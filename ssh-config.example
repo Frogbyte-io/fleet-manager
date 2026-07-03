@@ -1,0 +1,12 @@
+# Example ~/.ssh/config entry for the ananords-dev machine.
+# Copy into your actual ~/.ssh/config on each machine you want to reach it from,
+# and point IdentityFile at whichever key is actually authorized on the target
+# (see AGENTS.md for which key comments are currently trusted there).
+
+Host ananords-dev
+    HostName 192.168.68.149
+    User ananords
+    IdentityFile ~/.ssh/id_ed25519_ananords_outlook
+    # Pin the host key so a changed/spoofed key fails loudly instead of silently
+    # prompting "yes/no" — fingerprints are listed in AGENTS.md.
+    StrictHostKeyChecking accept-new
