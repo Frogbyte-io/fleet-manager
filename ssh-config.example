@@ -10,3 +10,9 @@ Host ananords-dev
     # Pin the host key so a changed/spoofed key fails loudly instead of silently
     # prompting "yes/no" — fingerprints are listed in AGENTS.md.
     StrictHostKeyChecking accept-new
+
+Host bazzite-dotx-dev
+    HostName 192.168.68.223
+    User ananords
+    IdentityFile ~/.ssh/id_ed25519_ananords_outlook
+    StrictHostKeyChecking accept-new

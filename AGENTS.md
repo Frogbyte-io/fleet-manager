@@ -50,8 +50,40 @@ as needed, this is not a list of trusted identities to assume):
 ```
 ananords@192.168.68.91     (ED25519) — another LAN machine, not yet in this registry
 ananords@outlook.com       (ED25519) — primary personal key
-bazzite-dotx-dev           (ED25519) — another machine, not yet in this registry
+bazzite-dotx-dev           (ED25519) — see the "bazzite-dotx-dev" entry below
 cowork-temp-access-20260703 (ED25519) — added 2026-07-03 for agent setup, kept intentionally for now — private key lives only in an ephemeral Cowork sandbox, so treat it as low-value/rotatable
+```
+
+---
+
+## bazzite-dotx-dev
+
+| | |
+|---|---|
+| SSH alias | `bazzite-dotx-dev` |
+| Host | `192.168.68.223` (LAN only — not reachable from outside the local network) |
+| User | `ananords` |
+| OS | Bazzite 44.20260629.0 (Kinoite), immutable/ostree-based, Fedora 44 |
+| Kernel | 7.0.9-ogc3.2.fc44.x86_64 |
+| Desktop environment | KDE Plasma 6.7.1 (plasma-desktop), headless at last check (no XDG_CURRENT_DESKTOP) |
+| Hardware | ASRock B450 Gaming K4, 8 cores / 15 GiB RAM, Nvidia (open) GPU variant |
+| Timezone | Europe/Oslo |
+| Package manager | dnf (base image is ostree/rpm-ostree — layering packages needs a reboot; prefer toolbox/distrobox or brew for dev tools) |
+| Dev tools present | git 2.54.0, Python 3.14.6, Node v26.4.0, gh (via linuxbrew, not on default non-interactive PATH — use `/home/linuxbrew/.linuxbrew/bin/gh` or `export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"` over SSH) |
+| Purpose | Secondary dev box |
+| Guardrails | Ok to run builds/tests freely; ask before `sudo`, `rpm-ostree` base-image changes, `dnf` upgrades, or `docker`/`podman` prune |
+
+**SSH host key fingerprints** (verify on first connect):
+```
+ED25519 SHA256:+n0FljexZ2sOFA+IpoI2CYzXZLw+U1aVwF/rnAAil+g
+ECDSA   SHA256:BavL4ThNF/DdUqcek7zE4M58ttukCbMLunMY5U84Efc
+RSA     SHA256:wOqEwTL/qFzwxTKbx/anw6alZR0ZerzO9w1BMpP0GiM
+```
+
+**Keys currently authorized on this host** (for audit reference only — rotate/remove
+as needed, this is not a list of trusted identities to assume):
+```
+ananords@outlook.com       (ED25519) — primary personal key
 ```
 
 ---
