@@ -24,6 +24,21 @@ cd ~/agents-registry
 ./setup.sh
 ```
 
+## Staying in sync automatically
+
+`setup.sh` also installs a `systemctl --user` timer, `agents-registry-sync.timer`,
+which runs `sync.sh` every 30 minutes. `sync.sh` does a `git fetch` + `git pull
+--ff-only`; if the pull brings new commits, it re-runs `setup.sh` so any updated
+`AGENTS.md` wiring takes effect without you having to log back in.
+
+- Check status: `systemctl --user status agents-registry-sync.timer`
+- Check recent runs: `journalctl --user -u agents-registry-sync.service`
+- The timer only runs while you're logged in unless you enable lingering:
+  `sudo loginctl enable-linger $(whoami)`.
+- If the repo has local commits that don't fast-forward (e.g. someone edited
+  `AGENTS.md` directly on the machine), `sync.sh` fails loudly instead of
+  silently merging — resolve it manually, then the timer will pick back up.
+
 ## Adding a new machine to the registry
 
 1. Copy the template block at the bottom of `AGENTS.md`.

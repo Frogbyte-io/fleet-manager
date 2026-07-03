@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically sync agents-registry (git pull + re-run setup.sh on change)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
