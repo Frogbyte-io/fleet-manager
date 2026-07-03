@@ -1,7 +1,11 @@
-# Example ~/.ssh/config entry for the ananords-dev machine.
-# Copy into your actual ~/.ssh/config on each machine you want to reach it from,
+# Example ~/.ssh/config entries for the registered machines.
+# Copy into your actual ~/.ssh/config on each machine you want to reach them from,
 # and point IdentityFile at whichever key is actually authorized on the target
 # (see AGENTS.md for which key comments are currently trusted there).
+#
+# Each machine gets two aliases: the plain name for LAN access, and a `-ts`
+# suffixed one using its Tailscale IP for when you're off-LAN. Same host, same
+# host key fingerprints — just pick whichever is reachable.
 
 Host ananords-dev
     HostName 192.168.68.149
@@ -11,8 +15,20 @@ Host ananords-dev
     # prompting "yes/no" — fingerprints are listed in AGENTS.md.
     StrictHostKeyChecking accept-new
 
+Host ananords-dev-ts
+    HostName 100.79.130.64
+    User ananords
+    IdentityFile ~/.ssh/id_ed25519_ananords_outlook
+    StrictHostKeyChecking accept-new
+
 Host bazzite-dotx-dev
     HostName 192.168.68.223
+    User ananords
+    IdentityFile ~/.ssh/id_ed25519_ananords_outlook
+    StrictHostKeyChecking accept-new
+
+Host bazzite-dotx-dev-ts
+    HostName 100.121.136.79
     User ananords
     IdentityFile ~/.ssh/id_ed25519_ananords_outlook
     StrictHostKeyChecking accept-new

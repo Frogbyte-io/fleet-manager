@@ -10,6 +10,8 @@ sanity-check a connection before acting.
 
 - Always connect via the SSH **alias** below (defined in `~/.ssh/config` on each of
   your machines), never by typing the raw IP — aliases are portable, IPs aren't.
+  Prefer the LAN alias when reachable; fall back to the `-ts` (Tailscale) alias
+  otherwise — same host, same fingerprints, just a different path to it.
 - Before the *first* connection to a host in a session, confirm the presented host
   key fingerprint matches what's listed here. If it doesn't match, stop and ask —
   don't proceed.
@@ -25,8 +27,8 @@ sanity-check a connection before acting.
 
 | | |
 |---|---|
-| SSH alias | `ananords-dev` |
-| Host | `192.168.68.149` (LAN only — not reachable from outside the local network) |
+| SSH alias | `ananords-dev` (LAN) / `ananords-dev-ts` (Tailscale) |
+| Host | `192.168.68.149` (LAN only) — Tailscale IP `100.79.130.64` (reachable off-LAN) |
 | User | `ananords` |
 | OS | Ubuntu 24.04.4 LTS (Noble Numbat) |
 | Kernel | 6.17.0-35-generic, x86_64 |
@@ -60,8 +62,8 @@ cowork-temp-access-20260703 (ED25519) — added 2026-07-03 for agent setup, kept
 
 | | |
 |---|---|
-| SSH alias | `bazzite-dotx-dev` |
-| Host | `192.168.68.223` (LAN only — not reachable from outside the local network) |
+| SSH alias | `bazzite-dotx-dev` (LAN) / `bazzite-dotx-dev-ts` (Tailscale) |
+| Host | `192.168.68.223` (LAN only) — Tailscale IP `100.121.136.79` (reachable off-LAN) |
 | User | `ananords` |
 | OS | Bazzite 44.20260629.0 (Kinoite), immutable/ostree-based, Fedora 44 |
 | Kernel | 7.0.9-ogc3.2.fc44.x86_64 |
@@ -95,8 +97,8 @@ ananords@outlook.com       (ED25519) — primary personal key
 
 | | |
 |---|---|
-| SSH alias | `<alias>` |
-| Host | `<ip-or-hostname>` |
+| SSH alias | `<alias>` (LAN) / `<alias>-ts` (Tailscale, if reachable off-LAN) |
+| Host | `<ip-or-hostname>` — Tailscale IP `<tailscale-ip-if-any>` |
 | User | `<user>` |
 | OS | |
 | Kernel | |

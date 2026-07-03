@@ -22,6 +22,9 @@ echo "XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-<none, likely headless>}"
 dpkg -l 2>/dev/null | grep -Ei 'gnome-shell|plasma-desktop|xfce4-session|budgie-desktop|cinnamon-session|mate-session' | awk '{print $2, $3}'
 rpm -qa 2>/dev/null | grep -Ei 'gnome-shell|plasma-desktop|xfce4-session'
 
+echo "=== tailscale ==="
+command -v tailscale >/dev/null && tailscale ip -4 2>/dev/null || echo "tailscale not installed / not running"
+
 echo "=== ssh host key fingerprints ==="
 for f in /etc/ssh/ssh_host_*.pub; do ssh-keygen -lf "$f" 2>/dev/null; done
 
