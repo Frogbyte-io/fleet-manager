@@ -54,14 +54,19 @@ if (-not $existingContent -or -not $existingContent.Contains($importLine)) {
 
 # --- Periodic sync: Scheduled Task that pulls latest changes and re-runs
 # setup.ps1 whenever the pull brings new commits. Runs every 30 min. ---
+# Launched via wscript + sync-hidden.vbs so it runs with no console window
+# flash, instead of calling powershell.exe directly (which -WindowStyle
+# Hidden alone does not reliably suppress).
 $taskName = "agents-registry-sync"
 $syncScript = Join-Path $RepoDir "sync.ps1"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$syncScript`""
+$hiddenWrapper = Join-Path $RepoDir "sync-hidden.vbs"
+$innerCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$syncScript`""
+$action = New-ScheduledTaskAction -Execute "wscript.exe" `
+    -Argument "`"$hiddenWrapper`" `"$innerCommand`""
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
     -RepetitionInterval (New-TimeSpan -Minutes 30) `
     -RepetitionDuration (New-TimeSpan -Days 3650)
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
     -Description "Pulls agents-registry and re-runs setup.ps1 if changed" -Force | Out-Null
