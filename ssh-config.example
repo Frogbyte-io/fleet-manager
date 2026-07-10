@@ -32,3 +32,15 @@ Host bazzite-dotx-dev-ts
     User ananords
     IdentityFile ~/.ssh/id_ed25519_ananords_outlook
     StrictHostKeyChecking accept-new
+
+Host windows-dev
+    HostName 192.168.68.115
+    User ananords
+    IdentityFile ~/.ssh/id_ed25519_ananords_outlook
+    StrictHostKeyChecking accept-new
+
+Host windows-dev-ts
+    HostName 100.107.236.91
+    User ananords
+    IdentityFile ~/.ssh/id_ed25519_ananords_outlook
+    StrictHostKeyChecking accept-new

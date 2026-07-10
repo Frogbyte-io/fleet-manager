@@ -90,6 +90,38 @@ ananords@outlook.com       (ED25519) — primary personal key
 
 ---
 
+## windows-dev
+
+| | |
+|---|---|
+| SSH alias | `windows-dev` (LAN) / `windows-dev-ts` (Tailscale) |
+| Host | `192.168.68.115` (LAN only) — Tailscale IP `100.107.236.91` (reachable off-LAN) |
+| User | `ananords` |
+| OS | Windows |
+| Kernel | _fill in_ |
+| Desktop environment | _fill in_ |
+| Hardware | _fill in_ |
+| Timezone | _fill in_ |
+| Package manager | winget / Chocolatey / Scoop — _fill in_ |
+| Dev tools present | _fill in_ |
+| Purpose | _fill in_ |
+| Guardrails | Treat as production; ask before destructive commands, package changes, service restarts, or anything requiring elevation |
+
+**SSH host key fingerprints** (verify on first connect):
+```
+ED25519 SHA256:T2HvKI0cpkScODjCdTiXlboSZgQK1ml3oN3abKgYebs
+ECDSA   SHA256:pYCOOuDJnlPHmQ8sLWPUT2Hh60aytPlDf8c2C5qhJ0Q
+RSA     SHA256:pcgRwnJRdjRQidD3ZRs/CzCi7STkNGg+hzQNEbXYMFs
+```
+
+**Keys currently authorized on this host** (for audit reference only — rotate/remove
+as needed, this is not a list of trusted identities to assume):
+```
+bazzite-dotx-dev           (ED25519) — added 2026-07-04 for agent access from this machine
+```
+
+---
+
 ## Template — copy this block for each new machine
 
 ```
