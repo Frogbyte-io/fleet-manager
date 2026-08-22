@@ -1,0 +1,10 @@
+extends:
+  - linux
+
+skills:
+  packs:
+    - core-dev
+
+capabilities:
+  - docker
+  - github-runner

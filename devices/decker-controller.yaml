@@ -1,0 +1,4 @@
+type: usb
+vendor_id: "2341"
+product_id: "8036"
+passthrough: true

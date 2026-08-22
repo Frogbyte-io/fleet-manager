@@ -1,0 +1,22 @@
+# Example ephemeral test VM, matching the manifest shape from issue #2.
+machine:
+  id: test-windows
+  host: proxmox-01
+  os: windows-11
+  roles:
+    - desktop-test
+
+resources:
+  cpu:
+    cores: 8
+  memory: 16GB
+  disk: 100GB
+
+lifecycle:
+  mode: ephemeral
+  reset_strategy: snapshot
+  base_template: win11-test-v1
+
+requires:
+  devices:
+    - decker-controller
