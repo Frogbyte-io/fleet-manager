@@ -200,7 +200,7 @@ export function resolveRegistryRoot({ flags = {}, env = process.env, platform = 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test test/config.test.js`
-Expected: PASS (7 tests)
+Expected: PASS (6 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -862,6 +862,12 @@ test('resetMachine throws naming an unsupported reset_strategy', async () => {
   const machine = { vmid: 210, lifecycle: { reset_strategy: 'something-else' } };
   await assert.rejects(() => resetMachine(client, 'pve', machine), /something-else/);
 });
+
+test('resetMachine throws a specific, actionable error for reset_strategy: clone (not yet wired - see Task 7 scope note)', async () => {
+  const client = fakeClient([]);
+  const machine = { vmid: 201, lifecycle: { reset_strategy: 'clone' } };
+  await assert.rejects(() => resetMachine(client, 'pve', machine), /cloneFromTemplate/);
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -914,7 +920,7 @@ export async function resetMachine(client, node, machine) {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test test/proxmox/lifecycle.test.js`
-Expected: PASS (7 tests)
+Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
 
