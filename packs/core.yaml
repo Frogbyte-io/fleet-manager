@@ -1,0 +1,4 @@
+# Minimal skill set every managed machine should carry, regardless of role.
+skills:
+  - theclaymethod/unslop
+  - owner/verification-before-completion

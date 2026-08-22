@@ -1,0 +1,15 @@
+machine:
+  id: test-bazzite
+  host: proxmox-01
+  os: bazzite
+  roles:
+    - desktop-test
+
+lifecycle:
+  mode: ephemeral
+  reset_strategy: clone
+  base_template: bazzite-test-v1
+
+requires:
+  devices:
+    - decker-controller

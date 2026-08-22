@@ -1,7 +1,9 @@
 # agents-registry
 
 Single source of truth for which machines Claude Code and Codex CLI are allowed to
-SSH into, shared across every machine you work from.
+SSH into, shared across every machine you work from — and, separately, a
+declarative registry of desired machine/skill/capability state (see
+[Fleet, roles and skill packs](#fleet-roles-and-skill-packs) below).
 
 ## How it's wired up
 
@@ -75,6 +77,32 @@ host key fingerprints — use the LAN alias when on-LAN, the `-ts` one otherwise
 3. Add a matching `Host` block to `~/.ssh/config` on each machine you want to be
    able to reach it from (see `ssh-config.example`).
 4. Commit and push. `git pull` on your other machines to sync.
+
+## Fleet, roles and skill packs
+
+Separately from the SSH allowlist above, this repo also implements the
+declarative fleet/machine/skill registry from
+[issue #2](https://github.com/Andreas-Froyland/agents-registry/issues/2):
+machine manifests, role inheritance, registry-owned skill packs, capability
+metadata, and projects/test-profile definitions, resolved and reconciled
+through an `agents-registry` CLI.
+
+```bash
+npm install
+node bin/agents-registry.js status
+node bin/agents-registry.js resolve <machine-id>
+node bin/agents-registry.js sync
+```
+
+- Full schema and CLI reference: `docs/schema.md`
+- Bootstrap rules for agents working with the registry: `bootstrap/fleet-bootstrap/SKILL.md`
+- Always-on machine/dev/security context: `context/`
+
+**What's not here yet:** live Proxmox VM lifecycle (reset/clone/boot/stop)
+and physical USB device passthrough need a real Proxmox host and hardware to
+build and validate against, so they're tracked in a separate follow-up
+issue rather than implemented speculatively. `agents-registry status`
+reports every machine's power state as `unmanaged` until that lands.
 
 ## Security notes
 

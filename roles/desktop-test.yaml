@@ -1,0 +1,7 @@
+skills:
+  packs:
+    - desktop-testing
+
+capabilities:
+  - desktop
+  - gui-testing

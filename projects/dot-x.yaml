@@ -1,0 +1,9 @@
+repo: ""
+
+skills:
+  packs:
+    - javascript
+    - desktop-testing
+
+tests:
+  - desktop-all
