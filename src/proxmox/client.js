@@ -43,13 +43,18 @@ function realFetch({ host, port = 8006, tokenId, apiKey, fingerprint }) {
     });
     req.on('error', reject);
     req.on('socket', (socket) => {
-      socket.on('secureConnect', () => {
+      const verify = () => {
         const cert = socket.getPeerCertificate();
         const actual = cert.fingerprint256;
         if (!actual || actual.replace(/:/g, '').toUpperCase() !== fingerprint.replace(/:/g, '').toUpperCase()) {
           req.destroy(new Error(`Proxmox TLS fingerprint mismatch: expected ${fingerprint}, got ${actual}`));
         }
-      });
+      };
+      if (socket.secureConnecting === false) {
+        verify(); // already-established, reused socket - verify synchronously right now
+      } else {
+        socket.once('secureConnect', verify); // fresh handshake - verify once it completes
+      }
     });
     if (payload) req.write(payload);
     req.end();
@@ -59,8 +64,6 @@ function realFetch({ host, port = 8006, tokenId, apiKey, fingerprint }) {
 export class ProxmoxClient {
   constructor({ host, port, tokenId, apiKey, fingerprint, fetchImpl }) {
     this.host = host;
-    this.tokenId = tokenId;
-    this.apiKey = apiKey;
     this.fetchImpl = fetchImpl ?? realFetch({ host, port, tokenId, apiKey, fingerprint });
   }
 
