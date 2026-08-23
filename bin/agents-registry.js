@@ -54,6 +54,11 @@ async function main() {
     return;
   }
 
+  if (command === undefined || command === '--help' || command === '-h' || command === 'help') {
+    usage();
+    return;
+  }
+
   let rootDir;
   try {
     ({ root: rootDir } = resolveRegistryRoot({ flags }));
@@ -97,12 +102,6 @@ async function main() {
         packAddCmd: typeof flags['pack-add-cmd'] === 'string' ? flags['pack-add-cmd'] : undefined,
         dryRun: Boolean(flags['dry-run']),
       });
-      break;
-    case undefined:
-    case '--help':
-    case '-h':
-    case 'help':
-      usage();
       break;
     default:
       console.error(`Unknown command "${command}"\n`);
