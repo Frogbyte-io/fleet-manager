@@ -32,7 +32,16 @@ export async function runStatus(rootDir, { client, node = 'pve' } = {}) {
   const rows = await Promise.all([...resolved.values()].map(async (machine) => {
     const source = registry.machines.get(machine.id);
     const vmid = source?.vmid ?? null;
-    const state = resolvedClient ? await getPowerState(resolvedClient, node, vmid) : 'unmanaged';
+    let state;
+    if (!resolvedClient) {
+      state = 'unmanaged';
+    } else {
+      try {
+        state = await getPowerState(resolvedClient, node, vmid);
+      } catch {
+        state = 'error';
+      }
+    }
     return [
       machine.id,
       state,
