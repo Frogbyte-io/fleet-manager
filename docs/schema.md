@@ -33,6 +33,7 @@ its identity.
 machine:
   id: test-windows        # required, must equal the filename stem
   host: proxmox-01         # optional, informational
+  vmid: 210                # optional, the Proxmox VM id this machine maps to
   os: windows-11           # optional
   roles:                   # role ids this machine composes, in order
     - desktop-test

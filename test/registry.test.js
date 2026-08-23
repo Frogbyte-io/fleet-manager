@@ -34,6 +34,31 @@ test('loadRegistry loads machines, roles, and packs with filename-derived ids', 
   }
 });
 
+test('loadRegistry carries an optional machine.vmid through', () => {
+  const dir = makeFixture({
+    'machines/test-ubuntu.yaml': 'machine:\n  id: test-ubuntu\n  vmid: 201\n  os: ubuntu-desktop-24.04\n  roles: []\n',
+  });
+  try {
+    const registry = loadRegistry(dir);
+    assert.deepEqual(registry.errors, []);
+    assert.equal(registry.machines.get('test-ubuntu').vmid, 201);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadRegistry defaults vmid to null when absent', () => {
+  const dir = makeFixture({
+    'machines/dev-01.yaml': 'machine:\n  id: dev-01\n  os: linux\n  roles: []\n',
+  });
+  try {
+    const registry = loadRegistry(dir);
+    assert.equal(registry.machines.get('dev-01').vmid, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('loadRegistry reports an error when machine.id does not match its filename', () => {
   const dir = makeFixture({
     'machines/dev-01.yaml': 'machine:\n  id: something-else\n  roles: []\n',

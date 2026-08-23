@@ -74,6 +74,7 @@ export function loadRegistry(rootDir) {
       id: machine.id,
       host: machine.host ?? null,
       os: machine.os ?? null,
+      vmid: machine.vmid ?? null,
       roles: machine.roles ?? [],
       skills: data.skills ?? {},
       capabilities: data.capabilities ?? [],
