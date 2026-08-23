@@ -70,7 +70,7 @@ async function main() {
 
   switch (command) {
     case 'status':
-      process.exitCode = runStatus(rootDir);
+      process.exitCode = await runStatus(rootDir);
       break;
     case 'resolve': {
       const machineId = positional[0];
