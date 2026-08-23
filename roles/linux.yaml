@@ -1,3 +1,0 @@
-# Base role for any Linux machine. Extended by more specific roles below.
-capabilities:
-  - linux
