@@ -24,6 +24,12 @@ test('request returns the unwrapped data field on success', async () => {
   assert.match(calls[0][1], /\/api2\/json\/version$/);
 });
 
+test('request throws when the response body has no "data" field', async () => {
+  const { fetchImpl } = fakeTransport([{ status: 200, body: {} }]);
+  const client = new ProxmoxClient({ host: 'h', tokenId: 't', apiKey: 'k', fingerprint: 'f', fetchImpl });
+  await assert.rejects(() => client.request('GET', '/version'), /had no "data" field/);
+});
+
 test('request throws with the API error message on non-2xx', async () => {
   const { fetchImpl } = fakeTransport([{ status: 403, body: { errors: { '/': 'Permission check failed' } } }]);
   const client = new ProxmoxClient({ host: 'h', tokenId: 't', apiKey: 'k', fingerprint: 'f', fetchImpl });

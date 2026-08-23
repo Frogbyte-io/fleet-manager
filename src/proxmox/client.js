@@ -1,13 +1,25 @@
 // src/proxmox/client.js
 import https from 'node:https';
 
-function realFetch({ host, tokenId, apiKey, fingerprint }) {
+function realFetch({ host, port = 8006, tokenId, apiKey, fingerprint }) {
+  // A private agent instance (never https.globalAgent) so:
+  //   - only sockets this client created (and verified via 'secureConnect')
+  //     can ever live in its connection pool — no other code in the process
+  //     can inject an unverified socket into it.
+  //   - maxCachedSessions: 0 disables TLS session resumption, forcing every
+  //     new TCP connection to do a full handshake with a real certificate
+  //     exchange, so getPeerCertificate() never returns {} from a resumed
+  //     session. keepAlive stays on: reusing an already-verified socket for
+  //     a second request over the SAME connection is fine, since the cert
+  //     was already checked at that connection's own handshake.
+  const agent = new https.Agent({ keepAlive: true, maxCachedSessions: 0 });
+
   return (method, path, body) => new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : undefined;
     const req = https.request({
       method,
       host,
-      port: 8006,
+      port,
       path,
       headers: {
         Authorization: `PVEAPIToken=${tokenId}=${apiKey}`,
@@ -15,6 +27,7 @@ function realFetch({ host, tokenId, apiKey, fingerprint }) {
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
       },
       rejectUnauthorized: false,
+      agent,
     }, (res) => {
       let raw = '';
       res.on('data', (chunk) => { raw += chunk; });
@@ -44,11 +57,11 @@ function realFetch({ host, tokenId, apiKey, fingerprint }) {
 }
 
 export class ProxmoxClient {
-  constructor({ host, tokenId, apiKey, fingerprint, fetchImpl }) {
+  constructor({ host, port, tokenId, apiKey, fingerprint, fetchImpl }) {
     this.host = host;
     this.tokenId = tokenId;
     this.apiKey = apiKey;
-    this.fetchImpl = fetchImpl ?? realFetch({ host, tokenId, apiKey, fingerprint });
+    this.fetchImpl = fetchImpl ?? realFetch({ host, port, tokenId, apiKey, fingerprint });
   }
 
   static fromEnv(env = process.env) {
@@ -71,7 +84,10 @@ export class ProxmoxClient {
       const message = responseBody?.errors ? JSON.stringify(responseBody.errors) : `HTTP ${status}`;
       throw new Error(`Proxmox API error on ${method} ${path}: ${message}`);
     }
-    return responseBody?.data;
+    if (!responseBody || !('data' in responseBody)) {
+      throw new Error(`Proxmox API response for ${method} ${path} had no "data" field: ${JSON.stringify(responseBody)}`);
+    }
+    return responseBody.data;
   }
 
   async waitForTask(node, upid, { pollIntervalMs = 1000, timeoutMs = 300000 } = {}) {
