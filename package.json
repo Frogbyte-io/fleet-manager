@@ -1,5 +1,5 @@
 {
-  "name": "agents-registry",
+  "name": "@frogbyte-io/fleet-manager",
   "version": "0.1.0",
   "description": "Declarative source of truth for agent-capable machines, roles, skill packs and projects.",
   "private": true,
