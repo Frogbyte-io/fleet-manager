@@ -30,7 +30,9 @@ with it safely.
    per-machine.
 6. **Secrets are managed separately.** Nothing under `machines/`, `roles/`,
    `packs/`, `devices/`, `projects/` should ever contain credentials — see
-   `context/security.md`.
+   `context/security.md` in your separate fleet data repo (this file no
+   longer lives in this repo; `machines/`, `roles/`, `packs/`, `devices/`,
+   `projects/`, `test-profiles/`, and `context/` all moved there too).
 7. **Validate before you sync.** Run `agents-registry validate` after
    editing any manifest; it catches unknown role/pack/device references and
    id mismatches before `sync` acts on them.
@@ -47,7 +49,12 @@ agents-registry sync [--machine <id>]    # reconcile this machine's desired stat
 
 ## What this skill does not cover
 
-Live VM lifecycle (Proxmox reset/clone/boot/stop) and physical USB device
-passthrough are not implemented yet — `agents-registry status` reports
-those machines as `unmanaged`. Don't assume `sync`/`status` reflect actual
-VM power state.
+`agents-registry status` reports live Proxmox power state (e.g. `running`,
+`stopped`) for any machine with a `vmid` when `PROXMOX_HOST`,
+`PROXMOX_TOKEN_ID`, `PROXMOX_API_KEY`, and `PROXMOX_FINGERPRINT` env vars are
+configured; it falls back to `unmanaged` for machines without a `vmid`, and
+for every machine when those env vars aren't set. A row can also show
+`error` if the Proxmox lookup for that machine failed (e.g. a `vmid` that
+doesn't exist yet) — that's a real live-status check failure, not a stale
+report, so don't distrust a `running`/`stopped` reading you get from it.
+Physical USB device passthrough is not implemented yet.

@@ -24,6 +24,10 @@ at.
 
 ## First-time setup on a new machine
 
+Until `@frogbyte-io/fleet-manager` is published to npm, clone this repo and run
+`node bin/agents-registry.js <command>` in place of `npx @frogbyte-io/fleet-manager <command>`
+everywhere below.
+
 ```bash
 npx @frogbyte-io/fleet-manager init --repo-url <your-data-repo-url> [--path <dir>]
 ```
