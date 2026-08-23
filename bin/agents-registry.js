@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-import { repoRoot } from '../src/paths.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { runStatus } from '../src/commands/status.js';
 import { runResolve } from '../src/commands/resolve.js';
 import { runCapabilities } from '../src/commands/capabilities.js';
 import { runValidate } from '../src/commands/validate.js';
 import { runSync } from '../src/commands/sync.js';
+import { runInit } from '../src/commands/init.js';
+import { resolveRegistryRoot } from '../src/config.js';
 
 function parseFlags(args) {
   const flags = {};
@@ -36,6 +39,7 @@ Usage:
   agents-registry capabilities <capability>
   agents-registry validate
   agents-registry sync [--machine <id>] [--dry-run] [--install-cmd "..."] [--pack-add-cmd "..."]
+  agents-registry init --repo-url <url> [--path <dir>]
 
 Run from anywhere inside this repo, or point at another registry with --root <dir>.`);
 }
@@ -43,7 +47,21 @@ Run from anywhere inside this repo, or point at another registry with --root <di
 async function main() {
   const [, , command, ...rest] = process.argv;
   const { flags, positional } = parseFlags(rest);
-  const rootDir = flags.root ?? repoRoot();
+
+  if (command === 'init') {
+    const path = typeof flags.path === 'string' ? flags.path : join(homedir(), '.fleet-manager', 'registry');
+    process.exitCode = runInit(null, { repoUrl: typeof flags['repo-url'] === 'string' ? flags['repo-url'] : undefined, path });
+    return;
+  }
+
+  let rootDir;
+  try {
+    ({ root: rootDir } = resolveRegistryRoot({ flags }));
+  } catch (err) {
+    console.error(err.message);
+    process.exitCode = 1;
+    return;
+  }
 
   switch (command) {
     case 'status':
