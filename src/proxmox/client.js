@@ -15,13 +15,6 @@ function realFetch({ host, tokenId, apiKey, fingerprint }) {
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
       },
       rejectUnauthorized: false,
-      checkServerIdentity: (_hostname, cert) => {
-        const actual = cert.fingerprint256;
-        if (actual.replace(/:/g, '').toUpperCase() !== fingerprint.replace(/:/g, '').toUpperCase()) {
-          return new Error(`Proxmox TLS fingerprint mismatch: expected ${fingerprint}, got ${actual}`);
-        }
-        return undefined;
-      },
     }, (res) => {
       let raw = '';
       res.on('data', (chunk) => { raw += chunk; });
@@ -36,6 +29,15 @@ function realFetch({ host, tokenId, apiKey, fingerprint }) {
       });
     });
     req.on('error', reject);
+    req.on('socket', (socket) => {
+      socket.on('secureConnect', () => {
+        const cert = socket.getPeerCertificate();
+        const actual = cert.fingerprint256;
+        if (!actual || actual.replace(/:/g, '').toUpperCase() !== fingerprint.replace(/:/g, '').toUpperCase()) {
+          req.destroy(new Error(`Proxmox TLS fingerprint mismatch: expected ${fingerprint}, got ${actual}`));
+        }
+      });
+    });
     if (payload) req.write(payload);
     req.end();
   });
