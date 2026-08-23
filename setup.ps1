@@ -7,49 +7,48 @@ $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AgentsFile = Join-Path $RepoDir "AGENTS.md"
 
 if (-not (Test-Path $AgentsFile)) {
-    Write-Error "AGENTS.md not found at $AgentsFile"
-    exit 1
-}
-
-# --- Codex CLI: link ~/.codex/AGENTS.md -> this repo's AGENTS.md ---
-$codexDir = Join-Path $HOME ".codex"
-New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
-$codexAgents = Join-Path $codexDir "AGENTS.md"
-
-if (Test-Path $codexAgents) {
-    $existing = Get-Item $codexAgents -Force
-    if ($existing.LinkType) {
-        Remove-Item $codexAgents -Force
-    } else {
-        Write-Host "$codexAgents already exists and isn't a link -- backing it up to AGENTS.md.bak"
-        Move-Item $codexAgents "$codexAgents.bak" -Force
-    }
-}
-
-try {
-    New-Item -ItemType SymbolicLink -Path $codexAgents -Target $AgentsFile -ErrorAction Stop | Out-Null
-} catch {
-    # Creating symlinks needs admin rights or Developer Mode - fall back to a
-    # hard link, which works unprivileged as long as both paths share a volume.
-    New-Item -ItemType HardLink -Path $codexAgents -Target $AgentsFile | Out-Null
-}
-Write-Host "Linked $codexAgents -> $AgentsFile"
-
-# --- Claude Code: append an @import line to ~/.claude/CLAUDE.md ---
-$claudeDir = Join-Path $HOME ".claude"
-New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
-$claudeMd = Join-Path $claudeDir "CLAUDE.md"
-if (-not (Test-Path $claudeMd)) {
-    New-Item -ItemType File -Path $claudeMd | Out-Null
-}
-
-$importLine = "@$AgentsFile"
-$existingContent = Get-Content $claudeMd -Raw -ErrorAction SilentlyContinue
-if (-not $existingContent -or -not $existingContent.Contains($importLine)) {
-    Add-Content -Path $claudeMd -Value "`n## Machine registry`n$importLine"
-    Write-Host "Added import line to $claudeMd"
+    Write-Warning "AGENTS.md not found in this repo -- it's expected to live in your separate fleet data repo now; skipping the Codex/Claude Code global-instructions symlink. Run 'agents-registry init' to set up your data repo, then wire its AGENTS.md manually if you want the symlink."
 } else {
-    Write-Host "$claudeMd already imports this registry -- nothing to do"
+    # --- Codex CLI: link ~/.codex/AGENTS.md -> this repo's AGENTS.md ---
+    $codexDir = Join-Path $HOME ".codex"
+    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+    $codexAgents = Join-Path $codexDir "AGENTS.md"
+
+    if (Test-Path $codexAgents) {
+        $existing = Get-Item $codexAgents -Force
+        if ($existing.LinkType) {
+            Remove-Item $codexAgents -Force
+        } else {
+            Write-Host "$codexAgents already exists and isn't a link -- backing it up to AGENTS.md.bak"
+            Move-Item $codexAgents "$codexAgents.bak" -Force
+        }
+    }
+
+    try {
+        New-Item -ItemType SymbolicLink -Path $codexAgents -Target $AgentsFile -ErrorAction Stop | Out-Null
+    } catch {
+        # Creating symlinks needs admin rights or Developer Mode - fall back to a
+        # hard link, which works unprivileged as long as both paths share a volume.
+        New-Item -ItemType HardLink -Path $codexAgents -Target $AgentsFile | Out-Null
+    }
+    Write-Host "Linked $codexAgents -> $AgentsFile"
+
+    # --- Claude Code: append an @import line to ~/.claude/CLAUDE.md ---
+    $claudeDir = Join-Path $HOME ".claude"
+    New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+    $claudeMd = Join-Path $claudeDir "CLAUDE.md"
+    if (-not (Test-Path $claudeMd)) {
+        New-Item -ItemType File -Path $claudeMd | Out-Null
+    }
+
+    $importLine = "@$AgentsFile"
+    $existingContent = Get-Content $claudeMd -Raw -ErrorAction SilentlyContinue
+    if (-not $existingContent -or -not $existingContent.Contains($importLine)) {
+        Add-Content -Path $claudeMd -Value "`n## Machine registry`n$importLine"
+        Write-Host "Added import line to $claudeMd"
+    } else {
+        Write-Host "$claudeMd already imports this registry -- nothing to do"
+    }
 }
 
 # --- Periodic sync: Scheduled Task that pulls latest changes and re-runs
