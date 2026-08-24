@@ -25,6 +25,24 @@ export async function stopMachine(client, node, vmid) {
   return client.waitForTask(node, upid);
 }
 
+export async function createVm(client, node, {
+  vmid, name, cores, memoryMb, diskGb, storage, bridge, isoVolid, ostype = 'l26',
+}) {
+  const upid = await client.request('POST', `/nodes/${node}/qemu`, {
+    vmid,
+    name,
+    cores,
+    memory: memoryMb,
+    net0: `virtio,bridge=${bridge}`,
+    scsihw: 'virtio-scsi-pci',
+    scsi0: `${storage}:${diskGb}`,
+    ide2: `${isoVolid},media=cdrom`,
+    ostype,
+    boot: 'order=ide2;scsi0',
+  });
+  return client.waitForTask(node, upid);
+}
+
 export async function resetMachine(client, node, machine) {
   const strategy = machine.lifecycle?.reset_strategy;
   if (strategy === 'snapshot') {

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  getPowerState, cloneFromTemplate, rollbackSnapshot, startMachine, stopMachine, resetMachine,
+  getPowerState, cloneFromTemplate, rollbackSnapshot, startMachine, stopMachine, resetMachine, createVm,
 } from '../../src/proxmox/lifecycle.js';
 
 function fakeClient(script) {
@@ -86,4 +86,33 @@ test('resetMachine throws a specific, actionable error for reset_strategy: clone
   const client = fakeClient([]);
   const machine = { vmid: 201, lifecycle: { reset_strategy: 'clone' } };
   await assert.rejects(() => resetMachine(client, 'pve', machine), /cloneFromTemplate/);
+});
+
+test('createVm allocates a persistent VM from an ISO then waits for the task', async () => {
+  const client = fakeClient(['UPID:pve:create1']);
+  await createVm(client, 'pve', {
+    vmid: 100,
+    name: 'dev-01',
+    cores: 2,
+    memoryMb: 4096,
+    diskGb: 40,
+    storage: 'local-lvm',
+    bridge: 'vmbr0',
+    isoVolid: 'local:iso/ubuntu-24.04.4-live-server-amd64.iso',
+  });
+  assert.deepEqual(client.calls, [
+    ['POST', '/nodes/pve/qemu', {
+      vmid: 100,
+      name: 'dev-01',
+      cores: 2,
+      memory: 4096,
+      net0: 'virtio,bridge=vmbr0',
+      scsihw: 'virtio-scsi-pci',
+      scsi0: 'local-lvm:40',
+      ide2: 'local:iso/ubuntu-24.04.4-live-server-amd64.iso,media=cdrom',
+      ostype: 'l26',
+      boot: 'order=ide2;scsi0',
+    }],
+    ['waitForTask', 'pve', 'UPID:pve:create1'],
+  ]);
 });
