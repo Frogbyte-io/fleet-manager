@@ -34,6 +34,21 @@ An implementation issue should normally fit one focused pull request. A spike en
 
 ## M0 — Architecture and migration foundation
 
+Created on GitHub 2026-08-25. Planning IDs are stable; GitHub numbers are not, so they are mapped here rather than renaming anything.
+
+| Planning ID | Issue | Epic |
+|---|---|---|
+| FM-000 | [#20](https://github.com/Frogbyte-io/fleet-manager/issues/20) (closed) | — precedes the epics |
+| FM-001 | [#21](https://github.com/Frogbyte-io/fleet-manager/issues/21) | [#19](https://github.com/Frogbyte-io/fleet-manager/issues/19) Build, CI, and deployment foundation |
+| FM-002 | [#22](https://github.com/Frogbyte-io/fleet-manager/issues/22) | [#17](https://github.com/Frogbyte-io/fleet-manager/issues/17) Monorepo and legacy migration |
+| FM-003 | [#23](https://github.com/Frogbyte-io/fleet-manager/issues/23) | [#17](https://github.com/Frogbyte-io/fleet-manager/issues/17) Monorepo and legacy migration |
+| FM-004 | [#24](https://github.com/Frogbyte-io/fleet-manager/issues/24) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
+| FM-005 | [#25](https://github.com/Frogbyte-io/fleet-manager/issues/25) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
+| FM-006 | [#26](https://github.com/Frogbyte-io/fleet-manager/issues/26) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
+| FM-007 | [#27](https://github.com/Frogbyte-io/fleet-manager/issues/27) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
+| FM-008 | [#28](https://github.com/Frogbyte-io/fleet-manager/issues/28) | [#19](https://github.com/Frogbyte-io/fleet-manager/issues/19) Build, CI, and deployment foundation |
+| FM-S01 | [#29](https://github.com/Frogbyte-io/fleet-manager/issues/29) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
+
 ### FM-000 — Review and accept the master plan and ADR set
 
 **Context:** The target architecture materially supersedes the current issues #2/#3 and local-CLI assumptions.  
@@ -44,7 +59,7 @@ An implementation issue should normally fit one focused pull request. A spike en
 **Acceptance criteria:** Maintainer decisions are recorded; ADR statuses match decisions; a root project license is selected/added; unresolved choices have named spike issues; #2/#3 are closed as superseded only after replacement epics link back.  
 **Non-goals:** Implementing code or deleting legacy functionality.  
 **Tests:** Documentation links and Markdown checks.  
-**Status:** Accepted 2026-08-25. Decisions are in [fm-000-acceptance.md](fm-000-acceptance.md); spikes are in [spikes.md](spikes.md). Closing #2/#3 remains outstanding until the milestones and epics exist.
+**Status:** Done 2026-08-25. Decisions are in [fm-000-acceptance.md](fm-000-acceptance.md); spikes are in [spikes.md](spikes.md). Milestones M0–M8, the replacement epics, and the closure of #2/#3 all landed.
 
 ### FM-001 — Establish pinned toolchains and cross-workspace CI
 

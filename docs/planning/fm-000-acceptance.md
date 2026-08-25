@@ -73,7 +73,9 @@ Consequences:
 
 Milestones M0–M8 and their epics follow `docs/PLAN.md#recommended-github-milestones-and-epic-issues` without change. Each epic is a tracking issue holding only dependency and status checklists; implementation stays in narrow linked issues.
 
-Only the twelve epics needed to supersede #2 and #3 were created (M4, M6, M7). The M0–M3, M5, and M8 epics are created when their milestone starts, so they reflect what the preceding milestones taught rather than what was guessed on day one. The M0–M2 implementation issues already exist in [initial-issues.md](initial-issues.md) and are copied to GitHub at that point.
+Only the twelve epics needed to supersede #2 and #3 were created up front (M4, M6, M7). Remaining epics are created when their milestone starts, so they reflect what the preceding milestones taught rather than what was guessed on day one.
+
+M0 opened on 2026-08-25 with three epics (#17, #18, #19), issues FM-001 through FM-008, and spike FM-S01. The planning-ID to GitHub-number mapping is in [initial-issues.md](initial-issues.md#m0--architecture-and-migration-foundation). M1–M3, M5, and M8 epics remain uncreated.
 
 ## Open items not decided here
 
