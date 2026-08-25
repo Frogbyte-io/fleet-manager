@@ -1,13 +1,20 @@
 # agents-registry schema
 
+> Legacy schema reference for the Node.js proof of concept. It is migration input,
+> not the target model. The accepted versioned desired-state model and migration
+> direction are in [desired-state.md](architecture/desired-state.md) and
+> [PLAN.md](PLAN.md); the schema itself is replaced in M4.
+
 Implements the initial scope of
-[issue #2](https://github.com/Andreas-Froyland/agents-registry/issues/2):
+[issue #2](https://github.com/Frogbyte-io/fleet-manager/issues/2):
 machine manifests, role inheritance, registry-owned skill packs, capability
 metadata, and the `agents-registry sync`/`status`/`resolve`/`validate` CLI.
+That issue was closed as superseded on 2026-08-25; its replacement epics are
+listed in the closing comment.
 
-Live infrastructure (Proxmox VM lifecycle, physical USB passthrough) is
-tracked separately and not implemented here — see the follow-up issue linked
-from #2.
+Live infrastructure (Proxmox VM lifecycle, physical USB passthrough) was
+tracked in [issue #3](https://github.com/Frogbyte-io/fleet-manager/issues/3)
+and is not implemented here. It is now covered by the M6 and M7 epics.
 
 ## Directory layout
 
