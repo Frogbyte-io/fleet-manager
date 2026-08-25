@@ -1,5 +1,12 @@
 # fleet-manager
 
+> **Architecture transition:** Fleet Manager is being redesigned as a persistent,
+> controller-first developer fleet control plane. The canonical roadmap is
+> [docs/PLAN.md](docs/PLAN.md), accepted on 2026-08-25 along with
+> [the ADR set](docs/adr/README.md). The Node.js `agents-registry` described below is the
+> **legacy** proof of concept and migration input; it is not the target controller/node/web
+> architecture. No product features from the new plan have been implemented yet.
+
 The engine behind a declarative fleet/machine/skill registry: machine manifests, role
 inheritance, registry-owned skill packs, capability metadata, a Proxmox VM lifecycle
 adapter, and the `agents-registry` CLI that resolves and reconciles all of it.
@@ -58,14 +65,21 @@ README.)
 ## Fleet, roles, skill packs, and the Proxmox adapter
 
 - Full schema and CLI reference: `docs/schema.md`
+- Master plan and architecture: `docs/PLAN.md` (accepted), `docs/adr/`, `docs/planning/`
 - Bootstrap rules for agents working with the registry: `bootstrap/fleet-bootstrap/SKILL.md`
 - Design/implementation history: `docs/superpowers/specs/`, `docs/superpowers/plans/`
 - Web GUI design system: `DESIGN.md` (agent rules: `bootstrap/fleet-console-labs/SKILL.md`)
 
 ```bash
 npm install
-npm test
+npm test        # legacy agents-registry suite
+npm run check:docs
 ```
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party source
+copied into this repository must be attributed in `NOTICE` under its own terms.
 
 ## Security notes
 

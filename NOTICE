@@ -1,0 +1,11 @@
+Fleet Manager
+Copyright 2026 Frogbyte
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party code incorporated into this repository is attributed here with its
+own license terms. Dependencies resolved at build time are covered by the
+dependency and license policy enforced in CI (see docs/planning/fm-000-acceptance.md)
+and are not listed individually in this file.
+
+No third-party source has been incorporated into this repository yet.
