@@ -60,6 +60,7 @@ README.)
 - Full schema and CLI reference: `docs/schema.md`
 - Bootstrap rules for agents working with the registry: `bootstrap/fleet-bootstrap/SKILL.md`
 - Design/implementation history: `docs/superpowers/specs/`, `docs/superpowers/plans/`
+- Web GUI design system: `DESIGN.md` (agent rules: `bootstrap/fleet-console-labs/SKILL.md`)
 
 ```bash
 npm install
