@@ -1,0 +1,69 @@
+# cargo-deny configuration. Enforces the inbound dependency policy documented in
+# .github/dependency-policy.md against the Cargo dependency graph.
+#
+# The `allow` list below is GENERATED from the table in that document. Edit the
+# document, run `node .github/scripts/generate.mjs`, and commit both files. CI
+# fails if they diverge.
+#
+# The pinned cargo-deny version is CARGO_DENY_VERSION in .github/toolchain.env.
+# This file is inert until the Cargo workspace exists (#22); CI skips the check
+# until then rather than pretending to have run it.
+
+[graph]
+# The supported platform baseline from docs/PLAN.md: Linux x86_64 and Windows.
+# macOS and Linux aarch64 are deferred targets and are deliberately absent, so a
+# dependency that only builds there is not silently accepted.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+all-features = true
+
+[advisories]
+# A control plane that holds machine credentials does not get to triage security
+# advisories lazily. Anything ignored here needs an issue and a reason.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Inference from license text needs high confidence before we trust it.
+confidence-threshold = 0.93
+
+# --- BEGIN GENERATED: allowed-licenses ---
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+# --- END GENERATED: allowed-licenses ---
+
+# Per-crate exceptions. Adding one requires the reviewed process in
+# .github/dependency-policy.md, not a green build.
+exceptions = []
+
+[bans]
+# Duplicate versions are a warning: transitive graphs routinely carry two majors
+# of a leaf crate, and denying that would mean permanent skip-list maintenance.
+multiple-versions = "warn"
+# A wildcard requirement means the build is not reproducible from the manifest.
+wildcards = "deny"
+deny = [
+    { crate = "openssl", use-instead = "rustls" },
+    { crate = "openssl-sys", use-instead = "rustls" },
+]
+
+[sources]
+# Dependencies come from crates.io. A git or vendored source bypasses the
+# advisory database and the yank mechanism, so it is a decision, not a default.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

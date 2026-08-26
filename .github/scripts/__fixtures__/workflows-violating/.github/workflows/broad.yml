@@ -1,0 +1,12 @@
+# Fixture: a workflow that declares permissions, but too many of them.
+name: Broad
+on:
+  push:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

@@ -1,0 +1,15 @@
+# Fixture: every violation check-workflows.mjs is supposed to catch, in one
+# file. Not a workflow GitHub will ever run: it lives under a fixtures
+# directory, not .github/workflows at the repository root.
+name: Deploy
+on:
+  pull_request_target:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: some-vendor/publish-action@v1
+      - env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: echo "deploying"

@@ -1,0 +1,12 @@
+# Fixture cargo-deny configuration.
+
+[licenses]
+confidence-threshold = 0.93
+
+# --- BEGIN GENERATED: allowed-licenses ---
+allow = [
+    "Apache-2.0",
+    "ISC",
+    "MIT",
+]
+# --- END GENERATED: allowed-licenses ---

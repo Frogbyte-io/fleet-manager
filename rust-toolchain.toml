@@ -1,0 +1,10 @@
+# The one place the Rust version is pinned. rustup reads this file for every
+# cargo/rustc invocation in this repository, locally and in CI, so bumping the
+# MSRV is the single-line `channel` edit below.
+#
+# The bump policy lives in .github/toolchain-policy.md.
+
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

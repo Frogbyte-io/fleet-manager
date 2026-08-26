@@ -13,7 +13,9 @@
   },
   "scripts": {
     "test": "node --test",
-    "check:docs": "node scripts/check-docs.mjs"
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:policy": "node .github/scripts/generate.mjs --check && node .github/scripts/check-licenses.mjs && node .github/scripts/check-workflows.mjs",
+    "test:policy": "node .github/scripts/test.mjs"
   },
   "dependencies": {
     "yaml": "^2.6.1"

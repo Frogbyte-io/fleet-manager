@@ -1,0 +1,22 @@
+# Secret-scanning configuration. Extends the upstream ruleset rather than
+# replacing it, so new provider rules arrive with a gitleaks version bump
+# (GITLEAKS_VERSION in .github/toolchain.env).
+#
+# Policy, including what to do when this finds something real:
+# .github/SECURITY.md
+
+title = "Fleet Manager secret scan"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+The generic high-entropy rule matches English prose in the planning documents —
+phrases such as "secret redaction, duplicate/correlation cases" score as a
+random-looking API key. This narrows only that one rule, only in Markdown under
+docs/. Every provider-specific rule (private keys, cloud credentials, tokens)
+still applies there, and no rule is relaxed anywhere else in the tree.
+"""
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)docs/.*\.md$''']

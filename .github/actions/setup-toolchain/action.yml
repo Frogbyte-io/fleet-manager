@@ -1,0 +1,80 @@
+name: Set up pinned toolchains
+description: >-
+  Installs the toolchain versions pinned by .github/toolchain.env and
+  rust-toolchain.toml, and exports every pinned version as an environment
+  variable. Every CI job goes through this action, so bumping a version is a
+  one-line edit in one file rather than a search across workflows.
+
+inputs:
+  node:
+    description: Install the pinned Node.js version.
+    required: false
+    default: 'true'
+  pnpm:
+    description: Activate the pinned pnpm through the pinned Corepack. Implies node.
+    required: false
+    default: 'false'
+  rust:
+    description: Install the toolchain pinned by rust-toolchain.toml.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Load pinned versions
+      id: versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        env_file="${GITHUB_ACTION_PATH}/../../toolchain.env"
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in ''|'#'*) continue ;; esac
+          # Strict KEY=VALUE only: this content lands in the job environment.
+          if ! printf '%s' "$line" | grep -Eq '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._+-]+$'; then
+            echo "::error file=.github/toolchain.env::not a plain KEY=VALUE line: ${line}"
+            exit 1
+          fi
+          printf '%s\n' "$line" >> "$GITHUB_ENV"
+          echo "pinned ${line}"
+        done < "$env_file"
+
+        # $GITHUB_ENV reaches later run steps, but a `with:` expression in this
+        # action is evaluated from step outputs, so publish those too. Sourcing
+        # is safe: every line was just validated as plain KEY=VALUE.
+        set -a; . "$env_file"; set +a
+        : "${NODE_VERSION:?NODE_VERSION missing from .github/toolchain.env}"
+        : "${PNPM_VERSION:?PNPM_VERSION missing from .github/toolchain.env}"
+        echo "node=${NODE_VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Install Node.js
+      if: inputs.node == 'true' || inputs.pnpm == 'true'
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ steps.versions.outputs.node }}
+
+    - name: Activate pnpm through Corepack
+      if: inputs.pnpm == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Corepack is installed explicitly rather than relying on the copy
+        # bundled with Node, which is being unbundled upstream.
+        npm install --global "corepack@${COREPACK_VERSION}"
+        corepack enable pnpm
+        corepack prepare "pnpm@${PNPM_VERSION}" --activate
+        echo "pnpm $(pnpm --version)"
+
+    - name: Install the pinned Rust toolchain
+      if: inputs.rust == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # With no toolchain argument rustup installs the active toolchain, which
+        # rust-toolchain.toml defines. The version is never repeated here.
+        rustup toolchain install --no-self-update
+        rustup show active-toolchain
+        rustc --version
+        cargo --version
+        cargo fmt --version
+        cargo clippy --version

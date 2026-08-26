@@ -1,0 +1,16 @@
+# Fixture: a workflow that satisfies the CI credential and pinning policy.
+name: CI
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-toolchain
+      - uses: some-vendor/some-action@1234567890abcdef1234567890abcdef12345678
+      - env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "the per-run token is allowed"
