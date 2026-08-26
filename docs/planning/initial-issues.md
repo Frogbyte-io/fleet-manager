@@ -36,11 +36,15 @@ An implementation issue should normally fit one focused pull request. A spike en
 
 Created on GitHub 2026-08-25. Planning IDs are stable; GitHub numbers are not, so they are mapped here rather than renaming anything.
 
+Execution order, path ownership, and the rules for concurrent agents are in [parallel-execution.md](parallel-execution.md).
+
 | Planning ID | Issue | Epic |
 |---|---|---|
 | FM-000 | [#20](https://github.com/Frogbyte-io/fleet-manager/issues/20) (closed) | — precedes the epics |
 | FM-001 | [#21](https://github.com/Frogbyte-io/fleet-manager/issues/21) | [#19](https://github.com/Frogbyte-io/fleet-manager/issues/19) Build, CI, and deployment foundation |
 | FM-002 | [#22](https://github.com/Frogbyte-io/fleet-manager/issues/22) | [#17](https://github.com/Frogbyte-io/fleet-manager/issues/17) Monorepo and legacy migration |
+| FM-002B | [#30](https://github.com/Frogbyte-io/fleet-manager/issues/30) | [#17](https://github.com/Frogbyte-io/fleet-manager/issues/17) Monorepo and legacy migration |
+| FM-002C | [#31](https://github.com/Frogbyte-io/fleet-manager/issues/31) | [#19](https://github.com/Frogbyte-io/fleet-manager/issues/19) Build, CI, and deployment foundation |
 | FM-003 | [#23](https://github.com/Frogbyte-io/fleet-manager/issues/23) | [#17](https://github.com/Frogbyte-io/fleet-manager/issues/17) Monorepo and legacy migration |
 | FM-004 | [#24](https://github.com/Frogbyte-io/fleet-manager/issues/24) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
 | FM-005 | [#25](https://github.com/Frogbyte-io/fleet-manager/issues/25) | [#18](https://github.com/Frogbyte-io/fleet-manager/issues/18) API, schema, and protocol contracts |
@@ -72,16 +76,43 @@ Created on GitHub 2026-08-25. Planning IDs are stable; GitHub numbers are not, s
 **Non-goals:** Release publishing/signing or product code.  
 **Tests:** A deliberately stale generated/format artifact fails its dedicated check in a fixture or script test.
 
-### FM-002 — Scaffold Cargo and pnpm workspaces
+### FM-002 — Scaffold Cargo workspace and crate skeletons
+
+Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on the original, and its halves share no files, so bundling them serialised work for no reason.
 
 **Context:** Target component boundaries need compilable roots before parallel work.  
-**Goal:** Create empty/skeletal crates and Vue workspace matching the approved layout, without moving legacy code.  
+**Goal:** Create the Cargo workspace and empty/skeletal crates matching the approved layout, without moving legacy code.  
 **Architecture reference:** `docs/PLAN.md#recommended-monorepo-layout`; ADR-0001/0006.  
 **Dependencies:** FM-001.  
-**Research required:** Axum/Vue/Vite supported versions and controller static asset embedding options.  
-**Acceptance criteria:** Every crate has its documented dependency direction; binaries print version/help only; Vue renders a static shell; one root verification command builds/tests both workspaces; no product provider behavior.  
-**Non-goals:** API routes, database, authentication, machine registration, or visual feature design.  
-**Tests:** Workspace dependency graph check, Rust unit smoke, Vue type/build smoke.
+**Owned paths:** root `Cargo.toml`, `crates/**`.  
+**Research required:** Axum supported versions and crate dependency-direction enforcement options.  
+**Acceptance criteria:** Every crate has its documented dependency direction; binaries print version/help only; no product provider behavior.  
+**Non-goals:** API routes, database, authentication, machine registration; the Vue workspace and the joint verification command.  
+**Tests:** Workspace dependency graph check, Rust unit smoke.
+
+### FM-002B — Scaffold pnpm workspace and Vue shell
+
+**Context:** The Vue workspace has a disjoint file set from the Cargo workspace and can be built concurrently.  
+**Goal:** Create the pnpm workspace and a Vue 3/TypeScript/Tailwind static shell.  
+**Architecture reference:** `docs/PLAN.md#recommended-monorepo-layout`; ADR-0001/0006.  
+**Dependencies:** FM-001.  
+**Owned paths:** `pnpm-workspace.yaml`, `apps/web/**`, `packages/ui/**`.  
+**Research required:** Vue/Vite supported versions and the static asset output layout the controller embeds.  
+**Acceptance criteria:** Vue renders a static shell; the build emits to a documented output directory FM-008 can embed; type-check and build pass; pnpm resolves from the FM-001 pin.  
+**Non-goals:** API client code, visual feature design, routing beyond a shell.  
+**Tests:** Vue type/build smoke.
+
+### FM-002C — Add the root verification command
+
+**Context:** Something must verify both workspaces with one command, and leaving that to whichever scaffold lands second gives it no owner.  
+**Goal:** One root command that builds and tests the Cargo and pnpm workspaces together.  
+**Architecture reference:** `docs/PLAN.md#recommended-monorepo-layout`; ADR-0006.  
+**Dependencies:** FM-002, FM-002B.  
+**Owned paths:** `xtask/**` and the root verification entry point.  
+**Research required:** None beyond the two scaffolds.  
+**Acceptance criteria:** One command builds/tests both workspaces; identical in CI and locally with no hidden local steps; either workspace failing fails the command legibly; wired into the FM-001 CI entry point; documented in the README.  
+**Non-goals:** Checks for artifacts that do not exist yet; Nx or Turborepo.  
+**Tests:** The command fails when either workspace is deliberately broken.
 
 ### FM-003 — Move the Node proof of concept under `legacy/`
 
@@ -143,7 +174,7 @@ Created on GitHub 2026-08-25. Planning IDs are stable; GitHub numbers are not, s
 **Context:** Controller-first deployment must be continuously real, not postponed until features.  
 **Goal:** Build a minimal non-privileged controller image serving the Vue shell and health/readiness endpoints with documented volumes/config placeholders.  
 **Architecture reference:** ADR-0001/0007; `architecture/overview.md#runtime-and-deployment`.  
-**Dependencies:** FM-002, FM-006.  
+**Dependencies:** FM-002B, FM-006. Blocked on a host with Docker.  
 **Research required:** Reproducible multi-stage Rust/Vue image builds, container health checks, non-root file ownership.  
 **Acceptance criteria:** `docker compose up -d` reaches healthy; web shell is served by controller; container has no Docker socket/host network/privileged mode; persistent and secret mount locations are documented; graceful SIGTERM passes.  
 **Non-goals:** TLS termination, database migrations, login, or production reverse-proxy templates.  

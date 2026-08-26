@@ -24,6 +24,7 @@ Rules:
 - Provider-specific models must be translated at the provider boundary instead of leaking through the application.
 - External CLI integrations use documented, versioned, machine-readable interfaces and contract tests. Do not read another tool's private database or internal files.
 - Keep changes narrow enough to review and revert. Do not combine repository migration with unrelated product features.
+- Write only inside the paths your issue owns. Other agents may be working concurrently; a drive-by fix in a shared file is the most common cause of a conflicted merge.
 - Do not add Nx, Turborepo, microservices, PostgreSQL, a dynamic plugin SDK, or another package/configuration/secrets manager without an approved ADR and demonstrated need.
 
 Canonical planning documents:
@@ -32,4 +33,5 @@ Canonical planning documents:
 - `docs/architecture/` — subsystem boundaries and invariants
 - `docs/adr/` — decisions that require explicit review before reversal
 - `docs/planning/initial-issues.md` — issue-ready work for the first milestones
+- `docs/planning/parallel-execution.md` — execution waves, path ownership, and rules for concurrent agents
 - `docs/research/ecosystem.md` — researched integrations and evidence
