@@ -1,6 +1,6 @@
 # Ecosystem research and integration recommendations
 
-Research date: 2026-08-25. Prefer linked upstream documentation/repositories over this summary when implementing. Re-run the relevant spike at milestone start because versions and public contracts will change.
+Research date: 2026-08-25; FM-S01 refreshed 2026-08-26. Prefer linked upstream documentation/repositories over this summary when implementing. Re-run the relevant spike at milestone start because versions and public contracts will change.
 
 ## Direct integrations
 
@@ -145,6 +145,38 @@ Decision: M6 begins with a compatibility spike against required endpoints and PV
 ### Rust controller/node stack
 
 Candidate primary sources: [Axum](https://docs.rs/axum/latest/axum/) for HTTP/SSE/WebSocket, [SQLx](https://github.com/launchbadge/sqlx) for compile-checked SQLite/migrations, [Bollard](https://docs.rs/bollard/latest/bollard/) for Docker, [Effectum](https://docs.rs/effectum/latest/effectum/) for an embedded SQLite task queue, and [Cedar](https://github.com/cedar-policy/cedar) for embedded authorization.
+
+#### FM-S01: OpenAPI and TypeScript client generation
+
+Decision (2026-08-26): use [`utoipa` 5.5.0](https://crates.io/crates/utoipa/5.5.0) with [`utoipa-axum` 0.2.0](https://crates.io/crates/utoipa-axum/0.2.0) to register real Axum handlers and generate OpenAPI 3.1 JSON. Use [`orval` 8.26.0](https://www.npmjs.com/package/orval/v/8.26.0) with its Fetch client to generate the TypeScript client. Pin these versions and their Cargo/npm dependency graphs; an upgrade reruns this evidence before changing the pins. This chooses tooling within ADR-0002 and does not change its API/protocol split.
+
+The FM-006 generation contract is:
+
+1. Build a small repository-owned export binary/task that constructs the same `utoipa_axum::OpenApiRouter` used by the controller, splits out its `OpenApi`, and serializes pretty JSON with `serde_json` to a checked-in file.
+2. Generate into a temporary location during the check and byte-compare it with the checked-in OpenAPI file. Any difference exits nonzero and prints the diff. Do not normalize, sort, or rewrite the document in a separate tool that could hide nondeterminism.
+3. Run pinned Orval against that checked-in document with `client: "fetch"`, then run TypeScript with `strict: true` and `noEmit: true`. Check the generated artifacts by regenerating to a temporary directory and diffing them; never hand-edit the client.
+4. Keep an HTTP contract test for each endpoint's material status/body behavior. Utoipa ties route registration and DTO schemas to handlers, but explicitly annotated response statuses can still be written incorrectly; OpenAPI snapshot checking is not a substitute for exercising the handler.
+
+Evidence was produced in disposable projects outside this repository using Rust/Cargo 1.98.0, Node 24.19.0, and TypeScript 5.9.3. The Rust proof used two actual Axum handlers registered through `OpenApiRouter`: `GET /api/v1/machines/{id}` and `POST /api/v1/machines`, with path, request, and response DTOs. No proof code or generated client is production code.
+
+| Required evidence | Observed result |
+|---|---|
+| Reproducible generated OpenAPI | Twenty separate `cargo run --quiet` invocations of the pinned utoipa proof produced 2,201-byte files with the identical SHA-256 `9fd8b510f9a9601cee4e40bb999d8e1914afd64122bf25b197a1c963b29537db`; `cmp` of runs 1 and 20 exited 0. A parallel aide proof also produced one identical SHA-256 across 20 runs. |
+| Compiling generated TypeScript client | `npx orval --input openapi.json --output generated/orval/client.ts --client fetch` generated typed `createMachine` and `getMachine` Fetch functions; `npx tsc --noEmit` under strict settings exited 0. A second generation diffed byte-for-byte equal. Hey API's generated SDK and openapi-typescript's generated declarations also compiled in the same project. |
+| Loud drift failure | After the checked baseline, adding `serial_number: Option<String>` to the Rust `Machine` response DTO changed the generated schema. `cmp checked-openapi.json regenerated-openapi.json` exited 1, reporting the first difference at byte 2,171/line 98, and the diff showed the new nullable property. FM-006 should implement this as a temporary regeneration plus diff, so a stale checked document fails CI. |
+| Fallback exercised | The hand-maintained-document fallback was assessed and rejected because handler-driven generation passed reproducibility, client compilation, and drift detection. Maintaining the same DTO contract twice would add drift risk without solving a failure observed by the spike. |
+
+Maintenance snapshot, verified from the projects' release histories, manifests, registries, and GitHub issue search on 2026-08-26 (open counts exclude pull requests):
+
+| Candidate | Release cadence and open issues | Current Axum tracking | Result |
+|---|---|---|---|
+| [`utoipa`](https://github.com/juhaku/utoipa) / [`utoipa-axum`](https://github.com/juhaku/utoipa/tree/master/utoipa-axum) | utoipa 5.5.0 on 2026-05-04, 5.4.0 on 2025-06-16, and 5.3.1 on 2025-01-06; [162 open issues](https://github.com/juhaku/utoipa/issues?q=is%3Aissue%20state%3Aopen). The repository was active through 2026-08-24. | The [binding manifest](https://github.com/juhaku/utoipa/blob/master/utoipa-axum/Cargo.toml) requires Axum `0.8.4`, whose compatible range resolved and compiled with current [Axum 0.8.9](https://crates.io/crates/axum/0.8.9). | **Chosen.** It passed 20-run determinism and its `routes!` plus `OpenApiRouter` path registers the handler and documentation together. Explicit operation metadata is straightforward and the stable release is current. |
+| [`aide`](https://github.com/tamasfe/aide) | Stable 0.15.1/0.15.0 on 2025-08-19 and 0.14.0 on 2025-01-12; 0.16 remains alpha, with alpha.4 published 2026-04-14; [35 open issues](https://github.com/tamasfe/aide/issues?q=is%3Aissue%20state%3Aopen). | Both the [0.15.1 manifest](https://github.com/tamasfe/aide/blob/release-aide-0.15.1/crates/aide/Cargo.toml) and current alpha accept Axum `0.8.1+`; the stable proof resolved and compiled Axum 0.8.9. | Rejected, not failed. Its real `ApiRouter` proof was also byte-stable across 20 runs, but its last stable line is a year old while the next line remains alpha, and the equivalent operation/status detail needs additional transforms. Utoipa has the stronger current stable integration signal. |
+| [`openapi-typescript`](https://github.com/openapi-ts/openapi-typescript) | 7.13.0 on 2026-02-11, 7.12.0 on 2026-02-08, and 7.10.1 on 2025-10-15; [208 open issues](https://github.com/openapi-ts/openapi-typescript/issues?q=is%3Aissue%20state%3Aopen). | Not applicable. | Rejected as the sole generator. Its output was deterministic and compiled, but the package generates TypeScript declarations, not callable client functions. Pairing it with a generic `openapi-fetch` runtime is viable later, but does not satisfy the spike's clearest generated-client outcome as directly as Orval. |
+| [`@hey-api/openapi-ts`](https://github.com/hey-api/hey-api/tree/main/packages/openapi-ts) | Stable 0.99.0 on 2026-06-22, 0.98.x on 2026-06-01, 0.97.2 on 2026-05-18, and frequent next builds through 2026-08-24; [493 open issues](https://github.com/hey-api/hey-api/issues?q=is%3Aissue%20state%3Aopen) across the monorepo. | Not applicable. | Rejected, not failed. Its generated Fetch SDK was deterministic and compiled, but the latest stable tool remains pre-1.0 and the exact installed graph produced four high `npm audit` findings through `js-yaml` with no non-breaking fix offered. Re-evaluate after 1.0 and a clean pinned audit rather than selecting that snapshot. |
+| [`orval`](https://github.com/orval-labs/orval) | 8.26.0 on 2026-08-23, 8.25.0 on 2026-08-21, and six more stable releases from 2026-06-24 through 2026-08-08; [56 open issues](https://github.com/orval-labs/orval/issues?q=is%3Aissue%20state%3Aopen). | Not applicable. | **Chosen.** The pinned stable release generated a compact, dependency-free Fetch client whose strict TypeScript compilation and repeated-output diff both passed. The separately tested pinned graph did not contribute an npm audit finding. |
+
+Primary-source commands used for the snapshot were GitHub's repository/releases and `type:issue state:open` search APIs, `cargo info` plus the candidates' published Cargo manifests, and npm package metadata. Counts and advisories are point-in-time maintenance signals, not quality scores; refresh them when FM-006 updates a pin.
 
 Recommendations:
 
