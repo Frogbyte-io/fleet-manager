@@ -4,6 +4,8 @@ These records were proposed with the master plan and accepted on 2026-08-25 unde
 
 Accepting these ADRs did not close every open question inside them. The named spikes in [../planning/spikes.md](../planning/spikes.md) resolve implementation choices *within* the accepted boundaries; a spike may add a follow-up ADR, but it does not reopen the decision it serves.
 
+The [2026-08-27 master-plan scope revision](../PLAN.md#confirmed-2026-08-27-product-scope-revision) changes release sequencing, initial deployment scope, and provider work while its design review continues. It does not retroactively rewrite this acceptance table. Any final revision that reverses an ADR decision requires a superseding ADR before implementation.
+
 | ADR | Decision | Status | Accepted | Open spikes |
 |---|---|---|---|---|
 | [0001](0001-controller-first-modular-monolith.md) | Controller-first modular monolith | Accepted | 2026-08-25 | — |
@@ -15,4 +17,4 @@ Accepting these ADRs did not close every open question inside them. The named sp
 | [0007](0007-sqlite-single-controller.md) | SQLite and one active controller initially | Accepted | 2026-08-25 | — |
 | [0008](0008-durable-operations-and-lab-leases.md) | Durable operations and explicit Lab lease/reservation state machines | Accepted | 2026-08-25 | FM-S03 |
 
-FM-S02 (embedded authorization engine) is not scoped by an existing ADR. It is expected to produce ADR-0009 before M1 authorization code lands.
+FM-S02 (authenticated authorization engine) is not scoped by an existing ADR. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. FM-S02 is expected to produce ADR-0009 before that engine lands.

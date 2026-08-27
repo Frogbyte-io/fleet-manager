@@ -7,14 +7,14 @@ Status: proposed
 - Work when the node has no inbound route or open port.
 - Keep controller administrator/provider credentials off managed nodes and agents.
 - Resume safely after disconnects, duplicate delivery, controller restart, and node restart.
-- Support Linux, Windows, and macOS without requiring Tailscale. The design goal covers all three; the initial supported baseline is Linux and Windows (see [../planning/fm-000-acceptance.md](../planning/fm-000-acceptance.md)).
+- Preserve a path to Linux, Windows, and macOS without requiring Tailscale. The initial controller and `fleetd` release baseline is Linux. Windows guests initially expose only Proxmox lifecycle and QEMU Guest Agent observations; Windows `fleetd`, named-pipe broker, in-guest inventory/exec, and project readiness follow after the first Lab release.
 - Version independently from the public Fleet API.
 
 ## Transport split
 
 `fleetd` opens an outbound `wss://<controller>/api/node/v1/connect` connection over ordinary TLS. The channel carries a versioned binary envelope (protobuf is the recommended initial encoding) with a WebSocket subprotocol identifying the Fleet node protocol version. A node never listens on a Fleet TCP administration port.
 
-Browser, CLI, and MCP traffic does not use this protocol. Public realtime uses SSE. Large artifacts and long log bodies use authenticated HTTP transfers linked to an operation ID rather than unbounded WebSocket frames.
+Browser, CLI, and skill-driven agent traffic does not use this protocol. Public realtime uses SSE. Large artifacts and long log bodies use HTTP transfers linked to an operation ID rather than unbounded WebSocket frames; authenticated deployment may add caller credentials later.
 
 ## Enrollment and node identity
 
@@ -62,13 +62,13 @@ Every command includes operation ID, command kind/schema version, deadline, idem
 
 ## Local agent path
 
-`fleetd` exposes a local Unix domain socket on Unix and named pipe on Windows. OS permissions restrict callers. `fleetctl` prefers this route when invoked locally and can ask the daemon to forward an allowed Fleet request using the node/agent delegation context.
+The initial Linux `fleetd` exposes a local Unix domain socket whose OS permissions restrict callers. A later Windows implementation uses a named pipe with equivalent peer restrictions. `fleetctl` prefers the local route when invoked on a managed node and can ask the daemon to forward an allowed Fleet request using node/local-agent context.
 
 ```text
 agent -> fleetctl -> local socket/pipe -> fleetd -> outbound WSS -> controller
 ```
 
-The local API exposes a smaller allowlisted surface than the controller API. It cannot return controller/provider secrets. OS peer credentials identify the local account where supported; an explicit short-lived agent session adds project/purpose/scopes. A direct-controller mode remains available for authenticated administrators and machines without `fleetd`.
+The local API exposes a smaller allowlisted surface than the controller API. It cannot return controller/provider secrets. OS peer credentials identify the local account where supported. Direct-controller mode remains available to trusted-LAN callers and machines without `fleetd`; authenticated mode later adds explicit agent sessions and scopes.
 
 ## Commands and privilege
 

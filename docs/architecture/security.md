@@ -4,7 +4,7 @@ Status: proposed; a dedicated threat model is an M1 deliverable
 
 ## Trust boundaries
 
-- Browser/CLI/MCP caller to controller
+- Browser/CLI/Fleet-skill caller to controller
 - Controller to agentless SSH host
 - Controller to third-party APIs (GitHub, Tailscale, Proxmox)
 - Controller to enrolled `fleetd`
@@ -12,11 +12,19 @@ Status: proposed; a dedicated threat model is an M1 deliverable
 - `fleetd` to Docker socket, Git checkout, skills, Frogenv, and project commands
 - Desired Git, recipes, skills, repositories, provider output, logs, and artifacts as potentially hostile input
 
-Tailscale provides private reachability and network identity but is not Fleet authentication or authorization.
+The first release is deliberately limited to a trusted local network and has no accounts or login. Every LAN caller can mutate. Network placement is therefore the initial authentication boundary, but requests still cross Fleet's centralized authorization and audit path as `anonymous-lan-admin`. Tailscale or a local network provides reachability, not durable Fleet identity; Internet exposure is unsupported in this mode.
 
-## Identities
+## Initial trusted-LAN principal
 
-First-class principals are user, node, agent, CI job, and service. Sessions/API credentials are separate records with expiry and revocation. An agent/CI identity has an owner, purpose, optional project/node/tag scope, issue/PR reference, and maximum lifetime.
+The initial controller recognizes one application principal, `anonymous-lan-admin`, for browser, CLI, and skill-driven requests received on the configured LAN listener. It grants the full initial permission vocabulary. Audit records include this principal plus correlation ID and available request-origin/client metadata; an IP address is evidence, not identity.
+
+Nodes retain Fleet-owned asymmetric identity because controller-to-node replay and impersonation risks exist even on a trusted LAN. Provider credentials remain encrypted secrets. Centralized authorization is not removed: the initial policy is an explicit allow-all policy for the LAN principal that authenticated deployment can replace later.
+
+The dashboard must prominently state that anyone who can reach it can control the fleet. The controller must not default to an Internet-facing deployment, and documentation must not present reverse-proxy publication as supported before authenticated mode exists.
+
+## Deferred authenticated identities
+
+When authenticated deployment is added, first-class principals are user, node, agent, CI job, and service. Sessions/API credentials are separate records with expiry and revocation. An agent/CI identity has an owner, purpose, optional project/node/tag scope, issue/PR reference, and maximum lifetime.
 
 - Web users use secure, HttpOnly, SameSite cookies with CSRF protection.
 - CLI users use device/login flow or explicitly created revocable tokens stored in an OS credential store where available.
@@ -24,11 +32,11 @@ First-class principals are user, node, agent, CI job, and service. Sessions/API 
 - Agents receive short-lived delegated credentials or go through the constrained local `fleetd` broker; they do not inherit a user's indefinite admin token.
 - Provider credentials authenticate Fleet to a provider and are never treated as Fleet identities.
 
-The initial local administrator is created through a one-time, expiring bootstrap secret emitted to the controller console/file. First login must establish the durable credential and invalidates bootstrap. Remote default credentials are prohibited.
+Bootstrap credentials and durable human/agent sessions belong to the later authenticated-deployment milestone, not the trusted-LAN release.
 
 ## Authorization
 
-Authorization is centralized in the application layer and answers principal/action/resource/context. Default is deny; explicit forbids override permits. HTTP route checks, hidden UI controls, or MCP tool lists are defense-in-depth, not the decision point.
+Authorization is centralized in the application layer and answers principal/action/resource/context. The trusted-LAN policy explicitly permits the full vocabulary to `anonymous-lan-admin`; authenticated mode later becomes deny-by-default with explicit forbids overriding permits. HTTP route checks and hidden UI controls are defense-in-depth, not the decision point.
 
 Initial permission vocabulary includes:
 
@@ -42,7 +50,7 @@ Initial permission vocabulary includes:
 - `secrets.use` (provider- and purpose-scoped), never a general `secrets.read` for agents
 - `fleet.audit.read`, `fleet.policy.admin`, `fleet.admin`
 
-Bindings can scope resources by ID, project, provider account, machine group/tag, environment classification, owner, TTL, and resource ceilings. Do not build an ad-hoc expression language. M1 should spike embedded Cedar against concrete policies; retain a small authorization port so the choice can be reviewed before multi-user release.
+Future bindings can scope resources by ID, project, provider account, machine group/tag, environment classification, owner, TTL, and resource ceilings. Do not build an ad-hoc expression language. M1 implements the authorization port and explicit trusted-LAN policy; evaluate an embedded engine only when authenticated or multi-user deployment requires concrete policies.
 
 Authentication, authorization, human approval, and provider privilege are separate. A permitted action may still require risk confirmation; confirmation never grants a denied permission.
 
@@ -65,15 +73,14 @@ Authentication, authorization, human approval, and provider privilege are separa
 - Git hooks are disabled for controller-managed desired clones. Project setup does not execute repository scripts until an authorized plan names them.
 - Downloads and binaries use TLS, pinned version, checksum/signature where upstream supplies one, and atomic install/rollback.
 
-## Agent and MCP protections
+## Agent and CLI-skill protections
 
-- Tool discovery is filtered by permission and resource scope.
-- Read and write tools are distinct; no overloaded “do anything” exec tool in the default set.
-- Tool parameters are structured and validated. Project text cannot add scopes or approvals.
-- Agent identities have TTL, concurrency/rate/resource limits, and a kill/revoke path.
-- Every call links owner, agent, project/purpose, input digest, authorization decision, operation, provider result, and lease/artifact IDs.
-- High-impact actions (production exec, keep Lab, delete VM, change policy, reveal secret) are absent or denied by default.
-- MCP HTTP transport follows the current MCP OAuth-based authorization specification. STDIO/local adapters obtain credentials from the local Fleet broker, not environment-wide administrator tokens.
+- Official Fleet skills call `fleetctl --output json`; they do not receive a second API, bypass application authorization, or confer authority through prompt text.
+- Read and write commands are distinct; no overloaded “do anything” command is the default agent surface.
+- Command parameters are structured and validated. Project text cannot add capabilities or approvals.
+- In trusted-LAN mode agents have the same full authority as every other LAN caller. This is an explicit risk, not least privilege; per-agent identity, limits, and revocation are deferred to authenticated mode.
+- Every call links the anonymous LAN principal, available client/origin metadata, project/purpose, input digest, authorization decision, operation, provider result, and lease/artifact IDs. Authenticated mode adds durable owner/agent identity.
+- The initial skill catalog should expose the intended autonomous workflows while making destructive effects explicit. There is no dedicated MCP server in the planned product.
 
 ## Audit
 

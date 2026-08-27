@@ -5,6 +5,8 @@ Decided: 2026-08-25
 Decided by: repository maintainers
 Supersedes: the `proposed for review` status of `docs/PLAN.md` and the `Proposed` status of `docs/adr/0001`–`0008`
 
+Historical note: the maintainer's 2026-08-27 product-scope review narrowed the initial Windows/authentication scope, made Developer Fleet the first complete release, removed full M4 GitOps from the first Lab critical path, and added Packer-backed image production. See [the confirmed revision in the master plan](../PLAN.md#confirmed-2026-08-27-product-scope-revision). This file remains the record of what FM-000 decided on 2026-08-25 rather than being rewritten retroactively.
+
 This record is the maintainer decision log for [FM-000](initial-issues.md#fm-000--review-and-accept-the-master-plan-and-adr-set). It records what was decided, not what was implemented. Implementation begins at FM-001.
 
 ## Decisions

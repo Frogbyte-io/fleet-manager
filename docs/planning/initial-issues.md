@@ -149,7 +149,7 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 
 ### FM-006 — Define public API conventions and OpenAPI generation
 
-**Context:** Web, CLI, and MCP need one stable client contract before endpoints proliferate.  
+**Context:** Web, CLI, and Fleet skills need one stable client contract before endpoints proliferate.
 **Goal:** Establish `/api/v1`, resource/error/operation envelopes, pagination/filter/idempotency/correlation conventions, and generated OpenAPI/TypeScript checks with one inert endpoint.  
 **Architecture reference:** ADR-0002; `architecture/overview.md#api-and-client-contract`.  
 **Dependencies:** FM-002, FM-004.  
@@ -180,7 +180,7 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Non-goals:** TLS termination, database migrations, login, or production reverse-proxy templates.  
 **Tests:** Compose e2e smoke, read-only root filesystem feasibility check, signal shutdown test.
 
-## M1 — Controller, API, and security kernel
+## M1 — Controller, API, and trusted-LAN control kernel
 
 ### FM-100 — Implement typed controller configuration and startup validation
 
@@ -215,49 +215,42 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Non-goals:** General secrets UI, Frogenv values, Vault integration, or provider-specific forms.  
 **Tests:** Known-vector/tamper/wrong-key/rotation/redaction tests and DB inspection assertion.
 
-### FM-103 — Implement one-time administrator bootstrap
+### FM-103 — Implement trusted-LAN caller resolution and deployment guardrails
 
-**Context:** A fresh remote controller must not ship default credentials or an open admin API.  
-**Goal:** Create one expiring single-use bootstrap path that establishes the first admin credential/session and then disables itself.  
-**Architecture reference:** `architecture/security.md#identities`.  
-**Dependencies:** FM-101, FM-102, FM-106.  
-**Research required:** Password hashing versus passkey/OIDC first slice and secure console/file delivery.  
-**Acceptance criteria:** Bootstrap is required only when no admin exists; replay/expiry/race loses safely; secret is emitted once without access-log leakage; successful setup creates audited admin identity and invalidates bootstrap.  
-**Non-goals:** Multi-user invitations, OIDC, recovery, or GitHub login.  
-**Tests:** Concurrent claim, expiry, restart, replay, log-redaction integration tests.
+**Context:** The first release deliberately has no accounts or login; every client that can reach the local-network listener has full control.
+**Goal:** Resolve browser/CLI/skill requests to an explicit `anonymous-lan-admin` principal, make the trust mode visible in configuration/system status/UI, and prevent documentation or defaults from implying safe Internet exposure.
+**Architecture reference:** `architecture/security.md#initial-trusted-lan-principal`.
+**Dependencies:** FM-100, FM-101.
+**Research required:** Axum client-address/trusted-proxy handling and safe container listen defaults.
+**Acceptance criteria:** Every request has the stable LAN principal and correlation metadata; startup/UI warn that all reachable clients can mutate; request IP/proxy data is treated as evidence rather than identity; unsupported public exposure is documented.
+**Non-goals:** Accounts, passwords, sessions, CLI tokens, OIDC, or per-agent identity.
+**Tests:** Caller-resolution, proxy-header rejection/allowlist, warning/status, and audit-metadata integration tests.
 
-### FM-104 — Implement web sessions and revocable CLI tokens
+### FM-104 — Protect browser mutations in trusted-LAN mode
 
-**Context:** Web and CLI need different safe credential storage/transport.  
-**Goal:** Add authenticated sessions, logout/revocation, CSRF controls, and named expiring CLI tokens with hashed storage.  
-**Architecture reference:** `architecture/security.md#identities`; ADR-0002.  
-**Dependencies:** FM-101, FM-102, FM-103, FM-106.  
-**Research required:** Axum session/cookie/CSRF libraries and OS credential-store follow-up for `fleetctl`.  
-**Acceptance criteria:** Secure cookie attributes and CSRF protection; API token shown once and stored hashed; expiry/revocation checked centrally; auth failures use stable API errors and do not reveal identity existence.  
-**Non-goals:** Agent/node credentials, OIDC, scopes beyond user role bindings.  
-**Tests:** Cookie/CSRF/revocation/expiry/token hash/timing-safe comparison tests.
+**Context:** An open LAN API is still vulnerable to a malicious public webpage driving a user's browser against local services.
+**Goal:** Enforce same-origin browser use, strict CORS/Host/Origin handling, appropriate anti-CSRF state for mutations, and safe content/security headers without introducing user accounts.
+**Architecture reference:** `architecture/security.md#initial-trusted-lan-principal`; ADR-0002.
+**Dependencies:** FM-103, FM-106.
+**Research required:** Browser private-network request behavior, Axum CORS/CSRF patterns, and reverse-proxy header trust.
+**Acceptance criteria:** Cross-site mutation attempts fail; supported same-origin web/API use works; CLI calls remain possible; proxy trust is explicit; protection does not claim to authenticate individual LAN callers.
+**Non-goals:** Login, identity, per-user sessions, revocable API tokens, or Internet exposure.
+**Tests:** Origin/CORS/CSRF/Host/proxy integration matrix and CLI regression tests.
 
-### FM-105 — Spike Cedar with Fleet authorization scenarios
+### FM-105 — Deferred authenticated authorization-engine spike
 
-**Context:** Fleet needs RBAC/ABAC-like resource scopes but must not invent a policy language.  
-**Goal:** Model at least admin, read-only user, development operator, restricted Codex, and CI Lab policies in Cedar; measure integration and authoring costs.  
-**Architecture reference:** `architecture/security.md#authorization`.  
-**Dependencies:** FM-004; can run before FM-106.  
-**Research required:** Current Cedar Rust API/schema/validator, forbid/default-deny diagnostics, policy storage/versioning.  
-**Acceptance criteria:** Executable matrix covers machine/project/tag/production/Lab TTL/resource constraints; deny/forbid and malformed policy behavior are proven; report recommends adopt/defer/reject and updates ADR/security doc.  
-**Non-goals:** Production UI, OpenFGA service, or permission enforcement rollout.  
-**Tests:** Policy matrix as data-driven tests and evaluation benchmark.
+FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human/agent/CI identities and scoped policies enter the roadmap. It is not a dependency of the trusted-LAN release.
 
 ### FM-106 — Add centralized authorization port and permission catalog
 
 **Context:** Every later mutation/read needs one decision point even if the final policy engine remains swappable.  
-**Goal:** Define principal/action/resource/context request, decision/diagnostics, permission catalog, default-deny adapter, and application middleware/helper.  
+**Goal:** Define principal/action/resource/context request, decision/diagnostics, permission catalog, an explicit allow-all `anonymous-lan-admin` adapter, and application middleware/helper. Preserve the port for a later deny-by-default authenticated adapter.
 **Architecture reference:** `architecture/security.md#authorization`; ADR-0001.  
-**Dependencies:** FM-004, FM-105 decision.  
-**Research required:** Incorporate Cedar spike; map HTTP hiding versus domain denial.  
-**Acceptance criteria:** No handler/provider directly decides permission; explicit forbid wins; resource scope is included; decisions carry stable reason/policy IDs without secret data; catalog documents read/write risk.  
+**Dependencies:** FM-004, FM-103.
+**Research required:** Map HTTP hiding versus domain denial and model a stable decision record that survives later authentication.
+**Acceptance criteria:** No handler/provider directly decides permission; the LAN adapter explicitly permits the catalog rather than bypassing it; resource context is included; decisions carry stable reason/policy IDs without secret data; catalog documents read/write risk.
 **Non-goals:** Complete end-user policy editor or every future permission.  
-**Tests:** Default deny, permit/forbid, scope/tag/project, missing context, decision diagnostics.
+**Tests:** LAN-principal permit, unknown-principal denial, missing context, handler/provider bypass checks, and decision diagnostics.
 
 ### FM-107 — Add append-only audit event service
 
@@ -292,15 +285,15 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Non-goals:** Distributed workers, cron platform, provider/node calls, or Lab scheduler.  
 **Tests:** Kill/restart, double worker, lease expiry, safe/unsafe retry, graceful shutdown integration tests.
 
-### FM-110 — Deliver authenticated system/operation vertical slice in API, web, and CLI
+### FM-110 — Deliver trusted-LAN system/operation vertical slice in API, web, and CLI
 
 **Context:** The API-first rule needs one complete path before machine features.  
 **Goal:** Expose system info and operation list/detail/cancel consistently in generated client, Vue shell, and `fleetctl`.  
 **Architecture reference:** ADR-0001/0002; `architecture/overview.md#api-and-client-contract`.  
-**Dependencies:** FM-006, FM-104, FM-108, FM-109.  
+**Dependencies:** FM-006, FM-103, FM-104, FM-108, FM-109.
 **Research required:** SSE reconnect/cursor behavior and CLI JSON/stdout conventions.  
 **Acceptance criteria:** Web uses generated client; CLI supports human and JSON output; SSE resumes progress after reconnect and gap triggers refetch; authorization and correlation behave identically; no business rule in UI/CLI.  
-**Non-goals:** Machine screens, design-system expansion, MCP, or desktop shell.  
+**Non-goals:** Machine screens, design-system expansion, accounts/login, MCP, or desktop shell.
 **Tests:** API-client contract, CLI stdout/stderr snapshots, web component/e2e, SSE reconnect/gap e2e.
 
 ## M2 — Machines, connectivity, and onboarding
@@ -322,7 +315,7 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Goal:** Store an SSH endpoint and implement connect test with strict known-host verification, explicit first fingerprint confirmation, and host-key-change block.  
 **Architecture reference:** `provider-model.md`; `security.md#remote-execution-and-providers`.  
 **Dependencies:** FM-102, FM-200.  
-**Research required:** OpenSSH isolated config/known_hosts, ProxyJump, key/agent auth, Windows targets, Purple SSH patterns.  
+**Research required:** OpenSSH isolated config/known_hosts, ProxyJump, key/agent auth, Linux targets, and Purple SSH patterns.
 **Acceptance criteria:** Password/key/agent secret references do not leak; TOFU requires authorized confirmation; changed key blocks; controller uses isolated files and bounded timeout; useful diagnostics are redacted.  
 **Non-goals:** Remote commands, inventory, SSH config editor/import, or certificate authority.  
 **Tests:** Ephemeral SSH servers for new/known/changed key, timeout/auth failure, secret/log redaction.
@@ -336,7 +329,7 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Research required:** OpenSSH process cancellation/control socket behavior, shell quoting across POSIX/PowerShell, sudo policy.  
 **Acceptance criteria:** Structured script payload avoids interpolating user data; timeout/cancel kills local SSH and reports remote uncertainty; stdout/stderr truncate safely; concurrency is limited; every execution is authorized/audited.  
 **Non-goals:** Interactive terminal, file browser, unrestricted sudo, or bulk fan-out.  
-**Tests:** Linux SSH integration for exit/output/timeout/cancel/disconnect; quoting injection fixtures; Windows contract marked required before support claim.
+**Tests:** Linux SSH integration for exit/output/timeout/cancel/disconnect and quoting-injection fixtures. Windows command execution is a later support claim.
 
 ### FM-203 — Implement agentless OS/hardware/tool inventory probe
 
@@ -344,7 +337,7 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Goal:** Detect OS/architecture/hostname/CPU/RAM/storage/IP plus presence/version of Git, Docker, Tailscale, major agents, Skills Manager, Frogenv, and mise through versioned probes.  
 **Architecture reference:** `provider-model.md#capability-facts`; `desired-state.md#observed-state`.  
 **Dependencies:** FM-200, FM-202.  
-**Research required:** Stable native commands on supported Linux and Windows targets and least-privilege behavior.  
+**Research required:** Stable native commands on the supported Linux baseline and least-privilege behavior.
 **Acceptance criteria:** Partial failures preserve other facts; each fact has source/time/version/status; probes are bounded/read-only; unsupported OS returns raw baseline plus explicit gaps; no project-recursive scan yet.  
 **Non-goals:** Install/update, project discovery, Docker containers, or hardware benchmark.  
 **Tests:** Sanitized fixtures per OS, locale/spacing/null variance, partial command failure, real Linux integration.
@@ -393,16 +386,16 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Non-goals:** General shell, provider commands, privileged helper, or exactly-once claim.  
 **Tests:** Disconnect before/after ack/result, controller/node kill/restart, duplicate frames, journal corruption/recovery, backpressure.
 
-### FM-208 — Implement constrained fleetd local socket/named-pipe API
+### FM-208 — Implement constrained fleetd local Unix-socket API
 
 **Context:** Local agents should use fleetd without controller admin credentials.  
-**Goal:** Expose local status and forwarded read request using OS peer permissions/credentials and a smaller allowlisted contract; add fleetctl route selection.  
+**Goal:** Expose local status and forwarded read request using Unix-socket peer permissions/credentials and a smaller allowlisted contract; add fleetctl route selection.
 **Architecture reference:** ADR-0003; `controller-node-protocol.md#local-agent-path`.  
 **Dependencies:** FM-110, FM-205.  
-**Research required:** Unix peer credentials/systemd socket permissions and Windows named-pipe ACL/client identity.  
+**Research required:** Unix peer credentials and systemd socket permissions.
 **Acceptance criteria:** Non-member local user is denied; allowed caller can get node/Fleet read status; no controller/provider secret or admin endpoint is reachable; direct-controller override is explicit; route appears in diagnostics/JSON.  
-**Non-goals:** Agent delegation tokens, mutation forwarding, MCP, or interactive terminal.  
-**Tests:** Unix permissions/peer identity, mocked Windows ACL contract plus Windows CI, surface allowlist, unavailable fallback.
+**Non-goals:** Agent delegation tokens, mutation forwarding, MCP, interactive terminal, or Windows named pipes.
+**Tests:** Unix permissions/peer identity, surface allowlist, and unavailable fallback.
 
 ### FM-209 — Add machine list/detail/status to API, web, and fleetctl
 
@@ -434,7 +427,7 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Dependencies:** FM-202, FM-204, FM-205, FM-207, release artifact from FM-001.  
 **Research required:** systemd hardening, deb/rpm or portable archive choice, signature/update framework, package repository later path.  
 **Acceptance criteria:** No reusable enrollment secret in process list/files after use; service is non-root unless a reviewed helper is necessary; restart/reboot reconnects; failed install leaves agentless endpoint usable; uninstall/re-enroll behavior documented.  
-**Non-goals:** The Windows service (FM-214), macOS installers, self-update service, tool/profile application.  
+**Non-goals:** Windows/macOS services, self-update service, or tool/profile application.
 **Tests:** Fresh VM install/reboot/reconnect, failure rollback, permissions, token cleanup, upgrade/downgrade compatibility.
 
 ### FM-212 — Add “Install Fleet Node” upgrade workflow
@@ -459,16 +452,9 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 **Non-goals:** Mandatory Tailscale install, ACL editor, Headscale, or automatic auth-key distribution.  
 **Tests:** Recorded API fixtures, pagination/rate/auth failure, secret redaction, duplicate/correlation cases, import handoff.
 
-### FM-214 — Package/install fleetd as a Windows service
+### FM-214 — Deferred Windows in-guest management slice
 
-**Context:** FM-000 committed Windows to the initial supported platform baseline, so the M2 exit gate cannot be met by the Linux packaging in FM-211 alone.  
-**Goal:** Produce a Windows service package and an audited bootstrap operation covering service account, protected key storage, named-pipe broker permissions, enrollment, health, and upgrade/rollback layout.  
-**Architecture reference:** ADR-0003; `controller-node-protocol.md#commands-and-privilege`; `security.md`; [fm-000-acceptance.md](fm-000-acceptance.md).  
-**Dependencies:** FM-S04, FM-208, FM-211.  
-**Research required:** Windows service installation and recovery settings, DPAPI or equivalent for node key storage, named-pipe ACLs and peer identification, code-signing requirements, process-tree termination for cancelled commands.  
-**Acceptance criteria:** No reusable enrollment secret survives in process arguments or on disk after use; the service runs with the least privilege the broker allows; reboot reconnects; failed install leaves the agentless SSH endpoint usable; named-pipe ACLs deny non-authorized local users; uninstall and re-enroll behavior is documented.  
-**Non-goals:** macOS installers, self-update service, tool/profile application, Windows-specific inventory breadth beyond FM-203.  
-**Tests:** Fresh Windows host install/reboot/reconnect, failure rollback, pipe ACL denial case, token cleanup, cancellation process-tree test, upgrade/downgrade compatibility.
+FM-214 moves after the first Lab release. Initial Windows support in M6 is Proxmox lifecycle plus QEMU Guest Agent health/IP observations. The later issue retains the Windows service, protected node key, named-pipe broker, inventory/exec, project readiness, upgrade/rollback, and real-host test requirements described by FM-S04.
 
 ## Creation and dependency hygiene
 

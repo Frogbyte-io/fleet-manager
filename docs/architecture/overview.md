@@ -12,8 +12,8 @@ Fleet Manager is a self-hosted modular monolith with remote adapters. The contro
   | Vue web  |------>| public API adapter: HTTP/JSON + SSE         |
   +----------+       |                                             |
   | fleetctl |------>| application services                       |
-  +----------+       | authn -> authz -> transaction -> audit      |
-  | MCP      |------>|       |                    |                |
+  +----------+       | caller -> authz -> transaction -> audit     |
+  | skills   |->CLI  |       |                    |                |
   +----------+       |    fleet-core          operations worker   |
                      |       |                    |                |
                      | SQLite/secret refs   controller providers   |
@@ -58,7 +58,7 @@ Use cases and ports:
 - Authorize before opening a transaction or dispatching an action
 - Emit audit drafts and domain events as part of the state change
 
-Handlers, CLI commands, MCP tools, and workers invoke this layer. None reimplement it.
+Handlers, CLI commands, skill-driven CLI calls, and workers invoke this layer. None reimplement it.
 
 ### Adapters
 
@@ -97,6 +97,7 @@ Handlers, CLI commands, MCP tools, and workers invoke this layer. None reimpleme
 - SSE carries ordered, resumable operation/audit/resource notifications. Clients recover gaps by refetching canonical resources.
 - Logs use bounded/resumable streams; bulk artifacts use separate upload/download endpoints.
 - `fleetctl` offers human output by default and `--output json` with the API schema. JSON goes to stdout; diagnostics/progress go to stderr.
+- Official Fleet skills orchestrate the JSON CLI contract. They do not call providers directly or define another authorization surface.
 
 ## Runtime and deployment
 
@@ -105,6 +106,7 @@ Initial Compose deployment contains one controller container and persistent moun
 Initial constraints:
 
 - One active controller instance per data directory
+- Linux-hosted controller reachable only on a trusted local network; all reachable callers initially map to the fully authorized `anonymous-lan-admin` principal
 - SQLite WAL on a local filesystem, not an arbitrary network share
 - Graceful shutdown stops intake, checkpoints workers, and leaves accepted operations resumable
 - Health means process/aliveness; readiness includes database migrations and master-key availability
@@ -112,7 +114,7 @@ Initial constraints:
 
 ## Cross-cutting rules
 
-- Every mutation passes through authentication, authorization, operation creation, and audit in the application layer.
+- Every mutation passes through caller resolution, centralized authorization, operation creation, and audit in the application layer. Initial caller resolution yields `anonymous-lan-admin`; later authenticated deployment can replace it without changing use cases.
 - Every remote/provider call has a deadline, cancellation path, bounded/redacted output, correlation ID, and typed retry semantics.
 - Inventory carries source, observed time, confidence/status, and schema version. Absence can mean unknown/stale, not automatically false.
 - Providers may add namespaced capability facts without changing a global enum.
@@ -126,4 +128,4 @@ Initial constraints:
 - Adapter contracts: recorded external responses and CLI JSON fixtures with redaction checks.
 - Integration: real SQLite migrations/recovery, HTTP/OpenAPI compatibility, WSS reconnect, SSH containers/VMs, Docker engine, and opt-in Proxmox lab.
 - End-to-end: Compose controller + web + fleetctl + test fleetd.
-- Cross-platform: protocol, config, service, filesystem permission, process cancellation, local socket/pipe, and inventory. Required on Linux and Windows for the initial baseline; macOS coverage is designed for but not gated (see [../planning/fm-000-acceptance.md](../planning/fm-000-acceptance.md)).
+- Cross-platform: keep protocol, config, service, filesystem permission, process cancellation, local socket/pipe, and inventory abstractions portable. The initial controller and in-guest node baseline is Linux; initial Windows coverage is Proxmox lifecycle and QEMU Guest Agent observation. Windows `fleetd`/broker/project readiness and macOS remain designed-for follow-ons.
