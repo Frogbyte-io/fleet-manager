@@ -1,3 +1,4 @@
 node_modules/
+target/
 .agents-registry-machine
 .env

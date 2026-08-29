@@ -1,0 +1,19 @@
+[package]
+name = "fleet-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fleet-api = { path = "../fleet-api" }
+fleet-application = { path = "../fleet-application" }
+fleet-auth = { path = "../fleet-auth" }
+fleet-config = { path = "../fleet-config" }
+fleet-protocol = { path = "../fleet-protocol" }
+fleet-secrets = { path = "../fleet-secrets" }
+fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
+
+[lints]
+workspace = true
+

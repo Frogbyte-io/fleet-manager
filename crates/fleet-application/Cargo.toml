@@ -1,0 +1,13 @@
+[package]
+name = "fleet-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fleet-core = { path = "../fleet-core" }
+
+[lints]
+workspace = true
+

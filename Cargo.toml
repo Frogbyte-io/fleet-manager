@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+# Keep the graph one-way: domain -> nothing; application -> domain; adapters
+# (API, auth, secrets, storage, and providers) -> application/domain; binaries
+# -> adapters. The controller is the composition root and may assemble them.
+members = [
+    "crates/fleet-controller",
+    "crates/fleetd",
+    "crates/fleetctl",
+    "crates/fleet-core",
+    "crates/fleet-application",
+    "crates/fleet-api",
+    "crates/fleet-protocol",
+    "crates/fleet-config",
+    "crates/fleet-auth",
+    "crates/fleet-secrets",
+    "crates/fleet-storage-sqlite",
+    "crates/providers/fleet-provider-ssh",
+    "crates/providers/fleet-provider-tailscale",
+    "crates/providers/fleet-provider-docker",
+    "crates/providers/fleet-provider-proxmox",
+    "crates/providers/fleet-provider-github",
+    "crates/providers/fleet-provider-skills-manager",
+    "crates/providers/fleet-provider-frogenv",
+    "crates/providers/fleet-provider-mise",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/Frogbyte-io/fleet-manager"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
