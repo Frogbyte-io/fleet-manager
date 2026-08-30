@@ -58,7 +58,7 @@ and starts exercising each one the moment it lands.
 |---|---|---|
 | Repository policy | Linux | always |
 | Secret scan | Linux | always |
-| Legacy Node suite | Linux | a `package-lock.json` at the root or under `legacy/` |
+| Legacy Node suite | Linux | `legacy/agents-registry/package-lock.json` |
 | Rust full checks | Linux x86_64 | a root `Cargo.toml` |
 | Rust compatibility checks | Windows | a root `Cargo.toml` |
 | Cargo dependency policy | Linux | a root `Cargo.toml` |
@@ -85,11 +85,9 @@ node .github/scripts/generate.mjs   # refresh a stale generated artifact
 script locally so that it is one thing to remember, and three steps in CI so
 that a failure names itself.
 
-One test is quarantined in CI and only there: `waitForTask rejects on timeout`
-asserts against a 2 ms wall-clock deadline and fails most runs. `npm test`
-locally still runs it, which is the point — it is a real defect, owned by
-[#23](https://github.com/Frogbyte-io/fleet-manager/issues/23), not a test to
-delete.
+The legacy suite runs in full from `legacy/agents-registry/`. Its Proxmox task
+timeout test uses an injected clock and sleeper so CI and local runs exercise
+the same deterministic behavior.
 
 Rust and pnpm commands become runnable as their workspaces land; the pinned
 toolchains are already in place for them.

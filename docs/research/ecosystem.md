@@ -24,7 +24,7 @@ Desired ownership needs to be explicit:
 - A Fleet-managed preset has membership canonical in Fleet desired Git and is reconciled through documented preset CLI operations. It must be visibly marked managed; manual divergence is drift, not two-way merge.
 - Skills Manager Git backup can mirror its store but does not silently become a second authority for a Fleet-managed preset.
 
-The current `src/skillsBackend.js` is not this integration. Its default `skills install` command matches neither Skills Manager (`skills-manager-cli skills install`) nor the separate skills.sh CLI (`npx skills add`). Preserve its tests only as migration evidence and replace it in M3.
+The current `legacy/agents-registry/src/skillsBackend.js` is not this integration. Its default `skills install` command matches neither Skills Manager (`skills-manager-cli skills install`) nor the separate skills.sh CLI (`npx skills add`). Preserve its tests only as migration evidence and replace it in M3.
 
 ### skills.sh CLI
 

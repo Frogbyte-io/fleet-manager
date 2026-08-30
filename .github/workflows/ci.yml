@@ -7,7 +7,7 @@ name: CI
 #   #22  root Cargo.toml       -> enables rust-linux, rust-windows, cargo-deny
 #   #30  pnpm-workspace.yaml   -> enables web
 #   #31  root verification cmd -> add a step to the jobs below, not a new pipeline
-#   #23  moves the legacy package to legacy/ -> detect follows it automatically
+#   #23  moves the legacy package to legacy/agents-registry/ -> detected below
 #
 # Nothing here holds a deployment credential; see .github/SECURITY.md.
 
@@ -48,8 +48,8 @@ jobs:
           set -euo pipefail
           exists() { if [ -e "$1" ]; then echo true; else echo false; fi; }
           legacy_dir=""
-          if [ -f package-lock.json ]; then legacy_dir="."
-          elif [ -f legacy/package-lock.json ]; then legacy_dir="legacy"
+          if [ -f legacy/agents-registry/package-lock.json ]; then
+            legacy_dir="legacy/agents-registry"
           fi
           {
             echo "cargo=$(exists Cargo.toml)"
@@ -67,7 +67,7 @@ jobs:
             echo "|---|---|---|"
             echo "| Cargo | ${{ steps.probe.outputs.cargo }} | #22 |"
             echo "| pnpm | ${{ steps.probe.outputs.pnpm }} | #30 |"
-            echo "| Legacy Node | ${{ steps.probe.outputs.legacy_dir != '' }} | present today |"
+            echo "| Legacy Node | ${{ steps.probe.outputs.legacy_dir != '' }} | #23 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   policy:
@@ -81,10 +81,9 @@ jobs:
       # repository already has. `npm ci` refuses to run against a lockfile that
       # does not match package.json, which is half of the lockfile enforcement.
       #
-      # #23: this install has to stay at the repository root. Moving the Node
-      # package under legacy/ puts node_modules where .github/scripts cannot
-      # resolve it, and these scripts are not part of the legacy package. It
-      # fails loudly if that happens; it does not pass quietly.
+      # This install stays at the repository root because the policy scripts
+      # import `yaml`; the legacy package has its own independently frozen npm
+      # dependency tree and test job below.
       - name: Install from the lockfile
         run: npm ci
 
@@ -163,30 +162,9 @@ jobs:
         working-directory: ${{ needs.detect.outputs.legacy_dir }}
         run: git diff --exit-code -- package-lock.json
 
-      # QUARANTINE: `waitForTask rejects on timeout` asserts against a 2 ms
-      # wall-clock deadline and fails roughly four runs in five even on an idle
-      # machine, so on a shared runner it is noise, not a signal. #23 replaces
-      # the deadline with a deterministic clock and owns that fix; this repeats
-      # the whole suite otherwise, and skips exactly one named test rather than
-      # disabling the file or the suite.
-      - name: Tests, with one quarantined
+      - name: Tests
         working-directory: ${{ needs.detect.outputs.legacy_dir }}
-        run: |
-          set -euo pipefail
-          echo "::notice::Quarantined until #23: 'waitForTask rejects on timeout'"
-          node --test --test-skip-pattern='^waitForTask rejects on timeout$'
-
-      # When #23 lands, the quarantine above becomes dead configuration. This
-      # says so out loud instead of leaving it to rot.
-      - name: Quarantine is still needed
-        if: always()
-        working-directory: ${{ needs.detect.outputs.legacy_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! grep -rqF "waitForTask rejects on timeout" test/ 2>/dev/null; then
-            echo "::warning::The quarantined test no longer exists. Remove the quarantine from .github/workflows/ci.yml."
-          fi
+        run: npm test
 
   rust-linux:
     name: Rust full checks (Linux x86_64)

@@ -62,9 +62,20 @@ function realFetch({ host, port = 8006, tokenId, apiKey, fingerprint }) {
 }
 
 export class ProxmoxClient {
-  constructor({ host, port, tokenId, apiKey, fingerprint, fetchImpl }) {
+  constructor({
+    host,
+    port,
+    tokenId,
+    apiKey,
+    fingerprint,
+    fetchImpl,
+    now = Date.now,
+    sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  }) {
     this.host = host;
     this.fetchImpl = fetchImpl ?? realFetch({ host, port, tokenId, apiKey, fingerprint });
+    this.now = now;
+    this.sleep = sleep;
   }
 
   static fromEnv(env = process.env) {
@@ -94,14 +105,14 @@ export class ProxmoxClient {
   }
 
   async waitForTask(node, upid, { pollIntervalMs = 1000, timeoutMs = 300000 } = {}) {
-    const start = Date.now();
+    const start = this.now();
     for (;;) {
       const status = await this.request('GET', `/nodes/${node}/tasks/${encodeURIComponent(upid)}/status`);
       if (status.status !== 'running') return status;
-      if (Date.now() - start > timeoutMs) {
+      if (this.now() - start > timeoutMs) {
         throw new Error(`waitForTask timed out after ${timeoutMs}ms waiting for ${upid}`);
       }
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
+      await this.sleep(pollIntervalMs);
     }
   }
 }

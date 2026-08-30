@@ -70,7 +70,8 @@ lockfile. CI installs in frozen mode and never resolves fresh versions:
 
 | Workspace | Lockfile | CI install command | Added by |
 |---|---|---|---|
-| Legacy Node package | `package-lock.json` | `npm ci` | present today |
+| Repository Node tooling | `package-lock.json` | `npm ci` | present today |
+| Legacy Node package | `legacy/agents-registry/package-lock.json` | `npm ci` from that directory | [#23](https://github.com/Frogbyte-io/fleet-manager/issues/23) |
 | Cargo workspace | `Cargo.lock` | `cargo build --locked` etc. | [#22](https://github.com/Frogbyte-io/fleet-manager/issues/22) |
 | pnpm workspace | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile` | [#30](https://github.com/Frogbyte-io/fleet-manager/issues/30) |
 
@@ -91,7 +92,7 @@ Rules:
 | Check | Tool | Scope | Runs |
 |---|---|---|---|
 | Rust licenses, advisories, banned crates, and source registries | `cargo-deny` (version pinned in [`toolchain.env`](toolchain.env)) | Cargo workspace | Once the Cargo workspace exists ([#22](https://github.com/Frogbyte-io/fleet-manager/issues/22)) |
-| Node licenses | `.github/scripts/check-licenses.mjs` | every entry in `package-lock.json` | Today |
+| npm licenses | `.github/scripts/check-licenses.mjs` | every entry in both committed npm lockfiles | Today |
 | Secrets | `gitleaks` | full working tree, and full history on `main` | Today |
 
 `cargo-deny` also enforces the non-license halves of this policy: security

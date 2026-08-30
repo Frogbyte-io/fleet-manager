@@ -1,0 +1,21 @@
+{
+  "name": "@frogbyte-io/fleet-manager",
+  "version": "0.1.0",
+  "description": "Declarative source of truth for agent-capable machines, roles, skill packs and projects.",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "agents-registry": "./bin/agents-registry.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check:docs": "node scripts/check-docs.mjs"
+  },
+  "dependencies": {
+    "yaml": "^2.6.1"
+  }
+}

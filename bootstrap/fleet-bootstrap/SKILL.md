@@ -16,7 +16,8 @@ with it safely.
    its manifest under `machines/` (or the roles/packs it references) and
    run `agents-registry sync`.
 2. **Don't manually edit generated skill directories.** Whatever the skills
-   CLI backend materializes on disk (see `src/skillsBackend.js`) is
+   CLI backend materializes on disk (see
+   `legacy/agents-registry/src/skillsBackend.js`) is
    generated output — treat it like a build artifact, not source.
 3. **Use `agents-registry sync` to reconcile desired state**, not ad-hoc
    installs. `agents-registry resolve <machine-id>` shows desired state

@@ -7,9 +7,14 @@
 > **legacy** proof of concept and migration input; it is not the target controller/node/web
 > architecture. No product features from the new plan have been implemented yet.
 
-The engine behind a declarative fleet/machine/skill registry: machine manifests, role
+The legacy engine behind a declarative fleet/machine/skill registry: machine manifests, role
 inheritance, registry-owned skill packs, capability metadata, a Proxmox VM lifecycle
 adapter, and the `agents-registry` CLI that resolves and reconciles all of it.
+
+Its preserved package now lives under
+[`legacy/agents-registry/`](legacy/agents-registry/). See the
+[deletion parity checklist](legacy/agents-registry/DELETION.md) for the conditions
+that must be met before removing it.
 
 This repo is the **engine only** — no machine-specific data lives here. Your actual
 fleet (machines, roles, packs, devices, projects, test profiles, and the
@@ -18,7 +23,8 @@ at.
 
 ## How it's wired up
 
-- **This repo (`fleet-manager`)** — the CLI and all resolution/validation/Proxmox logic.
+- **The legacy package (`legacy/agents-registry/`)** — the CLI and all
+  resolution/validation/Proxmox logic.
   Published to npm as `@frogbyte-io/fleet-manager`; run it via `npx @frogbyte-io/fleet-manager <command>`
   with no local clone needed.
 - **A data repo** (e.g. `Frogbyte-io/fleet`) — your `AGENTS.md`, `machines/`, `roles/`,
@@ -32,7 +38,8 @@ at.
 ## First-time setup on a new machine
 
 Until `@frogbyte-io/fleet-manager` is published to npm, clone this repo and run
-`node bin/agents-registry.js <command>` in place of `npx @frogbyte-io/fleet-manager <command>`
+`node legacy/agents-registry/bin/agents-registry.js <command>` in place of
+`npx @frogbyte-io/fleet-manager <command>`
 everywhere below.
 
 ```bash
@@ -71,8 +78,8 @@ README.)
 - Web GUI design system: `DESIGN.md` (agent rules: `bootstrap/fleet-console-labs/SKILL.md`)
 
 ```bash
-npm install
-npm test        # legacy agents-registry suite
+npm --prefix legacy/agents-registry ci
+npm --prefix legacy/agents-registry test
 npm run check:docs
 ```
 
@@ -99,7 +106,7 @@ copied into this repository must be attributed in `NOTICE` under its own terms.
 
 - This repo contains **no private keys, passwords, tokens, or machine-specific
   data** — that all lives in your separate data and secrets repos.
-- Live Proxmox VM lifecycle (`src/proxmox/`) authenticates via `PROXMOX_HOST`,
+- Live Proxmox VM lifecycle (`legacy/agents-registry/src/proxmox/`) authenticates via `PROXMOX_HOST`,
   `PROXMOX_TOKEN_ID`, `PROXMOX_API_KEY`, `PROXMOX_FINGERPRINT` environment
   variables — never hardcode these; source them from your secrets repo (e.g. via
   `frogenv env run`).

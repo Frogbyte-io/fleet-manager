@@ -49,16 +49,26 @@ test('waitForTask polls until status is not running', async () => {
 });
 
 test('waitForTask rejects on timeout', async () => {
+  const clock = [0, 0, 3];
+  const sleeps = [];
   const { fetchImpl } = fakeTransport([
     { status: 200, body: { data: { status: 'running' } } },
     { status: 200, body: { data: { status: 'running' } } },
-    { status: 200, body: { data: { status: 'running' } } },
   ]);
-  const client = new ProxmoxClient({ host: 'h', tokenId: 't', apiKey: 'k', fingerprint: 'f', fetchImpl });
+  const client = new ProxmoxClient({
+    host: 'h',
+    tokenId: 't',
+    apiKey: 'k',
+    fingerprint: 'f',
+    fetchImpl,
+    now: () => clock.shift(),
+    sleep: async (milliseconds) => sleeps.push(milliseconds),
+  });
   await assert.rejects(
     () => client.waitForTask('pve', 'UPID:pve:...', { pollIntervalMs: 1, timeoutMs: 2 }),
     /timed out/,
   );
+  assert.deepEqual(sleeps, [1]);
 });
 
 test('fromEnv throws naming the missing variable', () => {

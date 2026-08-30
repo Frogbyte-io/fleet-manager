@@ -7,7 +7,6 @@
 // only for Cargo. This covers the Node dependency graph, which is the graph the
 // repository actually has today, using the same allowed-license table.
 //
-// #30 adds pnpm-lock.yaml; add it to LOCKFILES when it lands.
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,10 +14,9 @@ import { readPolicy, POLICY_PATH } from './lib/policy.mjs';
 import { satisfies } from './lib/spdx.mjs';
 
 const repoRoot = resolve(join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
-// Both locations are listed rather than one, so that #23 relocating the Node
-// package under legacy/ moves the check with it instead of quietly leaving it
-// with nothing to inspect.
-const LOCKFILES = ['package-lock.json', join('legacy', 'package-lock.json')];
+// The root lockfile covers repository tooling. The second lockfile preserves
+// policy enforcement for the independently installable legacy package.
+const LOCKFILES = ['package-lock.json', join('legacy', 'agents-registry', 'package-lock.json')];
 
 /** npm has recorded `license` for years and `licenses` before that. */
 function declaredLicense(entry) {
