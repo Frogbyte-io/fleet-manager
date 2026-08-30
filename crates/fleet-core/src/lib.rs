@@ -1,17 +1,19 @@
-//! Fleet domain types and invariants.
+//! Framework-independent Fleet Manager domain primitives.
 //!
-//! This crate intentionally has no framework, persistence, subprocess, or
-//! provider dependencies. Product behavior will be added by later issues.
+//! Values in this crate are safe to share between application and adapter
+//! layers. It intentionally contains no HTTP, persistence, subprocess, or
+//! provider-specific behavior.
 
 #![warn(missing_docs)]
 
-/// Skeleton marker proving that the domain crate is loadable.
-pub const SKELETON: &str = "fleet-core";
+mod error;
+mod id;
+mod sensitive;
+mod time;
+mod value;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn domain_skeleton_is_available() {
-        assert_eq!(super::SKELETON, "fleet-core");
-    }
-}
+pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
+pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
+pub use sensitive::{SecretReference, SensitiveString};
+pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};
+pub use value::{ParseSlugError, Revision, Slug};
