@@ -1,0 +1,9 @@
+{
+  "name": "broken-web-fixture",
+  "private": true,
+  "scripts": {
+    "lint": "node -e \"process.exit(1)\"",
+    "typecheck": "node -e \"process.exit(0)\"",
+    "build": "node -e \"process.exit(0)\""
+  }
+}

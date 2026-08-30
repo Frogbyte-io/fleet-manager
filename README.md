@@ -76,6 +76,20 @@ npm test        # legacy agents-registry suite
 npm run check:docs
 ```
 
+## Repository verification
+
+After installing the pinned tools described in
+[`.github/toolchain-policy.md`](.github/toolchain-policy.md), run the same root
+verification command used by CI:
+
+```bash
+cargo xtask verify
+```
+
+It checks Rust formatting, linting, and tests, then installs the pnpm workspace
+from its lockfile and runs every package's lint, type-check, and build scripts.
+The command stops at the first failed step and prints the exact failing command.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party source
