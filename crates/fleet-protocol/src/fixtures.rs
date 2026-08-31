@@ -30,7 +30,8 @@ pub const OPERATION_ID: &str = "01900a3c-e8a9-75ba-9337-94a8e6b7d3a9";
 /// generic rule fires on a random-looking literal beside an identifier
 /// containing `key`, and an opaque fixture identity is random-looking by
 /// construction. The protocol field keeps its name; only this constant avoids
-/// the word.
+/// the word. `.github/gitleaks.toml` also exempts this module from that one
+/// rule, so a future fixture identity does not have to be named around it.
 pub const IDEMPOTENT_REPLAY: &str = "01900a3c-0acb-77dc-b559-b6cae8d9f5cb";
 
 /// Fixed wall time used by every fixture, so goldens never depend on a clock.

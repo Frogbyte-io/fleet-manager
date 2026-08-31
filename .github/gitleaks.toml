@@ -20,3 +20,21 @@ still applies there, and no rule is relaxed anywhere else in the tree.
 """
 targetRules = ["generic-api-key"]
 paths = ['''(^|/)docs/.*\.md$''']
+
+[[allowlists]]
+description = """
+Protocol fixture sources declare opaque UUIDv7 identities beside field names
+such as idempotency_key, which is exactly the shape the generic high-entropy
+rule looks for. The values are frozen test vectors with no privilege anywhere,
+and the field names come from proto/fleet/node/v1/node.proto rather than from a
+choice this file can influence. This narrows only that one rule, only in the
+protocol fixture module and the encoded fixtures it describes. Every
+provider-specific rule still applies there, and no rule is relaxed elsewhere.
+
+Real secrets never appear in fixtures; see AGENTS.md and proto/README.md.
+"""
+targetRules = ["generic-api-key"]
+paths = [
+    '''^crates/fleet-protocol/src/fixtures\.rs$''',
+    '''^proto/fixtures/''',
+]
