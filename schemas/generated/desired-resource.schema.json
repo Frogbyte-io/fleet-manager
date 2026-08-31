@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "ApiVersion": {
+      "description": "The registered desired-resource API version.",
+      "oneOf": [
+        {
+          "const": "fleet.frogbyte.io/v1alpha1",
+          "description": "Initial alpha desired-state contract.",
+          "type": "string"
+        }
+      ]
+    },
+    "FleetConfigSpec": {
+      "additionalProperties": false,
+      "description": "Minimal controller-neutral settings spec reserved for later extension.",
+      "type": "object"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "description": "Generic desired-resource metadata.",
+      "properties": {
+        "id": {
+          "description": "Stable opaque identity; renaming or moving a file does not change it.",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Mutable human-facing label.",
+          "maxLength": 63,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ResourceKind": {
+      "description": "Resource kinds currently published in the desired-state registry.",
+      "oneOf": [
+        {
+          "const": "FleetConfig",
+          "description": "Controller-neutral repository settings.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://schemas.frogbyte.io/fleet/desired-resource-v1alpha1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The closed generic envelope for a desired resource.",
+  "properties": {
+    "apiVersion": {
+      "$ref": "#/$defs/ApiVersion",
+      "description": "Version selecting the resource contract."
+    },
+    "kind": {
+      "$ref": "#/$defs/ResourceKind",
+      "description": "Resource type selecting the spec contract."
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata",
+      "description": "Stable identity and mutable label."
+    },
+    "spec": {
+      "$ref": "#/$defs/FleetConfigSpec",
+      "description": "Kind-specific non-secret desired configuration."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "DesiredResource",
+  "type": "object"
+}

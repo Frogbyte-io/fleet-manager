@@ -67,6 +67,27 @@ fn web_workspace_failure_is_legible_and_stops_verification() {
 }
 
 #[test]
+fn stale_schema_failure_is_legible_and_stops_verification() {
+    let steps = verification_steps();
+    let schema_check = steps
+        .iter()
+        .position(|step| step.label == "Generated desired-resource schema")
+        .expect("schema check step exists");
+    let mut runner = FakeRunner {
+        fail_at: Some(schema_check),
+        ..FakeRunner::default()
+    };
+
+    let error = verify_with(&mut runner).expect_err("the schema check must fail");
+
+    assert_eq!(runner.calls.len(), schema_check + 1);
+    assert_eq!(
+        error.to_string(),
+        "Generated desired-resource schema failed: cargo run --locked -p fleet-schema -- generate --check"
+    );
+}
+
+#[test]
 fn successful_verification_runs_every_step_in_order() {
     let mut runner = FakeRunner::default();
 

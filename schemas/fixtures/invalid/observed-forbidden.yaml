@@ -1,0 +1,8 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: FleetConfig
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2a1
+  name: local-fleet
+spec: {}
+observed:
+  hostname: workstation

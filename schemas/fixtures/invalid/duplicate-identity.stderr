@@ -1,0 +1,1 @@
+schemas/fixtures/invalid/duplicate-identity.yaml#document=2/metadata/id [FM_SCHEMA_DUPLICATE_ID] resource identity was first declared at schemas/fixtures/invalid/duplicate-identity.yaml#document=1/metadata/id

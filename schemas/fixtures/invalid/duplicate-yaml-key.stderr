@@ -1,0 +1,1 @@
+schemas/fixtures/invalid/duplicate-yaml-key.yaml:3:1 [FM_SCHEMA_YAML_PARSE] YAML could not be parsed under Fleet's strict input policy

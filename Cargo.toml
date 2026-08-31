@@ -23,6 +23,7 @@ members = [
     "crates/providers/fleet-provider-skills-manager",
     "crates/providers/fleet-provider-frogenv",
     "crates/providers/fleet-provider-mise",
+    "schemas",
     "xtask",
 ]
 

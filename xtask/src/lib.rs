@@ -45,6 +45,19 @@ const STEPS: &[VerificationStep] = &[
         args: &["test", "--workspace", "--all-features", "--locked"],
     },
     VerificationStep {
+        label: "Generated desired-resource schema",
+        program: "cargo",
+        args: &[
+            "run",
+            "--locked",
+            "-p",
+            "fleet-schema",
+            "--",
+            "generate",
+            "--check",
+        ],
+    },
+    VerificationStep {
         label: "Web frozen install",
         program: "corepack",
         args: &["pnpm", "install", "--frozen-lockfile"],

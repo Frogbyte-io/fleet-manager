@@ -1,0 +1,1 @@
+schemas/fixtures/invalid/unknown-version.yaml#document=1/apiVersion [FM_SCHEMA_UNKNOWN_API_VERSION] unsupported apiVersion "fleet.frogbyte.io/v2"
