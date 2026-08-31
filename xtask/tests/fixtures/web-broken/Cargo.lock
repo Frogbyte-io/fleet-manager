@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "fleet-api"
+version = "0.0.0"
+
+[[package]]
 name = "fleet-schema"
 version = "0.0.0"
 

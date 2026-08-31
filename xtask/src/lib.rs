@@ -58,9 +58,29 @@ const STEPS: &[VerificationStep] = &[
         ],
     },
     VerificationStep {
+        label: "Generated OpenAPI document",
+        program: "cargo",
+        args: &[
+            "run",
+            "--locked",
+            "-p",
+            "fleet-api",
+            "--bin",
+            "fleet-openapi",
+            "--",
+            "generate",
+            "--check",
+        ],
+    },
+    VerificationStep {
         label: "Web frozen install",
         program: "corepack",
         args: &["pnpm", "install", "--frozen-lockfile"],
+    },
+    VerificationStep {
+        label: "Generated API client",
+        program: "corepack",
+        args: &["pnpm", "-r", "--if-present", "run", "check:generated"],
     },
     VerificationStep {
         label: "Web lint",

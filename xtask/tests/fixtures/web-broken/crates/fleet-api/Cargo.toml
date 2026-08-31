@@ -1,0 +1,8 @@
+[package]
+name = "fleet-api"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "fleet-openapi"
+path = "src/main.rs"

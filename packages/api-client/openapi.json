@@ -1,0 +1,243 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fleet Manager API",
+    "description": "The public Fleet Manager control API. Mutations return durable operations; the controller-node channel is a separate, separately versioned protocol.",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    },
+    "version": "v1"
+  },
+  "paths": {
+    "/api/v1/meta": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Returns the served API version.",
+        "description": "This endpoint reads no state, requires no authorization, and creates no\noperation. It exists so the conventions in this crate are exercised end to\nend before any resource endpoint exists.",
+        "operationId": "getMeta",
+        "responses": {
+          "200": {
+            "description": "The API version this controller serves.",
+            "headers": {
+              "x-correlation-id": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Correlation identity of this request."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_Meta"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The supplied x-correlation-id header was not a canonical opaque Fleet identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "The body of every unsuccessful response.\n\nIt is built from [`PublicError`], which is the type that decides what is\nsafe to disclose. Internal causes, provider output, and secret values are\nexcluded there rather than filtered here.",
+        "required": [
+          "code",
+          "message",
+          "retry",
+          "correlationId"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable code. Clients branch on this, not on `message`.",
+            "example": "malformed_correlation_id"
+          },
+          "correlationId": {
+            "type": "string",
+            "description": "The correlation identity of the request that failed. It is also returned\nin the `x-correlation-id` response header, and is what an operator needs\nto find the request in the audit trail.",
+            "example": "01900a3c-b576-7287-a004-61d5b384a076"
+          },
+          "fieldViolations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldViolation"
+            },
+            "description": "Per-field rejections, when the failure is a validation failure."
+          },
+          "message": {
+            "type": "string",
+            "description": "Caller-safe human-readable summary."
+          },
+          "retry": {
+            "$ref": "#/components/schemas/Retry",
+            "description": "Retry guidance for this specific failure."
+          }
+        }
+      },
+      "FieldViolation": {
+        "type": "object",
+        "description": "One rejected input, identified by its location in the request body or query.",
+        "required": [
+          "field",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable reason this field was rejected.",
+            "example": "invalid_slug"
+          },
+          "field": {
+            "type": "string",
+            "description": "JSON pointer into the request body, or a query parameter name.",
+            "example": "/spec/name"
+          },
+          "message": {
+            "type": "string",
+            "description": "Caller-safe explanation."
+          }
+        }
+      },
+      "Meta": {
+        "type": "object",
+        "description": "Non-authoritative description of the API this controller serves.",
+        "required": [
+          "apiVersion",
+          "service"
+        ],
+        "properties": {
+          "apiVersion": {
+            "type": "string",
+            "description": "The version segment of the served API path.",
+            "example": "v1"
+          },
+          "service": {
+            "type": "string",
+            "description": "The service that answered, for operators reading a proxied response.",
+            "example": "fleet-controller"
+          }
+        }
+      },
+      "OperationAccepted": {
+        "type": "object",
+        "description": "What a mutation returns instead of holding the request open.\n\nPer ADR-0002, a long infrastructure workflow is a durable operation the\ncaller polls or subscribes to, not an HTTP request kept alive for minutes.",
+        "required": [
+          "operationId",
+          "status",
+          "correlationId"
+        ],
+        "properties": {
+          "correlationId": {
+            "type": "string",
+            "description": "Correlation identity shared by the request, the operation, and its audit\nevents.",
+            "example": "01900a3c-b576-7287-a004-61d5b384a076"
+          },
+          "operationId": {
+            "type": "string",
+            "description": "Opaque identity of the durable operation.",
+            "example": "01900a3c-e8a9-75ba-9337-94a8e6b7d3a9"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OperationStatus",
+            "description": "The operation's state at the time the response was written."
+          }
+        }
+      },
+      "OperationStatus": {
+        "type": "string",
+        "description": "The lifecycle state of a durable operation.\n\nFM-108 owns the operation model itself. This enum exists so the accepted\nenvelope has a typed status from the start.",
+        "enum": [
+          "pending",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "PageInfo": {
+        "type": "object",
+        "description": "Where a list response sits in its result set.\n\nPagination is cursor-based, never offset-based: an offset silently skips or\nrepeats rows when the underlying set changes between requests. The cursor is\nopaque, and a client that parses one is relying on an implementation detail\nthat is free to change.",
+        "required": [
+          "limit"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The number of items this page was limited to.",
+            "example": 50,
+            "minimum": 0
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page, or `null` on the last page."
+          }
+        }
+      },
+      "Resource_Meta": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Non-authoritative description of the API this controller serves.",
+            "required": [
+              "apiVersion",
+              "service"
+            ],
+            "properties": {
+              "apiVersion": {
+                "type": "string",
+                "description": "The version segment of the served API path.",
+                "example": "v1"
+              },
+              "service": {
+                "type": "string",
+                "description": "The service that answered, for operators reading a proxied response.",
+                "example": "fleet-controller"
+              }
+            }
+          }
+        }
+      },
+      "Retry": {
+        "type": "string",
+        "description": "Whether and how a caller may retry a failed request.",
+        "enum": [
+          "never",
+          "immediate",
+          "backoff"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "meta",
+      "description": "Service and contract description."
+    }
+  ]
+}

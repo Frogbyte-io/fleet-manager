@@ -88,6 +88,63 @@ fn stale_schema_failure_is_legible_and_stops_verification() {
 }
 
 #[test]
+fn stale_openapi_failure_is_legible_and_stops_verification() {
+    let steps = verification_steps();
+    let document_check = steps
+        .iter()
+        .position(|step| step.label == "Generated OpenAPI document")
+        .expect("the OpenAPI check step exists");
+    let mut runner = FakeRunner {
+        fail_at: Some(document_check),
+        ..FakeRunner::default()
+    };
+
+    let error = verify_with(&mut runner).expect_err("the OpenAPI check must fail");
+
+    assert_eq!(runner.calls.len(), document_check + 1);
+    assert_eq!(
+        error.to_string(),
+        "Generated OpenAPI document failed: cargo run --locked -p fleet-api --bin fleet-openapi -- generate --check"
+    );
+}
+
+#[test]
+fn stale_api_client_failure_is_legible_and_stops_verification() {
+    let steps = verification_steps();
+    let client_check = steps
+        .iter()
+        .position(|step| step.label == "Generated API client")
+        .expect("the API client check step exists");
+    let mut runner = FakeRunner {
+        fail_at: Some(client_check),
+        ..FakeRunner::default()
+    };
+
+    let error = verify_with(&mut runner).expect_err("the API client check must fail");
+
+    assert_eq!(runner.calls.len(), client_check + 1);
+    assert_eq!(
+        error.to_string(),
+        "Generated API client failed: corepack pnpm -r --if-present run check:generated"
+    );
+}
+
+#[test]
+fn the_api_client_check_runs_after_the_workspace_install_that_provides_its_tooling() {
+    let steps = verification_steps();
+    let install = steps
+        .iter()
+        .position(|step| step.label == "Web frozen install")
+        .expect("the install step exists");
+    let client_check = steps
+        .iter()
+        .position(|step| step.label == "Generated API client")
+        .expect("the API client check step exists");
+
+    assert!(install < client_check);
+}
+
+#[test]
 fn successful_verification_runs_every_step_in_order() {
     let mut runner = FakeRunner::default();
 
