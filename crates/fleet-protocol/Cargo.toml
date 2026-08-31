@@ -7,7 +7,14 @@ repository.workspace = true
 
 [dependencies]
 fleet-core = { path = "../fleet-core" }
+prost = "0.14.4"
+
+[build-dependencies]
+prost-build = "0.14.4"
+protox = "0.9.1"
+
+[dev-dependencies]
+proptest = "1.11.0"
 
 [lints]
 workspace = true
-

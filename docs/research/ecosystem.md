@@ -178,6 +178,21 @@ Maintenance snapshot, verified from the projects' release histories, manifests, 
 
 Primary-source commands used for the snapshot were GitHub's repository/releases and `type:issue state:open` search APIs, `cargo info` plus the candidates' published Cargo manifests, and npm package metadata. Counts and advisories are point-in-time maintenance signals, not quality scores; refresh them when FM-006 updates a pin.
 
+#### FM-007: protobuf compilation without `protoc`
+
+Decision (2026-08-31): compile the node protocol source with [`protox` 0.9.1](https://crates.io/crates/protox/0.9.1), a pure-Rust protobuf compiler, and generate Rust types from its descriptor set with [`prost-build` 0.14.4](https://crates.io/crates/prost-build/0.14.4) using `skip_protoc_run()`, on the [`prost` 0.14.4](https://crates.io/crates/prost/0.14.4) runtime. Building Fleet Manager therefore requires no `protoc` binary anywhere. This chooses tooling inside ADR-0002 and ADR-0003 and changes neither.
+
+FM-007 posed the choice as vendored `protoc` versus a documented toolchain prerequisite. Both were rejected in favour of the pure-Rust compiler:
+
+| Option | Result |
+|---|---|
+| `protox` + `prost-build` with `skip_protoc_run()` | **Chosen.** Verified on a machine with no `protoc` installed: a disposable project outside this repository compiled a `.proto` file and round-tripped an encode/decode through the generated types. `cargo metadata --all-features` over that graph reported 59 dependency crates, every one declaring a license already in the allow table generated from `.github/dependency-policy.md`, so no per-crate exception is needed. |
+| [`protoc-bin-vendored`](https://crates.io/crates/protoc-bin-vendored) | Rejected. It ships a prebuilt `protoc` per platform: a second supply chain outside the Cargo advisory and yank mechanisms, and a per-target artifact for both baseline targets in `deny.toml`. |
+| [`protobuf-src`](https://crates.io/crates/protobuf-src) | Rejected. It builds `protoc` from C++ source, adding a C++ toolchain to CI, to the controller image, and to every contributor's machine, and slowing cold builds for one build-time step. |
+| Documented `protoc` prerequisite | Rejected. A clean checkout would fail to build for a reason no lockfile can fix, and the failure would differ per platform and per installed `protoc` version — the class of problem pinned toolchains exist to remove. |
+
+The consequence to keep in mind is that prost *ignores* unknown fields rather than preserving them across a decode/encode cycle. That is sufficient for peers that consume frames, which is all FM-007 defines; it would not be sufficient for a relay that re-encodes a frame it does not fully understand, and `proto/README.md` records that limit.
+
 Recommendations:
 
 - Axum/Tokio/Tower fit the shared HTTP/SSE/WSS runtime.

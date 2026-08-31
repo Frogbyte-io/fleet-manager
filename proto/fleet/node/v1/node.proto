@@ -1,0 +1,187 @@
+// Fleet node protocol, version 1.
+//
+// This file is the protocol source of truth. Rust types are generated from it
+// at build time; there is no checked-in generated code to drift. Compatibility
+// rules for changing this file are in proto/README.md.
+
+syntax = "proto3";
+
+package fleet.node.v1;
+
+// A closed inclusive range of protocol or schema versions a peer supports.
+message VersionRange {
+  uint32 min = 1;
+  uint32 max = 2;
+}
+
+// Explicit bounds the controller imposes on a node session. A node that cannot
+// honour an advertised bound must fault rather than exceed it.
+message Limits {
+  uint32 max_frame_bytes = 1;
+  uint32 max_command_payload_bytes = 2;
+  uint32 max_result_payload_bytes = 3;
+  uint32 max_in_flight_commands = 4;
+}
+
+// How a node must treat a cancellation request for a command.
+enum CancellationPolicy {
+  CANCELLATION_POLICY_UNSPECIFIED = 0;
+  // Cancellation stops the process tree on a best-effort basis. The terminal
+  // result reports whether work actually stopped.
+  CANCELLATION_POLICY_BEST_EFFORT = 1;
+  // The command runs to completion or its deadline regardless of cancellation.
+  CANCELLATION_POLICY_NOT_CANCELLABLE = 2;
+}
+
+// The terminal disposition of a command.
+enum ResultStatus {
+  RESULT_STATUS_UNSPECIFIED = 0;
+  RESULT_STATUS_SUCCEEDED = 1;
+  RESULT_STATUS_FAILED = 2;
+  RESULT_STATUS_CANCELLED = 3;
+  RESULT_STATUS_TIMED_OUT = 4;
+  // The node refused the command before executing it, for example an unknown
+  // command kind or an unsupported kind schema version.
+  RESULT_STATUS_REJECTED = 5;
+}
+
+// A stable protocol-level failure code. Codes are never renumbered or reused.
+enum FaultCode {
+  FAULT_CODE_UNSPECIFIED = 0;
+  // No protocol version is common to both peers and the node is the older one.
+  FAULT_CODE_NODE_UPGRADE_REQUIRED = 1;
+  // No protocol version is common to both peers and the controller is older.
+  FAULT_CODE_CONTROLLER_UPGRADE_REQUIRED = 2;
+  // The frame could not be decoded as this protocol version.
+  FAULT_CODE_MALFORMED_FRAME = 3;
+  // The frame exceeded the advertised or default frame limit.
+  FAULT_CODE_FRAME_TOO_LARGE = 4;
+  // The frame decoded, but carried no payload this version understands.
+  FAULT_CODE_UNKNOWN_PAYLOAD = 5;
+  // A frame or correlation identity was not a canonical opaque Fleet identity.
+  FAULT_CODE_MALFORMED_IDENTITY = 6;
+  // The session was refused for a reason the peer cannot correct by retrying
+  // the same frame, for example a revoked or unknown node credential.
+  FAULT_CODE_SESSION_REJECTED = 7;
+}
+
+// Whether and how the peer may retry the frame that produced a fault.
+enum FaultRetry {
+  FAULT_RETRY_UNSPECIFIED = 0;
+  FAULT_RETRY_NEVER = 1;
+  FAULT_RETRY_IMMEDIATE = 2;
+  FAULT_RETRY_BACKOFF = 3;
+}
+
+// A typed protocol failure. It never carries provider output, command output,
+// credentials, or secret values.
+message Fault {
+  FaultCode code = 1;
+  // A stable Fleet-owned summary. Peers key behaviour off `code`, not text.
+  string message = 2;
+  FaultRetry retry = 3;
+  // Populated for version faults so the peer can report the actual mismatch.
+  VersionRange supported_protocol_versions = 4;
+}
+
+// Node to controller. Opens a session and states what the node supports.
+message Hello {
+  // The Fleet machine identity assigned at enrollment.
+  string machine_id = 1;
+  // Node software version, for operator diagnosis only. Never parsed for
+  // compatibility decisions; that is what `protocol_versions` is for.
+  string node_version = 2;
+  VersionRange protocol_versions = 3;
+  VersionRange inventory_schema_versions = 4;
+  // Identity of this node boot. A new value means local journal state may have
+  // been lost and the controller must not assume continuity.
+  string session_id = 5;
+  // Monotonically increasing local journal position already durable on the node.
+  uint64 journal_position = 6;
+  string os = 7;
+  string arch = 8;
+  // Optional capabilities, sorted and deduplicated. An unrecognised flag is
+  // ignored, never rejected.
+  repeated string feature_flags = 9;
+  // The last controller operation the node durably acknowledged, or empty.
+  string last_acknowledged_operation_id = 10;
+}
+
+// Controller to node. Accepts a session and fixes its negotiated terms.
+message Welcome {
+  uint32 protocol_version = 1;
+  uint32 inventory_schema_version = 2;
+  // Controller-assigned session identity used in audit and correlation.
+  string session_id = 3;
+  // The intersection of both peers' feature flags, sorted and deduplicated.
+  repeated string enabled_feature_flags = 4;
+  Limits limits = 5;
+  int64 heartbeat_interval_millis = 6;
+}
+
+// Node to controller. Liveness and journal progress. A missed heartbeat changes
+// connectivity state only; it never changes desired state.
+message Heartbeat {
+  uint64 sequence = 1;
+  // Node monotonic uptime, not wall time, so clock steps cannot rewind it.
+  int64 node_uptime_millis = 2;
+  uint64 journal_position = 3;
+  uint32 in_flight_commands = 4;
+}
+
+// Controller to node. Bounded requested work. The payload encoding belongs to
+// the command kind, not to this protocol version.
+message Command {
+  string operation_id = 1;
+  // Kind selects the payload contract, for example "fleet.exec".
+  string kind = 2;
+  uint32 kind_schema_version = 3;
+  int64 deadline_unix_millis = 4;
+  // Repeating a command with the same key must not start a second execution.
+  string idempotency_key = 5;
+  // A digest of the actor and authorization context. Never the context itself,
+  // and never a credential.
+  string authorization_digest = 6;
+  uint32 max_output_bytes = 7;
+  CancellationPolicy cancellation = 8;
+  bytes payload = 9;
+}
+
+// Node to controller. The terminal outcome of exactly one command.
+message CommandResult {
+  string operation_id = 1;
+  ResultStatus status = 2;
+  int32 exit_code = 3;
+  bool output_truncated = 4;
+  int64 duration_millis = 5;
+  // For a cancelled or timed-out result, whether the work actually stopped.
+  // Cancellation is best effort and this field must not be assumed true.
+  bool stopped = 6;
+  // Populated when the node refused or could not run the command.
+  Fault fault = 7;
+  bytes payload = 8;
+}
+
+// The single wire envelope. Every frame on the node channel is one of these.
+message Frame {
+  // Opaque per-frame identity.
+  string message_id = 1;
+  // Opaque identity correlating this frame with an operation and its audit
+  // trail, or empty when the frame starts its own correlation.
+  string correlation_id = 2;
+  // Sender wall time. Diagnostic only; deadlines are carried on commands.
+  int64 sent_at_unix_millis = 3;
+
+  // Tags 4-15 are held for later envelope scalars, which encode their tag in a
+  // single byte. Payload variants start at 16 for that reason.
+  reserved 4 to 15;
+
+  oneof payload {
+    Hello hello = 16;
+    Welcome welcome = 17;
+    Heartbeat heartbeat = 18;
+    Command command = 19;
+    CommandResult command_result = 20;
+    Fault fault = 21;
+  }
+}
