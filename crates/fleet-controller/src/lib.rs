@@ -18,6 +18,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
+use sqlx::SqlitePool;
 use tower_http::services::ServeDir;
 
 /// The runtime settings the controller process needs before it can serve.
@@ -33,9 +34,10 @@ pub struct Settings {
 }
 
 /// The health probe state shared with the probe handlers.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Probe {
     web_dist_ready: bool,
+    db: Option<SqlitePool>,
 }
 
 /// Serves the web shell directory as an ordinary static file service, with the
@@ -51,9 +53,13 @@ fn shell(settings: &Settings) -> ServeDir {
 /// file in the web distribution, and the public API adapter answers everything
 /// else — including unknown `/api/v1` paths, which therefore keep the JSON
 /// error envelope instead of ever falling through to the web shell.
-pub fn build_router(settings: &Settings) -> Router {
+///
+/// `db` is the store's connection pool once the database is open; readiness
+/// probes it live. Passing `None` is for tests that do not involve storage.
+pub fn build_router(settings: &Settings, db: Option<SqlitePool>) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
+        db,
     };
     let shell = shell(settings).fallback(fleet_api::router());
 
@@ -68,30 +74,55 @@ async fn healthz() -> &'static str {
     "ok\n"
 }
 
-async fn readyz(State(probe): State<Probe>) -> (StatusCode, &'static str) {
-    // Until FM-101 adds the database whose readiness genuinely matters, the
-    // only readiness fact is whether the web shell was found where the
-    // settings point. The API serves either way; a missing shell must be
-    // visible to the orchestrator, not silent.
-    if probe.web_dist_ready {
-        (StatusCode::OK, "ok\n")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "web shell not found\n")
+async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
+    // Readiness is the conjunction of the facts an orchestrator needs: the
+    // web shell was found where the settings point, and the database answers
+    // a live query. A degraded dependency must be visible, not silent.
+    if !probe.web_dist_ready {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "web shell not found\n".to_owned(),
+        );
     }
+    if let Some(db) = &probe.db {
+        let reachable = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            sqlx::query("SELECT 1").execute(db).await
+        })
+        .await;
+        match reachable {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("database: {error}\n"),
+                );
+            }
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database did not answer within 1s\n".to_owned(),
+                );
+            }
+        }
+    }
+    (StatusCode::OK, "ok\n".to_owned())
 }
 
 /// Binds [`Settings::listen`] and serves the controller until `shutdown`
 /// completes, then returns once in-flight requests have drained.
+///
+/// `db` is the opened store's pool, or `None` in tests; see [`build_router`].
 ///
 /// # Errors
 ///
 /// Fails if the listener cannot be bound or the server stops on an I/O error.
 pub async fn serve(
     settings: Settings,
+    db: Option<SqlitePool>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
-    serve_on(listener, settings, shutdown).await
+    serve_on(listener, settings, db, shutdown).await
 }
 
 /// Serves the controller on an already bound listener; [`serve`] is this plus
@@ -104,6 +135,7 @@ pub async fn serve(
 pub async fn serve_on(
     listener: tokio::net::TcpListener,
     settings: Settings,
+    db: Option<SqlitePool>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("fleet-controller listening on {}", listener.local_addr()?);
@@ -116,7 +148,7 @@ pub async fn serve_on(
             fleet_config::WEB_DIST_VAR
         );
     }
-    axum::serve(listener, build_router(&settings))
+    axum::serve(listener, build_router(&settings, db))
         .with_graceful_shutdown(shutdown)
         .await
 }

@@ -83,19 +83,38 @@ fn main() -> ExitCode {
                 listen: config.listen,
                 web_dist: config.web_dist,
             };
+            let database_path = config.data_dir.join("fleet.db");
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("the async runtime must start");
-            match runtime.block_on(serve(settings, shutdown_signal())) {
-                Ok(()) => {
+            // The store is opened — and its migrations verified — before the
+            // listener binds, so readiness never reports a database that has
+            // not finished coming up.
+            let outcome = runtime.block_on(async {
+                let store = match fleet_storage_sqlite::Store::open(&database_path).await {
+                    Ok(store) => store,
+                    Err(error) => {
+                        eprintln!("fleet-controller: refusing to start: {error}");
+                        return None;
+                    }
+                };
+                eprintln!("runtime state at {}", store.database_path().display());
+                let pool = Some(store.pool().clone());
+                let served = serve(settings, pool, shutdown_signal()).await;
+                store.close().await;
+                Some(served)
+            });
+            match outcome {
+                Some(Ok(())) => {
                     eprintln!("fleet-controller stopped gracefully");
                     ExitCode::SUCCESS
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     eprintln!("fleet-controller: {error}");
                     ExitCode::FAILURE
                 }
+                None => ExitCode::from(2),
             }
         }
         Command::Healthcheck => {

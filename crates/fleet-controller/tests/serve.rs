@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use fleet_controller::{Settings, serve_on};
+use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -34,8 +35,12 @@ fn settings(web_dist: &Path) -> Settings {
 }
 
 /// Binds an ephemeral listener, starts the server with a manual shutdown
-/// trigger, and returns the bound address plus the trigger's sender.
-async fn spawn(settings: Settings) -> (std::net::SocketAddr, oneshot::Sender<()>) {
+/// trigger, and returns the bound address plus the trigger's sender. `db` is
+/// the readiness-probed pool, `None` when the test does not involve storage.
+async fn spawn(
+    settings: Settings,
+    db: Option<SqlitePool>,
+) -> (std::net::SocketAddr, oneshot::Sender<()>) {
     let listener = TcpListener::bind(settings.listen)
         .await
         .expect("listener must bind");
@@ -44,7 +49,7 @@ async fn spawn(settings: Settings) -> (std::net::SocketAddr, oneshot::Sender<()>
         .expect("bound listener must report its address");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        serve_on(listener, settings, async {
+        serve_on(listener, settings, db, async {
             let _ = shutdown_rx.await;
         })
         .await
@@ -82,7 +87,7 @@ async fn get(address: std::net::SocketAddr, path: &str) -> (u16, String) {
 #[tokio::test]
 async fn health_probes_answer_ok() {
     let dist = shell_dist();
-    let (address, _shutdown) = spawn(settings(dist.path())).await;
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
     let (status, body) = get(address, "/healthz").await;
     assert_eq!(status, 200);
     assert_eq!(body, "ok\n");
@@ -94,7 +99,7 @@ async fn health_probes_answer_ok() {
 #[tokio::test]
 async fn the_web_shell_is_served_with_its_assets() {
     let dist = shell_dist();
-    let (address, _shutdown) = spawn(settings(dist.path())).await;
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
     let (status, body) = get(address, "/").await;
     assert_eq!(status, 200);
     assert_eq!(body, "<html>fleet shell</html>\n");
@@ -106,7 +111,7 @@ async fn the_web_shell_is_served_with_its_assets() {
 #[tokio::test]
 async fn the_public_api_answers_behind_the_same_listener() {
     let dist = shell_dist();
-    let (address, _shutdown) = spawn(settings(dist.path())).await;
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
     let (status, body) = get(address, "/api/v1/meta").await;
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("\"service\":\"fleet-controller\""), "{body}");
@@ -115,7 +120,7 @@ async fn the_public_api_answers_behind_the_same_listener() {
 #[tokio::test]
 async fn unknown_api_paths_keep_the_json_error_envelope() {
     let dist = shell_dist();
-    let (address, _shutdown) = spawn(settings(dist.path())).await;
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
     let (status, body) = get(address, "/api/v1/no-such-endpoint").await;
     assert_eq!(status, 404);
     assert!(body.contains("\"code\":\"not_found\""), "{body}");
@@ -124,7 +129,7 @@ async fn unknown_api_paths_keep_the_json_error_envelope() {
 #[tokio::test]
 async fn a_missing_web_shell_is_reported_by_readiness_without_stopping_the_api() {
     let empty = tempfile::tempdir().expect("empty dist must create");
-    let (address, _shutdown) = spawn(settings(empty.path())).await;
+    let (address, _shutdown) = spawn(settings(empty.path()), None).await;
     let (status, _) = get(address, "/readyz").await;
     assert_eq!(status, 503);
     let (status, _) = get(address, "/api/v1/meta").await;
@@ -144,7 +149,7 @@ async fn graceful_shutdown_stops_the_server_and_releases_the_listener() {
         .expect("bound listener must report its address");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
-        serve_on(listener, settings(dist.path()), async {
+        serve_on(listener, settings(dist.path()), None, async {
             let _ = shutdown_rx.await;
         })
         .await
@@ -166,4 +171,41 @@ async fn graceful_shutdown_stops_the_server_and_releases_the_listener() {
     TcpListener::bind(address)
         .await
         .expect("the listener must be released after shutdown");
+}
+
+#[tokio::test]
+async fn readiness_reports_the_live_database() {
+    use fleet_storage_sqlite::Store;
+
+    let dist = shell_dist();
+    let dir = tempfile::tempdir().expect("temp dir must create");
+    let store = Store::open(&dir.path().join("fleet.db"))
+        .await
+        .expect("the test database must open");
+    let (address, shutdown) = spawn(settings(dist.path()), Some(store.pool().clone())).await;
+    let (status, body) = get(address, "/readyz").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "ok\n");
+    let _ = shutdown.send(());
+    store.close().await;
+}
+
+#[tokio::test]
+async fn readiness_degrades_when_the_database_stops_answering() {
+    use fleet_storage_sqlite::Store;
+
+    let dist = shell_dist();
+    let dir = tempfile::tempdir().expect("temp dir must create");
+    let store = Store::open(&dir.path().join("fleet.db"))
+        .await
+        .expect("the test database must open");
+    let pool = store.pool().clone();
+    let (address, shutdown) = spawn(settings(dist.path()), Some(pool.clone())).await;
+    // Close the store out from under the router: readiness must report the
+    // degradation instead of pretending everything is fine.
+    store.close().await;
+    pool.close().await;
+    let (status, _) = get(address, "/readyz").await;
+    assert_eq!(status, 503);
+    let _ = shutdown.send(());
 }
