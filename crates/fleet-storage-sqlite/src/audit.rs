@@ -306,6 +306,7 @@ fn outcome_from_id(text: &str) -> Option<AuditOutcome> {
     match text {
         "succeeded" => Some(AuditOutcome::Succeeded),
         "failed" => Some(AuditOutcome::Failed),
+        "cancelled" => Some(AuditOutcome::Cancelled),
         _ => None,
     }
 }

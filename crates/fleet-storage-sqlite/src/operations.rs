@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use fleet_application::operation::{Operation, OperationPort, PortFailure};
+use fleet_application::operation::{Operation, OperationPort, PortFailure, QueueDepths};
 use fleet_core::{OperationState, validate_transition};
 
 /// A repository problem, carrying the context the use-case layer maps onto
@@ -287,46 +287,109 @@ impl OperationPort for OperationRepository {
         }
         Ok(())
     }
-}
 
-impl OperationRepository {
-    /// Marks deadline-expired live operations as timed out; returns how many
-    /// transitioned. Idempotent, safe to call repeatedly.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the database errors.
-    pub async fn sweep_deadlines(&self, now: i64) -> Result<usize, OperationStoreError> {
+    async fn claim_pending(
+        &self,
+        worker_id: &str,
+        now: i64,
+    ) -> Result<Option<Operation>, PortFailure> {
+        // The compare-and-set: only the writer whose UPDATE lands while the
+        // row is still pending owns the claim. Two racing workers get two
+        // different rows, never the same one twice.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| PortFailure::Backend {
+                detail: format!("claim begin failed: {error}"),
+            })?;
+        let candidate: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM operations WHERE state = 'pending' AND (deadline_at IS NULL OR deadline_at > ?1) \
+             ORDER BY created_at ASC, id ASC LIMIT 1",
+        )
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("claim select failed: {error}"),
+        })?;
+        let Some(id) = candidate else {
+            return Ok(None);
+        };
+        let updated = sqlx::query(
+            "UPDATE operations SET state = 'running', worker_id = ?2, claimed_at = ?3, updated_at = ?3 \
+             WHERE id = ?1 AND state = 'pending'",
+        )
+        .bind(&id)
+        .bind(worker_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("claim update failed: {error}"),
+        })?;
+        tx.commit().await.map_err(|error| PortFailure::Backend {
+            detail: format!("claim commit failed: {error}"),
+        })?;
+        if updated.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.get(&id).await?))
+    }
+
+    async fn expired_claims(&self, now: i64, lease_ms: i64) -> Result<Vec<Operation>, PortFailure> {
+        let rows = sqlx::query(
+            "SELECT * FROM operations WHERE state IN ('running', 'cancelling') \
+             AND claimed_at IS NOT NULL AND claimed_at < ?1 ORDER BY claimed_at ASC",
+        )
+        .bind(now.saturating_sub(lease_ms))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("expired claims select failed: {error}"),
+        })?;
+        Ok(rows.iter().map(row_to_operation).collect())
+    }
+
+    async fn sweep_deadlines(&self, now: i64) -> Result<Vec<String>, PortFailure> {
+        // Find, do not transition: completing is the service's decision, so
+        // the audit outcome and the state change land together.
         let expired = sqlx::query(
-            "SELECT id, state FROM operations \
+            "SELECT id FROM operations \
              WHERE deadline_at IS NOT NULL AND deadline_at <= ?1 \
              AND state IN ('pending', 'running', 'cancelling')",
         )
         .bind(now)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| OperationStoreError::Query {
-            context: "sweep_select",
-            detail: error.to_string(),
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("sweep select failed: {error}"),
         })?;
+        Ok(expired
+            .iter()
+            .map(|row| row.get::<String, _>("id"))
+            .collect())
+    }
 
-        let mut swept = 0;
-        for row in expired {
-            let id: String = row.get("id");
-            let state: String = row.get("state");
-            let from = OperationState::from_id(&state)
-                .map_err(|error| OperationStoreError::InvalidTransition { error })?;
-            if validate_transition(from, OperationState::TimedOut).is_ok() {
-                self.transition(&id, "timed_out").await.map_err(|failure| {
-                    OperationStoreError::Query {
-                        context: "sweep_transition",
-                        detail: failure.to_string(),
-                    }
-                })?;
-                swept += 1;
-            }
-        }
-        Ok(swept)
+    async fn queue_depths(&self) -> Result<QueueDepths, PortFailure> {
+        use sqlx::Row as _;
+        let row = sqlx::query(
+            "SELECT \
+             COUNT(*) FILTER (WHERE state = 'pending') AS pending, \
+             COUNT(*) FILTER (WHERE state = 'running') AS running, \
+             COUNT(*) FILTER (WHERE state = 'cancelling') AS cancelling \
+             FROM operations",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("queue depths failed: {error}"),
+        })?;
+        Ok(QueueDepths {
+            pending: row.get("pending"),
+            running: row.get("running"),
+            cancelling: row.get("cancelling"),
+        })
     }
 }
 

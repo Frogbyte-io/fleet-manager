@@ -597,6 +597,7 @@ dependencies = [
  "fleet-application",
  "fleet-auth",
  "fleet-config",
+ "fleet-core",
  "fleet-protocol",
  "fleet-secrets",
  "fleet-storage-sqlite",
@@ -604,6 +605,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower-http",
+ "uuid",
 ]
 
 [[package]]

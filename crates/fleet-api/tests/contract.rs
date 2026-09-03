@@ -289,6 +289,30 @@ impl OperationPort for FakePort {
     ) -> Result<(), PortFailure> {
         Ok(())
     }
+
+    async fn claim_pending(
+        &self,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<Option<Operation>, PortFailure> {
+        Ok(None)
+    }
+
+    async fn expired_claims(
+        &self,
+        _now: i64,
+        _lease_ms: i64,
+    ) -> Result<Vec<Operation>, PortFailure> {
+        Ok(Vec::new())
+    }
+
+    async fn sweep_deadlines(&self, _now: i64) -> Result<Vec<String>, PortFailure> {
+        Ok(Vec::new())
+    }
+
+    async fn queue_depths(&self) -> Result<fleet_application::operation::QueueDepths, PortFailure> {
+        Ok(fleet_application::operation::QueueDepths::default())
+    }
 }
 
 #[derive(Debug, Default)]

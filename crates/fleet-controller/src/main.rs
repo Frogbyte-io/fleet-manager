@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use fleet_controller::worker::run as run_worker;
 use fleet_controller::{Settings, run_healthcheck, serve, shutdown_signal};
 
 const HELP: &str = "Usage: fleet-controller [--config <path>] [--help|--version|serve|healthcheck]";
@@ -41,6 +42,84 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     Ok(Args { config, command })
+}
+
+/// The serve command: open the store, open the secret store, start the
+/// worker, serve until shutdown, then drain in reverse order.
+fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
+    let settings = Settings {
+        listen: config.listen,
+        web_dist: config.web_dist,
+    };
+    let database_path = config.data_dir.join("fleet.db");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the async runtime must start");
+    // The store is opened — and its migrations verified — before the
+    // listener binds, so readiness never reports a database that has not
+    // finished coming up.
+    let outcome = runtime.block_on(async {
+        let store = match fleet_storage_sqlite::Store::open(&database_path).await {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("fleet-controller: refusing to start: {error}");
+                return None;
+            }
+        };
+        eprintln!("runtime state at {}", store.database_path().display());
+        // The secret store fails closed on a wrong or missing key, so a
+        // configured key file is validated here, before readiness; an unset
+        // one is a loud pre-secrets state, not an error.
+        let mut secrets = None;
+        if let Some(key_path) = &config.master_key_file {
+            match fleet_secrets::SecretStore::open(store.pool().clone(), key_path) {
+                Ok(opened) => {
+                    eprintln!(
+                        "secret store ready (key version {})",
+                        opened.current_key_version()
+                    );
+                    secrets = Some(opened);
+                }
+                Err(error) => {
+                    eprintln!("fleet-controller: refusing to start: {error}");
+                    return None;
+                }
+            }
+        }
+        if secrets.is_none() {
+            eprintln!("secret store unavailable: no master key configured");
+        }
+        let pool = Some(store.pool().clone());
+        // The worker drives durable operations to their terminal states; it
+        // drains when shutdown fires, before the server.
+        let worker_operations = std::sync::Arc::new(fleet_application::operation::Operations::new(
+            std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        ));
+        let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let worker_handle = tokio::spawn(run_worker(worker_operations, async move {
+            let _ = worker_shutdown_rx.await;
+        }));
+        let served = serve(settings, pool, shutdown_signal()).await;
+        let _ = worker_shutdown.send(());
+        let _ = worker_handle.await;
+        store.close().await;
+        Some(served)
+    });
+    match outcome {
+        Some(Ok(())) => {
+            eprintln!("fleet-controller stopped gracefully");
+            ExitCode::SUCCESS
+        }
+        Some(Err(error)) => {
+            eprintln!("fleet-controller: {error}");
+            ExitCode::FAILURE
+        }
+        None => ExitCode::from(2),
+    }
 }
 
 fn main() -> ExitCode {
@@ -78,67 +157,7 @@ fn main() -> ExitCode {
     eprintln!("effective configuration:\n{}", config.summary());
 
     match args.command {
-        Command::Serve => {
-            let settings = Settings {
-                listen: config.listen,
-                web_dist: config.web_dist,
-            };
-            let database_path = config.data_dir.join("fleet.db");
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("the async runtime must start");
-            // The store is opened — and its migrations verified — before the
-            // listener binds, so readiness never reports a database that has
-            // not finished coming up.
-            let outcome = runtime.block_on(async {
-                let store = match fleet_storage_sqlite::Store::open(&database_path).await {
-                    Ok(store) => store,
-                    Err(error) => {
-                        eprintln!("fleet-controller: refusing to start: {error}");
-                        return None;
-                    }
-                };
-                eprintln!("runtime state at {}", store.database_path().display());
-                // The secret store fails closed on a wrong or missing key, so
-                // a configured key file is validated here, before readiness;
-                // an unset one is a loud pre-secrets state, not an error.
-                let mut secrets = None;
-                if let Some(key_path) = &config.master_key_file {
-                    match fleet_secrets::SecretStore::open(store.pool().clone(), key_path) {
-                        Ok(opened) => {
-                            eprintln!(
-                                "secret store ready (key version {})",
-                                opened.current_key_version()
-                            );
-                            secrets = Some(opened);
-                        }
-                        Err(error) => {
-                            eprintln!("fleet-controller: refusing to start: {error}");
-                            return None;
-                        }
-                    }
-                }
-                if secrets.is_none() {
-                    eprintln!("secret store unavailable: no master key configured");
-                }
-                let pool = Some(store.pool().clone());
-                let served = serve(settings, pool, shutdown_signal()).await;
-                store.close().await;
-                Some(served)
-            });
-            match outcome {
-                Some(Ok(())) => {
-                    eprintln!("fleet-controller stopped gracefully");
-                    ExitCode::SUCCESS
-                }
-                Some(Err(error)) => {
-                    eprintln!("fleet-controller: {error}");
-                    ExitCode::FAILURE
-                }
-                None => ExitCode::from(2),
-            }
-        }
+        Command::Serve => run_serve(config),
         Command::Healthcheck => {
             if run_healthcheck(config.listen) {
                 ExitCode::SUCCESS

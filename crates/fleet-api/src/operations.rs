@@ -105,6 +105,34 @@ impl fleet_application::operation::OperationPort for UnavailableBackend {
             detail: "no backend is wired".to_owned(),
         })
     }
+    async fn claim_pending(
+        &self,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<Option<Operation>, PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "no backend is wired".to_owned(),
+        })
+    }
+    async fn expired_claims(
+        &self,
+        _now: i64,
+        _lease_ms: i64,
+    ) -> Result<Vec<Operation>, PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "no backend is wired".to_owned(),
+        })
+    }
+    async fn sweep_deadlines(&self, _now: i64) -> Result<Vec<String>, PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "no backend is wired".to_owned(),
+        })
+    }
+    async fn queue_depths(&self) -> Result<fleet_application::operation::QueueDepths, PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "no backend is wired".to_owned(),
+        })
+    }
 }
 
 #[async_trait::async_trait]

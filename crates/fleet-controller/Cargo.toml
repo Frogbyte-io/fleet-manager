@@ -12,12 +12,14 @@ fleet-api = { path = "../fleet-api" }
 fleet-application = { path = "../fleet-application" }
 fleet-auth = { version = "0.1.0", path = "../fleet-auth" }
 fleet-config = { version = "0.1.0", path = "../fleet-config" }
+fleet-core = { version = "0.1.0", path = "../fleet-core" }
 fleet-protocol = { path = "../fleet-protocol" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }
 fleet-storage-sqlite = { version = "0.1.0", path = "../fleet-storage-sqlite" }
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "signal", "time"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
+uuid = { version = "1.26.0", features = ["v7"] }
 
 [lints]
 workspace = true

@@ -163,6 +163,8 @@ pub enum AuditOutcome {
     Succeeded,
     /// The action failed; the detail is a bounded, already-redacted string.
     Failed,
+    /// The action was cancelled before completing.
+    Cancelled,
 }
 
 impl AuditOutcome {
@@ -172,6 +174,7 @@ impl AuditOutcome {
         match self {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }

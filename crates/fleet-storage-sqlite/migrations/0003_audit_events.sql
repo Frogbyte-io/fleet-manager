@@ -14,7 +14,7 @@ CREATE TABLE audit_events (
     reason          TEXT NOT NULL,
     correlation_id  TEXT,
     operation_id    TEXT,
-    outcome         TEXT CHECK (outcome IS NULL OR outcome IN ('succeeded', 'failed')),
+    outcome         TEXT CHECK (outcome IS NULL OR outcome IN ('succeeded', 'failed', 'cancelled')),
     metadata_json   TEXT NOT NULL
 ) STRICT;
 

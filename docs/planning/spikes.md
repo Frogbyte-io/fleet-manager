@@ -11,6 +11,19 @@ Each spike must be created as a GitHub issue with the `type:spike` label under i
 | FM-S01 | Which Rust OpenAPI toolchain and TypeScript generator produce a reproducible spec and a compiling client from Axum handlers? | M0 | ADR-0002 | FM-006 | Hand-maintained OpenAPI document with a generated client and a spec-drift guard in CI |
 | FM-S02 | When authenticated deployment is introduced, is Cedar the right embedded authorization engine for Fleet's permission, resource, tag, and project policies? | M8 | — (expected to produce ADR-0009) | Authenticated deployment epic | Native Rust permission catalog with deny-by-default checks and no external policy language |
 | FM-S03 | Can Effectum execute durable operations without owning Fleet's Operation domain records? | M1 | ADR-0008 | FM-109 | Purpose-built SQLite-backed worker over the existing Operation table |
+
+Spike outcomes:
+
+- **FM-S03 (resolved 2026-09-03, fallback chosen).** Effectum 0.7.0 embeds its
+  own SQLite database with its own schema, migrations, connection pool
+  (rusqlite/deadpool), and job-state records. Using it for durable operations
+  would put every operation's lifecycle in two places — Effectum's job rows and
+  Fleet's `operations` rows — with no shared transaction to keep them
+  consistent, which is the ownership split ADR-0008 forbids. What it offers in
+  exchange (exponential retries, cron/recurring schedules) is either classified
+  unsafe for Fleet semantics or an explicit non-goal of the first release. The
+  purpose-built claim/complete loop over the existing table keeps one database,
+  one transaction boundary, and one state machine.
 | FM-S04 | How does `fleetd` install as a Windows service, expose a named pipe, and authenticate a local peer at least as strictly as Unix socket peer credentials? | Later Windows in-guest slice | ADR-0003 | Windows `fleetd`/project-readiness epic | Keep Windows support at Proxmox lifecycle and QEMU Guest Agent observation until the broker can be secured |
 | FM-S05 | Is `purple_ssh` reusable as a dependency, as extracted MIT code with attribution, or only as a reference implementation? | M2 | ADR-0005 | FM-201, FM-202 | Direct system OpenSSH invocation using Purple's tested behaviour as a reference only |
 | FM-S06 | Does `skills-manager-cli --json` cover agents, skills, presets, deploy/undeploy, and update status on both supported platforms, and which version range is pinned? | M3 | ADR-0005 | M3 Skills Manager epic | Degrade to detection and status only, and open an upstream contract request |

@@ -9,6 +9,8 @@
 //! prints the effective (redacted) configuration before readiness.
 #![warn(missing_docs)]
 
+pub mod worker;
+
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

@@ -193,6 +193,50 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
         total: Option<i64>,
         message: Option<&str>,
     ) -> Result<(), PortFailure>;
+    /// Atomically claims one pending operation for `worker_id`: pending to
+    /// running with the claim recorded, or `None` when the queue is empty.
+    /// The compare-and-set in the adapter is what lets two workers race
+    /// without both owning a claim.
+    ///
+    /// # Errors
+    ///
+    /// Fails on backend errors.
+    async fn claim_pending(
+        &self,
+        worker_id: &str,
+        now: i64,
+    ) -> Result<Option<Operation>, PortFailure>;
+    /// Returns live operations whose worker claim is older than
+    /// `lease_ms`: a crashed worker's leftovers, ready to be resolved.
+    ///
+    /// # Errors
+    ///
+    /// Fails on backend errors.
+    async fn expired_claims(&self, now: i64, lease_ms: i64) -> Result<Vec<Operation>, PortFailure>;
+    /// Completes deadline-expired live operations as timed out, returning
+    /// the ids that transitioned.
+    ///
+    /// # Errors
+    ///
+    /// Fails on backend errors.
+    async fn sweep_deadlines(&self, now: i64) -> Result<Vec<String>, PortFailure>;
+    /// The queue depths per state, for backpressure visibility.
+    ///
+    /// # Errors
+    ///
+    /// Fails on backend errors.
+    async fn queue_depths(&self) -> Result<QueueDepths, PortFailure>;
+}
+
+/// How much work sits in the queue, per state that matters for backpressure.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueueDepths {
+    /// Accepted, not yet claimed.
+    pub pending: i64,
+    /// Claimed and executing.
+    pub running: i64,
+    /// Asked to stop, not yet stopped.
+    pub cancelling: i64,
 }
 
 /// The audit half: accepted mutations append an intent, and the terminal
@@ -218,7 +262,7 @@ pub trait AuditPort: fmt::Debug + Send + Sync {
 /// The authorized operation use cases.
 #[derive(Debug)]
 pub struct Operations {
-    port: Arc<dyn OperationPort>,
+    pub(crate) port: Arc<dyn OperationPort>,
     audit: Arc<dyn AuditPort>,
 }
 
@@ -423,6 +467,7 @@ impl Operations {
             .map_err(map_port_failure("complete"))?;
         let outcome = match state {
             "succeeded" => AuditOutcome::Succeeded,
+            "cancelled" => AuditOutcome::Cancelled,
             _ => AuditOutcome::Failed,
         };
         self.audit
