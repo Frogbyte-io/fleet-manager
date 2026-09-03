@@ -148,6 +148,15 @@ async fn a_correlation_filter_returns_only_that_flow() {
     assert_eq!(page.events[0].correlation_id.as_deref(), Some("flow-b"));
 }
 
+/// An authorizer that denies everything, to drive the real denial path.
+#[derive(Debug)]
+struct DenyAll;
+impl fleet_application::authz::Authorizer for DenyAll {
+    fn decide(&self, _request: AccessRequest<'_>) -> Decision {
+        Decision::deny(ReasonId::UnknownPrincipal)
+    }
+}
+
 #[tokio::test]
 async fn an_unauthorized_caller_cannot_read_the_ledger() {
     let (_dir, store) = store().await;
@@ -156,16 +165,6 @@ async fn an_unauthorized_caller_cannot_read_the_ledger() {
         .append_intent(&intent(Permission::SystemRead, true, None))
         .await
         .unwrap();
-
-    // An authorizer that denies everything: any non-LAN principal must hit
-    // the same wall, so drive it through the real denial path.
-    #[derive(Debug)]
-    struct DenyAll;
-    impl fleet_application::authz::Authorizer for DenyAll {
-        fn decide(&self, _request: AccessRequest<'_>) -> Decision {
-            Decision::deny(ReasonId::UnknownPrincipal)
-        }
-    }
 
     let error = ledger
         .query(&DenyAll, "someone-else", Query::default())
