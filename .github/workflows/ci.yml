@@ -232,6 +232,20 @@ jobs:
       - name: Licenses, advisories, bans, and sources
         run: cargo deny check
 
+  deploy-smoke:
+    # The M0 exit gate made continuous: the minimal controller image must
+    # build and reach healthy under Compose on every change, not only on the
+    # machine of whoever last ran deploy/smoke.sh. The job holds no
+    # credentials and publishes nothing; see deploy/README.md.
+    name: Compose smoke (Linux)
+    needs: detect
+    if: needs.detect.outputs.pnpm == 'true' && needs.detect.outputs.cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compose end-to-end smoke
+        run: deploy/smoke.sh
+
   web:
     name: Web workspace (Linux)
     needs: detect
@@ -258,7 +272,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [detect, policy, secrets, legacy-node, rust-linux, rust-windows, cargo-deny, web]
+    needs: [detect, policy, secrets, legacy-node, rust-linux, rust-windows, cargo-deny, web, deploy-smoke]
     runs-on: ubuntu-latest
     steps:
       # One status to require on the branch. A gated-off job reports "skipped",
