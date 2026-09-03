@@ -100,6 +100,28 @@ fn main() -> ExitCode {
                     }
                 };
                 eprintln!("runtime state at {}", store.database_path().display());
+                // The secret store fails closed on a wrong or missing key, so
+                // a configured key file is validated here, before readiness;
+                // an unset one is a loud pre-secrets state, not an error.
+                let mut secrets = None;
+                if let Some(key_path) = &config.master_key_file {
+                    match fleet_secrets::SecretStore::open(store.pool().clone(), key_path) {
+                        Ok(opened) => {
+                            eprintln!(
+                                "secret store ready (key version {})",
+                                opened.current_key_version()
+                            );
+                            secrets = Some(opened);
+                        }
+                        Err(error) => {
+                            eprintln!("fleet-controller: refusing to start: {error}");
+                            return None;
+                        }
+                    }
+                }
+                if secrets.is_none() {
+                    eprintln!("secret store unavailable: no master key configured");
+                }
                 let pool = Some(store.pool().clone());
                 let served = serve(settings, pool, shutdown_signal()).await;
                 store.close().await;

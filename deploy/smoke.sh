@@ -31,11 +31,12 @@ container_of() {
 }
 
 # The controller refuses to start without a usable key source; the smoke hands
-# the stack an ephemeral one. The file is mode 0600 and removed on exit; it is
-# a throwaway artifact of this run, never a stored credential.
+# the stack an ephemeral one in the documented key-file format (hex text, see
+# crates/fleet-secrets/README.md). The file is mode 0600 and removed on exit;
+# it is a throwaway artifact of this run, never a stored credential.
 if [ -z "${FLEET_MASTER_KEY_SOURCE:-}" ]; then
   key_file="$(mktemp "${TMPDIR:-/tmp}/fleet-smoke-master-key.XXXXXX")"
-  head -c 32 /dev/urandom > "$key_file"
+  printf '1 %s\n' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" > "$key_file"
   chmod 600 "$key_file"
   export FLEET_MASTER_KEY_SOURCE="$key_file"
 fi

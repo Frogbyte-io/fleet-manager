@@ -54,5 +54,7 @@ secrets:
   master_key:
     # Overridable so deploy/smoke.sh can hand the stack an ephemeral key and
     # production can point at a real, operator-managed one. The file must be
-    # mode 0600: startup validation refuses a more exposed key.
+    # mode 0600 on the host and owned by the uid the container runs the
+    # service as (see FLEET_UID in the entrypoint); this compose file runs
+    # the service as the image's `fleet` user (999).
     file: ${FLEET_MASTER_KEY_SOURCE:-./secrets/master_key}

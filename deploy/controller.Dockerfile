@@ -38,14 +38,18 @@ COPY proto/ proto/
 RUN cargo build --release --locked -p fleet-controller
 
 FROM debian:bookworm-slim AS runtime
-# The service user owns the runtime state directory so a named volume mounted
-# there is writable without root. The controller currently writes nothing; the
-# location is reserved for the M1 database and documented in deploy/README.md.
+# The service user (uid/gid 999) owns the runtime state directory. The
+# entrypoint starts as root only to align ownership of the state directory and
+# the mounted master key with FLEET_UID/FLEET_GID, then drops privileges with
+# setpriv, so the process that serves traffic is never root.
 RUN useradd --system --home-dir /var/lib/fleet --create-home --shell /usr/sbin/nologin fleet
 COPY --from=rust /src/target/release/fleet-controller /usr/local/bin/fleet-controller
 COPY --from=web /src/apps/web/dist /opt/fleet/web
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 ENV FLEET_LISTEN=0.0.0.0:8080 \
-    FLEET_WEB_DIST=/opt/fleet/web
+    FLEET_WEB_DIST=/opt/fleet/web \
+    FLEET_DATA_DIR=/var/lib/fleet
 EXPOSE 8080
-USER fleet
-ENTRYPOINT ["/usr/local/bin/fleet-controller"]
+# No USER directive: the entrypoint drops privileges itself (see above).
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
