@@ -1,0 +1,55 @@
+# Smoke deployment of the Fleet controller.
+#
+# Posture, decided once and asserted by deploy/smoke.sh:
+# - no Docker socket, no host network, no privileged mode, no host mounts;
+#   the controller needs none of these and must not grow them silently
+# - read-only root filesystem with a tmpfs for /tmp
+# - published to host loopback only: the controller is a trusted-LAN service,
+#   and the smoke deployment must not imply that Internet exposure is fine
+#
+# Secrets are not wired up yet — M1 introduces the secret store — but the
+# mount location is reserved and documented; see the commented block below.
+
+name: fleet-manager
+
+services:
+  controller:
+    build:
+      context: ..
+      dockerfile: deploy/controller.Dockerfile
+    image: fleet-manager/controller:local
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Inside the container the listener must bind the container interface;
+      # the host-facing reachability is limited by the loopback publish above.
+      FLEET_LISTEN: 0.0.0.0:8080
+      FLEET_WEB_DIST: /opt/fleet/web
+    volumes:
+      # Runtime state (the M1 SQLite database and friends). Named volume so a
+      # `compose down -v` is the explicit destructive act.
+      - fleet-data:/var/lib/fleet
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      # The binary probes itself; no shell or HTTP client in the image.
+      test: ["CMD", "fleet-controller", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    # secrets:
+    #   - master_key
+
+volumes:
+  fleet-data:
+
+# When M1 lands the secret-reference store, uncomment the service `secrets:`
+# block above and add the top-level definition; the master key arrives as a
+# mounted file, never as an environment variable or a build argument:
+#
+# secrets:
+#   master_key:
+#     file: ./secrets/master_key

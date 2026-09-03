@@ -7,6 +7,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum = "0.8.9"
 fleet-api = { path = "../fleet-api" }
 fleet-application = { path = "../fleet-application" }
 fleet-auth = { path = "../fleet-auth" }
@@ -14,7 +15,13 @@ fleet-config = { path = "../fleet-config" }
 fleet-protocol = { path = "../fleet-protocol" }
 fleet-secrets = { path = "../fleet-secrets" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.7.1", features = ["fs"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["macros", "io-util", "time"] }
 

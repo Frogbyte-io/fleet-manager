@@ -1,0 +1,14 @@
+# Build-context exclusions for the controller image. Everything the multi-stage
+# build needs is named in the Dockerfile's COPY steps; everything else only
+# slows the upload and risks leaking local state into image layers.
+.git/
+.github/
+.vscode/
+target/
+**/target/
+node_modules/
+**/node_modules/
+apps/web/dist/
+docs/
+legacy/
+deploy/
