@@ -21,10 +21,15 @@ function sandbox() {
 }
 
 function run(envFile, { dir, githubEnv, githubOutput }) {
-  return spawnSync('bash', [script, envFile], {
-    encoding: 'utf8',
-    env: { ...process.env, GITHUB_ENV: githubEnv, GITHUB_OUTPUT: githubOutput },
-  });
+  // The loader reads required keys from the sourced file, but a CI job that
+  // already ran setup-toolchain exports them into every later step's
+  // environment — including this test process. Strip the toolchain keys so a
+  // fixture's completeness decides the outcome, not the runner's.
+  const env = { ...process.env, GITHUB_ENV: githubEnv, GITHUB_OUTPUT: githubOutput };
+  for (const key of Object.keys(env)) {
+    if (/^(NODE|PNPM|COREPACK|CARGO_DENY|GITLEAKS)_/.test(key)) delete env[key];
+  }
+  return spawnSync('bash', [script, envFile], { encoding: 'utf8', env });
 }
 
 const LF_CONTENT = [
