@@ -7,11 +7,11 @@ use axum::{
     body::Body,
     extract::{ConnectInfo, Request},
     http::Request as HttpRequest,
-    middleware::{self as axum_middleware, Next},
+    middleware as axum_middleware,
     routing::get,
 };
 use fleet_auth::{LAN_PRINCIPAL_ID, Principal, TrustMode, caller_of, resolve_lan_caller};
-use tower::{Service, ServiceExt as _};
+use tower::ServiceExt as _;
 
 const PROXY_VALUES: [(&str, &str); 2] = [
     ("x-forwarded-for", "203.0.113.9"),
