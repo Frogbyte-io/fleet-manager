@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkPnpmLicenses, checkLicenses } from './check-licenses.mjs';
 import { satisfies } from './lib/spdx.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -65,4 +66,52 @@ test('a malformed license expression is reported, not ignored', () => {
   assert.throws(() => satisfies('MIT OR', ['MIT']), /unexpected end of license expression/);
   assert.throws(() => satisfies('(MIT', ['MIT']), /unbalanced parentheses/);
   assert.throws(() => satisfies('MIT WITH', ['MIT']), /dangling WITH/);
+});
+
+const ALLOWED = ['Apache-2.0', 'MIT', 'BlueOak-1.0.0', 'Python-2.0'];
+
+test('a pnpm package outside the allowed set is rejected, naming package and version', () => {
+  const report = { 'GPL-3.0-only': [{ name: 'copyleft', versions: ['6.6.6'], license: 'GPL-3.0-only' }] };
+  const { checked, problems } = checkPnpmLicenses(report, ALLOWED);
+  assert.equal(checked, 1);
+  assert.deepEqual(problems, ['copyleft@6.6.6: GPL-3.0-only is not in the allowed inbound set (pnpm graph)']);
+});
+
+test('every installed version of a pnpm package is enforced separately', () => {
+  const report = {
+    BlueOak: [{ name: 'minimatch', versions: ['10.2.6'], license: 'BlueOak-1.0.0' }],
+    'GPL-3.0-only': [{ name: 'glob-copyleft', versions: ['1.0.0', '2.0.0'], license: 'GPL-3.0-only' }],
+  };
+  const { checked, problems } = checkPnpmLicenses(report, ALLOWED);
+  assert.equal(checked, 3);
+  assert.deepEqual(problems, [
+    'glob-copyleft@1.0.0: GPL-3.0-only is not in the allowed inbound set (pnpm graph)',
+    'glob-copyleft@2.0.0: GPL-3.0-only is not in the allowed inbound set (pnpm graph)',
+  ]);
+});
+
+test('a pnpm package with no license field fails like an npm one', () => {
+  const report = { Unknown: [{ name: 'undeclared', versions: ['1.0.0'] }] };
+  const { problems } = checkPnpmLicenses(report, ALLOWED);
+  assert.deepEqual(problems, ['undeclared@1.0.0: no license recorded in the pnpm graph']);
+});
+
+test('a pnpm license expression is evaluated, not string-matched', () => {
+  const report = { '(MIT OR Apache-2.0)': [{ name: 'dual', versions: ['1.0.0'], license: '(MIT OR Apache-2.0)' }] };
+  const { checked, problems } = checkPnpmLicenses(report, ALLOWED);
+  assert.equal(checked, 1);
+  assert.deepEqual(problems, []);
+});
+
+test('a malformed pnpm report is a problem, not a silent pass', () => {
+  assert.deepEqual(checkPnpmLicenses(null, ALLOWED).problems, ['pnpm licenses report is not an object']);
+  assert.deepEqual(checkPnpmLicenses({ MIT: 'not-a-list' }, ALLOWED).problems, ['pnpm licenses report: MIT is not a package list']);
+});
+
+test('the repository pnpm graph satisfies the policy', () => {
+  const { ok, lines, problems } = checkLicenses(join(here, '..', '..'));
+  const pnpmLine = lines.find((line) => line.includes('pnpm workspace'));
+  assert.ok(pnpmLine, `no pnpm graph was checked: ${lines.join(' | ')}`);
+  assert.ok(!pnpmLine.includes('skipped'), 'the committed pnpm workspace must be checked, not skipped');
+  assert.ok(ok, problems.join('\n'));
 });

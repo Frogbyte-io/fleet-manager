@@ -76,6 +76,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
+        with:
+          # The pnpm half of the license check reports from an installed store.
+          pnpm: 'true'
 
       # The policy scripts import `yaml`, the one runtime dependency this
       # repository already has. `npm ci` refuses to run against a lockfile that
@@ -89,6 +92,14 @@ jobs:
 
       - name: Installing must not rewrite the lockfile
         run: git diff --exit-code -- package-lock.json
+
+      # pnpm-lock.yaml records no license fields, so the license check reads
+      # them from an installed store. Frozen, like every install in CI.
+      - name: Install the pnpm workspace from the lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Installing must not rewrite the pnpm lockfile
+        run: git diff --exit-code -- pnpm-lock.yaml
 
       - name: Generated artifacts are up to date
         run: node .github/scripts/generate.mjs --check

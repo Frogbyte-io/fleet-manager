@@ -24,6 +24,7 @@ Anything not in this table is denied. There is no "probably fine" tier.
 | `0BSD` | Public-domain-equivalent; no attribution obligation at all. |
 | `Apache-2.0` | The project's own license. |
 | `Apache-2.0 WITH LLVM-exception` | Apache-2.0 plus an extra grant; strictly more permissive. Used by parts of the Rust standard toolchain ecosystem. |
+| `BlueOak-1.0.0` | Permissive with an explicit patent grant; the license npm's own tooling ships under. Enters the graph with the web toolchain (`minimatch`), reviewed in [#34](https://github.com/Frogbyte-io/fleet-manager/issues/34). |
 | `BSD-2-Clause` | Permissive; attribution only. |
 | `BSD-3-Clause` | Permissive; attribution plus a no-endorsement clause we already honour. |
 | `BSL-1.0` | Boost license; permissive and imposes no obligation on binary distribution. |
@@ -31,6 +32,7 @@ Anything not in this table is denied. There is no "probably fine" tier.
 | `ISC` | Permissive; attribution only. Used by the current `yaml` dependency of the legacy Node package. |
 | `MIT` | Permissive; attribution only. |
 | `MPL-2.0` | File-level copyleft. Allowed for **unmodified** upstream files only: modifying an MPL-2.0 file obliges us to publish that file under MPL-2.0. Forking one is a decision, not a drive-by edit. |
+| `Python-2.0` | Permissive, attribution-only PSF license. Enters the graph transitively under the pinned `orval` generator (`argparse`), reviewed in [#34](https://github.com/Frogbyte-io/fleet-manager/issues/34). |
 | `Unicode-3.0` | Unicode data license used by ICU-derived crates; permissive for both source and binary distribution. |
 | `Unicode-DFS-2016` | The older Unicode data license still declared by some crates. |
 | `Zlib` | Permissive; no attribution required for binary distribution. |
@@ -93,6 +95,7 @@ Rules:
 |---|---|---|---|
 | Rust licenses, advisories, banned crates, and source registries | `cargo-deny` (version pinned in [`toolchain.env`](toolchain.env)) | Cargo workspace | Once the Cargo workspace exists ([#22](https://github.com/Frogbyte-io/fleet-manager/issues/22)) |
 | npm licenses | `.github/scripts/check-licenses.mjs` | every entry in both committed npm lockfiles | Today |
+| pnpm licenses | `.github/scripts/check-licenses.mjs` via `pnpm licenses list --json` | every package in the pnpm workspace graph, devDependencies included ([#34](https://github.com/Frogbyte-io/fleet-manager/issues/34)) | [#34](https://github.com/Frogbyte-io/fleet-manager/issues/34) |
 | Secrets | `gitleaks` | full working tree, and full history on `main` | Today |
 
 `cargo-deny` also enforces the non-license halves of this policy: security
@@ -102,3 +105,9 @@ crates sourced from anywhere other than crates.io.
 The Node license check reads the `license` field that npm records for every
 package in the lockfile. A package with no recorded license fails; see
 [Denied, with the usual offenders named](#denied-with-the-usual-offenders-named).
+
+The pnpm graph has no lockfile license fields, so its half of the check runs
+`pnpm licenses list --json` against an installed store; the policy job installs
+from the frozen lockfile first. devDependencies are in scope on purpose: the
+build-time distinction was reviewed in [#34](https://github.com/Frogbyte-io/fleet-manager/issues/34)
+and rejected — one global table, no "probably fine" tier.
