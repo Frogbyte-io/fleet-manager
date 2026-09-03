@@ -29,6 +29,7 @@ Anything not in this table is denied. There is no "probably fine" tier.
 | `BSD-3-Clause` | Permissive; attribution plus a no-endorsement clause we already honour. |
 | `BSL-1.0` | Boost license; permissive and imposes no obligation on binary distribution. |
 | `CC0-1.0` | Public-domain dedication. |
+| `CDLA-Permissive-2.0` | The Linux Foundation's permissive **data** license: unlimited use and redistribution of the data, no copyleft. Not an open-source *code* license, and deliberately admitted only because the dependency carrying it (`webpki-roots`, the TLS root-certificate store used by the Rust TLS stack) is pure data with no code — reviewed in this repository's inbound-policy history alongside [#34](https://github.com/Frogbyte-io/fleet-manager/issues/34). If a code dependency ever declares it, that is a new decision, not precedent. |
 | `ISC` | Permissive; attribution only. Used by the current `yaml` dependency of the legacy Node package. |
 | `MIT` | Permissive; attribution only. |
 | `MPL-2.0` | File-level copyleft. Allowed for **unmodified** upstream files only: modifying an MPL-2.0 file obliges us to publish that file under MPL-2.0. Forking one is a decision, not a drive-by edit. |
