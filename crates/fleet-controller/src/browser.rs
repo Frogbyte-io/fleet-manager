@@ -52,6 +52,11 @@ const GUARDED_METHODS: [Method; 5] = [
 /// allowed through: the guard fences browsers, the only clients that can be
 /// fenced without accounts. Requests with a foreign `Origin` get the standard
 /// error envelope.
+///
+/// # Panics
+///
+/// Panics only if the pinned literal error code stops being valid syntax,
+/// which is a constant path a test pins.
 pub async fn browser_mutation_guard(request: Request, next: Next) -> Response {
     if !GUARDED_METHODS.contains(request.method()) {
         return next.run(request).await;
