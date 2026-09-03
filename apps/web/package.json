@@ -10,7 +10,8 @@
     "build": "vue-tsc -b && vite build"
   },
   "dependencies": {
-    "vue": "3.5.42"
+    "vue": "3.5.42",
+    "@frogbyte-io/fleet-api-client": "workspace:*"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

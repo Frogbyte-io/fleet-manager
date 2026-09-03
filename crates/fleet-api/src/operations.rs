@@ -34,6 +34,8 @@ pub struct ApiState {
     pub operations: Arc<Operations>,
     /// The active authorization policy.
     pub authorizer: Arc<dyn Authorizer>,
+    /// The system view's source, assembled by the controller.
+    pub system: Arc<dyn crate::system::SystemInfoSource>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -41,6 +43,7 @@ impl std::fmt::Debug for ApiState {
         f.debug_struct("ApiState")
             .field("operations", &self.operations)
             .field("authorizer", &"dyn Authorizer")
+            .field("system", &"dyn SystemInfoSource")
             .finish()
     }
 }
@@ -152,6 +155,17 @@ impl fleet_application::operation::AuditPort for UnavailableBackend {
     }
 }
 
+/// Answers nothing; document generation only.
+#[derive(Debug)]
+struct UnavailableSystemInfo;
+
+#[async_trait::async_trait]
+impl crate::system::SystemInfoSource for UnavailableSystemInfo {
+    async fn info(&self) -> Result<crate::system::SystemInfo, String> {
+        Err("no backend is wired".to_owned())
+    }
+}
+
 impl ApiState {
     /// A state whose backends answer nothing, for document generation.
     #[must_use]
@@ -162,6 +176,7 @@ impl ApiState {
                 Arc::new(UnavailableBackend),
             )),
             authorizer: Arc::new(PermitAllForDocument),
+            system: Arc::new(UnavailableSystemInfo),
         }
     }
 }
@@ -486,7 +501,7 @@ fn principal_or_error(
 /// Maps a use-case outcome onto the public error envelope. Status codes are
 /// decided here, once; the codes are stable and the messages carry the
 /// caller-safe detail the use case produced.
-fn map_use_case_error(
+pub(crate) fn map_use_case_error(
     error: &OperationUseCaseError,
     correlation_id: CorrelationId,
 ) -> ApiErrorResponse {

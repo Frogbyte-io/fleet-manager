@@ -20,7 +20,8 @@ const SUPPLIED_CORRELATION_ID: &str = "01900a3c-b576-7287-a004-61d5b384a076";
 
 /// The test router: the in-memory operation state plus a resolved LAN
 /// principal, as the controller's caller middleware provides in production.
-fn test_router() -> axum::Router {
+/// The fake backend is returned so tests can drive its state directly.
+fn test_router() -> (axum::Router, Arc<FakePort>) {
     #[derive(Debug)]
     struct PermitAll;
     impl fleet_application::authz::Authorizer for PermitAll {
@@ -31,14 +32,23 @@ fn test_router() -> axum::Router {
             fleet_application::authz::Decision::allow()
         }
     }
-    let state = operation_state(Arc::new(PermitAll));
-    router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
-        id: "anonymous-lan-admin".to_owned(),
-    }))
+    let port = Arc::new(FakePort::default());
+    let state = Arc::new(ApiState {
+        operations: Arc::new(Operations::new(port.clone(), Arc::new(FakeAudit))),
+        authorizer: Arc::new(PermitAll),
+        system: Arc::new(FakeSystemInfo),
+    });
+    (
+        router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        })),
+        port,
+    )
 }
 
 async fn call(request: Request<Body>) -> (Parts, Value) {
-    let response = test_router()
+    let (router, _port) = test_router();
+    let response = router
         .oneshot(request)
         .await
         .expect("the router is infallible");
@@ -315,6 +325,26 @@ impl OperationPort for FakePort {
     }
 }
 
+#[derive(Debug)]
+struct FakeSystemInfo;
+
+#[async_trait::async_trait]
+impl fleet_api::system::SystemInfoSource for FakeSystemInfo {
+    async fn info(&self) -> Result<fleet_api::system::SystemInfo, String> {
+        Ok(fleet_api::system::SystemInfo {
+            service: "fleet-controller".to_owned(),
+            version: "0.1.0".to_owned(),
+            trust_mode: "trusted-lan".to_owned(),
+            trust_warning:
+                "TRUSTED-LAN MODE: no accounts or login; every reachable client can mutate."
+                    .to_owned(),
+            storage_ok: true,
+            queue_pending: 0,
+            queue_running: 0,
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 struct FakeAudit;
 
@@ -340,6 +370,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
             Arc::new(FakeAudit),
         )),
         authorizer,
+        system: Arc::new(FakeSystemInfo),
     })
 }
 
@@ -381,7 +412,7 @@ async fn an_unknown_kind_is_refused_with_the_invalid_request_code() {
 #[tokio::test]
 async fn the_operation_list_is_a_page() {
     // One router for both calls: the in-memory backend is per router.
-    let router = test_router();
+    let (router, _port) = test_router();
     router
         .clone()
         .oneshot(
@@ -416,7 +447,7 @@ async fn an_unknown_operation_is_not_found() {
 #[tokio::test]
 async fn cancelling_records_a_durable_request() {
     // One router for both calls: the in-memory backend is per router.
-    let router = test_router();
+    let (router, _port) = test_router();
     let (_, body) = {
         let response = router
             .clone()
@@ -483,4 +514,106 @@ async fn a_denied_caller_receives_the_denial_envelope() {
         .unwrap();
     let parts = response.into_parts().0;
     assert_eq!(parts.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
+    let (parts, body) = call(get(&format!("{API_BASE_PATH}/system"))).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["service"], "fleet-controller");
+    assert_eq!(body["trustMode"], "trusted-lan");
+    assert!(
+        body["trustWarning"]
+            .as_str()
+            .unwrap()
+            .contains("no accounts")
+    );
+}
+
+#[tokio::test]
+async fn the_operation_event_stream_snapshots_and_closes_on_terminal() {
+    // One router for both calls: the in-memory backend is per router.
+    let (router, port) = test_router();
+    let (_, created) = {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("{API_BASE_PATH}/operations"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"kind": "noop"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        into_parts_json(response).await
+    };
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+
+    // Complete the operation behind the stream's back: the next poll must
+    // observe the change, snapshot it, and close the stream.
+    {
+        let mut operations = port.operations.lock().unwrap();
+        let operation = operations.first_mut().unwrap();
+        operation.state = "succeeded".to_owned();
+        operation.updated_at += 1_000;
+        operation.result_json = Some("{\"kind\":\"noop\"}".to_owned());
+    }
+
+    // Take the first events from the stream with a hard timeout; a snapshot
+    // for a terminal operation must arrive and then the stream must close.
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        router.oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/operations/{id}/events"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the stream must start")
+    .unwrap();
+    if response.status() != StatusCode::OK {
+        let (parts, body) = response.into_parts();
+        let bytes = http_body_util::BodyExt::collect(body)
+            .await
+            .unwrap()
+            .to_bytes();
+        panic!(
+            "stream did not start: {:?} {}",
+            parts.status,
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    let body = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut body = response.into_body();
+        let mut text = String::new();
+        loop {
+            match http_body_util::BodyExt::frame(&mut body).await {
+                Some(Ok(frame)) => {
+                    let data = frame.into_data().ok();
+                    if let Some(chunk) = data {
+                        text.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                }
+                Some(Err(error)) => panic!("the stream must not error: {error}"),
+                None => return text,
+            }
+        }
+    })
+    .await
+    .expect("snapshots must stream");
+    assert!(body.contains("event: operation"), "{body}");
+    assert!(body.contains("\"kind\":\"noop\""), "{body}");
 }

@@ -1,8 +1,31 @@
-const HELP: &str = "Usage: fleetctl [--help|--version]";
+//! The `fleetctl` binary: argument dispatch over the library in `lib.rs`.
 
-fn main() {
-    match std::env::args().nth(1).as_deref() {
-        Some("--version" | "-V") => println!("fleetctl {}", env!("CARGO_PKG_VERSION")),
-        _ => println!("{HELP}"),
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.as_slice(), [x] if x == "--version" || x == "-V") {
+        println!("fleetctl {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if matches!(args.as_slice(), [x] if x == "--help" || x == "-h") {
+        println!("fleetctl {}", env!("CARGO_PKG_VERSION"));
+    }
+
+    match fleetctl::parse(&args) {
+        Ok(invocation) => match fleetctl::run(&invocation) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("fleetctl: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            println!("{error}");
+            ExitCode::from(2)
+        }
     }
 }

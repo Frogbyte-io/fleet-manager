@@ -45,11 +45,13 @@ fn api_state(db: Option<SqlitePool>) -> fleet_api::operations::ApiState {
     if let Some(pool) = db {
         let operations = fleet_application::operation::Operations::new(
             std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
-            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool)),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
         );
+        let system = ControllerSystemInfo { pool: pool.clone() };
         return fleet_api::operations::ApiState {
             operations: std::sync::Arc::new(operations),
             authorizer,
+            system: std::sync::Arc::new(system),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -59,7 +61,50 @@ fn api_state(db: Option<SqlitePool>) -> fleet_api::operations::ApiState {
     fleet_api::operations::ApiState {
         operations: state.operations,
         authorizer: std::sync::Arc::new(DenyAllForTests),
+        system: state.system,
     }
+}
+
+/// The system view assembled from this controller's own parts: its build,
+/// its trust mode, and a live probe of its store.
+#[derive(Debug)]
+struct ControllerSystemInfo {
+    pool: SqlitePool,
+}
+
+#[async_trait::async_trait]
+impl fleet_api::system::SystemInfoSource for ControllerSystemInfo {
+    async fn info(&self) -> Result<fleet_api::system::SystemInfo, String> {
+        let (storage_ok, depths) = probe_pool(&self.pool).await;
+        Ok(fleet_api::system::SystemInfo {
+            service: "fleet-controller".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            trust_mode: fleet_auth::TrustMode::TrustedLan.id().to_owned(),
+            trust_warning: fleet_auth::TrustMode::TrustedLan.warning().to_owned(),
+            storage_ok,
+            queue_pending: depths.0,
+            queue_running: depths.1,
+        })
+    }
+}
+
+/// Probes the store and reads the queue depths on the caller's runtime.
+async fn probe_pool(pool: &SqlitePool) -> (bool, (i64, i64)) {
+    let probe = sqlx::query("SELECT 1").execute(pool).await.is_ok();
+    let depths = sqlx::query(
+        "SELECT COUNT(*) FILTER (WHERE state = 'pending') AS pending, \
+         COUNT(*) FILTER (WHERE state = 'running') AS running FROM operations",
+    )
+    .fetch_one(pool)
+    .await;
+    let depths = match depths {
+        Ok(row) => {
+            use sqlx::Row as _;
+            (row.get::<i64, _>("pending"), row.get::<i64, _>("running"))
+        }
+        Err(_) => (0, 0),
+    };
+    (probe, depths)
 }
 
 /// Denies everything; only used in states that never serve traffic.

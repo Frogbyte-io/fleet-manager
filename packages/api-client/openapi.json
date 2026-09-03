@@ -250,6 +250,87 @@
           }
         }
       }
+    },
+    "/api/v1/operations/{id}/events": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "The live event stream of one operation: a fresh snapshot whenever the\noperation changes.",
+        "description": "Reconnect protocol: the client sends `Last-Event-ID` with the last\nsnapshot's `updated_at`. Because snapshots are not archived, any change\nsince that cursor is announced as a `gap` event, and the client refetches\nthe operation before trusting the stream again. A terminal operation emits\nits final snapshot and closes the stream.\n\n# Errors\n\nReturns the public error envelope when the caller may not read the\noperation or it does not exist.",
+        "operationId": "streamOperationEvents",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The operation's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A text/event-stream of operation snapshots, with `gap` markers after missed changes.",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "403": {
+            "description": "The caller may not read operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Reads the system view.",
+        "description": "# Errors\n\nReturns the public error envelope when the system source fails.\n\n# Panics\n\nPanics only if the pinned literal error code stops being valid syntax,\nwhich is a constant path a test pins.",
+        "operationId": "getSystemInfo",
+        "responses": {
+          "200": {
+            "description": "What this controller is and how it is doing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfo"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A dependency could not be reached.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -792,6 +873,54 @@
           "immediate",
           "backoff"
         ]
+      },
+      "SystemInfo": {
+        "type": "object",
+        "description": "The system view served at `/api/v1/system`.",
+        "required": [
+          "service",
+          "version",
+          "trustMode",
+          "trustWarning",
+          "storageOk",
+          "queuePending",
+          "queueRunning"
+        ],
+        "properties": {
+          "queuePending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Operations accepted but not yet claimed."
+          },
+          "queueRunning": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Operations claimed and executing."
+          },
+          "service": {
+            "type": "string",
+            "description": "The service that answered.",
+            "example": "fleet-controller"
+          },
+          "storageOk": {
+            "type": "boolean",
+            "description": "Whether the runtime database answered the readiness probe."
+          },
+          "trustMode": {
+            "type": "string",
+            "description": "The deployment's trust mode id, e.g. `trusted-lan`.",
+            "example": "trusted-lan"
+          },
+          "trustWarning": {
+            "type": "string",
+            "description": "The trust mode's operator warning, verbatim."
+          },
+          "version": {
+            "type": "string",
+            "description": "The controller's build version.",
+            "example": "0.1.0"
+          }
+        }
       }
     }
   },
@@ -799,6 +928,10 @@
     {
       "name": "meta",
       "description": "Service and contract description."
+    },
+    {
+      "name": "system",
+      "description": "The controller's own view of itself."
     },
     {
       "name": "operations",

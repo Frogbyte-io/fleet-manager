@@ -377,6 +377,26 @@ export interface ResourceOperationDto {
   data: ResourceOperationDtoData;
 }
 
+/**
+ * The system view served at `/api/v1/system`.
+ */
+export interface SystemInfo {
+  /** Operations accepted but not yet claimed. */
+  queuePending: number;
+  /** Operations claimed and executing. */
+  queueRunning: number;
+  /** The service that answered. */
+  service: string;
+  /** Whether the runtime database answered the readiness probe. */
+  storageOk: boolean;
+  /** The deployment's trust mode id, e.g. `trusted-lan`. */
+  trustMode: string;
+  /** The trust mode's operator warning, verbatim. */
+  trustWarning: string;
+  /** The controller's build version. */
+  version: string;
+}
+
 export type ListOperationsParams = {
 /**
  * The maximum number of operations to return.
@@ -674,4 +694,121 @@ export const cancelOperation = async (id: string, options?: RequestInit): Promis
 
   const data: cancelOperationResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as cancelOperationResponse
+}
+
+
+
+export type streamOperationEventsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type streamOperationEventsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+;
+export type streamOperationEventsResponseError = (streamOperationEventsResponse403 | streamOperationEventsResponse404) & {
+  headers: Headers;
+};
+
+export type streamOperationEventsResponse = (streamOperationEventsResponseError)
+
+export const getStreamOperationEventsUrl = (id: string,) => {
+
+
+
+
+  return `/api/v1/operations/${id}/events`
+}
+
+/**
+ * Reconnect protocol: the client sends `Last-Event-ID` with the last
+ * snapshot's `updated_at`. Because snapshots are not archived, any change
+ * since that cursor is announced as a `gap` event, and the client refetches
+ * the operation before trusting the stream again. A terminal operation emits
+ * its final snapshot and closes the stream.
+ *
+ * # Errors
+ *
+ * Returns the public error envelope when the caller may not read the
+ * operation or it does not exist.
+ * @summary The live event stream of one operation: a fresh snapshot whenever the
+operation changes.
+ */
+export const streamOperationEvents = async (id: string, options?: RequestInit): Promise<streamOperationEventsResponse> => {
+
+  const res = await fetch(getStreamOperationEventsUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: streamOperationEventsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as streamOperationEventsResponse
+}
+
+
+
+export type getSystemInfoResponse200 = {
+  data: SystemInfo
+  status: 200
+}
+
+export type getSystemInfoResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getSystemInfoResponseSuccess = (getSystemInfoResponse200) & {
+  headers: Headers;
+};
+export type getSystemInfoResponseError = (getSystemInfoResponse500) & {
+  headers: Headers;
+};
+
+export type getSystemInfoResponse = (getSystemInfoResponseSuccess | getSystemInfoResponseError)
+
+export const getGetSystemInfoUrl = () => {
+
+
+
+
+  return `/api/v1/system`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope when the system source fails.
+ *
+ * # Panics
+ *
+ * Panics only if the pinned literal error code stops being valid syntax,
+ * which is a constant path a test pins.
+ * @summary Reads the system view.
+ */
+export const getSystemInfo = async ( options?: RequestInit): Promise<getSystemInfoResponse> => {
+
+  const res = await fetch(getGetSystemInfoUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getSystemInfoResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getSystemInfoResponse
 }

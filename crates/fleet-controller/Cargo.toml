@@ -7,6 +7,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait = "0.1.92"
 axum = "0.8.9"
 fleet-api = { path = "../fleet-api" }
 fleet-application = { path = "../fleet-application" }

@@ -16,6 +16,7 @@ mod envelope;
 mod error;
 mod meta;
 pub mod operations;
+pub mod system;
 
 use std::sync::Arc;
 
@@ -63,10 +64,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         OperationAccepted,
         OperationStatus,
         operations::CreateOperationRequest,
-        operations::OperationDto
+        operations::OperationDto,
+        system::SystemInfo
     )),
     tags(
         (name = "meta", description = "Service and contract description."),
+        (name = "system", description = "The controller's own view of itself."),
         (name = "operations", description = "Durable operations: accepted remote work.")
     )
 )]
@@ -88,6 +91,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 ))
                 .routes(routes!(operations::get_operation))
                 .routes(routes!(operations::cancel_operation))
+                .routes(routes!(system::get_system_info))
+                .routes(routes!(system::stream_operation_events))
                 .with_state(state),
         )
         .split_for_parts();

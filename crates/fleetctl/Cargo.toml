@@ -9,7 +9,18 @@ publish.workspace = true
 [dependencies]
 fleet-api = { path = "../fleet-api" }
 fleet-config = { path = "../fleet-config" }
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1.26.0", features = ["v7"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+axum = "0.8.9"
+fleet-controller = { path = "../fleet-controller" }
+fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros"] }
 
