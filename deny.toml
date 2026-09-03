@@ -22,7 +22,13 @@ all-features = true
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste is unmaintained (Frogbyte-io/fleet-manager#35). It is a proc-macro
+    # helper pulled in transitively by utoipa-axum 0.2.0; there is no runtime
+    # surface in any Fleet binary and no feature flag to drop it. Remove this
+    # entry when utoipa-axum ships without paste or Fleet upgrades past it.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 # Inference from license text needs high confidence before we trust it.
@@ -56,6 +62,10 @@ exceptions = []
 multiple-versions = "warn"
 # A wildcard requirement means the build is not reproducible from the manifest.
 wildcards = "deny"
+# An intra-workspace path dependency resolves to `*` but is pinned by the commit
+# rather than by a version requirement, so it cannot break reproducibility.
+# Registry wildcards above stay denied.
+allow-wildcard-paths = true
 deny = [
     { crate = "openssl", use-instead = "rustls" },
     { crate = "openssl-sys", use-instead = "rustls" },

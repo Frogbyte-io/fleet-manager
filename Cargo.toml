@@ -32,6 +32,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/Frogbyte-io/fleet-manager"
+# Fleet binaries and their internal libraries are distributed as products of
+# this repository, not on crates.io. Marking every member non-publishable is
+# also what lets cargo-deny accept intra-workspace wildcard path dependencies
+# under [bans] allow-wildcard-paths; crates.io rejects path dependencies.
+publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
