@@ -601,9 +601,12 @@ dependencies = [
  "fleet-protocol",
  "fleet-secrets",
  "fleet-storage-sqlite",
+ "http-body-util",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http",
  "uuid",
 ]

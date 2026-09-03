@@ -9,6 +9,7 @@
 //! prints the effective (redacted) configuration before readiness.
 #![warn(missing_docs)]
 
+pub mod browser;
 pub mod worker;
 
 use std::future::Future;
@@ -86,7 +87,11 @@ pub struct Probe {
 /// Serves the web shell directory as an ordinary static file service, with the
 /// directory's `index.html` answering bare directory requests.
 fn shell(settings: &Settings) -> ServeDir {
-    ServeDir::new(&settings.web_dist).append_index_html_on_directories(true)
+    ServeDir::new(&settings.web_dist)
+        .append_index_html_on_directories(true)
+        // Mutations and other non-GET methods must reach the API behind the
+        // shell, not a 405 from the static file service.
+        .call_fallback_on_method_not_allowed(true)
 }
 
 /// Builds the controller's HTTP router.
@@ -115,6 +120,8 @@ pub fn build_router(settings: &Settings, db: Option<SqlitePool>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback_service(shell)
+        .layer(axum::middleware::from_fn(browser::browser_mutation_guard))
+        .layer(axum::middleware::from_fn(browser::security_headers))
         .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
         .with_state(probe)
 }
