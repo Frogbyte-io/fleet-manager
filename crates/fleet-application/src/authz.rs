@@ -41,6 +41,9 @@ pub enum Permission {
     SecretWrite,
     /// Delete a secret record. A mutation.
     SecretDelete,
+    /// Query the audit ledger. A read, but a sensitive one: it reveals who
+    /// did what.
+    AuditRead,
 }
 
 impl Permission {
@@ -55,6 +58,7 @@ impl Permission {
         Permission::SecretRead,
         Permission::SecretWrite,
         Permission::SecretDelete,
+        Permission::AuditRead,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -68,6 +72,7 @@ impl Permission {
             Permission::SecretRead => "secret.read",
             Permission::SecretWrite => "secret.write",
             Permission::SecretDelete => "secret.delete",
+            Permission::AuditRead => "audit.read",
         }
     }
 
@@ -77,7 +82,10 @@ impl Permission {
     #[must_use]
     pub fn is_risky(self) -> bool {
         match self {
-            Permission::SystemRead | Permission::OperationRead | Permission::SecretList => false,
+            Permission::SystemRead
+            | Permission::OperationRead
+            | Permission::SecretList
+            | Permission::AuditRead => false,
             Permission::OperationCancel
             | Permission::SecretRead
             | Permission::SecretWrite
@@ -94,7 +102,8 @@ impl Permission {
             Permission::SystemRead
             | Permission::OperationRead
             | Permission::SecretList
-            | Permission::SecretWrite => false,
+            | Permission::SecretWrite
+            | Permission::AuditRead => false,
             Permission::OperationCancel | Permission::SecretRead | Permission::SecretDelete => true,
         }
     }

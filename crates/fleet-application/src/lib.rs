@@ -4,6 +4,7 @@
 
 #![warn(missing_docs)]
 
+pub mod audit;
 pub mod authz;
 
 /// Skeleton marker proving that the application crate is loadable.

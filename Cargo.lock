@@ -549,6 +549,8 @@ name = "fleet-application"
 version = "0.1.0"
 dependencies = [
  "fleet-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -709,6 +711,7 @@ name = "fleet-storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "fleet-application",
+ "fleet-auth",
  "fleet-core",
  "fs4",
  "sqlx",

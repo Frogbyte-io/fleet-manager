@@ -12,6 +12,10 @@
 //! local-filesystem constraint.
 #![warn(missing_docs)]
 
+pub mod audit;
+
+pub use audit::AuditLedger;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
