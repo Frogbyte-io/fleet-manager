@@ -1,0 +1,231 @@
+//! The centralized authorization port and permission catalog.
+//!
+//! Every read and mutation answers one question in one place: may this
+//! principal perform this action on this resource? The port below is that
+//! place. Handlers, providers, and adapters never decide permission
+//! themselves — they construct an [`AccessRequest`] and obey the
+//! [`Decision`] — because a permission check scattered across an adapter is a
+//! check no review can find and no policy engine can replace.
+//!
+//! The catalog is the complete action vocabulary of the running system, not a
+//! sample: an action that is not in it cannot be named, so it cannot be
+//! permitted by accident. Adding an entry is a reviewed decision that states
+//! the action's risk.
+//!
+//! The initial trusted-LAN deployment supplies one implementation — the
+//! explicit allow-all adapter for `anonymous-lan-admin` (see `fleet-auth`) —
+//! and keeps the port, so the later authenticated mode is a swap, not a
+//! rewrite.
+#![warn(missing_docs)]
+
+use std::fmt;
+
+/// One action in the permission catalog.
+///
+/// The id is stable and appears in audit events and decisions; renaming one
+/// is a breaking change to the audit trail, not a refactor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Permission {
+    /// Read system-level facts: build metadata, configuration summary,
+    /// trust mode, storage health.
+    SystemRead,
+    /// List and read operations and their progress.
+    OperationRead,
+    /// Request cancellation of a running operation. A mutation.
+    OperationCancel,
+    /// List secret record metadata (names and key versions, never values).
+    SecretList,
+    /// Resolve a secret value. The most sensitive read in the system.
+    SecretRead,
+    /// Create or replace a secret value. A mutation.
+    SecretWrite,
+    /// Delete a secret record. A mutation.
+    SecretDelete,
+}
+
+impl Permission {
+    /// Every action in the catalog. The trusted-LAN adapter's allow-all
+    /// behavior is defined over exactly this list, so "all" means this
+    /// catalog and nothing outside it.
+    pub const ALL: &'static [Permission] = &[
+        Permission::SystemRead,
+        Permission::OperationRead,
+        Permission::OperationCancel,
+        Permission::SecretList,
+        Permission::SecretRead,
+        Permission::SecretWrite,
+        Permission::SecretDelete,
+    ];
+
+    /// The stable action id, as recorded in decisions and audit events.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Permission::SystemRead => "system.read",
+            Permission::OperationRead => "operation.read",
+            Permission::OperationCancel => "operation.cancel",
+            Permission::SecretList => "secret.list",
+            Permission::SecretRead => "secret.read",
+            Permission::SecretWrite => "secret.write",
+            Permission::SecretDelete => "secret.delete",
+        }
+    }
+
+    /// Whether performing the action changes state or reveals sensitive
+    /// material. Every mutation is true; the two reads that expose
+    /// high-value information are true as well.
+    #[must_use]
+    pub fn is_risky(self) -> bool {
+        match self {
+            Permission::SystemRead | Permission::OperationRead | Permission::SecretList => false,
+            Permission::OperationCancel
+            | Permission::SecretRead
+            | Permission::SecretWrite
+            | Permission::SecretDelete => true,
+        }
+    }
+
+    /// Whether the action names a specific resource and therefore requires
+    /// one in the request. A catalog-level action without a resource is a
+    /// malformed request, not an implicit wildcard.
+    #[must_use]
+    pub fn requires_resource(self) -> bool {
+        match self {
+            Permission::SystemRead
+            | Permission::OperationRead
+            | Permission::SecretList
+            | Permission::SecretWrite => false,
+            Permission::OperationCancel | Permission::SecretRead | Permission::SecretDelete => true,
+        }
+    }
+}
+
+impl fmt::Display for Permission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// Stable reason identifiers. A decision's reason is part of the audit
+/// surface: these strings persist in logs and events, so they change only by
+/// adding new ones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReasonId {
+    /// The policy explicitly allows the action.
+    PolicyAllow,
+    /// Nothing allows the action for this principal. The default when the
+    /// policy is deny-by-default; the trusted-LAN adapter also answers this
+    /// for principals it does not recognize.
+    UnknownPrincipal,
+    /// The action requires a resource and the request named none.
+    MissingResource,
+    /// The request is malformed: it names an action outside the catalog.
+    UnknownAction,
+}
+
+impl ReasonId {
+    /// The stable string recorded in decisions and audit events.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            ReasonId::PolicyAllow => "policy.allow",
+            ReasonId::UnknownPrincipal => "policy.unknown_principal",
+            ReasonId::MissingResource => "policy.missing_resource",
+            ReasonId::UnknownAction => "policy.unknown_action",
+        }
+    }
+}
+
+impl fmt::Display for ReasonId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// What the caller wants to do.
+#[derive(Clone, Copy, Debug)]
+pub struct AccessRequest<'a> {
+    /// The acting principal's stable id, as resolved by caller resolution.
+    pub principal_id: &'a str,
+    /// The catalog action.
+    pub action: Permission,
+    /// The specific resource, when the action names one.
+    pub resource: Option<&'a str>,
+}
+
+/// The answer to one access request. This is a record to keep, not a signal
+/// to branch on alone: audit events carry the reason, so denials are
+/// explainable after the fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Decision {
+    /// Whether the action may proceed.
+    pub allowed: bool,
+    /// Why, in stable identifier form.
+    pub reason: ReasonId,
+}
+
+impl Decision {
+    /// The allow decision with [`ReasonId::PolicyAllow`].
+    #[must_use]
+    pub const fn allow() -> Self {
+        Self {
+            allowed: true,
+            reason: ReasonId::PolicyAllow,
+        }
+    }
+
+    /// A denial with the given reason.
+    #[must_use]
+    pub const fn deny(reason: ReasonId) -> Self {
+        Self {
+            allowed: false,
+            reason,
+        }
+    }
+}
+
+impl fmt::Display for Decision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {}",
+            self.reason,
+            if self.allowed { "allowed" } else { "denied" }
+        )
+    }
+}
+
+/// The authorization port. Exactly one implementation is active in a
+/// deployment; handlers and use cases call it through the application helper,
+/// never around it.
+pub trait Authorizer: fmt::Debug + Send + Sync {
+    /// Answers one access request. Must be cheap, side-effect free, and
+    /// secret-free: it runs on every call.
+    fn decide(&self, request: AccessRequest<'_>) -> Decision;
+}
+
+/// The application-side helper every use case calls.
+///
+/// This is the single funnel: it enforces the catalog's resource rule and
+/// routes through the active [`Authorizer`]. A use case that checks
+/// permission by any other path is a defect; a handler that decides
+/// permission itself is one too.
+///
+/// # Errors
+///
+/// Returns the decision when it is a denial so the caller can map it to a
+/// public error; the decision carries the stable reason.
+pub fn authorize(
+    authorizer: &dyn Authorizer,
+    request: AccessRequest<'_>,
+) -> Result<Decision, Decision> {
+    if request.action.requires_resource() && request.resource.is_none() {
+        return Err(Decision::deny(ReasonId::MissingResource));
+    }
+    let decision = authorizer.decide(request);
+    if decision.allowed {
+        Ok(decision)
+    } else {
+        Err(decision)
+    }
+}

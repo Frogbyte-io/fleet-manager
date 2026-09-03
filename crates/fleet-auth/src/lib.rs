@@ -21,6 +21,10 @@
 //! shape: callers keep flowing through one resolution point with evidence.
 #![warn(missing_docs)]
 
+pub mod adapter;
+
+pub use adapter::LanAllowAllAuthorizer;
+
 use std::fmt;
 use std::net::SocketAddr;
 

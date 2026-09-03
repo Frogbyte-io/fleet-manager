@@ -4,5 +4,7 @@
 
 #![warn(missing_docs)]
 
+pub mod authz;
+
 /// Skeleton marker proving that the application crate is loadable.
 pub const SKELETON: &str = "fleet-application";
