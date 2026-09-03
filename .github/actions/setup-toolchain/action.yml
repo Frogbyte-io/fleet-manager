@@ -27,25 +27,12 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        env_file="${GITHUB_ACTION_PATH}/../../toolchain.env"
-        while IFS= read -r line || [ -n "$line" ]; do
-          case "$line" in ''|'#'*) continue ;; esac
-          # Strict KEY=VALUE only: this content lands in the job environment.
-          if ! printf '%s' "$line" | grep -Eq '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._+-]+$'; then
-            echo "::error file=.github/toolchain.env::not a plain KEY=VALUE line: ${line}"
-            exit 1
-          fi
-          printf '%s\n' "$line" >> "$GITHUB_ENV"
-          echo "pinned ${line}"
-        done < "$env_file"
-
-        # $GITHUB_ENV reaches later run steps, but a `with:` expression in this
-        # action is evaluated from step outputs, so publish those too. Sourcing
-        # is safe: every line was just validated as plain KEY=VALUE.
-        set -a; . "$env_file"; set +a
-        : "${NODE_VERSION:?NODE_VERSION missing from .github/toolchain.env}"
-        : "${PNPM_VERSION:?PNPM_VERSION missing from .github/toolchain.env}"
-        echo "node=${NODE_VERSION}" >> "$GITHUB_OUTPUT"
+        # The loader validates every line and normalises CRLF before anything
+        # reaches the job environment, so a Windows checkout with
+        # core.autocrlf=true cannot inject a trailing \r into a pinned value.
+        # load-toolchain-env.test.mjs proves both halves.
+        bash "${GITHUB_ACTION_PATH}/../../scripts/load-toolchain-env.sh" \
+          "${GITHUB_ACTION_PATH}/../../toolchain.env"
 
     - name: Install Node.js
       if: inputs.node == 'true' || inputs.pnpm == 'true'
