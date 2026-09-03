@@ -171,14 +171,22 @@ pub async fn resolve_lan_caller(mut request: Request, next: Next) -> Response {
         })
         .collect();
 
+    let principal = Principal::ANONYMOUS_LAN_ADMIN;
     let caller = Caller {
-        principal: Principal::ANONYMOUS_LAN_ADMIN,
+        principal,
         evidence: CallerEvidence {
             remote_addr,
             proxy_headers,
         },
     };
     request.extensions_mut().insert(caller);
+    // The API handlers read the principal through the application type, so
+    // they never need to know how trusted-LAN resolution works.
+    request
+        .extensions_mut()
+        .insert(fleet_application::authz::ActingPrincipal {
+            id: principal.id().to_owned(),
+        });
     next.run(request).await
 }
 

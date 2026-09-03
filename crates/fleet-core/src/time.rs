@@ -34,12 +34,23 @@ pub trait Clock {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemClock;
 
+impl SystemClock {
+    /// The current wall-clock time as Unix epoch milliseconds, without going
+    /// through the trait, for call sites that need only the number.
+    #[must_use]
+    pub fn now_unix_millis() -> i64 {
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_millis()),
+        )
+        .unwrap_or(i64::MAX)
+    }
+}
+
 impl Clock for SystemClock {
     fn now(&self) -> Timestamp {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_millis());
-        Timestamp(i64::try_from(millis).unwrap_or(i64::MAX))
+        Timestamp(Self::now_unix_millis())
     }
 }
 

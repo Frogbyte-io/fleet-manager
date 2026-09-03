@@ -49,6 +49,207 @@
           }
         }
       }
+    },
+    "/api/v1/operations": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Lists operations, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listOperations",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of operations to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_OperationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Creates an operation.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "createOperation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The operation was accepted and is durable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed, or names an unknown kind.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/operations/{id}": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Reads one operation.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "getOperation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The operation's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/operations/{id}/cancel": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Requests cancellation of an operation.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "cancelOperation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The operation's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancellation request is durable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not cancel operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such live operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -87,6 +288,36 @@
           "retry": {
             "$ref": "#/components/schemas/Retry",
             "description": "Retry guidance for this specific failure."
+          }
+        }
+      },
+      "CreateOperationRequest": {
+        "type": "object",
+        "description": "The body of the create-operation request.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "deadlineAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The absolute deadline, in Unix epoch milliseconds, after which the\noperation must be treated as timed out. Absent means no deadline."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A caller-chosen key making this request idempotent: replaying it\nreturns the original operation instead of creating a second one.",
+            "example": "bootstrap-2026-09-03"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The kind of work to create; only kinds the controller can describe are\naccepted.",
+            "example": "noop"
           }
         }
       },
@@ -160,6 +391,107 @@
           }
         }
       },
+      "OperationDto": {
+        "type": "object",
+        "description": "The public operation resource. The application type is the transport\ntruth; this type is the documented shape, kept one `From` away so the two\ncannot drift silently.",
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "cancelRequested",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "cancelRequested": {
+            "type": "boolean",
+            "description": "Whether cancellation has been requested but not yet observed."
+          },
+          "correlationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The correlation identity joining this operation to the caller's flow."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, in epoch milliseconds."
+          },
+          "deadlineAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The deadline, in epoch milliseconds, when one was set."
+          },
+          "errorJson": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bounded public error, present when the operation failed."
+          },
+          "id": {
+            "type": "string",
+            "description": "The operation's identity."
+          },
+          "idempotencyKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's idempotency key, when one was supplied."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What kind of work this is.",
+            "example": "noop"
+          },
+          "progressCurrent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Progress numerator, when reported."
+          },
+          "progressMessage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Bounded progress message, when reported."
+          },
+          "progressTotal": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Progress denominator, when reported."
+          },
+          "resultJson": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bounded public result, present when the operation succeeded."
+          },
+          "state": {
+            "type": "string",
+            "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, or `timed_out`.",
+            "example": "pending"
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last update, in epoch milliseconds."
+          }
+        }
+      },
       "OperationStatus": {
         "type": "string",
         "description": "The lifecycle state of a durable operation.\n\nFM-108 owns the operation model itself. This enum exists so the accepted\nenvelope has a typed status from the start.",
@@ -194,6 +526,125 @@
           }
         }
       },
+      "Page_OperationDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "The public operation resource. The application type is the transport\ntruth; this type is the documented shape, kept one `From` away so the two\ncannot drift silently.",
+              "required": [
+                "id",
+                "kind",
+                "state",
+                "cancelRequested",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "cancelRequested": {
+                  "type": "boolean",
+                  "description": "Whether cancellation has been requested but not yet observed."
+                },
+                "correlationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The correlation identity joining this operation to the caller's flow."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Creation time, in epoch milliseconds."
+                },
+                "deadlineAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "The deadline, in epoch milliseconds, when one was set."
+                },
+                "errorJson": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The bounded public error, present when the operation failed."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The operation's identity."
+                },
+                "idempotencyKey": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The caller's idempotency key, when one was supplied."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "What kind of work this is.",
+                  "example": "noop"
+                },
+                "progressCurrent": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "Progress numerator, when reported."
+                },
+                "progressMessage": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Bounded progress message, when reported."
+                },
+                "progressTotal": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "Progress denominator, when reported."
+                },
+                "resultJson": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The bounded public result, present when the operation succeeded."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, or `timed_out`.",
+                  "example": "pending"
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last update, in epoch milliseconds."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "Resource_Meta": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -223,6 +674,116 @@
           }
         }
       },
+      "Resource_OperationDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The public operation resource. The application type is the transport\ntruth; this type is the documented shape, kept one `From` away so the two\ncannot drift silently.",
+            "required": [
+              "id",
+              "kind",
+              "state",
+              "cancelRequested",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "cancelRequested": {
+                "type": "boolean",
+                "description": "Whether cancellation has been requested but not yet observed."
+              },
+              "correlationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The correlation identity joining this operation to the caller's flow."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time, in epoch milliseconds."
+              },
+              "deadlineAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The deadline, in epoch milliseconds, when one was set."
+              },
+              "errorJson": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The bounded public error, present when the operation failed."
+              },
+              "id": {
+                "type": "string",
+                "description": "The operation's identity."
+              },
+              "idempotencyKey": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The caller's idempotency key, when one was supplied."
+              },
+              "kind": {
+                "type": "string",
+                "description": "What kind of work this is.",
+                "example": "noop"
+              },
+              "progressCurrent": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Progress numerator, when reported."
+              },
+              "progressMessage": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Bounded progress message, when reported."
+              },
+              "progressTotal": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Progress denominator, when reported."
+              },
+              "resultJson": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The bounded public result, present when the operation succeeded."
+              },
+              "state": {
+                "type": "string",
+                "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, or `timed_out`.",
+                "example": "pending"
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last update, in epoch milliseconds."
+              }
+            }
+          }
+        }
+      },
       "Retry": {
         "type": "string",
         "description": "Whether and how a caller may retry a failed request.",
@@ -238,6 +799,10 @@
     {
       "name": "meta",
       "description": "Service and contract description."
+    },
+    {
+      "name": "operations",
+      "description": "Durable operations: accepted remote work."
     }
   ]
 }

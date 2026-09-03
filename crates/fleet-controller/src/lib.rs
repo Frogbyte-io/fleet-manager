@@ -33,6 +33,47 @@ pub struct Settings {
     pub web_dist: PathBuf,
 }
 
+/// Builds the API state over an opened store, or a state whose backends
+/// answer nothing when the caller has none (tests). The authorization policy
+/// is the trusted-LAN adapter in both cases.
+fn api_state(db: Option<SqlitePool>) -> fleet_api::operations::ApiState {
+    let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
+        std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
+    if let Some(pool) = db {
+        let operations = fleet_application::operation::Operations::new(
+            std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool)),
+        );
+        return fleet_api::operations::ApiState {
+            operations: std::sync::Arc::new(operations),
+            authorizer,
+        };
+    }
+    // Without a store there is nothing to serve: the state's backends answer
+    // nothing, and the permissive document policy is replaced so a state that
+    // never serves traffic cannot pretend to authorize either.
+    let state = fleet_api::operations::ApiState::for_document();
+    fleet_api::operations::ApiState {
+        operations: state.operations,
+        authorizer: std::sync::Arc::new(DenyAllForTests),
+    }
+}
+
+/// Denies everything; only used in states that never serve traffic.
+#[derive(Debug)]
+struct DenyAllForTests;
+
+impl fleet_application::authz::Authorizer for DenyAllForTests {
+    fn decide(
+        &self,
+        _request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        fleet_application::authz::Decision::deny(
+            fleet_application::authz::ReasonId::UnknownPrincipal,
+        )
+    }
+}
+
 /// The health probe state shared with the probe handlers.
 #[derive(Clone, Debug)]
 pub struct Probe {
@@ -55,16 +96,18 @@ fn shell(settings: &Settings) -> ServeDir {
 /// error envelope instead of ever falling through to the web shell.
 ///
 /// `db` is the store's connection pool once the database is open; readiness
-/// probes it live. Passing `None` is for tests that do not involve storage.
-/// Every request through this router resolves to the trusted-LAN principal
-/// with its request evidence (see `fleet_auth`); the service must be made
-/// with connection info for that evidence to include the peer address.
+/// probes it live and the operation use cases run over it. Passing `None` is
+/// for tests that do not involve storage. Every request through this router
+/// resolves to the trusted-LAN principal with its request evidence (see
+/// `fleet_auth`); the service must be made with connection info for that
+/// evidence to include the peer address.
 pub fn build_router(settings: &Settings, db: Option<SqlitePool>) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
-        db,
+        db: db.clone(),
     };
-    let shell = shell(settings).fallback(fleet_api::router());
+    let api_state = std::sync::Arc::new(api_state(db));
+    let shell = shell(settings).fallback(fleet_api::router(api_state));
 
     Router::new()
         .route("/healthz", get(healthz))

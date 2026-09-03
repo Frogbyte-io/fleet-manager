@@ -51,6 +51,29 @@ export interface ApiError {
 }
 
 /**
+ * The body of the create-operation request.
+ */
+export interface CreateOperationRequest {
+  /**
+     * The absolute deadline, in Unix epoch milliseconds, after which the
+     * operation must be treated as timed out. Absent means no deadline.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * A caller-chosen key making this request idempotent: replaying it
+     * returns the original operation instead of creating a second one.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * The kind of work to create; only kinds the controller can describe are
+     * accepted.
+     */
+  kind: string;
+}
+
+/**
  * Non-authoritative description of the API this controller serves.
  */
 export interface Meta {
@@ -96,6 +119,69 @@ export interface OperationAccepted {
 }
 
 /**
+ * The public operation resource. The application type is the transport
+ * truth; this type is the documented shape, kept one `From` away so the two
+ * cannot drift silently.
+ */
+export interface OperationDto {
+  /** Whether cancellation has been requested but not yet observed. */
+  cancelRequested: boolean;
+  /**
+     * The correlation identity joining this operation to the caller's flow.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Creation time, in epoch milliseconds. */
+  createdAt: number;
+  /**
+     * The deadline, in epoch milliseconds, when one was set.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * The bounded public error, present when the operation failed.
+     * @nullable
+     */
+  errorJson?: string | null;
+  /** The operation's identity. */
+  id: string;
+  /**
+     * The caller's idempotency key, when one was supplied.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** What kind of work this is. */
+  kind: string;
+  /**
+     * Progress numerator, when reported.
+     * @nullable
+     */
+  progressCurrent?: number | null;
+  /**
+     * Bounded progress message, when reported.
+     * @nullable
+     */
+  progressMessage?: string | null;
+  /**
+     * Progress denominator, when reported.
+     * @nullable
+     */
+  progressTotal?: number | null;
+  /**
+     * The bounded public result, present when the operation succeeded.
+     * @nullable
+     */
+  resultJson?: string | null;
+  /**
+     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
+     * `failed`, `cancelled`, or `timed_out`.
+     */
+  state: string;
+  /** Last update, in epoch milliseconds. */
+  updatedAt: number;
+}
+
+/**
  * Where a list response sits in its result set.
  *
  * Pagination is cursor-based, never offset-based: an offset silently skips or
@@ -114,6 +200,82 @@ export interface PageInfo {
      * @nullable
      */
   nextCursor?: string | null;
+}
+
+/**
+ * The public operation resource. The application type is the transport
+ * truth; this type is the documented shape, kept one `From` away so the two
+ * cannot drift silently.
+ */
+export type PageOperationDtoItemsItem = {
+  /** Whether cancellation has been requested but not yet observed. */
+  cancelRequested: boolean;
+  /**
+     * The correlation identity joining this operation to the caller's flow.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Creation time, in epoch milliseconds. */
+  createdAt: number;
+  /**
+     * The deadline, in epoch milliseconds, when one was set.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * The bounded public error, present when the operation failed.
+     * @nullable
+     */
+  errorJson?: string | null;
+  /** The operation's identity. */
+  id: string;
+  /**
+     * The caller's idempotency key, when one was supplied.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** What kind of work this is. */
+  kind: string;
+  /**
+     * Progress numerator, when reported.
+     * @nullable
+     */
+  progressCurrent?: number | null;
+  /**
+     * Bounded progress message, when reported.
+     * @nullable
+     */
+  progressMessage?: string | null;
+  /**
+     * Progress denominator, when reported.
+     * @nullable
+     */
+  progressTotal?: number | null;
+  /**
+     * The bounded public result, present when the operation succeeded.
+     * @nullable
+     */
+  resultJson?: string | null;
+  /**
+     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
+     * `failed`, `cancelled`, or `timed_out`.
+     */
+  state: string;
+  /** Last update, in epoch milliseconds. */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageOperationDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageOperationDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -136,6 +298,92 @@ export interface ResourceMeta {
   /** Non-authoritative description of the API this controller serves. */
   data: ResourceMetaData;
 }
+
+/**
+ * The public operation resource. The application type is the transport
+ * truth; this type is the documented shape, kept one `From` away so the two
+ * cannot drift silently.
+ */
+export type ResourceOperationDtoData = {
+  /** Whether cancellation has been requested but not yet observed. */
+  cancelRequested: boolean;
+  /**
+     * The correlation identity joining this operation to the caller's flow.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Creation time, in epoch milliseconds. */
+  createdAt: number;
+  /**
+     * The deadline, in epoch milliseconds, when one was set.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * The bounded public error, present when the operation failed.
+     * @nullable
+     */
+  errorJson?: string | null;
+  /** The operation's identity. */
+  id: string;
+  /**
+     * The caller's idempotency key, when one was supplied.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** What kind of work this is. */
+  kind: string;
+  /**
+     * Progress numerator, when reported.
+     * @nullable
+     */
+  progressCurrent?: number | null;
+  /**
+     * Bounded progress message, when reported.
+     * @nullable
+     */
+  progressMessage?: string | null;
+  /**
+     * Progress denominator, when reported.
+     * @nullable
+     */
+  progressTotal?: number | null;
+  /**
+     * The bounded public result, present when the operation succeeded.
+     * @nullable
+     */
+  resultJson?: string | null;
+  /**
+     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
+     * `failed`, `cancelled`, or `timed_out`.
+     */
+  state: string;
+  /** Last update, in epoch milliseconds. */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceOperationDto {
+  /**
+     * The public operation resource. The application type is the transport
+     * truth; this type is the documented shape, kept one `From` away so the two
+     * cannot drift silently.
+     */
+  data: ResourceOperationDtoData;
+}
+
+export type ListOperationsParams = {
+/**
+ * The maximum number of operations to return.
+ * @minimum 0
+ */
+limit?: number;
+};
 
 export type getMetaResponse200 = {
   data: ResourceMeta
@@ -186,4 +434,244 @@ export const getMeta = async ( options?: RequestInit): Promise<getMetaResponse> 
 
   const data: getMetaResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getMetaResponse
+}
+
+
+
+export type listOperationsResponse200 = {
+  data: PageOperationDto
+  status: 200
+}
+
+export type listOperationsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listOperationsResponseSuccess = (listOperationsResponse200) & {
+  headers: Headers;
+};
+export type listOperationsResponseError = (listOperationsResponse403) & {
+  headers: Headers;
+};
+
+export type listOperationsResponse = (listOperationsResponseSuccess | listOperationsResponseError)
+
+export const getListOperationsUrl = (params?: ListOperationsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/operations?${stringifiedParams}` : `/api/v1/operations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists operations, newest first.
+ */
+export const listOperations = async (params?: ListOperationsParams, options?: RequestInit): Promise<listOperationsResponse> => {
+
+  const res = await fetch(getListOperationsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listOperationsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listOperationsResponse
+}
+
+
+
+export type createOperationResponse201 = {
+  data: ResourceOperationDto
+  status: 201
+}
+
+export type createOperationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createOperationResponseSuccess = (createOperationResponse201) & {
+  headers: Headers;
+};
+export type createOperationResponseError = (createOperationResponse400 | createOperationResponse403) & {
+  headers: Headers;
+};
+
+export type createOperationResponse = (createOperationResponseSuccess | createOperationResponseError)
+
+export const getCreateOperationUrl = () => {
+
+
+
+
+  return `/api/v1/operations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Creates an operation.
+ */
+export const createOperation = async (createOperationRequest: CreateOperationRequest, options?: RequestInit): Promise<createOperationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateOperationUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createOperationRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createOperationResponse
+}
+
+
+
+export type getOperationResponse200 = {
+  data: ResourceOperationDto
+  status: 200
+}
+
+export type getOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getOperationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getOperationResponseSuccess = (getOperationResponse200) & {
+  headers: Headers;
+};
+export type getOperationResponseError = (getOperationResponse403 | getOperationResponse404) & {
+  headers: Headers;
+};
+
+export type getOperationResponse = (getOperationResponseSuccess | getOperationResponseError)
+
+export const getGetOperationUrl = (id: string,) => {
+
+
+
+
+  return `/api/v1/operations/${id}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Reads one operation.
+ */
+export const getOperation = async (id: string, options?: RequestInit): Promise<getOperationResponse> => {
+
+  const res = await fetch(getGetOperationUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getOperationResponse
+}
+
+
+
+export type cancelOperationResponse200 = {
+  data: ResourceOperationDto
+  status: 200
+}
+
+export type cancelOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type cancelOperationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type cancelOperationResponseSuccess = (cancelOperationResponse200) & {
+  headers: Headers;
+};
+export type cancelOperationResponseError = (cancelOperationResponse403 | cancelOperationResponse404) & {
+  headers: Headers;
+};
+
+export type cancelOperationResponse = (cancelOperationResponseSuccess | cancelOperationResponseError)
+
+export const getCancelOperationUrl = (id: string,) => {
+
+
+
+
+  return `/api/v1/operations/${id}/cancel`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Requests cancellation of an operation.
+ */
+export const cancelOperation = async (id: string, options?: RequestInit): Promise<cancelOperationResponse> => {
+
+  const res = await fetch(getCancelOperationUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: cancelOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as cancelOperationResponse
 }

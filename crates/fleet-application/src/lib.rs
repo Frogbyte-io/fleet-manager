@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod authz;
+pub mod operation;
 
 /// Skeleton marker proving that the application crate is loadable.
 pub const SKELETON: &str = "fleet-application";

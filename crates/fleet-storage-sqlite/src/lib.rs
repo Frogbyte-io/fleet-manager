@@ -13,8 +13,10 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod operations;
 
-pub use audit::AuditLedger;
+pub use audit::{AuditLedger, AuditSink};
+pub use operations::OperationRepository;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

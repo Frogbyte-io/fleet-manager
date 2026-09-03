@@ -190,6 +190,8 @@ pub struct AuditIntent {
     pub decision: Decision,
     /// The correlation identity joining this event to the caller's flow.
     pub correlation_id: Option<String>,
+    /// The durable operation this event belongs to, when one exists.
+    pub operation_id: Option<String>,
     /// Validated metadata.
     pub metadata: AuditMetadata,
 }

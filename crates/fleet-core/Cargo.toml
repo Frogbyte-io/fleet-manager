@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
 uuid = { version = "1.26.0", features = ["serde", "v7"] }
 
 [dev-dependencies]

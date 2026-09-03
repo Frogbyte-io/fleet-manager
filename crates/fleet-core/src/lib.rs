@@ -8,12 +8,16 @@
 
 mod error;
 mod id;
+mod operation;
 mod sensitive;
 mod time;
 mod value;
 
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
+pub use operation::{
+    InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
+};
 pub use sensitive::{SecretReference, SensitiveString};
 pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};
 pub use value::{ParseSlugError, Revision, Slug};

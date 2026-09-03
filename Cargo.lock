@@ -71,6 +71,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -532,9 +543,11 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 name = "fleet-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "fleet-application",
  "fleet-core",
+ "http",
  "http-body-util",
  "serde",
  "serde_json",
@@ -548,6 +561,7 @@ dependencies = [
 name = "fleet-application"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fleet-core",
  "serde",
  "serde_json",
@@ -600,6 +614,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "thiserror",
  "uuid",
 ]
 
@@ -710,6 +725,7 @@ dependencies = [
 name = "fleet-storage-sqlite"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fleet-application",
  "fleet-auth",
  "fleet-core",

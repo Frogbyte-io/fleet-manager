@@ -235,7 +235,7 @@ pub async fn append_intent_tx(
     sqlx::query(
         "INSERT INTO audit_events \
          (id, occurred_at, actor, action, resource, allowed, reason, correlation_id, operation_id, outcome, metadata_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
     )
     .bind(&id)
     .bind(epoch_millis())
@@ -245,11 +245,61 @@ pub async fn append_intent_tx(
     .bind(i64::from(intent.decision.allowed))
     .bind(intent.decision.reason.id())
     .bind(&intent.correlation_id)
+    .bind(&intent.operation_id)
     .bind(intent.metadata.to_json())
     .execute(&mut **tx)
     .await
     .map_err(|error| error.to_string())?;
     Ok(id)
+}
+
+/// The audit sink the operation use cases call: appends intents for accepted
+/// mutations and terminal outcomes, keyed by the operation they belong to.
+#[derive(Debug)]
+pub struct AuditSink {
+    pool: SqlitePool,
+}
+
+impl AuditSink {
+    /// Creates a sink over the store's pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::operation::AuditPort for AuditSink {
+    async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+        AuditLedger::new(&self.pool)
+            .append_intent(intent)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    async fn record_outcome(
+        &self,
+        operation_id: &str,
+        outcome: AuditOutcome,
+    ) -> Result<(), String> {
+        let intent_id: Option<String> = sqlx::query(
+            "SELECT id FROM audit_events WHERE operation_id = ?1 AND outcome IS NULL ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(operation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("audit outcome select failed: {error}"))?
+        .map(|row| row.get(0));
+        let Some(intent_id) = intent_id else {
+            return Err(format!("no audit intent for operation {operation_id:?}"));
+        };
+        AuditLedger::new(&self.pool)
+            .append_outcome(&intent_id, outcome)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 fn outcome_from_id(text: &str) -> Option<AuditOutcome> {

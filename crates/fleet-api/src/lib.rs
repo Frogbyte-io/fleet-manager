@@ -15,9 +15,14 @@ mod correlation;
 mod envelope;
 mod error;
 mod meta;
+pub mod operations;
+
+use std::sync::Arc;
 
 use axum::{Extension, Router, http::StatusCode, middleware};
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
+
+pub use fleet_application::authz::ActingPrincipal;
 use std::str::FromStr as _;
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -56,9 +61,14 @@ pub const API_BASE_PATH: &str = "/api/v1";
         Retry,
         PageInfo,
         OperationAccepted,
-        OperationStatus
+        OperationStatus,
+        operations::CreateOperationRequest,
+        operations::OperationDto
     )),
-    tags((name = "meta", description = "Service and contract description."))
+    tags(
+        (name = "meta", description = "Service and contract description."),
+        (name = "operations", description = "Durable operations: accepted remote work.")
+    )
 )]
 pub struct ApiDoc;
 
@@ -66,11 +76,19 @@ pub struct ApiDoc;
 ///
 /// Both come from one registration, so a handler cannot be served without being
 /// documented or documented without being served.
-pub fn api() -> (Router, utoipa::openapi::OpenApi) {
+pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenApi) {
     let (router, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .nest(
             API_BASE_PATH,
-            OpenApiRouter::new().routes(routes!(meta::get_meta)),
+            OpenApiRouter::new()
+                .routes(routes!(meta::get_meta))
+                .routes(routes!(
+                    operations::create_operation,
+                    operations::list_operations
+                ))
+                .routes(routes!(operations::get_operation))
+                .routes(routes!(operations::cancel_operation))
+                .with_state(state),
         )
         .split_for_parts();
 
@@ -81,15 +99,19 @@ pub fn api() -> (Router, utoipa::openapi::OpenApi) {
     (router, openapi)
 }
 
-/// Builds the API router.
-pub fn router() -> Router {
-    api().0
+/// Builds the API router over the given state.
+pub fn router(state: Arc<operations::ApiState>) -> Router {
+    api(state).0
 }
 
-/// Builds the `OpenAPI` document.
+/// Builds the `OpenAPI` document. The document describes the router's
+/// contract; the state is needed to build the router, so a throwaway state
+/// documents the same paths without touching any backend.
 #[must_use]
 pub fn openapi() -> utoipa::openapi::OpenApi {
-    api().1
+    let (router, openapi) = api(Arc::new(operations::ApiState::for_document()));
+    let _ = router;
+    openapi
 }
 
 /// Returns the canonical serialization of the `OpenAPI` document.

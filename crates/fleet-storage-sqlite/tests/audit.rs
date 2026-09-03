@@ -24,6 +24,7 @@ fn intent(action: Permission, allowed: bool, correlation: Option<&str>) -> Audit
             Decision::deny(ReasonId::UnknownPrincipal)
         },
         correlation_id: correlation.map(str::to_owned),
+        operation_id: None,
         metadata: AuditMetadata::default(),
     }
 }
@@ -276,6 +277,7 @@ async fn validated_metadata_is_stored_and_readable() {
         resource: None,
         decision: Decision::allow(),
         correlation_id: Some("flow-m".to_owned()),
+        operation_id: None,
         metadata,
     };
     ledger.append_intent(&intent).await.unwrap();

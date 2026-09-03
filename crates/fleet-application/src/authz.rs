@@ -31,6 +31,8 @@ pub enum Permission {
     SystemRead,
     /// List and read operations and their progress.
     OperationRead,
+    /// Create a durable operation. A mutation.
+    OperationCreate,
     /// Request cancellation of a running operation. A mutation.
     OperationCancel,
     /// List secret record metadata (names and key versions, never values).
@@ -53,6 +55,7 @@ impl Permission {
     pub const ALL: &'static [Permission] = &[
         Permission::SystemRead,
         Permission::OperationRead,
+        Permission::OperationCreate,
         Permission::OperationCancel,
         Permission::SecretList,
         Permission::SecretRead,
@@ -67,6 +70,7 @@ impl Permission {
         match self {
             Permission::SystemRead => "system.read",
             Permission::OperationRead => "operation.read",
+            Permission::OperationCreate => "operation.create",
             Permission::OperationCancel => "operation.cancel",
             Permission::SecretList => "secret.list",
             Permission::SecretRead => "secret.read",
@@ -86,7 +90,8 @@ impl Permission {
             | Permission::OperationRead
             | Permission::SecretList
             | Permission::AuditRead => false,
-            Permission::OperationCancel
+            Permission::OperationCreate
+            | Permission::OperationCancel
             | Permission::SecretRead
             | Permission::SecretWrite
             | Permission::SecretDelete => true,
@@ -101,6 +106,7 @@ impl Permission {
         match self {
             Permission::SystemRead
             | Permission::OperationRead
+            | Permission::OperationCreate
             | Permission::SecretList
             | Permission::SecretWrite
             | Permission::AuditRead => false,
@@ -202,6 +208,15 @@ impl fmt::Display for Decision {
             if self.allowed { "allowed" } else { "denied" }
         )
     }
+}
+
+/// The acting principal as use cases see it: the resolved caller's stable
+/// id. Caller resolution creates it; authorization consumes it; handlers
+/// extract it as an extension without knowing how resolution works.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActingPrincipal {
+    /// The stable principal id.
+    pub id: String,
 }
 
 /// The authorization port. Exactly one implementation is active in a

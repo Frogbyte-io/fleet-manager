@@ -1,0 +1,456 @@
+//! The durable operation service: the authorized use cases over the
+//! [`OperationPort`].
+//!
+//! Remote work cannot be request-scoped, so an accepted action becomes an
+//! operation row that survives restarts. This module owns the *use cases* —
+//! who may create, read, list, or cancel an operation — while the port below
+//! owns the mechanics (idempotency, deadlines, state transitions) that the
+//! storage adapter implements. Every use case funnels through the
+//! authorization catalog, and every accepted mutation appends an audit intent
+//! through the [`AuditPort`], in that order: authorize first, audit second,
+//! mutate last.
+//!
+//! There is intentionally no execution here. Claiming, retrying, and running
+//! steps belongs to the operation worker (FM-109); node dispatch belongs to
+//! the node protocol. This module can complete, but never on its own behalf.
+#![warn(missing_docs)]
+
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+use crate::audit::{AuditMetadata, AuditOutcome};
+use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, authorize};
+
+/// The kinds of operation the public API accepts. Until providers and nodes
+/// teach the controller their own kinds, the vocabulary is deliberately tiny:
+/// an unknown kind is refused rather than accepted as an unspecified promise.
+pub const CREATABLE_KINDS: [&str; 1] = ["noop"];
+
+/// The public view of a durable operation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Operation {
+    /// The operation's identity.
+    pub id: String,
+    /// What kind of work this is.
+    pub kind: String,
+    /// The current domain state id.
+    pub state: String,
+    /// The caller's idempotency key, when one was supplied.
+    pub idempotency_key: Option<String>,
+    /// Progress numerator, when reported.
+    pub progress_current: Option<i64>,
+    /// Progress denominator, when reported.
+    pub progress_total: Option<i64>,
+    /// Bounded progress message, when reported.
+    pub progress_message: Option<String>,
+    /// The deadline, in epoch milliseconds, when one was set.
+    pub deadline_at: Option<i64>,
+    /// Whether cancellation has been requested but not yet observed.
+    pub cancel_requested: bool,
+    /// The bounded public result, present when the operation succeeded.
+    pub result_json: Option<String>,
+    /// The bounded public error, present when the operation failed.
+    pub error_json: Option<String>,
+    /// The correlation identity joining this operation to the caller's flow.
+    pub correlation_id: Option<String>,
+    /// Creation time (epoch milliseconds).
+    pub created_at: i64,
+    /// Last update (epoch milliseconds).
+    pub updated_at: i64,
+}
+
+/// A use-case rejection. Variants map onto public API errors by the adapter
+/// that surfaces them; the strings here are safe to print.
+#[derive(Debug)]
+pub enum OperationUseCaseError {
+    /// The caller may not perform the action.
+    Denied(Decision),
+    /// The action names an unknown kind, id, or key.
+    NotFound {
+        /// What was not found.
+        what: String,
+    },
+    /// The request is malformed for this use case.
+    Invalid {
+        /// What is wrong, safe to print.
+        detail: String,
+    },
+    /// The port or audit sink failed.
+    Backend {
+        /// The failing half.
+        context: &'static str,
+        /// The failure detail.
+        detail: String,
+    },
+}
+
+impl fmt::Display for OperationUseCaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied(decision) => write!(f, "denied: {decision}"),
+            Self::NotFound { what } => write!(f, "not found: {what}"),
+            Self::Invalid { detail } => write!(f, "invalid request: {detail}"),
+            Self::Backend { context, detail } => write!(f, "operation {context} failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for OperationUseCaseError {}
+
+/// The port's failures, typed so the use cases can answer honestly: a
+/// missing operation is a client-visible 404, a backend failure is not.
+#[derive(Debug)]
+pub enum PortFailure {
+    /// The referenced operation does not exist.
+    NotFound {
+        /// The reference that was not found.
+        what: String,
+    },
+    /// Something failed in the backend; the detail is safe to log.
+    Backend {
+        /// The failure detail.
+        detail: String,
+    },
+}
+
+impl fmt::Display for PortFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound { what } => write!(f, "not found: {what}"),
+            Self::Backend { detail } => write!(f, "backend failure: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for PortFailure {}
+
+/// The storage-side port. Mechanics only: no authorization and no audit, both
+/// of which belong to the use cases here.
+#[async_trait]
+pub trait OperationPort: fmt::Debug + Send + Sync {
+    /// Creates an operation, honoring the idempotency key when given.
+    ///
+    /// # Errors
+    ///
+    /// Fails on backend errors, reported as [`OperationUseCaseError`]-shaped
+    /// problems by the caller.
+    async fn create(
+        &self,
+        kind: &str,
+        idempotency_key: Option<&str>,
+        deadline_at: Option<i64>,
+        correlation_id: Option<&str>,
+    ) -> Result<Operation, PortFailure>;
+    /// Reads one operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the id is unknown or the backend errors.
+    async fn get(&self, id: &str) -> Result<Operation, PortFailure>;
+    /// Lists operations, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn list(&self, limit: u32) -> Result<Vec<Operation>, PortFailure>;
+    /// Records a durable cancellation request.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the id is unknown or the backend errors.
+    async fn request_cancel(&self, id: &str) -> Result<Operation, PortFailure>;
+    /// Transitions state, validating through the domain machine.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an illegal transition or a backend error.
+    async fn transition(&self, id: &str, state: &str) -> Result<Operation, PortFailure>;
+    /// Records a terminal state with bounded public payloads.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an illegal transition or a backend error.
+    async fn complete(
+        &self,
+        id: &str,
+        state: &str,
+        result_json: Option<&str>,
+        error_json: Option<&str>,
+    ) -> Result<Operation, PortFailure>;
+    /// Records progress.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the message is too long or the backend errors.
+    async fn record_progress(
+        &self,
+        id: &str,
+        current: Option<i64>,
+        total: Option<i64>,
+        message: Option<&str>,
+    ) -> Result<(), PortFailure>;
+}
+
+/// The audit half: accepted mutations append an intent, and the terminal
+/// outcome is appended separately.
+#[async_trait]
+pub trait AuditPort: fmt::Debug + Send + Sync {
+    /// Appends an intent for the accepted action.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the sink refuses; the use case then refuses too, so state
+    /// and audit stay consistent.
+    async fn record_intent(&self, intent: &crate::audit::AuditIntent) -> Result<(), String>;
+    /// Appends the terminal outcome.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the sink refuses.
+    async fn record_outcome(&self, operation_id: &str, outcome: AuditOutcome)
+    -> Result<(), String>;
+}
+
+/// The authorized operation use cases.
+#[derive(Debug)]
+pub struct Operations {
+    port: Arc<dyn OperationPort>,
+    audit: Arc<dyn AuditPort>,
+}
+
+impl Operations {
+    /// Composes the service from its ports.
+    #[must_use]
+    pub fn new(port: Arc<dyn OperationPort>, audit: Arc<dyn AuditPort>) -> Self {
+        Self { port, audit }
+    }
+
+    /// Creates an operation after authorization, recording the audit intent
+    /// for the accepted mutation.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, unknown kind, or a backend failure.
+    pub async fn create(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        kind: &str,
+        idempotency_key: Option<&str>,
+        deadline_at: Option<i64>,
+        correlation_id: Option<&str>,
+    ) -> Result<Operation, OperationUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::OperationCreate,
+                resource: None,
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+
+        if !CREATABLE_KINDS.contains(&kind) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!(
+                    "kind {kind:?} is not accepted; known kinds: {}",
+                    CREATABLE_KINDS.join(", ")
+                ),
+            });
+        }
+
+        let operation = self
+            .port
+            .create(kind, idempotency_key, deadline_at, correlation_id)
+            .await
+            .map_err(map_port_failure("create"))?;
+
+        let mut metadata = AuditMetadata::default();
+        metadata
+            .insert("kind", kind)
+            .map_err(|error| OperationUseCaseError::Backend {
+                context: "create_audit",
+                detail: error.to_string(),
+            })?;
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal_id.to_owned(),
+                action: Permission::OperationCreate.id().to_owned(),
+                resource: Some(operation.id.clone()),
+                decision: Decision::allow(),
+                correlation_id: correlation_id.map(str::to_owned),
+                operation_id: Some(operation.id.clone()),
+                metadata,
+            })
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "create_audit",
+                detail,
+            })?;
+        Ok(operation)
+    }
+
+    /// Reads one operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, unknown id, or a backend failure.
+    pub async fn get(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        id: &str,
+    ) -> Result<Operation, OperationUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::OperationRead,
+                resource: Some(id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.port.get(id).await.map_err(map_port_failure("get"))
+    }
+
+    /// Lists operations, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Operation>, OperationUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::OperationRead,
+                resource: None,
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.port
+            .list(limit)
+            .await
+            .map_err(map_port_failure("list"))
+    }
+
+    /// Requests cancellation of an operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, unknown id, or a backend failure.
+    pub async fn cancel(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        id: &str,
+    ) -> Result<Operation, OperationUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::OperationCancel,
+                resource: Some(id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+
+        let existing = self
+            .port
+            .get(id)
+            .await
+            .map_err(map_port_failure("cancel_get"))?;
+        if existing.state == "succeeded"
+            || existing.state == "failed"
+            || existing.state == "cancelled"
+            || existing.state == "timed_out"
+        {
+            return Err(OperationUseCaseError::NotFound {
+                what: format!("live operation {id}"),
+            });
+        }
+
+        let operation = self
+            .port
+            .request_cancel(id)
+            .await
+            .map_err(map_port_failure("cancel"))?;
+
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal_id.to_owned(),
+                action: Permission::OperationCancel.id().to_owned(),
+                resource: Some(id.to_owned()),
+                decision: Decision::allow(),
+                correlation_id: operation.correlation_id.clone(),
+                operation_id: Some(id.to_owned()),
+                metadata: AuditMetadata::default(),
+            })
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "cancel_audit",
+                detail,
+            })?;
+        Ok(operation)
+    }
+
+    /// Marks an operation terminal with bounded public payloads and appends
+    /// the audit outcome. Called by the operation worker, not by callers.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a backend failure or an illegal transition.
+    pub async fn complete(
+        &self,
+        id: &str,
+        state: &str,
+        result_json: Option<&str>,
+        error_json: Option<&str>,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let operation = self
+            .port
+            .complete(id, state, result_json, error_json)
+            .await
+            .map_err(map_port_failure("complete"))?;
+        let outcome = match state {
+            "succeeded" => AuditOutcome::Succeeded,
+            _ => AuditOutcome::Failed,
+        };
+        self.audit
+            .record_outcome(id, outcome)
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "complete_audit",
+                detail,
+            })?;
+        Ok(operation)
+    }
+}
+
+fn map_port_failure(context: &'static str) -> impl Fn(PortFailure) -> OperationUseCaseError {
+    move |failure| match failure {
+        PortFailure::NotFound { what } => OperationUseCaseError::NotFound { what },
+        PortFailure::Backend { detail } => OperationUseCaseError::Backend { context, detail },
+    }
+}
+
+/// Convenience: the reason a denied use case surfaces.
+impl OperationUseCaseError {
+    /// The stable denial reason, when this error is a denial.
+    #[must_use]
+    pub const fn reason(&self) -> Option<ReasonId> {
+        match self {
+            Self::Denied(decision) => Some(decision.reason),
+            _ => None,
+        }
+    }
+}
