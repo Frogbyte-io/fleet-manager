@@ -56,6 +56,9 @@ fn shell(settings: &Settings) -> ServeDir {
 ///
 /// `db` is the store's connection pool once the database is open; readiness
 /// probes it live. Passing `None` is for tests that do not involve storage.
+/// Every request through this router resolves to the trusted-LAN principal
+/// with its request evidence (see `fleet_auth`); the service must be made
+/// with connection info for that evidence to include the peer address.
 pub fn build_router(settings: &Settings, db: Option<SqlitePool>) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -67,6 +70,7 @@ pub fn build_router(settings: &Settings, db: Option<SqlitePool>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback_service(shell)
+        .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
         .with_state(probe)
 }
 
@@ -138,6 +142,7 @@ pub async fn serve_on(
     db: Option<SqlitePool>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
+    eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
     eprintln!("fleet-controller listening on {}", listener.local_addr()?);
     if settings.web_dist.join("index.html").is_file() {
         eprintln!("serving web shell from {}", settings.web_dist.display());
@@ -148,9 +153,12 @@ pub async fn serve_on(
             fleet_config::WEB_DIST_VAR
         );
     }
-    axum::serve(listener, build_router(&settings, db))
-        .with_graceful_shutdown(shutdown)
-        .await
+    axum::serve(
+        listener,
+        build_router(&settings, db).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Completes on SIGTERM or SIGINT so the process drains before exiting.

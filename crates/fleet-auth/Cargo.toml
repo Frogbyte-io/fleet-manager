@@ -7,9 +7,14 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum = "0.8.9"
 fleet-application = { path = "../fleet-application" }
 fleet-core = { path = "../fleet-core" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt"] }
+tower = "0.5.3"
 

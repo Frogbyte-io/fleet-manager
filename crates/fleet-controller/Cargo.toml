@@ -10,7 +10,7 @@ publish.workspace = true
 axum = "0.8.9"
 fleet-api = { path = "../fleet-api" }
 fleet-application = { path = "../fleet-application" }
-fleet-auth = { path = "../fleet-auth" }
+fleet-auth = { version = "0.1.0", path = "../fleet-auth" }
 fleet-config = { version = "0.1.0", path = "../fleet-config" }
 fleet-protocol = { path = "../fleet-protocol" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }

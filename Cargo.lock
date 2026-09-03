@@ -555,8 +555,11 @@ dependencies = [
 name = "fleet-auth"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "fleet-application",
  "fleet-core",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
