@@ -4,10 +4,9 @@
 //! public API adapter ([`fleet_api`]) and the static web shell into one HTTP
 //! listener, answers container health probes, and shuts down gracefully.
 //! Business rules live in the application and domain layers; nothing here
-//! decides what an operation means.
-//!
-//! Configuration is deliberately a pair of environment placeholders until
-//! FM-100 introduces typed controller configuration.
+//! decides what an operation means. Typed configuration and startup
+//! validation live in [`fleet_config`]; the binary loads, validates, and
+//! prints the effective (redacted) configuration before readiness.
 #![warn(missing_docs)]
 
 use std::future::Future;
@@ -21,53 +20,16 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use tower_http::services::ServeDir;
 
-/// The environment variable holding the listen address, e.g. `127.0.0.1:8080`.
-pub const LISTEN_VAR: &str = "FLEET_LISTEN";
-/// The environment variable holding the built web shell's directory.
-pub const WEB_DIST_VAR: &str = "FLEET_WEB_DIST";
-/// The default listen address: loopback only, because the controller is a
-/// trusted-LAN service and must not face an untrusted network by accident.
-pub const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
-/// The default web shell directory for development runs beside the workspace.
-pub const DEFAULT_WEB_DIST: &str = "./web";
-
 /// The runtime settings the controller process needs before it can serve.
+///
+/// Built from a validated [`fleet_config::ControllerConfig`] by the binary;
+/// tests construct it directly.
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// The address the HTTP listener binds.
     pub listen: SocketAddr,
     /// The directory holding the built web shell; served at `/`.
     pub web_dist: PathBuf,
-}
-
-impl Settings {
-    /// Reads the settings from the process environment, applying the safe
-    /// defaults documented on the constants above.
-    ///
-    /// # Errors
-    ///
-    /// Fails when `FLEET_LISTEN` is set but not a valid socket address; the
-    /// process must not start on a setting it does not understand.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the documented default listen address stops being a
-    /// valid socket address, which a test pins.
-    pub fn from_env() -> Result<Self, String> {
-        let listen = match std::env::var(LISTEN_VAR) {
-            Ok(value) => value
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("{LISTEN_VAR} is not a socket address: {error}"))?,
-            Err(_) => DEFAULT_LISTEN
-                .parse()
-                .expect("the documented default listen address must parse"),
-        };
-        let web_dist = match std::env::var(WEB_DIST_VAR) {
-            Ok(value) => PathBuf::from(value),
-            Err(_) => PathBuf::from(DEFAULT_WEB_DIST),
-        };
-        Ok(Self { listen, web_dist })
-    }
 }
 
 /// The health probe state shared with the probe handlers.
@@ -151,7 +113,7 @@ pub async fn serve_on(
         eprintln!(
             "warning: no web shell at {} (set {}); the API still serves",
             settings.web_dist.display(),
-            WEB_DIST_VAR
+            fleet_config::WEB_DIST_VAR
         );
     }
     axum::serve(listener, build_router(&settings))
@@ -186,27 +148,21 @@ pub async fn shutdown_signal() {
     }
 }
 
-/// Returns true when the controller answers `/readyz` on its configured
-/// listener, and false otherwise. This is the container healthcheck: it needs
-/// no shell, no HTTP client, and no package beyond the binary itself.
+/// Returns true when the controller answers `/readyz` on the given listener
+/// address, and false otherwise. This is the container healthcheck: it needs
+/// no shell, no HTTP client, and no package beyond the binary itself. The
+/// address comes from the same validated configuration the server uses.
 ///
 /// A wildcard listen address is probed on loopback, because the process cannot
 /// connect to `0.0.0.0`.
 #[must_use]
-pub fn run_healthcheck() -> bool {
-    let settings = match Settings::from_env() {
-        Ok(settings) => settings,
-        Err(error) => {
-            eprintln!("healthcheck: {error}");
-            return false;
-        }
-    };
-    let host = match settings.listen.ip() {
+pub fn run_healthcheck(listen: SocketAddr) -> bool {
+    let host = match listen.ip() {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED) => IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
         ip => ip,
     };
-    let address = SocketAddr::new(host, settings.listen.port());
+    let address = SocketAddr::new(host, listen.port());
     let mut stream =
         match std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(2)) {
             Ok(stream) => stream,

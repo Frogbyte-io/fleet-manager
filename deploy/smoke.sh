@@ -21,12 +21,24 @@ fi
 
 cleanup() {
   docker compose -p "$project" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  [ -n "${key_file:-}" ] && rm -f "$key_file"
+  return 0
 }
 trap cleanup EXIT
 
 container_of() {
   docker compose -p "$project" ps -q "$service"
 }
+
+# The controller refuses to start without a usable key source; the smoke hands
+# the stack an ephemeral one. The file is mode 0600 and removed on exit; it is
+# a throwaway artifact of this run, never a stored credential.
+if [ -z "${FLEET_MASTER_KEY_SOURCE:-}" ]; then
+  key_file="$(mktemp "${TMPDIR:-/tmp}/fleet-smoke-master-key.XXXXXX")"
+  head -c 32 /dev/urandom > "$key_file"
+  chmod 600 "$key_file"
+  export FLEET_MASTER_KEY_SOURCE="$key_file"
+fi
 
 echo "==> Building and starting the stack"
 docker compose -p "$project" up --build --detach --quiet-pull

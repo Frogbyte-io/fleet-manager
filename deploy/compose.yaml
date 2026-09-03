@@ -7,8 +7,8 @@
 # - published to host loopback only: the controller is a trusted-LAN service,
 #   and the smoke deployment must not imply that Internet exposure is fine
 #
-# Secrets are not wired up yet — M1 introduces the secret store — but the
-# mount location is reserved and documented; see the commented block below.
+# The master key arrives as a mounted Docker secret backed by a file, which is
+# the key source the typed configuration validates before readiness.
 
 name: fleet-manager
 
@@ -25,13 +25,19 @@ services:
       # the host-facing reachability is limited by the loopback publish above.
       FLEET_LISTEN: 0.0.0.0:8080
       FLEET_WEB_DIST: /opt/fleet/web
+      FLEET_DATA_DIR: /var/lib/fleet
+      # The key source is a mounted Docker secret: a file, never an
+      # environment variable or a build argument.
+      FLEET_MASTER_KEY_FILE: /run/secrets/master_key
     volumes:
-      # Runtime state (the M1 SQLite database and friends). Named volume so a
+      # Runtime state (the SQLite database and friends). Named volume so a
       # `compose down -v` is the explicit destructive act.
       - fleet-data:/var/lib/fleet
     read_only: true
     tmpfs:
       - /tmp
+    secrets:
+      - master_key
     healthcheck:
       # The binary probes itself; no shell or HTTP client in the image.
       test: ["CMD", "fleet-controller", "healthcheck"]
@@ -40,16 +46,13 @@ services:
       retries: 12
       start_period: 5s
     restart: unless-stopped
-    # secrets:
-    #   - master_key
 
 volumes:
   fleet-data:
 
-# When M1 lands the secret-reference store, uncomment the service `secrets:`
-# block above and add the top-level definition; the master key arrives as a
-# mounted file, never as an environment variable or a build argument:
-#
-# secrets:
-#   master_key:
-#     file: ./secrets/master_key
+secrets:
+  master_key:
+    # Overridable so deploy/smoke.sh can hand the stack an ephemeral key and
+    # production can point at a real, operator-managed one. The file must be
+    # mode 0600: startup validation refuses a more exposed key.
+    file: ${FLEET_MASTER_KEY_SOURCE:-./secrets/master_key}

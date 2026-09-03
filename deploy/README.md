@@ -30,19 +30,31 @@ deploy/smoke.sh
 
 ## Configuration placeholders
 
+Precedence, documented in `crates/fleet-config`: built-in defaults < the
+configuration file selected with `--config <path>` (TOML) < environment
+variables. The controller validates everything below **before readiness** and
+refuses to start on a missing or unsafe setting.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `FLEET_LISTEN` | `127.0.0.1:8080` | Address the HTTP listener binds. Loopback is the default on purpose: the controller is a trusted-LAN service and must not face an untrusted network by accident. The container overrides this to `0.0.0.0:8080` because reachability is limited by the loopback publish instead. |
 | `FLEET_WEB_DIST` | `./web` | Directory of the built web shell. The image sets `/opt/fleet/web`. |
+| `FLEET_DATA_DIR` | `./data` | Runtime state directory; created during startup validation. The container sets `/var/lib/fleet`. |
+| `FLEET_MASTER_KEY_FILE` | *(unset)* | Master key file for the secret store. Must exist, be a regular file, and be mode 0600; startup refuses a more exposed key. The container sets `/run/secrets/master_key`. |
 
-Typed configuration with documented precedence and validation is FM-100.
+An unset master key source is reported in the startup summary as "secret store
+unavailable" rather than pointed at a file that does not exist.
 
 ## Mount locations
 
 | Mount | What it holds |
 |---|---|
-| `fleet-data` volume at `/var/lib/fleet` | Runtime state: the M1 SQLite database, backups, and operation records. A named volume, so `docker compose down -v` is the explicit destructive act. |
-| Docker secret `master_key` (planned, M1) | The secret-store master key, mounted as a file — never an environment variable or build argument. The `secrets:` blocks are prepared in `compose.yaml`, commented out until the store lands. |
+| `fleet-data` volume at `/var/lib/fleet` | Runtime state: the SQLite database, backups, and operation records. A named volume, so `docker compose down -v` is the explicit destructive act. |
+| Docker secret `master_key` at `/run/secrets/master_key` | The secret-store master key, mounted as a file — never an environment variable or a build argument. The compose definition reads the file path from `FLEET_MASTER_KEY_SOURCE` (default `./secrets/master_key`). |
+
+The master key file must be mode 0600. `deploy/smoke.sh` generates an
+ephemeral key for the smoke run and removes it on exit; in production the
+operator provisions a real one.
 
 ## Security posture
 
