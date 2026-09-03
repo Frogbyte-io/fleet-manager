@@ -86,10 +86,9 @@ pub async fn browser_mutation_guard(request: Request, next: Next) -> Response {
          use the controller's own address, or the CLI",
         RetryClass::Never,
     );
-    let response = ApiError::new(&public, correlation_id)
+    ApiError::new(&public, correlation_id)
         .with_status(StatusCode::FORBIDDEN)
-        .into_response();
-    response
+        .into_response()
 }
 
 /// Whether an `Origin` value and a `Host` value name the same authority.
