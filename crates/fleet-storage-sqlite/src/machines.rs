@@ -341,6 +341,40 @@ impl MachinePort for MachineRepository {
         }
         Ok(())
     }
+
+    async fn confirm_fingerprint(
+        &self,
+        endpoint_id: &str,
+        fingerprint: &str,
+        confirmed_at: i64,
+    ) -> Result<(), PortFailure> {
+        let updated = sqlx::query(
+            "UPDATE machine_endpoints SET verified_fingerprint = ?2, verified_at = ?3 WHERE id = ?1",
+        )
+        .bind(endpoint_id)
+        .bind(fingerprint)
+        .bind(confirmed_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| backend("confirm_fingerprint", &error))?;
+        if updated.rows_affected() == 0 {
+            return Err(PortFailure::NotFound {
+                what: format!("endpoint {endpoint_id:?}"),
+            });
+        }
+        Ok(())
+    }
+
+    async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure> {
+        sqlx::query_scalar("SELECT verified_fingerprint FROM machine_endpoints WHERE id = ?1")
+            .bind(endpoint_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| backend("verified_fingerprint", &error))?
+            .ok_or_else(|| PortFailure::NotFound {
+                what: format!("endpoint {endpoint_id:?}"),
+            })
+    }
 }
 
 impl MachineRepository {

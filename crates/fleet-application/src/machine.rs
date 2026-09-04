@@ -230,6 +230,23 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn delete(&self, id: &str) -> Result<(), PortFailure>;
+    /// Records an operator-confirmed host-key fingerprint on one endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is unknown or the backend errors.
+    async fn confirm_fingerprint(
+        &self,
+        endpoint_id: &str,
+        fingerprint: &str,
+        confirmed_at: i64,
+    ) -> Result<(), PortFailure>;
+    /// The fingerprint previously confirmed for one endpoint, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is unknown or the backend errors.
+    async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure>;
 }
 
 /// The authorized machine use cases.
@@ -593,6 +610,95 @@ impl Machines {
             .record_capabilities(id, facts)
             .await
             .map_err(|failure| map_port("record_capabilities", failure))
+    }
+
+    /// Records an operator-confirmed host-key fingerprint for an endpoint.
+    /// This is the trust-on-first-use confirmation: the caller supplies the
+    /// fingerprint it verified out of band, and the confirmation is audited.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown endpoint, or a backend failure.
+    pub async fn confirm_host_key(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        endpoint_id: &str,
+        fingerprint: &str,
+    ) -> Result<(), MachineUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineUpdate,
+                resource: Some(endpoint_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        if !fingerprint.starts_with("SHA256:") || fingerprint.len() > 128 {
+            return Err(MachineUseCaseError::Invalid {
+                detail: "the fingerprint must be an OpenSSH SHA256 fingerprint".to_owned(),
+            });
+        }
+        self.port
+            .confirm_fingerprint(
+                endpoint_id,
+                fingerprint,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .map_err(|failure| map_port("confirm_fingerprint", failure))?;
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal.id.clone(),
+                action: Permission::MachineUpdate.id().to_owned(),
+                resource: Some(endpoint_id.to_owned()),
+                decision: Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata: {
+                    let mut metadata = crate::audit::AuditMetadata::default();
+                    metadata
+                        .insert("event", "host_key_confirmed")
+                        .map_err(|error| MachineUseCaseError::Backend {
+                            context: "audit",
+                            detail: error.to_string(),
+                        })?;
+                    metadata
+                },
+            })
+            .await
+            .map_err(|detail| MachineUseCaseError::Backend {
+                context: "audit",
+                detail,
+            })?;
+        Ok(())
+    }
+
+    /// The fingerprint previously confirmed for an endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn verified_host_key(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        endpoint_id: &str,
+    ) -> Result<Option<String>, MachineUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: Some(endpoint_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        self.port
+            .verified_fingerprint(endpoint_id)
+            .await
+            .map_err(|failure| map_port("verified_fingerprint", failure))
     }
 
     /// Removes a machine and all its facts.
