@@ -14,6 +14,19 @@ Each spike must be created as a GitHub issue with the `type:spike` label under i
 
 Spike outcomes:
 
+- **FM-S05 (resolved 2026-09-03, fallback chosen).** \`purple-ssh\` on crates.io
+  (3.23.0, MIT) is a bin+lib TUI application — roughly 154K lines, 190
+  releases of fast churn, zero dependents — whose module surface includes the
+  whole terminal UI (tui, tui_loop, animation, fuzzy, clipboard, demo, 18
+  cloud providers). Depending on it would pull the application, not an SSH
+  library, into the controller. Its own \`ssh_launcher\` module confirms the
+  approach Fleet already planned: it runs the system \`ssh\` binary rather
+  than implementing SSH in Rust. Fleet therefore invokes system OpenSSH
+  directly with an isolated config/known-hosts directory, using Purple's
+  round-trip config handling and cancellation behaviour as a reference only.
+  No code was extracted; MIT attribution in NOTICE remains open if specific
+  modules are later borrowed.
+
 - **FM-S03 (resolved 2026-09-03, fallback chosen).** Effectum 0.7.0 embeds its
   own SQLite database with its own schema, migrations, connection pool
   (rusqlite/deadpool), and job-state records. Using it for durable operations
