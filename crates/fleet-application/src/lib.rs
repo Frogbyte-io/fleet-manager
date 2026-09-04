@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod authz;
+pub mod machine;
 pub mod operation;
 pub mod worker;
 

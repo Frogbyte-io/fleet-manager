@@ -13,9 +13,11 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod machines;
 pub mod operations;
 
 pub use audit::{AuditLedger, AuditSink};
+pub use machines::MachineRepository;
 pub use operations::OperationRepository;
 
 use std::path::{Path, PathBuf};

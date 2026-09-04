@@ -8,6 +8,7 @@
 
 mod error;
 mod id;
+mod machine;
 mod operation;
 mod sensitive;
 mod time;
@@ -15,6 +16,7 @@ mod value;
 
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
+pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
 };

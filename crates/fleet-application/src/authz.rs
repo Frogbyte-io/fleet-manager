@@ -46,6 +46,15 @@ pub enum Permission {
     /// Query the audit ledger. A read, but a sensitive one: it reveals who
     /// did what.
     AuditRead,
+    /// List and read machines, endpoints, capabilities, and observations.
+    MachineRead,
+    /// Register a machine. A mutation.
+    MachineCreate,
+    /// Change a machine's mutable facts: name, description, endpoints,
+    /// tags, groups. A mutation.
+    MachineUpdate,
+    /// Remove a machine and its facts. A mutation.
+    MachineDelete,
 }
 
 impl Permission {
@@ -62,6 +71,10 @@ impl Permission {
         Permission::SecretWrite,
         Permission::SecretDelete,
         Permission::AuditRead,
+        Permission::MachineRead,
+        Permission::MachineCreate,
+        Permission::MachineUpdate,
+        Permission::MachineDelete,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -77,6 +90,10 @@ impl Permission {
             Permission::SecretWrite => "secret.write",
             Permission::SecretDelete => "secret.delete",
             Permission::AuditRead => "audit.read",
+            Permission::MachineRead => "machine.read",
+            Permission::MachineCreate => "machine.create",
+            Permission::MachineUpdate => "machine.update",
+            Permission::MachineDelete => "machine.delete",
         }
     }
 
@@ -89,12 +106,16 @@ impl Permission {
             Permission::SystemRead
             | Permission::OperationRead
             | Permission::SecretList
-            | Permission::AuditRead => false,
+            | Permission::AuditRead
+            | Permission::MachineRead => false,
             Permission::OperationCreate
             | Permission::OperationCancel
             | Permission::SecretRead
             | Permission::SecretWrite
-            | Permission::SecretDelete => true,
+            | Permission::SecretDelete
+            | Permission::MachineCreate
+            | Permission::MachineUpdate
+            | Permission::MachineDelete => true,
         }
     }
 
@@ -109,8 +130,14 @@ impl Permission {
             | Permission::OperationCreate
             | Permission::SecretList
             | Permission::SecretWrite
-            | Permission::AuditRead => false,
-            Permission::OperationCancel | Permission::SecretRead | Permission::SecretDelete => true,
+            | Permission::AuditRead
+            | Permission::MachineRead
+            | Permission::MachineCreate => false,
+            Permission::OperationCancel
+            | Permission::SecretRead
+            | Permission::SecretDelete
+            | Permission::MachineUpdate
+            | Permission::MachineDelete => true,
         }
     }
 }
