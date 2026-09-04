@@ -51,6 +51,18 @@ export interface ApiError {
 }
 
 /**
+ * The create-enrollment-token request.
+ */
+export interface CreateEnrollmentTokenRequest {
+  /**
+     * The token's lifetime in milliseconds, between one minute and one day.
+     * Absent means one hour.
+     * @nullable
+     */
+  ttlMillis?: number | null;
+}
+
+/**
  * The body of the create-operation request.
  */
 export interface CreateOperationRequest {
@@ -80,6 +92,51 @@ export interface CreateOperationRequest {
 }
 
 /**
+ * The create-enrollment-token response. The token value is shown exactly
+ * once; only its hash is stored.
+ */
+export interface EnrollmentTokenCreatedDto {
+  /** Expiry (epoch milliseconds). */
+  expiresAt: number;
+  /** The token record's identity. */
+  id: string;
+  /** The machine the token is scoped to. */
+  machineId: string;
+  /** The token value. Shown once. */
+  token: string;
+}
+
+/**
+ * An enrollment token's facts. The token value appears only once, in the
+ * create response.
+ */
+export interface EnrollmentTokenDto {
+  /**
+     * Consumption time, when consumed (epoch milliseconds).
+     * @nullable
+     */
+  consumedAt?: number | null;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Expiry (epoch milliseconds). */
+  expiresAt: number;
+  /** The token record's identity. */
+  id: string;
+  /** The machine the token is scoped to. */
+  machineId: string;
+  /** `pending`, `consumed`, or `expired`. */
+  status: string;
+}
+
+/**
+ * The list-enrollment-tokens response.
+ */
+export interface EnrollmentTokenListDto {
+  /** The machine's tokens, newest first. */
+  items: EnrollmentTokenDto[];
+}
+
+/**
  * Non-authoritative description of the API this controller serves.
  */
 export interface Meta {
@@ -87,6 +144,81 @@ export interface Meta {
   apiVersion: string;
   /** The service that answered, for operators reading a proxied response. */
   service: string;
+}
+
+/**
+ * A node credential record. The signed token is never stored or returned.
+ */
+export interface NodeCredentialDto {
+  /** Expiry (epoch milliseconds). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** Issue time (epoch milliseconds). */
+  issuedAt: number;
+  /**
+     * Last presentation time, when any (epoch milliseconds).
+     * @nullable
+     */
+  lastUsedAt?: number | null;
+  /** The machine the credential belongs to. */
+  machineId: string;
+  /** The node key version the credential is bound to. */
+  nodeKeyVersion: number;
+  /** `active` or `revoked`. */
+  status: string;
+}
+
+/**
+ * A node identity, as the operator sees it.
+ */
+export interface NodeIdentityDto {
+  /** The architecture the node reported. */
+  arch: string;
+  /** First enrollment time (epoch milliseconds). */
+  enrolledAt: number;
+  /** Monotonic key version. */
+  keyVersion: number;
+  /** The machine the identity belongs to. */
+  machineId: string;
+  /** The node software version the node reported. */
+  nodeVersion: string;
+  /** The operating system the node reported. */
+  os: string;
+  /** The hex-encoded Ed25519 public key. */
+  publicKey: string;
+  /**
+     * Last rotation time, when any (epoch milliseconds).
+     * @nullable
+     */
+  rotatedAt?: number | null;
+  /** `active` or `revoked`. */
+  status: string;
+}
+
+/**
+ * The outcome of a revocation.
+ */
+export interface NodeRevokedDto {
+  /** The machine whose node was revoked. */
+  machineId: string;
+  /** The resulting identity status; `revoked`. */
+  status: string;
+}
+
+/**
+ * A machine's node state.
+ */
+export interface NodeViewDto {
+  /** Active credentials. */
+  activeCredentials: NodeCredentialDto[];
+  /** The number of active sessions. */
+  activeSessions: number;
+  identity?: null | NodeIdentityDto;
+  /** The machine the view describes. */
+  machineId: string;
+  /** Tokens that are still pending. */
+  pendingTokens: EnrollmentTokenDto[];
 }
 
 /**
@@ -285,6 +417,35 @@ export interface PageOperationDto {
 }
 
 /**
+ * The create-enrollment-token response. The token value is shown exactly
+ * once; only its hash is stored.
+ */
+export type ResourceEnrollmentTokenCreatedDtoData = {
+  /** Expiry (epoch milliseconds). */
+  expiresAt: number;
+  /** The token record's identity. */
+  id: string;
+  /** The machine the token is scoped to. */
+  machineId: string;
+  /** The token value. Shown once. */
+  token: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceEnrollmentTokenCreatedDto {
+  /**
+     * The create-enrollment-token response. The token value is shown exactly
+     * once; only its hash is stored.
+     */
+  data: ResourceEnrollmentTokenCreatedDtoData;
+}
+
+/**
  * Non-authoritative description of the API this controller serves.
  */
 export type ResourceMetaData = {
@@ -303,6 +464,53 @@ export type ResourceMetaData = {
 export interface ResourceMeta {
   /** Non-authoritative description of the API this controller serves. */
   data: ResourceMetaData;
+}
+
+/**
+ * The outcome of a revocation.
+ */
+export type ResourceNodeRevokedDtoData = {
+  /** The machine whose node was revoked. */
+  machineId: string;
+  /** The resulting identity status; `revoked`. */
+  status: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceNodeRevokedDto {
+  /** The outcome of a revocation. */
+  data: ResourceNodeRevokedDtoData;
+}
+
+/**
+ * A machine's node state.
+ */
+export type ResourceNodeViewDtoData = {
+  /** Active credentials. */
+  activeCredentials: NodeCredentialDto[];
+  /** The number of active sessions. */
+  activeSessions: number;
+  identity?: null | NodeIdentityDto;
+  /** The machine the view describes. */
+  machineId: string;
+  /** Tokens that are still pending. */
+  pendingTokens: EnrollmentTokenDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceNodeViewDto {
+  /** A machine's node state. */
+  data: ResourceNodeViewDtoData;
 }
 
 /**
@@ -410,6 +618,251 @@ export type ListOperationsParams = {
  */
 limit?: number;
 };
+
+export type getNodeResponse200 = {
+  data: ResourceNodeViewDto
+  status: 200
+}
+
+export type getNodeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getNodeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getNodeResponseSuccess = (getNodeResponse200) & {
+  headers: Headers;
+};
+export type getNodeResponseError = (getNodeResponse403 | getNodeResponse404) & {
+  headers: Headers;
+};
+
+export type getNodeResponse = (getNodeResponseSuccess | getNodeResponseError)
+
+export const getGetNodeUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/node`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Reads a machine's node state.
+ */
+export const getNode = async (machineId: string, options?: RequestInit): Promise<getNodeResponse> => {
+
+  const res = await fetch(getGetNodeUrl(machineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getNodeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getNodeResponse
+}
+
+
+
+export type listEnrollmentTokensResponse200 = {
+  data: EnrollmentTokenListDto
+  status: 200
+}
+
+export type listEnrollmentTokensResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listEnrollmentTokensResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listEnrollmentTokensResponseSuccess = (listEnrollmentTokensResponse200) & {
+  headers: Headers;
+};
+export type listEnrollmentTokensResponseError = (listEnrollmentTokensResponse403 | listEnrollmentTokensResponse404) & {
+  headers: Headers;
+};
+
+export type listEnrollmentTokensResponse = (listEnrollmentTokensResponseSuccess | listEnrollmentTokensResponseError)
+
+export const getListEnrollmentTokensUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/node/enrollments`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists a machine's enrollment tokens, newest first, with effective status.
+ */
+export const listEnrollmentTokens = async (machineId: string, options?: RequestInit): Promise<listEnrollmentTokensResponse> => {
+
+  const res = await fetch(getListEnrollmentTokensUrl(machineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listEnrollmentTokensResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listEnrollmentTokensResponse
+}
+
+
+
+export type createEnrollmentTokenResponse201 = {
+  data: ResourceEnrollmentTokenCreatedDto
+  status: 201
+}
+
+export type createEnrollmentTokenResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createEnrollmentTokenResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createEnrollmentTokenResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createEnrollmentTokenResponseSuccess = (createEnrollmentTokenResponse201) & {
+  headers: Headers;
+};
+export type createEnrollmentTokenResponseError = (createEnrollmentTokenResponse400 | createEnrollmentTokenResponse403 | createEnrollmentTokenResponse404) & {
+  headers: Headers;
+};
+
+export type createEnrollmentTokenResponse = (createEnrollmentTokenResponseSuccess | createEnrollmentTokenResponseError)
+
+export const getCreateEnrollmentTokenUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/node/enrollments`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Creates a single-use enrollment token for a machine.
+ */
+export const createEnrollmentToken = async (machineId: string,
+    createEnrollmentTokenRequest: CreateEnrollmentTokenRequest, options?: RequestInit): Promise<createEnrollmentTokenResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateEnrollmentTokenUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createEnrollmentTokenRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createEnrollmentTokenResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createEnrollmentTokenResponse
+}
+
+
+
+export type revokeNodeResponse200 = {
+  data: ResourceNodeRevokedDto
+  status: 200
+}
+
+export type revokeNodeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type revokeNodeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type revokeNodeResponseSuccess = (revokeNodeResponse200) & {
+  headers: Headers;
+};
+export type revokeNodeResponseError = (revokeNodeResponse403 | revokeNodeResponse404) & {
+  headers: Headers;
+};
+
+export type revokeNodeResponse = (revokeNodeResponseSuccess | revokeNodeResponseError)
+
+export const getRevokeNodeUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/node/revoke`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Revokes a machine's node identity, every credential, and every session.
+Renewal fails until an explicit re-enrollment.
+ */
+export const revokeNode = async (machineId: string, options?: RequestInit): Promise<revokeNodeResponse> => {
+
+  const res = await fetch(getRevokeNodeUrl(machineId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: revokeNodeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as revokeNodeResponse
+}
+
+
 
 export type getMetaResponse200 = {
   data: ResourceMeta

@@ -10,6 +10,236 @@
     "version": "v1"
   },
   "paths": {
+    "/api/v1/machines/{machineId}/node": {
+      "get": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Reads a machine's node state.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "getNode",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine whose node state to read.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The machine's node state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_NodeViewDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read node state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/node/enrollments": {
+      "get": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Lists a machine's enrollment tokens, newest first, with effective status.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listEnrollmentTokens",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine whose tokens to list.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The machine's tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollmentTokenListDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read node state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Creates a single-use enrollment token for a machine.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "createEnrollmentToken",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine to enroll a node for.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEnrollmentTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The token was created. Its value is shown exactly once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_EnrollmentTokenCreatedDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed, or the TTL is out of range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create enrollment tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/node/revoke": {
+      "post": {
+        "tags": [
+          "nodes"
+        ],
+        "summary": "Revokes a machine's node identity, every credential, and every session.\nRenewal fails until an explicit re-enrollment.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "revokeNode",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine whose node to revoke.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The node identity and all credentials and sessions are revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_NodeRevokedDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not revoke nodes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such machine, or the machine has no node identity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/meta": {
       "get": {
         "tags": [
@@ -372,6 +602,20 @@
           }
         }
       },
+      "CreateEnrollmentTokenRequest": {
+        "type": "object",
+        "description": "The create-enrollment-token request.",
+        "properties": {
+          "ttlMillis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The token's lifetime in milliseconds, between one minute and one day.\nAbsent means one hour."
+          }
+        }
+      },
       "CreateOperationRequest": {
         "type": "object",
         "description": "The body of the create-operation request.",
@@ -406,6 +650,94 @@
               "null"
             ],
             "description": "The bounded provider input for kinds that need one, e.g. the script\npayload of `ssh.exec`."
+          }
+        }
+      },
+      "EnrollmentTokenCreatedDto": {
+        "type": "object",
+        "description": "The create-enrollment-token response. The token value is shown exactly\nonce; only its hash is stored.",
+        "required": [
+          "id",
+          "machineId",
+          "token",
+          "expiresAt"
+        ],
+        "properties": {
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry (epoch milliseconds)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The token record's identity."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine the token is scoped to."
+          },
+          "token": {
+            "type": "string",
+            "description": "The token value. Shown once."
+          }
+        }
+      },
+      "EnrollmentTokenDto": {
+        "type": "object",
+        "description": "An enrollment token's facts. The token value appears only once, in the\ncreate response.",
+        "required": [
+          "id",
+          "machineId",
+          "status",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "consumedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Consumption time, when consumed (epoch milliseconds)."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (epoch milliseconds)."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry (epoch milliseconds)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The token record's identity."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine the token is scoped to."
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `consumed`, or `expired`."
+          }
+        }
+      },
+      "EnrollmentTokenListDto": {
+        "type": "object",
+        "description": "The list-enrollment-tokens response.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentTokenDto"
+            },
+            "description": "The machine's tokens, newest first."
           }
         }
       },
@@ -451,6 +783,177 @@
             "type": "string",
             "description": "The service that answered, for operators reading a proxied response.",
             "example": "fleet-controller"
+          }
+        }
+      },
+      "NodeCredentialDto": {
+        "type": "object",
+        "description": "A node credential record. The signed token is never stored or returned.",
+        "required": [
+          "id",
+          "machineId",
+          "nodeKeyVersion",
+          "issuedAt",
+          "expiresAt",
+          "status"
+        ],
+        "properties": {
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry (epoch milliseconds)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The credential's identity."
+          },
+          "issuedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Issue time (epoch milliseconds)."
+          },
+          "lastUsedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Last presentation time, when any (epoch milliseconds)."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine the credential belongs to."
+          },
+          "nodeKeyVersion": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The node key version the credential is bound to."
+          },
+          "status": {
+            "type": "string",
+            "description": "`active` or `revoked`."
+          }
+        }
+      },
+      "NodeIdentityDto": {
+        "type": "object",
+        "description": "A node identity, as the operator sees it.",
+        "required": [
+          "machineId",
+          "publicKey",
+          "keyVersion",
+          "status",
+          "os",
+          "arch",
+          "nodeVersion",
+          "enrolledAt"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string",
+            "description": "The architecture the node reported."
+          },
+          "enrolledAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First enrollment time (epoch milliseconds)."
+          },
+          "keyVersion": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic key version."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine the identity belongs to."
+          },
+          "nodeVersion": {
+            "type": "string",
+            "description": "The node software version the node reported."
+          },
+          "os": {
+            "type": "string",
+            "description": "The operating system the node reported."
+          },
+          "publicKey": {
+            "type": "string",
+            "description": "The hex-encoded Ed25519 public key."
+          },
+          "rotatedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Last rotation time, when any (epoch milliseconds)."
+          },
+          "status": {
+            "type": "string",
+            "description": "`active` or `revoked`."
+          }
+        }
+      },
+      "NodeRevokedDto": {
+        "type": "object",
+        "description": "The outcome of a revocation.",
+        "required": [
+          "machineId",
+          "status"
+        ],
+        "properties": {
+          "machineId": {
+            "type": "string",
+            "description": "The machine whose node was revoked."
+          },
+          "status": {
+            "type": "string",
+            "description": "The resulting identity status; `revoked`."
+          }
+        }
+      },
+      "NodeViewDto": {
+        "type": "object",
+        "description": "A machine's node state.",
+        "required": [
+          "machineId",
+          "pendingTokens",
+          "activeCredentials",
+          "activeSessions"
+        ],
+        "properties": {
+          "activeCredentials": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeCredentialDto"
+            },
+            "description": "Active credentials."
+          },
+          "activeSessions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The number of active sessions."
+          },
+          "identity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeIdentityDto",
+                "description": "The bound identity, when the machine is enrolled."
+              }
+            ]
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine the view describes."
+          },
+          "pendingTokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrollmentTokenDto"
+            },
+            "description": "Tokens that are still pending."
           }
         }
       },
@@ -733,6 +1236,44 @@
           }
         }
       },
+      "Resource_EnrollmentTokenCreatedDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The create-enrollment-token response. The token value is shown exactly\nonce; only its hash is stored.",
+            "required": [
+              "id",
+              "machineId",
+              "token",
+              "expiresAt"
+            ],
+            "properties": {
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Expiry (epoch milliseconds)."
+              },
+              "id": {
+                "type": "string",
+                "description": "The token record's identity."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine the token is scoped to."
+              },
+              "token": {
+                "type": "string",
+                "description": "The token value. Shown once."
+              }
+            }
+          }
+        }
+      },
       "Resource_Meta": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -757,6 +1298,88 @@
                 "type": "string",
                 "description": "The service that answered, for operators reading a proxied response.",
                 "example": "fleet-controller"
+              }
+            }
+          }
+        }
+      },
+      "Resource_NodeRevokedDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The outcome of a revocation.",
+            "required": [
+              "machineId",
+              "status"
+            ],
+            "properties": {
+              "machineId": {
+                "type": "string",
+                "description": "The machine whose node was revoked."
+              },
+              "status": {
+                "type": "string",
+                "description": "The resulting identity status; `revoked`."
+              }
+            }
+          }
+        }
+      },
+      "Resource_NodeViewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A machine's node state.",
+            "required": [
+              "machineId",
+              "pendingTokens",
+              "activeCredentials",
+              "activeSessions"
+            ],
+            "properties": {
+              "activeCredentials": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/NodeCredentialDto"
+                },
+                "description": "Active credentials."
+              },
+              "activeSessions": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The number of active sessions."
+              },
+              "identity": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NodeIdentityDto",
+                    "description": "The bound identity, when the machine is enrolled."
+                  }
+                ]
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine the view describes."
+              },
+              "pendingTokens": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EnrollmentTokenDto"
+                },
+                "description": "Tokens that are still pending."
               }
             }
           }
@@ -943,6 +1566,10 @@
     {
       "name": "operations",
       "description": "Durable operations: accepted remote work."
+    },
+    {
+      "name": "nodes",
+      "description": "Node enrollment and identity: enrollment tokens, node state, and revocation. The machine-facing enrollment endpoints under /api/node/v1 are versioned with the node protocol and documented in proto/README.md, not here."
     }
   ]
 }

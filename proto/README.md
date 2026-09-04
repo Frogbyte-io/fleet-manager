@@ -48,6 +48,83 @@ Anything that breaks a rule above needs `fleet/node/v2/`, a new
 `ProtocolVersion`, and fixtures for both versions across the supported rolling
 upgrade window.
 
+## Enrollment over HTTP (FM-204)
+
+Enrollment and key proof do not use the frame channel: they happen over
+ordinary TLS on the controller's HTTP listener, versioned with the node
+protocol at `/api/node/v1`. These endpoints are the node trust surface; they
+are not part of the public `OpenAPI` document, and the trusted-LAN principal
+never authorizes them — possession of the enrollment token or of a verified
+Ed25519 key proof does.
+
+The implementation lives in `fleet-api/src/node.rs` (handlers) and
+`fleet-auth/src/node.rs` (token, credential, and proof formats), with
+`fleet-application/src/node.rs` as the use cases. `fleetd` (FM-205) is the
+client.
+
+### Endpoints
+
+| Endpoint | Request | Response |
+|---|---|---|
+| `POST /api/node/v1/enroll` | `{token, publicKey, os, arch, nodeVersion}` | `201` `{machineId, credential, credentialExpiresAt, rebind}` |
+| `POST /api/node/v1/challenge` | `{credential, purpose?, newPublicKey?}` | `200` `{challengeId, machineId, nonce, purpose, expiresAt}` |
+| `POST /api/node/v1/session` | `{credential, challengeId, signature}` | `200` `{machineId, session, sessionExpiresAt}` |
+| `POST /api/node/v1/rotate` | `{credential, newPublicKey, challengeId, signature}` | `200` `{machineId, credential, nodeKeyVersion, credentialExpiresAt}` |
+
+Failures use the standard error envelope: `401` for a token, credential,
+challenge, or proof that did not verify; `404` for unknown references; `409`
+when the machine already has an active identity (enrollment over a live
+identity is a rotation, not a second enrollment); `400` for malformed
+requests; `503` when the controller has no master key configured.
+
+### Formats
+
+- **Enrollment token** `fmtenr1.<64 hex>`: 32 CSPRNG bytes. The value is shown
+  exactly once to the operator who created it; the controller stores only its
+  SHA-256 hash. A token is scoped to one machine, expires within a day, and
+  claims exactly once — a replayed or concurrent claim is answered with `401`.
+- **Key proof message** (the bytes the node signs with its *private* key):
+
+  ```text
+  fleet-node-proof/v1 <NUL> challengeId <NUL> machineId <NUL> purpose <NUL> newPublicKey
+  ```
+
+  where `purpose` is `session` or `rotate`, and `newPublicKey` is empty for
+  session proofs. The signature is hex-encoded; the proof for a `rotate`
+  challenge must be made with the *new* private key over the message that
+  binds it.
+- **Node credential** `fmnc1.<credentialId>.<machineId>.<nodeKeyVersion>.<expiresAt>.<HMAC>`:
+  HMAC-SHA256 over the dotted prefix, under the controller's node-credential
+  signing key, provisioned by the controller as an encrypted secret record.
+  The credential is short-lived (default seven days), renewable by key proof,
+  and invalidated by key rotation or revocation. Losing or replacing the
+  controller signing key fails closed: every outstanding credential and
+  session becomes unverifiable, and nodes re-prove or re-enroll through
+  explicit, audited actions.
+- **Node session** `fmns1.<sessionId>.<credentialId>.<machineId>.<expiresAt>.<HMAC>`:
+  the same codec for the short-lived session (default ten minutes) a verified
+  proof exchanges a credential for. A session is a node-surface credential
+  only — it never authorizes an operator API call; the node gateway (FM-205)
+  is its sole consumer.
+
+### Lifecycle rules
+
+- A node identity is one Ed25519 public key per machine, at a monotonic
+  `nodeKeyVersion`. Enrollment claims the token, binds the key, and mints the
+  first credential in one transaction; the machine and the audit record commit
+  together.
+- Every enrollment consumption, session issuance, and rotation is audited
+  under the actor `node:<machineId>`. Challenges themselves are not audited:
+  issuing one grants nothing, and nodes poll often enough to drown the ledger.
+- Rotation consumes a `rotate` challenge whose `newPublicKey` matches the
+  request, bumps the key version, revokes every outstanding credential and
+  session of the machine, and issues one new credential — atomically.
+- Revocation (operator action) invalidates the identity, every credential, and
+  every session; renewal fails until an explicit re-enrollment replaces the
+  revoked identity with a fresh token and a version bump. The disconnect of an
+  existing gateway connection is the gateway's job (FM-205); revocation here
+  prevents renewal.
+
 ## Golden fixtures
 
 `fixtures/v1/*.bin` are frozen encodings, one per message family, plus two

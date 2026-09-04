@@ -57,7 +57,7 @@ wave 7   FM-213 Tailscale (optional)
 | 1 | FM-S05, FM-200 | **Done** (2026-09-04) |
 | 2 | FM-201, FM-202 | **Done** (2026-09-04) |
 | 3 | FM-203 | **Done** (2026-09-04) |
-| 4 | FM-204 → FM-205 → FM-207 | serial; FM-204 next |
+| 4 | FM-204 → FM-205 → FM-207 | FM-204 **Done** (2026-09-04); FM-205 next |
 | 5 | FM-206, FM-208, FM-209 | parallel after wave 4 |
 | 6 | FM-210 → FM-211 → FM-212 | after FM-209 |
 | 7 | FM-213 | after FM-210; optional |
@@ -68,6 +68,7 @@ Handoff guarantees a fresh agent can rely on:
 - **FM-201** (#55): the system-OpenSSH provider (`fleet-provider-ssh`) with the isolated config dir, the probe→decide(new/known/changed)→pin→connect trust flow, per-endpoint verified fingerprints, and a real-sshd integration harness reused by FM-202/FM-203's tests. **FM-S05 resolved: direct OpenSSH invocation; Purple is reference only.**
 - **FM-202** (#56): `execute_script` with the metadata-blob transport (caller data never hits a remote shell), 64 KiB stream caps, deadline kills, a permit-pool limiter, the bounded `payload_json` on operations, the `ssh.exec` kind, and the controller's kind-dispatching executor enforcing the trust gate.
 - **FM-203** (#57): the probe script + parser (`fleet-provider-ssh::inventory`), the honest status vocabulary, fixture tests, and the `agentless.inventory` operation kind proven end-to-end. **Note:** capability facts are stored but not yet hydrated into the `Machine` read model — FM-209 owns that surface.
+- **FM-204** (#58): node enrollment and identity (see FM-204's handoff below and FM-204's close-out comment on #58). **Guarantees:** the `Nodes` use cases over the `NodePort` (`fleet-application::node`), the `node.enroll`/`node.read`/`node.revoke` permissions, the enrollment tables (`fleet-storage-sqlite` migration `0009`), the pinned token/credential/proof formats (`fleet-auth::node`, RFC 8032/known-vector pinned), the HMAC signing key auto-provisioned in the secret store (`fleet-controller::node_crypto`), machine-facing endpoints at `/api/node/v1/{enroll,challenge,session,rotate}` (contract in `proto/README.md#enrollment-over-http-fm-204`), and the operator surface `machines/{id}/node{,/enrollments,/revoke}` in the public OpenAPI (client regenerated). **What FM-205 can rely on:** `Nodes::enroll`, `challenge`, `prove_session`, `rotate`, and `validate_session` are ready to serve a gateway; `validate_session(credential-token)` answers `SessionValidity::Valid/Invalid` for a presented session. **What it owns next:** the WSS loop, session presentation, revocation-driven disconnect, and the `fleetd` client.
 
 M0's waves below are historical evidence of that milestone's execution, kept because the path-ownership rules are still the operating rules.
 

@@ -36,6 +36,9 @@ pub struct ApiState {
     pub authorizer: Arc<dyn Authorizer>,
     /// The system view's source, assembled by the controller.
     pub system: Arc<dyn crate::system::SystemInfoSource>,
+    /// The node trust use cases, when the controller was composed with a
+    /// database and a master key; `None` only in document/test states.
+    pub nodes: Option<Arc<fleet_application::node::Nodes>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -44,6 +47,7 @@ impl std::fmt::Debug for ApiState {
             .field("operations", &self.operations)
             .field("authorizer", &"dyn Authorizer")
             .field("system", &"dyn SystemInfoSource")
+            .field("nodes", &self.nodes)
             .finish()
     }
 }
@@ -178,6 +182,7 @@ impl ApiState {
             )),
             authorizer: Arc::new(PermitAllForDocument),
             system: Arc::new(UnavailableSystemInfo),
+            nodes: None,
         }
     }
 }
@@ -488,7 +493,7 @@ pub async fn cancel_operation(
 /// with the proper envelope instead of an extractor's plain-text failure:
 /// caller resolution is a deployment invariant, and its absence is a
 /// configuration defect worth a machine-readable answer.
-fn principal_or_error(
+pub(crate) fn principal_or_error(
     principal: Option<Extension<crate::ActingPrincipal>>,
     correlation_id: CorrelationId,
 ) -> Result<crate::ActingPrincipal, ApiErrorResponse> {

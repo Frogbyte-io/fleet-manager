@@ -36,7 +36,7 @@ async fn router_with_db() -> (axum::Router, Vec<tempfile::TempDir>) {
     let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
         .await
         .unwrap();
-    let router = build_router(&settings(dist.path()), Some(store.pool().clone()));
+    let router = build_router(&settings(dist.path()), Some(store.pool().clone()), None);
     (router, vec![dist, dir])
 }
 

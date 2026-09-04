@@ -55,6 +55,14 @@ pub enum Permission {
     MachineUpdate,
     /// Remove a machine and its facts. A mutation.
     MachineDelete,
+    /// Create a single-use enrollment token for a machine. A mutation: it
+    /// hands whoever holds the token the ability to bind a node key.
+    NodeEnroll,
+    /// View a machine's node identity, credentials, sessions, and tokens.
+    NodeRead,
+    /// Revoke a machine's node identity and every credential and session
+    /// under it. A mutation.
+    NodeRevoke,
 }
 
 impl Permission {
@@ -75,6 +83,9 @@ impl Permission {
         Permission::MachineCreate,
         Permission::MachineUpdate,
         Permission::MachineDelete,
+        Permission::NodeEnroll,
+        Permission::NodeRead,
+        Permission::NodeRevoke,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -94,6 +105,9 @@ impl Permission {
             Permission::MachineCreate => "machine.create",
             Permission::MachineUpdate => "machine.update",
             Permission::MachineDelete => "machine.delete",
+            Permission::NodeEnroll => "node.enroll",
+            Permission::NodeRead => "node.read",
+            Permission::NodeRevoke => "node.revoke",
         }
     }
 
@@ -107,7 +121,8 @@ impl Permission {
             | Permission::OperationRead
             | Permission::SecretList
             | Permission::AuditRead
-            | Permission::MachineRead => false,
+            | Permission::MachineRead
+            | Permission::NodeRead => false,
             Permission::OperationCreate
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -115,7 +130,9 @@ impl Permission {
             | Permission::SecretDelete
             | Permission::MachineCreate
             | Permission::MachineUpdate
-            | Permission::MachineDelete => true,
+            | Permission::MachineDelete
+            | Permission::NodeEnroll
+            | Permission::NodeRevoke => true,
         }
     }
 
@@ -137,7 +154,10 @@ impl Permission {
             | Permission::SecretRead
             | Permission::SecretDelete
             | Permission::MachineUpdate
-            | Permission::MachineDelete => true,
+            | Permission::MachineDelete
+            | Permission::NodeEnroll
+            | Permission::NodeRead
+            | Permission::NodeRevoke => true,
         }
     }
 }

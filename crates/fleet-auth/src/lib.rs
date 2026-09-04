@@ -22,8 +22,10 @@
 #![warn(missing_docs)]
 
 pub mod adapter;
+pub mod node;
 
 pub use adapter::LanAllowAllAuthorizer;
+pub use node::HmacNodeCrypto;
 
 use std::fmt;
 use std::net::SocketAddr;

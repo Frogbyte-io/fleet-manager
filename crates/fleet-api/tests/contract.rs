@@ -37,6 +37,7 @@ fn test_router() -> (axum::Router, Arc<FakePort>) {
         operations: Arc::new(Operations::new(port.clone(), Arc::new(FakeAudit))),
         authorizer: Arc::new(PermitAll),
         system: Arc::new(FakeSystemInfo),
+        nodes: None,
     });
     (
         router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
@@ -373,6 +374,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
         )),
         authorizer,
         system: Arc::new(FakeSystemInfo),
+        nodes: None,
     })
 }
 

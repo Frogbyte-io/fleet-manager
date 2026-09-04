@@ -14,10 +14,12 @@
 
 pub mod audit;
 pub mod machines;
+pub mod nodes;
 pub mod operations;
 
 pub use audit::{AuditLedger, AuditSink};
 pub use machines::MachineRepository;
+pub use nodes::NodeRepository;
 pub use operations::OperationRepository;
 
 use std::path::{Path, PathBuf};

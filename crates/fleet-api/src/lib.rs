@@ -15,6 +15,7 @@ mod correlation;
 mod envelope;
 mod error;
 mod meta;
+pub mod node;
 pub mod operations;
 pub mod system;
 
@@ -65,12 +66,26 @@ pub const API_BASE_PATH: &str = "/api/v1";
         OperationStatus,
         operations::CreateOperationRequest,
         operations::OperationDto,
-        system::SystemInfo
+        system::SystemInfo,
+        node::CreateEnrollmentTokenRequest,
+        node::EnrollmentTokenCreatedDto,
+        node::EnrollmentTokenDto,
+        node::EnrollmentTokenListDto,
+        node::NodeCredentialDto,
+        node::NodeIdentityDto,
+        node::NodeRevokedDto,
+        node::NodeViewDto
     )),
     tags(
         (name = "meta", description = "Service and contract description."),
         (name = "system", description = "The controller's own view of itself."),
-        (name = "operations", description = "Durable operations: accepted remote work.")
+        (name = "operations", description = "Durable operations: accepted remote work."),
+        (
+            name = "nodes",
+            description = "Node enrollment and identity: enrollment tokens, node state, and revocation. \
+                           The machine-facing enrollment endpoints under /api/node/v1 are versioned with \
+                           the node protocol and documented in proto/README.md, not here."
+        )
     )
 )]
 pub struct ApiDoc;
@@ -93,6 +108,12 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(operations::cancel_operation))
                 .routes(routes!(system::get_system_info))
                 .routes(routes!(system::stream_operation_events))
+                .routes(routes!(
+                    node::create_enrollment_token,
+                    node::list_enrollment_tokens
+                ))
+                .routes(routes!(node::get_node))
+                .routes(routes!(node::revoke_node))
                 .with_state(state),
         )
         .split_for_parts();

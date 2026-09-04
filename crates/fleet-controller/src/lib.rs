@@ -11,12 +11,14 @@
 
 pub mod browser;
 pub mod exec;
+pub mod node_crypto;
 pub mod worker;
 
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;
@@ -40,7 +42,14 @@ pub struct Settings {
 /// Builds the API state over an opened store, or a state whose backends
 /// answer nothing when the caller has none (tests). The authorization policy
 /// is the trusted-LAN adapter in both cases.
-fn api_state(db: Option<SqlitePool>) -> fleet_api::operations::ApiState {
+///
+/// `nodes` is the node-trust use-case service, composed by the binary when
+/// the store and the secret store are both available; without it the node
+/// surface answers with the standard envelope.
+fn api_state(
+    db: Option<SqlitePool>,
+    nodes: Option<Arc<fleet_application::node::Nodes>>,
+) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
     if let Some(pool) = db {
@@ -53,6 +62,7 @@ fn api_state(db: Option<SqlitePool>) -> fleet_api::operations::ApiState {
             operations: std::sync::Arc::new(operations),
             authorizer,
             system: std::sync::Arc::new(system),
+            nodes,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -63,6 +73,7 @@ fn api_state(db: Option<SqlitePool>) -> fleet_api::operations::ApiState {
         operations: state.operations,
         authorizer: std::sync::Arc::new(DenyAllForTests),
         system: state.system,
+        nodes: None,
     }
 }
 
@@ -150,26 +161,38 @@ fn shell(settings: &Settings) -> ServeDir {
 ///
 /// `db` is the store's connection pool once the database is open; readiness
 /// probes it live and the operation use cases run over it. Passing `None` is
-/// for tests that do not involve storage. Every request through this router
-/// resolves to the trusted-LAN principal with its request evidence (see
-/// `fleet_auth`); the service must be made with connection info for that
-/// evidence to include the peer address.
-pub fn build_router(settings: &Settings, db: Option<SqlitePool>) -> Router {
+/// for tests that do not involve storage. `nodes` is the node-trust use-case
+/// service (see [`node_crypto`]); when it is present the machine-facing
+/// enrollment router is mounted at `/api/node/v1` alongside the public API.
+/// Every request through this router resolves to the trusted-LAN principal
+/// with its request evidence (see `fleet_auth`); the service must be made
+/// with connection info for that evidence to include the peer address.
+pub fn build_router(
+    settings: &Settings,
+    db: Option<SqlitePool>,
+    nodes: Option<Arc<fleet_application::node::Nodes>>,
+) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
         db: db.clone(),
     };
-    let api_state = std::sync::Arc::new(api_state(db));
-    let shell = shell(settings).fallback(fleet_api::router(api_state));
-
-    Router::new()
+    let api_state = Arc::new(api_state(db, nodes));
+    let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback_service(shell)
         .layer(axum::middleware::from_fn(browser::browser_mutation_guard))
         .layer(axum::middleware::from_fn(browser::security_headers))
         .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
-        .with_state(probe)
+        .with_state(probe);
+    if api_state.nodes.is_some() {
+        // The machine-facing enrollment endpoints: versioned with the node
+        // protocol, documented in proto/README.md, and mounted beside the
+        // public API — not under it.
+        return router.nest("/api/node/v1", fleet_api::node::node_router(api_state));
+    }
+    router
 }
 
 async fn healthz() -> &'static str {
@@ -214,6 +237,7 @@ async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
 /// completes, then returns once in-flight requests have drained.
 ///
 /// `db` is the opened store's pool, or `None` in tests; see [`build_router`].
+/// `nodes` is the node-trust service, when the composition supports it.
 ///
 /// # Errors
 ///
@@ -221,10 +245,11 @@ async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
 pub async fn serve(
     settings: Settings,
     db: Option<SqlitePool>,
+    nodes: Option<Arc<fleet_application::node::Nodes>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
-    serve_on(listener, settings, db, shutdown).await
+    serve_on(listener, settings, db, nodes, shutdown).await
 }
 
 /// Serves the controller on an already bound listener; [`serve`] is this plus
@@ -238,6 +263,7 @@ pub async fn serve_on(
     listener: tokio::net::TcpListener,
     settings: Settings,
     db: Option<SqlitePool>,
+    nodes: Option<Arc<fleet_application::node::Nodes>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -251,9 +277,14 @@ pub async fn serve_on(
             fleet_config::WEB_DIST_VAR
         );
     }
+    if nodes.is_some() {
+        eprintln!("node trust surface mounted at /api/node/v1");
+    } else {
+        eprintln!("warning: node trust surface unavailable (no database or no master key)");
+    }
     axum::serve(
         listener,
-        build_router(&settings, db).into_make_service_with_connect_info::<SocketAddr>(),
+        build_router(&settings, db, nodes).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)
     .await
