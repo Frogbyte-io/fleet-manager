@@ -744,6 +744,7 @@ impl std::error::Error for DispatchError {}
 #[derive(Debug)]
 pub struct NodeCommandExecutor {
     gateway: Arc<GatewayService>,
+    machines: Arc<dyn fleet_application::machine::MachinePort>,
     fallback: Arc<dyn fleet_application::worker::OperationExecutor>,
 }
 
@@ -757,9 +758,14 @@ impl NodeCommandExecutor {
     #[must_use]
     pub fn new(
         gateway: Arc<GatewayService>,
+        machines: Arc<dyn fleet_application::machine::MachinePort>,
         fallback: Arc<dyn fleet_application::worker::OperationExecutor>,
     ) -> Self {
-        Self { gateway, fallback }
+        Self {
+            gateway,
+            machines,
+            fallback,
+        }
     }
 
     /// The operation's dispatch deadline in Unix milliseconds.
@@ -779,6 +785,7 @@ impl fleet_application::worker::OperationExecutor for NodeCommandExecutor {
     ) -> Result<(), String> {
         match operation.kind.as_str() {
             "node.noop" | "node.diagnostic" => self.execute_node(operations, operation).await,
+            "node.inventory" => self.execute_inventory(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
         }
     }
@@ -894,6 +901,162 @@ impl NodeCommandExecutor {
                 complete(operations, &operation.id, "timed_out", None, None).await
             }
         }
+    }
+}
+
+impl NodeCommandExecutor {
+    /// Dispatches an inventory collection and ingests the node's report:
+    /// capability facts upsert with provenance, and the whole report lands
+    /// as the machine's newest snapshot. Observations are recorded data —
+    /// no per-snapshot audit event; the operation's own audit intent is the
+    /// trace, so volatile collections cannot flood the ledger.
+    async fn execute_inventory(
+        &self,
+        operations: &fleet_application::operation::Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct InventoryPayload {
+            machine_id: String,
+            /// The revision the controller believes the node is on; a
+            /// mismatch or absence asks for a full snapshot.
+            expected_revision: Option<u64>,
+        }
+        let payload: InventoryPayload = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a valid inventory dispatch: {error}"))?;
+        if payload.machine_id.is_empty() || payload.machine_id.len() > 64 {
+            return Err("the payload's machine id is malformed".to_owned());
+        }
+
+        let deadline = Self::deadline_for(operation);
+        let remaining = deadline - fleet_core::SystemClock::now_unix_millis();
+        if remaining <= 0 {
+            return complete(operations, &operation.id, "timed_out", None, None).await;
+        }
+        operations
+            .record_progress(
+                &operation.id,
+                Some(0),
+                Some(1),
+                Some(&format!("collecting inventory on {}", payload.machine_id)),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        // The revision the controller last ingested decides delta versus
+        // full snapshot: agreement produces a delta, drift produces the
+        // full snapshot the gap rule demands.
+        let expected_revision = match payload.expected_revision {
+            Some(explicit) => Some(explicit),
+            None => self
+                .machines
+                .latest_inventory_revision(&payload.machine_id)
+                .await
+                .map_err(|failure| {
+                    format!("the last inventory revision is unreadable: {failure}")
+                })?,
+        };
+        let command = wire::Command {
+            operation_id: operation.id.clone(),
+            kind: operation.kind.clone(),
+            kind_schema_version: 1,
+            deadline_unix_millis: deadline,
+            idempotency_key: operation.idempotency_key.clone().unwrap_or_default(),
+            authorization_digest: String::new(),
+            max_output_bytes: MAX_RESULT_PAYLOAD_BYTES,
+            cancellation: wire::CancellationPolicy::BestEffort as i32,
+            payload: serde_json::to_vec(&serde_json::json!({
+                "expectedRevision": expected_revision,
+            }))
+            .unwrap_or_default(),
+        };
+        let dispatch = self.gateway.dispatch(&payload.machine_id, command);
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_millis(u64::try_from(remaining).unwrap_or(u64::MAX)),
+            dispatch,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(DispatchError::Timeout {
+                operation_id: operation.id.clone(),
+            }),
+        };
+        self.gateway.release(&payload.machine_id);
+
+        let result = outcome.map_err(|error| error.to_string())?;
+        if wire::ResultStatus::try_from(result.status)
+            .map(|status| status != wire::ResultStatus::Succeeded)
+            .unwrap_or(true)
+        {
+            let error_json = serde_json::json!({
+                "reason": "inventory_refused",
+                "detail": String::from_utf8_lossy(&result.payload),
+            })
+            .to_string();
+            return complete(operations, &operation.id, "failed", None, Some(&error_json)).await;
+        }
+        let report: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&result.payload))
+                .map_err(|error| format!("the inventory report is not JSON: {error}"))?;
+        if report["schemaVersion"].as_u64() != Some(1) {
+            return Err(format!(
+                "the inventory report carries schema version {:?}, not 1",
+                report["schemaVersion"]
+            ));
+        }
+        let facts: Vec<fleet_core::CapabilityFact> =
+            serde_json::from_value(report["facts"].clone())
+                .map_err(|error| format!("the inventory report's facts are malformed: {error}"))?;
+        if facts.len() > 256 {
+            return Err("the inventory report carries too many facts".to_owned());
+        }
+        for fact in &facts {
+            fact.validate()
+                .map_err(|detail| format!("the inventory report has a malformed fact: {detail}"))?;
+        }
+        let mode = report["mode"].as_str().unwrap_or("full").to_owned();
+        let revision = report["revision"].as_u64().unwrap_or(0);
+
+        // Provenance: what observed it, when, at which schema version.
+        let observed_at = fleet_core::SystemClock::now_unix_millis();
+        self.machines
+            .record_capabilities(&payload.machine_id, &facts)
+            .await
+            .map_err(|failure| format!("the facts could not be recorded: {failure}"))?;
+        let snapshot = serde_json::to_string(&report)
+            .map_err(|error| format!("the report does not serialize: {error}"))?;
+        self.machines
+            .record_snapshot(
+                &payload.machine_id,
+                &format!("fleetd/{}", env!("CARGO_PKG_VERSION")),
+                &snapshot,
+                observed_at,
+            )
+            .await
+            .map_err(|failure| format!("the snapshot could not be recorded: {failure}"))?;
+
+        let result_json = serde_json::json!({
+            "mode": mode,
+            "revision": revision,
+            "facts": facts.len(),
+            "probeErrors": report["probeErrors"],
+        })
+        .to_string();
+        complete(
+            operations,
+            &operation.id,
+            "succeeded",
+            Some(&result_json),
+            None,
+        )
+        .await
     }
 }
 

@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use crate::http::Controller;
+use crate::inventory::InventoryState;
 use crate::journal::NodeJournal;
 use crate::state::{Jitter, NodeState};
 
@@ -55,6 +56,7 @@ pub async fn connect_once(
     controller: &Controller,
     state: &std::sync::Arc<NodeState>,
     journal: &std::sync::Arc<NodeJournal>,
+    inventory: &std::sync::Arc<InventoryState>,
     shutdown: &mut (dyn std::future::Future<Output = ()> + Unpin + Send),
 ) -> Attempt {
     // The key proof happens over blocking HTTP on purpose: it is one small
@@ -203,11 +205,12 @@ pub async fn connect_once(
                         // goes back through the outbound channel.
                         let journal = journal.clone();
                         let state = state.clone();
+                        let inventory = inventory.clone();
                         let outbound = outbound_tx.clone();
                         let operation_id = command.operation_id.clone();
                         tokio::spawn(async move {
                             let outcome = tokio::task::spawn_blocking(move || {
-                                crate::commands::execute(&journal, &state, &command)
+                                crate::commands::execute(&journal, &state, &inventory, &command)
                             })
                             .await
                             .unwrap_or_else(|error| {

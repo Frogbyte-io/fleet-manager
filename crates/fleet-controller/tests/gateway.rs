@@ -45,6 +45,7 @@ struct Harness {
     _dist: tempfile::TempDir,
     _store_dir: tempfile::TempDir,
     _key_dir: tempfile::TempDir,
+    pool: sqlx::SqlitePool,
     machines: fleet_storage_sqlite::MachineRepository,
     nodes: Arc<fleet_application::node::Nodes>,
     gateway: Arc<GatewayService>,
@@ -109,6 +110,7 @@ async fn harness() -> Harness {
         _dist: dist,
         _store_dir: store_dir,
         _key_dir: key_dir,
+        pool: store.pool().clone(),
         machines,
         nodes: services.nodes.clone(),
         gateway: services.gateway.clone(),
@@ -131,6 +133,9 @@ impl Harness {
     fn node_executor(&self) -> fleet_controller::gateway::NodeCommandExecutor {
         fleet_controller::gateway::NodeCommandExecutor::new(
             self.gateway.clone(),
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                self.pool.clone(),
+            )),
             Arc::new(fleet_application::worker::NoopExecutor),
         )
     }
@@ -679,14 +684,25 @@ async fn start_real_node(
             .map_err(|error| error.to_string())
             .unwrap(),
     );
+    let inventory = std::sync::Arc::new(
+        fleetd::inventory::InventoryState::open(&state_dir.join("inventory.json"))
+            .map_err(|error| error.to_string())
+            .unwrap(),
+    );
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let run_controller = controller.clone();
     let run_state = node_state;
     let run_journal = journal.clone();
     tokio::spawn(async move {
-        let _ = fleetd::run_gateway_connected(run_controller, run_state, run_journal, async move {
-            let _ = shutdown_rx.await;
-        })
+        let _ = fleetd::run_gateway_connected(
+            run_controller,
+            run_state,
+            run_journal,
+            inventory,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
         .await;
     });
     // The gateway loop proves and connects within its bounded backoff.
@@ -918,4 +934,100 @@ async fn the_in_flight_bound_refuses_a_dispatch_beyond_flow_control() {
     for task in pending {
         let _ = task.await;
     }
+}
+
+#[tokio::test]
+async fn an_inventory_operation_records_facts_and_the_snapshot() {
+    let harness = harness().await;
+    let (_state_dir, machine_id, shutdown) = start_real_node(&harness, "inventoried").await;
+
+    // First collection: a full snapshot, ingested as facts + a snapshot row.
+    let first = harness
+        .create_node_operation("node.inventory", &machine_id, None)
+        .await;
+    let report = harness.tick().await;
+    assert!(report.completed, "{report:?}");
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &first.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        finished.state,
+        "succeeded",
+        "{}",
+        finished.error_json.unwrap_or_default()
+    );
+    let result: Value = serde_json::from_str(&finished.result_json.unwrap()).unwrap();
+    assert_eq!(result["mode"], "full");
+    let fact_count = result["facts"].as_i64().unwrap();
+    assert!(fact_count >= 2, "os family and arch at minimum: {result}");
+
+    let os_family: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM machine_capabilities WHERE machine_id = ?1          AND namespace = 'os' AND name = 'family'",
+    )
+    .bind(&machine_id)
+    .fetch_optional(&harness.pool)
+    .await
+    .expect("the facts query must run");
+    assert_eq!(os_family.expect("the os fact").0, std::env::consts::OS);
+    let snapshots: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM inventory_snapshots WHERE machine_id = ?1 AND source LIKE 'fleetd/%'",
+    )
+    .bind(&machine_id)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the snapshot query must run");
+    assert!(snapshots >= 1, "the snapshot row must be recorded");
+
+    // Second collection: a delta with no changes is still recorded.
+    let second = harness
+        .create_node_operation("node.inventory", &machine_id, None)
+        .await;
+    assert!(harness.tick().await.completed);
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &second.id,
+        )
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_str(&finished.result_json.unwrap()).unwrap();
+    assert_eq!(result["mode"], "delta", "{result}");
+    assert_eq!(result["facts"], 0, "nothing changed between the rounds");
+
+    // A stale expected revision forces a full snapshot (the gap rule).
+    let body = harness
+        .gateway
+        .dispatch(
+            &machine_id,
+            wire::Command {
+                operation_id: "op-gap-test".to_owned(),
+                kind: "node.inventory".to_owned(),
+                kind_schema_version: 1,
+                deadline_unix_millis: i64::MAX,
+                idempotency_key: String::new(),
+                authorization_digest: String::new(),
+                max_output_bytes: 256 * 1024,
+                cancellation: wire::CancellationPolicy::BestEffort as i32,
+                payload: serde_json::json!({ "expectedRevision": 99 })
+                    .to_string()
+                    .into_bytes(),
+            },
+        )
+        .await
+        .expect("the gap dispatch must be answered");
+    assert_eq!(
+        body.status,
+        fleet_protocol::wire::ResultStatus::Succeeded as i32
+    );
+    let gap_report: Value = serde_json::from_str(&String::from_utf8_lossy(&body.payload)).unwrap();
+    assert_eq!(gap_report["mode"], "full", "{gap_report}");
+    let _ = shutdown.send(());
 }

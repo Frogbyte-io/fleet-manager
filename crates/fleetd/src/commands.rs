@@ -17,11 +17,13 @@ use std::time::Instant;
 
 use fleet_protocol::wire;
 
+use crate::inventory::InventoryState;
 use crate::journal::{JournalFault, JournalResult, NodeJournal};
+use crate::probes::{ProbeRunner, standard_probes};
 use crate::state::NodeState;
 
 /// The command kinds this build executes. Anything else is rejected.
-pub const SUPPORTED_KINDS: [&str; 2] = ["node.noop", "node.diagnostic"];
+pub const SUPPORTED_KINDS: [&str; 3] = ["node.noop", "node.diagnostic", "node.inventory"];
 
 /// The result of executing (or refusing) one command.
 #[derive(Clone, Debug)]
@@ -53,6 +55,7 @@ pub fn deadline_passed(deadline_unix_millis: i64) -> bool {
 pub fn execute(
     journal: &Arc<NodeJournal>,
     state: &Arc<NodeState>,
+    inventory: &Arc<InventoryState>,
     command: &wire::Command,
 ) -> Result<CommandOutcome, String> {
     let operation_id = command.operation_id.as_str();
@@ -136,6 +139,7 @@ pub fn execute(
             fault: None,
             output_truncated: false,
         },
+        "node.inventory" => collect_inventory(inventory, command)?,
         other => rejected(
             wire::FaultCode::SessionRejected,
             &format!("the node does not execute {other:?} commands"),
@@ -169,6 +173,34 @@ fn state_uptime_millis() -> i64 {
     static STARTED: OnceLock<Instant> = OnceLock::new();
     let started = STARTED.get_or_init(Instant::now);
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Collects one inventory round and serializes the report within the
+/// command's output bound.
+fn collect_inventory(
+    inventory: &Arc<InventoryState>,
+    command: &wire::Command,
+) -> Result<CommandOutcome, String> {
+    let expected_revision = serde_json::from_slice::<serde_json::Value>(&command.payload)
+        .ok()
+        .and_then(|payload| payload["expectedRevision"].as_u64());
+    let report = inventory
+        .collect(
+            &ProbeRunner::new(standard_probes()),
+            expected_revision,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .map_err(|error| format!("the inventory collection failed: {error}"))?;
+    let payload = serde_json::to_vec(&report)
+        .map_err(|error| format!("the inventory report does not serialize: {error}"))?;
+    let bound = usize::try_from(command.max_output_bytes).unwrap_or(usize::MAX);
+    let truncated = payload.len() > bound;
+    Ok(CommandOutcome {
+        status: wire::ResultStatus::Succeeded,
+        payload: String::from_utf8_lossy(&payload[..bound.min(payload.len())]).into_owned(),
+        fault: None,
+        output_truncated: truncated,
+    })
 }
 
 fn rejected(code: wire::FaultCode, message: &str) -> CommandOutcome {
@@ -245,6 +277,11 @@ mod tests {
         (dir, journal)
     }
 
+    fn inventory() -> Arc<InventoryState> {
+        let dir = tempfile::tempdir().unwrap();
+        Arc::new(InventoryState::open(&dir.path().join("inventory.json")).unwrap())
+    }
+
     fn state() -> Arc<NodeState> {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
@@ -269,7 +306,13 @@ mod tests {
     fn an_unknown_kind_is_rejected_without_execution() {
         let (_dir, journal) = journal();
         let state = state();
-        let outcome = execute(&journal, &state, &command("shell.exec", "op-x")).unwrap();
+        let outcome = execute(
+            &journal,
+            &state,
+            &inventory(),
+            &command("shell.exec", "op-x"),
+        )
+        .unwrap();
         assert_eq!(outcome.status, wire::ResultStatus::Rejected);
         assert!(outcome.fault.is_some());
         // A rejected command is journaled as terminal, so a redelivery
@@ -283,7 +326,7 @@ mod tests {
         let state = state();
         let mut expired = command("node.noop", "op-y");
         expired.deadline_unix_millis = 0;
-        let outcome = execute(&journal, &state, &expired).unwrap();
+        let outcome = execute(&journal, &state, &inventory(), &expired).unwrap();
         assert_eq!(outcome.status, wire::ResultStatus::TimedOut);
         assert_eq!(journal.terminal_result("op-y").unwrap().status, "timed_out");
     }
@@ -292,8 +335,20 @@ mod tests {
     fn a_replayed_result_never_re_executes() {
         let (_dir, journal) = journal();
         let state = state();
-        let first = execute(&journal, &state, &command("node.noop", "op-z")).unwrap();
-        let replay = execute(&journal, &state, &command("node.noop", "op-z")).unwrap();
+        let first = execute(
+            &journal,
+            &state,
+            &inventory(),
+            &command("node.noop", "op-z"),
+        )
+        .unwrap();
+        let replay = execute(
+            &journal,
+            &state,
+            &inventory(),
+            &command("node.noop", "op-z"),
+        )
+        .unwrap();
         assert_eq!(first.status, wire::ResultStatus::Succeeded);
         assert_eq!(replay.status, wire::ResultStatus::Succeeded);
         assert_eq!(replay.payload, first.payload, "the journal replayed it");
@@ -306,8 +361,13 @@ mod tests {
         // Acceptance without a result stands in for a command that is
         // executing right now.
         journal.record_accepted("op-flight", "node.noop").unwrap();
-        let error = execute(&journal, &state, &command("node.noop", "op-flight"))
-            .expect_err("a duplicate in flight is refused");
+        let error = execute(
+            &journal,
+            &state,
+            &inventory(),
+            &command("node.noop", "op-flight"),
+        )
+        .expect_err("a duplicate in flight is refused");
         assert!(error.contains("already in flight"), "{error}");
     }
 
@@ -315,7 +375,13 @@ mod tests {
     fn the_diagnostic_result_carries_bounded_facts() {
         let (_dir, journal) = journal();
         let state = state();
-        let outcome = execute(&journal, &state, &command("node.diagnostic", "op-d")).unwrap();
+        let outcome = execute(
+            &journal,
+            &state,
+            &inventory(),
+            &command("node.diagnostic", "op-d"),
+        )
+        .unwrap();
         assert_eq!(outcome.status, wire::ResultStatus::Succeeded);
         let facts: serde_json::Value = serde_json::from_str(&outcome.payload).unwrap();
         assert_eq!(facts["os"], std::env::consts::OS);

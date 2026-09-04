@@ -8,7 +8,9 @@
 pub mod commands;
 pub mod gateway;
 pub mod http;
+pub mod inventory;
 pub mod journal;
+pub mod probes;
 pub mod session;
 pub mod state;
 
@@ -41,7 +43,20 @@ pub async fn run(command: Command) -> Result<(), String> {
                 )
                 .map_err(|error| error.to_string())?,
             );
-            run_gateway_connected(controller, node_state, journal, shutdown_signal()).await
+            let inventory = std::sync::Arc::new(
+                inventory::InventoryState::open(
+                    &state_dir(args.state_dir.as_deref()).join("inventory.json"),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+            run_gateway_connected(
+                controller,
+                node_state,
+                journal,
+                inventory,
+                shutdown_signal(),
+            )
+            .await
         }
     }
 }
@@ -93,8 +108,16 @@ pub async fn run_gateway(
     controller: http::Controller,
     node_state: std::sync::Arc<state::NodeState>,
     journal: std::sync::Arc<journal::NodeJournal>,
+    inventory: std::sync::Arc<inventory::InventoryState>,
 ) -> Result<(), String> {
-    run_gateway_connected(controller, node_state, journal, shutdown_signal()).await
+    run_gateway_connected(
+        controller,
+        node_state,
+        journal,
+        inventory,
+        shutdown_signal(),
+    )
+    .await
 }
 
 /// The run loop with a caller-supplied shutdown, so integration tests can
@@ -108,6 +131,7 @@ pub async fn run_gateway_connected(
     controller: http::Controller,
     node_state: std::sync::Arc<state::NodeState>,
     journal: std::sync::Arc<journal::NodeJournal>,
+    inventory: std::sync::Arc<inventory::InventoryState>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), String> {
     let mut shutdown = Box::pin(shutdown);
@@ -115,7 +139,9 @@ pub async fn run_gateway_connected(
     loop {
         let shutdown_ref: &mut (dyn std::future::Future<Output = ()> + Unpin + Send) =
             &mut shutdown;
-        match gateway::connect_once(&controller, &node_state, &journal, shutdown_ref).await {
+        match gateway::connect_once(&controller, &node_state, &journal, &inventory, shutdown_ref)
+            .await
+        {
             gateway::Attempt::Stop(reason) => {
                 eprintln!("fleetd: {reason}");
                 return Ok(());

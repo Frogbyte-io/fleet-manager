@@ -202,6 +202,33 @@ frames — no new payload variants:
   `controller-node-protocol.md#commands-and-privilege` — not extensions of
   these two.
 
+### Inventory over dispatch (FM-206)
+
+Node inventory is a `node.inventory` command kind, not a new frame family:
+the controller dispatches it like any other node command, and the result
+payload carries the report — no new payload variants, no version bump.
+
+- **Probes** are pluggable and isolated: each runs on its own thread under a
+  two-second timeout, a panic degrades to a probe error, and one probe's
+  failure never removes another's facts. Facts carry provenance
+  (`fleetd/<probe>/<schema>`) and an observation timestamp; fact values are
+  bounded to 4 KiB and a report to 256 facts, inside the command result's
+  output bound (`output_truncated` marks a cut-off report).
+- **Baseline and delta** are node-local state: every collection records what
+  it observed as the new baseline (revision + 1, persisted atomically). A
+  dispatch whose `expectedRevision` matches the node's baseline answers with
+  a **delta** of changed facts only; a mismatch, an absent expectation, or a
+  missing baseline answers with a **full snapshot**. A lost delivery
+  self-heals: the controller's next `expectedRevision` misses, so the gap
+  rule returns the full set.
+- **Ingestion** upserts the facts into the machine's capability records and
+  appends the whole report as the machine's newest snapshot, both with
+  provenance. There is deliberately no per-snapshot audit event: snapshots
+  are observations, and the dispatching operation's own audit intent is the
+  trace — a chatty node cannot flood the ledger.
+- The journal's dedupe makes collection idempotent: a redelivered inventory
+  command replays its report instead of re-probing.
+
 ## Golden fixtures
 
 `fixtures/v1/*.bin` are frozen encodings, one per message family, plus two

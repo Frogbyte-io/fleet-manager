@@ -365,6 +365,27 @@ impl MachinePort for MachineRepository {
         Ok(())
     }
 
+    async fn latest_inventory_revision(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<u64>, PortFailure> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT payload_json FROM inventory_snapshots WHERE machine_id = ?1 \
+             ORDER BY collected_at DESC, id DESC LIMIT 1",
+        )
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("latest_inventory_revision: {error}"),
+        })?;
+        Ok(row.and_then(|(payload,)| {
+            serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|report| report["revision"].as_u64())
+        }))
+    }
+
     async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure> {
         sqlx::query_scalar("SELECT verified_fingerprint FROM machine_endpoints WHERE id = ?1")
             .bind(endpoint_id)

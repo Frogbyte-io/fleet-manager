@@ -247,6 +247,16 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the endpoint is unknown or the backend errors.
     async fn verified_fingerprint(&self, endpoint_id: &str) -> Result<Option<String>, PortFailure>;
+    /// The revision of the newest inventory snapshot recorded for a
+    /// machine, when any. This is what the controller sends back as
+    /// `expectedRevision`, so the node answers with a delta when the two
+    /// agree and a full snapshot when they have drifted apart.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn latest_inventory_revision(&self, machine_id: &str)
+    -> Result<Option<u64>, PortFailure>;
 }
 
 /// The authorized machine use cases.

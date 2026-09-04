@@ -29,12 +29,13 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// an unknown kind is refused rather than accepted as an unspecified promise.
 /// `ssh.exec` carries its bounded script payload in `payload_json`; the node
 /// kinds dispatch through the gateway with a `{"machineId": …}` payload.
-pub const CREATABLE_KINDS: [&str; 5] = [
+pub const CREATABLE_KINDS: [&str; 6] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
     "node.noop",
     "node.diagnostic",
+    "node.inventory",
 ];
 
 /// The payload bound for provider inputs.

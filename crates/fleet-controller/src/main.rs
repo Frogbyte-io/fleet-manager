@@ -136,8 +136,13 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             };
             match &services {
                 Some(services) => {
+                    let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        ));
                     std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                         services.gateway.clone(),
+                        node_machines,
                         ssh,
                     ))
                 }
