@@ -92,22 +92,17 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             eprintln!("secret store unavailable: no master key configured");
         }
         let pool = Some(store.pool().clone());
-        // The node-trust service composes only over a store and a secret
+        // The node-trust services compose only over a store and a secret
         // store; without both, the node surface serves the standard
         // "unavailable" envelope instead of minting credentials it cannot
         // verify.
-        let nodes = match secrets.as_ref() {
+        let services = match secrets.as_ref() {
             Some(secret_store) => {
                 match fleet_controller::node_crypto::NodeCryptoService::open(secret_store).await {
-                    Ok(crypto) => Some(std::sync::Arc::new(fleet_application::node::Nodes::new(
-                        std::sync::Arc::new(fleet_storage_sqlite::NodeRepository::new(
-                            store.pool().clone(),
-                        )),
+                    Ok(crypto) => Some(fleet_controller::compose_node_services(
+                        store.pool(),
                         std::sync::Arc::new(crypto),
-                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                            store.pool().clone(),
-                        )),
-                    ))),
+                    )),
                     Err(error) => {
                         eprintln!("fleet-controller: refusing to start: {error}");
                         return None;
@@ -139,7 +134,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         let worker_handle = tokio::spawn(run_worker(worker_operations, executor, async move {
             let _ = worker_shutdown_rx.await;
         }));
-        let served = serve(settings, pool, nodes, shutdown_signal()).await;
+        let served = serve(settings, pool, services, shutdown_signal()).await;
         let _ = worker_shutdown.send(());
         let _ = worker_handle.await;
         store.close().await;

@@ -14,10 +14,10 @@ use fleet_application::audit::AuditOutcome;
 use fleet_application::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, ReasonId};
 use fleet_application::node::{
     ChallengePurpose, EnrollClaim, EnrolledNode, EnrollmentTokenCreated, EnrollmentTokenRecord,
-    EnrollmentTokenView, NewChallenge, NewEnrollmentToken, NodeChallenge, NodeCredential,
-    NodeCredentialClaims, NodeCrypto, NodeIdentity, NodePort, NodePortError, NodeSessionClaims,
-    NodeSessionIssued, NodeStatus, NodeUseCaseError, NodeView, Nodes, RotateClaim, RotationOutcome,
-    SessionClaim, SessionValidity, TokenFacts, proof_message,
+    EnrollmentTokenView, GatewayState, NewChallenge, NewEnrollmentToken, NodeChallenge,
+    NodeCredential, NodeCredentialClaims, NodeCrypto, NodeIdentity, NodePort, NodePortError,
+    NodeSessionClaims, NodeSessionIssued, NodeStatus, NodeUseCaseError, NodeView, Nodes,
+    RotateClaim, RotationOutcome, SessionClaim, SessionValidity, TokenFacts, proof_message,
 };
 use fleet_application::operation::AuditPort;
 
@@ -281,6 +281,9 @@ impl NodePort for MemoryPort {
                 node_version: claim.node_version.clone(),
                 enrolled_at: claim.now,
                 rotated_at: rebind.then_some(claim.now),
+                gateway_state: GatewayState::Offline,
+                last_seen_at: None,
+                boot_session_id: None,
             },
         );
         drop(identities);
@@ -657,6 +660,25 @@ impl NodePort for MemoryPort {
         {
             credential.last_used_at = Some(used_at);
         }
+        Ok(())
+    }
+
+    async fn record_gateway_state(
+        &self,
+        machine_id: &str,
+        state: GatewayState,
+        boot_session: Option<&str>,
+        last_seen: i64,
+    ) -> Result<(), NodePortError> {
+        let mut identities = self.identities.lock().expect("uncontended");
+        let identity = identities
+            .get_mut(machine_id)
+            .ok_or(NodePortError::NotFound {
+                what: "node identity".to_owned(),
+            })?;
+        identity.gateway_state = state;
+        identity.last_seen_at = Some(last_seen);
+        identity.boot_session_id = boot_session.map(str::to_owned);
         Ok(())
     }
 }

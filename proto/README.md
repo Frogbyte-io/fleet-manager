@@ -125,6 +125,49 @@ requests; `503` when the controller has no master key configured.
   existing gateway connection is the gateway's job (FM-205); revocation here
   prevents renewal.
 
+## The gateway channel (FM-205)
+
+The node gateway is the WebSocket session at `GET /api/node/v1/connect`,
+speaking the subprotocol `fleet.node.v1`. Everything before the upgrade and
+after it is deliberately split:
+
+- **Before the upgrade** the node authenticates over HTTP: it proves key
+  possession (`/challenge` + `/session`) and presents the resulting
+  short-lived session in the `x-fleet-node-session` header. The controller
+  validates the session chain before answering the upgrade; a refusal is an
+  HTTP status (`401` for a missing/invalid session, `400` for a missing
+  subprotocol), never a frame.
+- **After the upgrade** the channel carries only FM-007's frames: `Hello`
+  opens the session (machine id, software version, protocol and
+  inventory-schema ranges, boot session id, journal position, platform
+  facts, feature flags); `Welcome` fixes the negotiated terms (protocol
+  version, inventory-schema version, controller-assigned session id,
+  feature-flag intersection, `Limits`, heartbeat interval). `Heartbeat`
+  frames carry the monotonic sequence, monotonic node uptime, journal
+  position, and in-flight count. Any other payload is answered with
+  `UNKNOWN_PAYLOAD`; an undecodable frame with `MALFORMED_FRAME`; a
+  range mismatch with the typed version fault carrying the controller's
+  supported range.
+
+### Session rules
+
+- One live session per machine. A second connect **supersedes** the first:
+  the older session answers `FAULT_CODE_SESSION_REJECTED` and closes, so a
+  reconnecting node always wins without wedging the registry.
+- Heartbeats update the controller's in-memory registry only. A background
+  sweeper transitions `connected` → `stale` after two missed intervals and
+  persists only on transition; a closed connection settles `offline` once.
+  Connect, disconnect, and superseded transitions are audited under
+  `node:<machineId>`; staleness is observable in durable node state
+  (`node_identities.gateway_state`) but deliberately not audited, because an
+  offline node flaps faster than an operator can read the ledger.
+- The journal position is reported but not yet acted on: command dispatch
+  and journal reconciliation are FM-207.
+- The client reconnects with bounded jitter (±25%, exponential from 500 ms
+  to a 30 s cap) after re-proving the session over HTTP. A
+  `SESSION_REJECTED` fault is retryable (session state may heal); every
+  other fault is a build or wire problem and stops the client.
+
 ## Golden fixtures
 
 `fixtures/v1/*.bin` are frozen encodings, one per message family, plus two

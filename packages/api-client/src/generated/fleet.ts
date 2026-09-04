@@ -177,8 +177,19 @@ export interface NodeIdentityDto {
   arch: string;
   /** First enrollment time (epoch milliseconds). */
   enrolledAt: number;
+  /**
+     * The node's gateway connectivity state: `connected`, `stale`, or
+     * `offline`, as last persisted by the session registry.
+     */
+  gatewayState: string;
   /** Monotonic key version. */
   keyVersion: number;
+  /**
+     * The last gateway observation time, when the node ever connected
+     * (epoch milliseconds).
+     * @nullable
+     */
+  lastSeenAt?: number | null;
   /** The machine the identity belongs to. */
   machineId: string;
   /** The node software version the node reported. */

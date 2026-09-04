@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use fleet_application::node::{
     ChallengePurpose, EnrollClaim, EnrolledNode, EnrollmentTokenRecord, EnrollmentTokenView,
-    NewChallenge, NewEnrollmentToken, NodeChallenge, NodeCredential, NodeIdentity, NodePort,
-    NodePortError, NodeSessionIssued, NodeStatus, NodeView, RotateClaim, RotationOutcome,
+    GatewayState, NewChallenge, NewEnrollmentToken, NodeChallenge, NodeCredential, NodeIdentity,
+    NodePort, NodePortError, NodeSessionIssued, NodeStatus, NodeView, RotateClaim, RotationOutcome,
     SessionClaim, SessionValidity, TokenFacts,
 };
 
@@ -172,7 +172,8 @@ impl NodePort for NodeRepository {
     async fn identity(&self, machine_id: &str) -> Result<Option<NodeIdentity>, NodePortError> {
         let row = sqlx::query(
             "SELECT machine_id, public_key, key_version, status, os, arch, node_version, \
-             enrolled_at, rotated_at FROM node_identities WHERE machine_id = ?1",
+             enrolled_at, rotated_at, gateway_state, last_seen_at, boot_session_id \
+             FROM node_identities WHERE machine_id = ?1",
         )
         .bind(machine_id)
         .fetch_optional(&self.pool)
@@ -189,6 +190,10 @@ impl NodePort for NodeRepository {
             node_version: row.get("node_version"),
             enrolled_at: row.get("enrolled_at"),
             rotated_at: row.get("rotated_at"),
+            gateway_state: GatewayState::from_id(&row.get::<String, _>("gateway_state"))
+                .unwrap_or(GatewayState::Offline),
+            last_seen_at: row.get("last_seen_at"),
+            boot_session_id: row.get("boot_session_id"),
         }))
     }
 
@@ -645,6 +650,32 @@ impl NodePort for NodeRepository {
             .map_err(|error| backend("touch_credential", &error))?;
         Ok(())
     }
+
+    async fn record_gateway_state(
+        &self,
+        machine_id: &str,
+        state: GatewayState,
+        boot_session: Option<&str>,
+        last_seen: i64,
+    ) -> Result<(), NodePortError> {
+        let updated = sqlx::query(
+            "UPDATE node_identities SET gateway_state = ?2, last_seen_at = ?3, \
+             boot_session_id = ?4 WHERE machine_id = ?1",
+        )
+        .bind(machine_id)
+        .bind(state.id())
+        .bind(last_seen)
+        .bind(boot_session)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| backend("record_gateway_state", &error))?;
+        if updated.rows_affected() == 0 {
+            return Err(NodePortError::NotFound {
+                what: format!("node identity of machine {machine_id:?}"),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl NodeRepository {
@@ -723,7 +754,8 @@ async fn bind_identity(
             let version = row.get::<i64, _>("key_version") + 1;
             sqlx::query(
                 "UPDATE node_identities SET public_key = ?2, key_version = ?3, status = 'active', \
-                 os = ?4, arch = ?5, node_version = ?6, rotated_at = ?7 WHERE machine_id = ?1",
+                 os = ?4, arch = ?5, node_version = ?6, rotated_at = ?7, gateway_state = 'offline', \
+                 boot_session_id = NULL WHERE machine_id = ?1",
             )
             .bind(machine_id)
             .bind(&claim.public_key)

@@ -73,18 +73,13 @@ async fn controller() -> TestController {
     let crypto = fleet_controller::node_crypto::NodeCryptoService::open(&secrets)
         .await
         .expect("the node signing key must provision");
-    let nodes = Arc::new(fleet_application::node::Nodes::new(
-        Arc::new(fleet_storage_sqlite::NodeRepository::new(
-            store.pool().clone(),
-        )),
-        Arc::new(crypto),
-        Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-    ));
+    let services = fleet_controller::compose_node_services(store.pool(), Arc::new(crypto));
+    let nodes = services.nodes.clone();
     let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
     let router = build_router(
         &settings(dist.path()),
         Some(store.pool().clone()),
-        Some(nodes.clone()),
+        Some(&services),
     );
     TestController {
         _dist: dist,

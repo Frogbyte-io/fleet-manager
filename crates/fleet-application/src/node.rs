@@ -131,6 +131,44 @@ impl ChallengePurpose {
     }
 }
 
+/// The durable gateway connectivity state of a node, as the session
+/// registry persists it. Only transitions are written; heartbeats never
+/// touch storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayState {
+    /// The gateway session is open and heartbeats are fresh.
+    Connected,
+    /// The session is open but heartbeats aged past the threshold: a
+    /// half-dead connection, not an absent one.
+    Stale,
+    /// No open session: the node is absent.
+    Offline,
+}
+
+impl GatewayState {
+    /// The stable string used in storage and the API.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Stale => "stale",
+            Self::Offline => "offline",
+        }
+    }
+
+    /// Parses the stable string.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "connected" => Some(Self::Connected),
+            "stale" => Some(Self::Stale),
+            "offline" => Some(Self::Offline),
+            _ => None,
+        }
+    }
+}
+
 /// A node's bound identity: the public key and its monotonic version.
 ///
 /// `key_version` exists so a credential records which key it was bound to:
@@ -157,6 +195,13 @@ pub struct NodeIdentity {
     pub enrolled_at: i64,
     /// Last rotation or re-bind time, when any (epoch milliseconds).
     pub rotated_at: Option<i64>,
+    /// The durable gateway state the session registry last persisted.
+    pub gateway_state: GatewayState,
+    /// The last gateway observation time, when the node ever connected
+    /// (epoch milliseconds).
+    pub last_seen_at: Option<i64>,
+    /// The boot session id of the last open gateway session, when any.
+    pub boot_session_id: Option<String>,
 }
 
 /// A node credential as recorded: the signed token is derived from these
@@ -690,6 +735,20 @@ pub trait NodePort: fmt::Debug + Send + Sync {
         &self,
         credential_id: &str,
         used_at: i64,
+    ) -> Result<(), NodePortError>;
+    /// Persists one gateway-state transition. The session registry calls
+    /// this on connect, staleness, and disconnect only — never per
+    /// heartbeat — so an open, healthy session costs no writes at all.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the machine has no identity or the backend errors.
+    async fn record_gateway_state(
+        &self,
+        machine_id: &str,
+        state: GatewayState,
+        boot_session: Option<&str>,
+        last_seen: i64,
     ) -> Result<(), NodePortError>;
 }
 

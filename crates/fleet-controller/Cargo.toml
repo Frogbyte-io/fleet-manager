@@ -7,9 +7,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-getrandom = "0.2"
 async-trait = "0.1.92"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 fleet-api = { path = "../fleet-api" }
 fleet-application = { path = "../fleet-application" }
 fleet-auth = { version = "0.1.0", path = "../fleet-auth" }
@@ -19,6 +18,8 @@ fleet-protocol = { path = "../fleet-protocol" }
 fleet-provider-ssh = { version = "0.1.0", path = "../providers/fleet-provider-ssh" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }
 fleet-storage-sqlite = { version = "0.1.0", path = "../fleet-storage-sqlite" }
+futures-util = "0.3.31"
+getrandom = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
@@ -26,14 +27,12 @@ tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "signal", "t
 tower-http = { version = "0.7.1", features = ["fs"] }
 uuid = { version = "1.26.0", features = ["v7"] }
 
-[lints]
-workspace = true
-
 [dev-dependencies]
 http-body-util = "0.1.3"
 ring = "0.17.14"
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "io-util", "time"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["connect"] }
 tower = { version = "0.5.3", features = ["util"] }
 

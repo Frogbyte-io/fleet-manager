@@ -846,7 +846,8 @@
           "os",
           "arch",
           "nodeVersion",
-          "enrolledAt"
+          "enrolledAt",
+          "gatewayState"
         ],
         "properties": {
           "arch": {
@@ -858,10 +859,22 @@
             "format": "int64",
             "description": "First enrollment time (epoch milliseconds)."
           },
+          "gatewayState": {
+            "type": "string",
+            "description": "The node's gateway connectivity state: `connected`, `stale`, or\n`offline`, as last persisted by the session registry."
+          },
           "keyVersion": {
             "type": "integer",
             "format": "int64",
             "description": "Monotonic key version."
+          },
+          "lastSeenAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last gateway observation time, when the node ever connected\n(epoch milliseconds)."
           },
           "machineId": {
             "type": "string",

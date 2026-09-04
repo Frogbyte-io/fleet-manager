@@ -397,6 +397,12 @@ pub struct NodeIdentityDto {
     pub enrolled_at: i64,
     /// Last rotation time, when any (epoch milliseconds).
     pub rotated_at: Option<i64>,
+    /// The node's gateway connectivity state: `connected`, `stale`, or
+    /// `offline`, as last persisted by the session registry.
+    pub gateway_state: String,
+    /// The last gateway observation time, when the node ever connected
+    /// (epoch milliseconds).
+    pub last_seen_at: Option<i64>,
 }
 
 /// A node credential record. The signed token is never stored or returned.
@@ -496,6 +502,8 @@ fn identity_dto(identity: fleet_application::node::NodeIdentity) -> NodeIdentity
         node_version: identity.node_version,
         enrolled_at: identity.enrolled_at,
         rotated_at: identity.rotated_at,
+        gateway_state: identity.gateway_state.id().to_owned(),
+        last_seen_at: identity.last_seen_at,
     }
 }
 

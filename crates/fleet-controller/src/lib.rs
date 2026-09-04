@@ -11,6 +11,7 @@
 
 pub mod browser;
 pub mod exec;
+pub mod gateway;
 pub mod node_crypto;
 pub mod worker;
 
@@ -37,6 +38,47 @@ pub struct Settings {
     pub listen: SocketAddr,
     /// The directory holding the built web shell; served at `/`.
     pub web_dist: PathBuf,
+}
+
+/// The node trust services, composed together by the binary when the store
+/// and the secret store are both available. The gateway always accompanies
+/// the node use cases: it is the consumer of their sessions.
+#[derive(Clone)]
+pub struct NodeServices {
+    /// The node trust use cases.
+    pub nodes: Arc<fleet_application::node::Nodes>,
+    /// The node gateway: the WebSocket session registry and its route.
+    pub gateway: Arc<gateway::GatewayService>,
+}
+
+impl std::fmt::Debug for NodeServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeServices")
+            .field("nodes", &self.nodes)
+            .field("gateway", &self.gateway)
+            .finish()
+    }
+}
+
+/// Composes the node trust services over a store: the use cases, the
+/// gateway, and the persistence they share. The caller supplies the node
+/// crypto from the secret store (see [`node_crypto`]).
+#[must_use]
+pub fn compose_node_services(
+    db: &SqlitePool,
+    crypto: Arc<dyn fleet_application::node::NodeCrypto>,
+) -> NodeServices {
+    let nodes = Arc::new(fleet_application::node::Nodes::new(
+        Arc::new(fleet_storage_sqlite::NodeRepository::new(db.clone())),
+        crypto,
+        Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    ));
+    let gateway = Arc::new(gateway::GatewayService::new(
+        nodes.clone(),
+        Arc::new(fleet_storage_sqlite::NodeRepository::new(db.clone())),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    ));
+    NodeServices { nodes, gateway }
 }
 
 /// Builds the API state over an opened store, or a state whose backends
@@ -161,22 +203,26 @@ fn shell(settings: &Settings) -> ServeDir {
 ///
 /// `db` is the store's connection pool once the database is open; readiness
 /// probes it live and the operation use cases run over it. Passing `None` is
-/// for tests that do not involve storage. `nodes` is the node-trust use-case
-/// service (see [`node_crypto`]); when it is present the machine-facing
-/// enrollment router is mounted at `/api/node/v1` alongside the public API.
-/// Every request through this router resolves to the trusted-LAN principal
-/// with its request evidence (see `fleet_auth`); the service must be made
-/// with connection info for that evidence to include the peer address.
+/// for tests that do not involve storage. `services` is the node-trust
+/// composition (see [`compose_node_services`]); when present, the
+/// machine-facing node routes — enrollment endpoints and the gateway — are
+/// mounted at `/api/node/v1` alongside the public API. Every request through
+/// this router resolves to the trusted-LAN principal with its request
+/// evidence (see `fleet_auth`); the service must be made with connection
+/// info for that evidence to include the peer address.
 pub fn build_router(
     settings: &Settings,
     db: Option<SqlitePool>,
-    nodes: Option<Arc<fleet_application::node::Nodes>>,
+    services: Option<&NodeServices>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
         db: db.clone(),
     };
-    let api_state = Arc::new(api_state(db, nodes));
+    let api_state = Arc::new(api_state(
+        db,
+        services.map(|services| services.nodes.clone()),
+    ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let router = Router::new()
         .route("/healthz", get(healthz))
@@ -186,13 +232,16 @@ pub fn build_router(
         .layer(axum::middleware::from_fn(browser::security_headers))
         .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
         .with_state(probe);
-    if api_state.nodes.is_some() {
-        // The machine-facing enrollment endpoints: versioned with the node
-        // protocol, documented in proto/README.md, and mounted beside the
-        // public API — not under it.
-        return router.nest("/api/node/v1", fleet_api::node::node_router(api_state));
-    }
-    router
+    let Some(services) = services else {
+        return router;
+    };
+    // The machine-facing node surface: versioned with the node protocol,
+    // documented in proto/README.md, and mounted beside the public API —
+    // not under it. The gateway route joins the enrollment routes in one
+    // nest so no path overlaps.
+    let node_routes = fleet_api::node::node_router(api_state)
+        .merge(gateway::gateway_router(services.gateway.clone()));
+    router.nest("/api/node/v1", node_routes)
 }
 
 async fn healthz() -> &'static str {
@@ -237,7 +286,8 @@ async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
 /// completes, then returns once in-flight requests have drained.
 ///
 /// `db` is the opened store's pool, or `None` in tests; see [`build_router`].
-/// `nodes` is the node-trust service, when the composition supports it.
+/// `services` is the node-trust composition, when the composition supports
+/// it; its gateway runs the staleness sweeper alongside the server.
 ///
 /// # Errors
 ///
@@ -245,11 +295,11 @@ async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
 pub async fn serve(
     settings: Settings,
     db: Option<SqlitePool>,
-    nodes: Option<Arc<fleet_application::node::Nodes>>,
+    services: Option<NodeServices>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
-    serve_on(listener, settings, db, nodes, shutdown).await
+    serve_on(listener, settings, db, services, shutdown).await
 }
 
 /// Serves the controller on an already bound listener; [`serve`] is this plus
@@ -263,7 +313,7 @@ pub async fn serve_on(
     listener: tokio::net::TcpListener,
     settings: Settings,
     db: Option<SqlitePool>,
-    nodes: Option<Arc<fleet_application::node::Nodes>>,
+    services: Option<NodeServices>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -277,17 +327,30 @@ pub async fn serve_on(
             fleet_config::WEB_DIST_VAR
         );
     }
-    if nodes.is_some() {
+    // The staleness sweeper runs beside the server and drains when this
+    // function returns, after the server's own drain phase.
+    let sweeper_shutdown = services.as_ref().map(|services| {
         eprintln!("node trust surface mounted at /api/node/v1");
-    } else {
+        let sweeper = services.gateway.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(sweeper.run_staleness_sweeper(async move {
+            let _ = shutdown_rx.await;
+        }));
+        shutdown_tx
+    });
+    if sweeper_shutdown.is_none() {
         eprintln!("warning: node trust surface unavailable (no database or no master key)");
     }
     axum::serve(
         listener,
-        build_router(&settings, db, nodes).into_make_service_with_connect_info::<SocketAddr>(),
+        build_router(&settings, db, services.as_ref())
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)
-    .await
+    .await?;
+    // Dropping the sender stops the sweeper now that the server is down.
+    drop(sweeper_shutdown);
+    Ok(())
 }
 
 /// Completes on SIGTERM or SIGINT so the process drains before exiting.
