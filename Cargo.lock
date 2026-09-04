@@ -699,6 +699,7 @@ dependencies = [
  "base64 0.22.1",
  "fleet-application",
  "fleet-core",
+ "serde_json",
  "tempfile",
 ]
 

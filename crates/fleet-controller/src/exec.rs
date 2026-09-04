@@ -23,7 +23,7 @@ use fleet_application::machine::MachinePort;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::{
-    ExecutionLimiter, ScriptMetadata, SshAuth, SshConnectionSpec, SshProvider,
+    COLLECTION_DEADLINE, ExecutionLimiter, ScriptMetadata, SshAuth, SshConnectionSpec, SshProvider,
 };
 
 /// The payload of an `ssh.exec` operation, as validated JSON.
@@ -82,6 +82,20 @@ pub struct ScriptExecutor {
     work_dir: PathBuf,
 }
 
+/// The payload of an `agentless.inventory` operation.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InventoryPayload {
+    /// The machine carrying the SSH endpoint.
+    machine_id: String,
+    /// The endpoint id to probe.
+    endpoint_id: String,
+    /// How the endpoint authenticates.
+    auth: SshExecAuth,
+    /// The deadline, in seconds. Bounded hard.
+    timeout_seconds: u64,
+}
+
 impl ScriptExecutor {
     /// Composes the executor from its parts.
     ///
@@ -111,6 +125,7 @@ impl OperationExecutor for ScriptExecutor {
         match operation.kind.as_str() {
             "noop" => self.execute_noop(operations, operation).await,
             "ssh.exec" => self.execute_ssh(operations, operation).await,
+            "agentless.inventory" => self.execute_inventory(operations, operation).await,
             other => {
                 let error_json = serde_json::json!({
                     "reason": "unknown_kind",
@@ -147,6 +162,114 @@ impl ScriptExecutor {
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// The agentless inventory path: probe, ingest capabilities, snapshot.
+    async fn execute_inventory(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
+        let payload: InventoryPayload = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a valid inventory record: {error}"))?;
+        let (spec, verified, host) = self.resolve_inventory_endpoint(&payload).await?;
+
+        operations
+            .record_progress(
+                &operation.id,
+                Some(0),
+                Some(1),
+                Some(&format!("probing {host} (verified {verified})")),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let (collected, detail) = {
+            let provider = self.provider.clone();
+            let limiter = self.limiter.clone();
+            let spec = spec.clone();
+            tokio::task::spawn_blocking(move || {
+                fleet_provider_ssh::collect(&provider, &limiter, &spec, COLLECTION_DEADLINE)
+            })
+            .await
+            .unwrap_or_else(|join_error| {
+                Err(fleet_provider_ssh::SshProviderError::Tool {
+                    tool: "ssh",
+                    detail: format!("the collection thread failed: {join_error}"),
+                })
+            })
+            .map_or_else(
+                |error| (None, Some(error.to_string())),
+                |result| (Some(result), None),
+            )
+        };
+
+        match (collected, detail) {
+            (Some(facts), _) => {
+                let count = facts.len();
+                self.machines
+                    .record_capabilities(&payload.machine_id, &facts)
+                    .await
+                    .map_err(|failure| failure.to_string())?;
+                let snapshot = serde_json::to_string(&facts)
+                    .map_err(|error| format!("the fact set does not serialize: {error}"))?;
+                self.machines
+                    .record_snapshot(
+                        &payload.machine_id,
+                        fleet_provider_ssh::PROBE_SOURCE,
+                        &snapshot,
+                        fleet_core::SystemClock::now_unix_millis(),
+                    )
+                    .await
+                    .map_err(|failure| failure.to_string())?;
+                let result_json = serde_json::json!({ "facts": count }).to_string();
+                operations
+                    .complete(&operation.id, "succeeded", Some(&result_json), None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+            (None, Some(detail)) => {
+                let error_json =
+                    serde_json::json!({ "reason": "collection_failed", "detail": detail })
+                        .to_string();
+                operations
+                    .complete(&operation.id, "failed", None, Some(&error_json))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+            (None, None) => Err("the collection produced neither facts nor a detail".to_owned()),
+        }
+    }
+
+    /// The inventory variant of endpoint resolution: the trust gate is the
+    /// same, the payload shape differs.
+    async fn resolve_inventory_endpoint(
+        &self,
+        payload: &InventoryPayload,
+    ) -> Result<(SshConnectionSpec, String, String), String> {
+        self.resolve_endpoint(&SshExecPayload {
+            machine_id: payload.machine_id.clone(),
+            endpoint_id: payload.endpoint_id.clone(),
+            script: String::new(),
+            working_directory: String::new(),
+            environment: Vec::new(),
+            arguments: Vec::new(),
+            auth: match &payload.auth {
+                SshExecAuth::Agent => SshExecAuth::Agent,
+                SshExecAuth::IdentityFile { path } => {
+                    SshExecAuth::IdentityFile { path: path.clone() }
+                }
+            },
+            timeout_seconds: payload.timeout_seconds,
+        })
+        .await
     }
 
     async fn execute_ssh(

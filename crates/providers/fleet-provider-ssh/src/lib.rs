@@ -34,11 +34,13 @@ use std::process::Command;
 use std::time::Duration;
 
 pub mod exec;
+pub mod inventory;
 
 pub use exec::{
     ExecutionLimiter, ExecutionResult, MAX_STREAM_BYTES, ScriptMetadata, decode_metadata,
     encode_metadata, execute_script, remote_prologue,
 };
+pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
 
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]

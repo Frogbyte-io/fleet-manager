@@ -10,6 +10,7 @@ publish.workspace = true
 base64 = "0.22.1"
 fleet-application = { path = "../../fleet-application" }
 fleet-core = { path = "../../fleet-core" }
+serde_json = "1.0.151"
 
 [lints]
 workspace = true

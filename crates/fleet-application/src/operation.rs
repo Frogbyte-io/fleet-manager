@@ -28,7 +28,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
 /// an unknown kind is refused rather than accepted as an unspecified promise.
 /// `ssh.exec` carries its bounded script payload in `payload_json`.
-pub const CREATABLE_KINDS: [&str; 2] = ["noop", "ssh.exec"];
+pub const CREATABLE_KINDS: [&str; 3] = ["noop", "ssh.exec", "agentless.inventory"];
 
 /// The payload bound for provider inputs.
 pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
