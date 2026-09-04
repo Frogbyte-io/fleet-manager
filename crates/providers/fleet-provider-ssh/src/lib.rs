@@ -33,6 +33,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod exec;
+
+pub use exec::{
+    ExecutionLimiter, ExecutionResult, MAX_STREAM_BYTES, ScriptMetadata, decode_metadata,
+    encode_metadata, execute_script, remote_prologue,
+};
+
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostKeyObservation {
@@ -112,8 +119,9 @@ impl std::fmt::Display for SshProviderError {
 
 impl std::error::Error for SshProviderError {}
 
-/// The provider: one isolated configuration directory per store.
-#[derive(Debug)]
+/// The provider: one isolated configuration directory per store. Cloning
+/// shares the same directory on purpose: one trust store per controller.
+#[derive(Clone, Debug)]
 pub struct SshProvider {
     work_dir: PathBuf,
 }
@@ -418,7 +426,7 @@ fn host_matches_line(line: &str, host: &str) -> bool {
 /// Picks the most informative bounded line from a tool's stderr. OpenSSH
 /// puts banner noise (the `@@@@` warning block) before the actual reason, so
 /// a recognized failure reason wins; otherwise the last line does.
-fn redact_failure(text: &str) -> String {
+pub(crate) fn redact_failure(text: &str) -> String {
     let lines: Vec<&str> = text
         .lines()
         .map(str::trim)

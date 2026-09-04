@@ -399,6 +399,13 @@
             "type": "string",
             "description": "The kind of work to create; only kinds the controller can describe are\naccepted.",
             "example": "noop"
+          },
+          "payloadJson": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bounded provider input for kinds that need one, e.g. the script\npayload of `ssh.exec`."
           }
         }
       },

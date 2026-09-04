@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use fleet_controller::exec::ScriptExecutor;
 use fleet_controller::worker::run as run_worker;
 use fleet_controller::{Settings, run_healthcheck, serve, shutdown_signal};
 
@@ -100,7 +101,18 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let worker_handle = tokio::spawn(run_worker(worker_operations, async move {
+        let executor = {
+            let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                ));
+            std::sync::Arc::new(ScriptExecutor::new(
+                machines,
+                config.data_dir.join("ssh"),
+                fleet_provider_ssh::ExecutionLimiter::new(4),
+            ))
+        };
+        let worker_handle = tokio::spawn(run_worker(worker_operations, executor, async move {
             let _ = worker_shutdown_rx.await;
         }));
         let served = serve(settings, pool, shutdown_signal()).await;

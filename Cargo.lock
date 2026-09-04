@@ -607,9 +607,11 @@ dependencies = [
  "fleet-config",
  "fleet-core",
  "fleet-protocol",
+ "fleet-provider-ssh",
  "fleet-secrets",
  "fleet-storage-sqlite",
  "http-body-util",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -694,6 +696,7 @@ dependencies = [
 name = "fleet-provider-ssh"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "fleet-application",
  "fleet-core",
  "tempfile",

@@ -26,7 +26,7 @@ COPY packages/ packages/
 RUN pnpm install --frozen-lockfile \
     && pnpm -r --if-present run build
 
-FROM rust:1.98.0-slim AS rust
+FROM rust:1.98.0-slim-bookworm AS rust
 WORKDIR /src
 # rustup reads rust-toolchain.toml for the channel and components, so the
 # version is never repeated here.

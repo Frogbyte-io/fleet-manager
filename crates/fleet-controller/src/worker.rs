@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_application::operation::Operations;
-use fleet_application::worker::{TickReport, noop_executor};
+use fleet_application::worker::TickReport;
 
 /// How long a worker's claim stays believable without a heartbeat. The M1
 /// worker heartbeats by completing work; the lease exists so a crashed
@@ -24,9 +24,9 @@ pub const TICK: Duration = Duration::from_millis(250);
 /// claims at most one operation, so shutdown never waits on long work.
 pub async fn run(
     operations: Arc<Operations>,
+    executor: Arc<dyn fleet_application::worker::OperationExecutor>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
-    let executor = noop_executor();
     let worker_id = format!("controller-{}", uuid::Uuid::now_v7());
     eprintln!("operation worker {worker_id} started (tick {TICK:?}, lease {LEASE_MS}ms)");
 

@@ -27,7 +27,11 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// The kinds of operation the public API accepts. Until providers and nodes
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
 /// an unknown kind is refused rather than accepted as an unspecified promise.
-pub const CREATABLE_KINDS: [&str; 1] = ["noop"];
+/// `ssh.exec` carries its bounded script payload in `payload_json`.
+pub const CREATABLE_KINDS: [&str; 2] = ["noop", "ssh.exec"];
+
+/// The payload bound for provider inputs.
+pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
 /// The public view of a durable operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +55,8 @@ pub struct Operation {
     pub deadline_at: Option<i64>,
     /// Whether cancellation has been requested but not yet observed.
     pub cancel_requested: bool,
+    /// The bounded provider input, decided at creation.
+    pub payload_json: Option<String>,
     /// The bounded public result, present when the operation succeeded.
     pub result_json: Option<String>,
     /// The bounded public error, present when the operation failed.
@@ -144,6 +150,7 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
         idempotency_key: Option<&str>,
         deadline_at: Option<i64>,
         correlation_id: Option<&str>,
+        payload_json: Option<&str>,
     ) -> Result<Operation, PortFailure>;
     /// Reads one operation.
     ///
@@ -259,6 +266,21 @@ pub trait AuditPort: fmt::Debug + Send + Sync {
     -> Result<(), String>;
 }
 
+/// A creation request: everything the use case needs in one place.
+#[derive(Clone, Debug, Default)]
+pub struct NewOperation {
+    /// The kind of work to create.
+    pub kind: String,
+    /// A caller-chosen key making the request idempotent.
+    pub idempotency_key: Option<String>,
+    /// The absolute deadline, in epoch milliseconds.
+    pub deadline_at: Option<i64>,
+    /// The correlation identity joining this operation to the caller's flow.
+    pub correlation_id: Option<String>,
+    /// The bounded provider input, for kinds that need one.
+    pub payload_json: Option<String>,
+}
+
 /// The authorized operation use cases.
 #[derive(Debug)]
 pub struct Operations {
@@ -283,10 +305,7 @@ impl Operations {
         &self,
         authorizer: &dyn Authorizer,
         principal_id: &str,
-        kind: &str,
-        idempotency_key: Option<&str>,
-        deadline_at: Option<i64>,
-        correlation_id: Option<&str>,
+        new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
         authorize(
             authorizer,
@@ -298,24 +317,38 @@ impl Operations {
         )
         .map_err(OperationUseCaseError::Denied)?;
 
-        if !CREATABLE_KINDS.contains(&kind) {
+        if !CREATABLE_KINDS.contains(&new.kind.as_str()) {
             return Err(OperationUseCaseError::Invalid {
                 detail: format!(
-                    "kind {kind:?} is not accepted; known kinds: {}",
+                    "kind {:?} is not accepted; known kinds: {}",
+                    new.kind,
                     CREATABLE_KINDS.join(", ")
                 ),
             });
         }
 
+        if let Some(payload_json) = &new.payload_json
+            && payload_json.len() > MAX_PAYLOAD_JSON
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: format!("the payload exceeds {MAX_PAYLOAD_JSON} bytes"),
+            });
+        }
         let operation = self
             .port
-            .create(kind, idempotency_key, deadline_at, correlation_id)
+            .create(
+                &new.kind,
+                new.idempotency_key.as_deref(),
+                new.deadline_at,
+                new.correlation_id.as_deref(),
+                new.payload_json.as_deref(),
+            )
             .await
             .map_err(map_port_failure("create"))?;
 
         let mut metadata = AuditMetadata::default();
         metadata
-            .insert("kind", kind)
+            .insert("kind", &new.kind)
             .map_err(|error| OperationUseCaseError::Backend {
                 context: "create_audit",
                 detail: error.to_string(),
@@ -326,7 +359,7 @@ impl Operations {
                 action: Permission::OperationCreate.id().to_owned(),
                 resource: Some(operation.id.clone()),
                 decision: Decision::allow(),
-                correlation_id: correlation_id.map(str::to_owned),
+                correlation_id: new.correlation_id.clone(),
                 operation_id: Some(operation.id.clone()),
                 metadata,
             })

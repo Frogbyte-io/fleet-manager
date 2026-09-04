@@ -89,19 +89,21 @@ impl OperationPort for OperationRepository {
         idempotency_key: Option<&str>,
         deadline_at: Option<i64>,
         correlation_id: Option<&str>,
+        payload_json: Option<&str>,
     ) -> Result<Operation, PortFailure> {
         let id = Uuid::now_v7().to_string();
         let now = fleet_core::SystemClock::now_unix_millis();
         let result = sqlx::query(
             "INSERT INTO operations \
-             (id, kind, state, idempotency_key, deadline_at, cancel_requested, correlation_id, created_at, updated_at) \
-             VALUES (?1, ?2, 'pending', ?3, ?4, 0, ?5, ?6, ?6)",
+             (id, kind, state, idempotency_key, deadline_at, cancel_requested, correlation_id, payload_json, created_at, updated_at) \
+             VALUES (?1, ?2, 'pending', ?3, ?4, 0, ?5, ?6, ?7, ?7)",
         )
         .bind(&id)
         .bind(kind)
         .bind(idempotency_key)
         .bind(deadline_at)
         .bind(correlation_id)
+        .bind(payload_json)
         .bind(now)
         .execute(&self.pool)
         .await;
@@ -413,6 +415,7 @@ fn row_to_operation(row: &sqlx::sqlite::SqliteRow) -> Operation {
         progress_message: row.get("progress_message"),
         deadline_at: row.get("deadline_at"),
         cancel_requested: row.get::<i64, _>("cancel_requested") != 0,
+        payload_json: row.get("payload_json"),
         result_json: row.get("result_json"),
         error_json: row.get("error_json"),
         correlation_id: row.get("correlation_id"),

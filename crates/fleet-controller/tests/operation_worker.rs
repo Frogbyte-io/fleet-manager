@@ -24,10 +24,13 @@ async fn the_noop_operation_runs_end_to_end() {
         .create(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
-            "noop",
-            None,
-            None,
-            Some("corr-worker-1"),
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: Some("corr-worker-1".to_owned()),
+                payload_json: None,
+            },
         )
         .await
         .unwrap();
@@ -63,10 +66,13 @@ async fn two_workers_cannot_claim_the_same_operation() {
         .create(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
-            "noop",
-            None,
-            None,
-            None,
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+            },
         )
         .await
         .unwrap();
@@ -98,10 +104,13 @@ async fn a_crashed_workers_lease_is_recovered_as_failed_not_retried() {
         .create(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
-            "noop",
-            None,
-            None,
-            None,
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+            },
         )
         .await
         .unwrap();
@@ -145,10 +154,13 @@ async fn a_cancelled_operation_stops_without_running() {
         .create(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
-            "noop",
-            None,
-            None,
-            None,
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+            },
         )
         .await
         .unwrap();
@@ -194,10 +206,13 @@ async fn a_deadline_expires_even_when_no_worker_claims_it() {
         .create(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
-            "noop",
-            None,
-            Some(now - 1_000),
-            None,
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: Some(now - 1_000),
+                correlation_id: None,
+                payload_json: None,
+            },
         )
         .await
         .unwrap();
@@ -233,10 +248,13 @@ async fn restart_preserves_terminal_truth() {
         .create(
             &fleet_auth::LanAllowAllAuthorizer,
             "anonymous-lan-admin",
-            "noop",
-            None,
-            None,
-            None,
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+            },
         )
         .await
         .unwrap();

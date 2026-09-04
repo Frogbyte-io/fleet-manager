@@ -195,6 +195,7 @@ impl OperationPort for FakePort {
         idempotency_key: Option<&str>,
         deadline_at: Option<i64>,
         correlation_id: Option<&str>,
+        payload_json: Option<&str>,
     ) -> Result<Operation, PortFailure> {
         let mut operations = self.operations.lock().unwrap();
         if let Some(existing) = idempotency_key.and_then(|key| {
@@ -214,6 +215,7 @@ impl OperationPort for FakePort {
             progress_message: None,
             deadline_at,
             cancel_requested: false,
+            payload_json: payload_json.map(str::to_owned),
             result_json: None,
             error_json: None,
             correlation_id: correlation_id.map(str::to_owned),

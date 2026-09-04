@@ -71,6 +71,12 @@ export interface CreateOperationRequest {
      * accepted.
      */
   kind: string;
+  /**
+     * The bounded provider input for kinds that need one, e.g. the script
+     * payload of `ssh.exec`.
+     * @nullable
+     */
+  payloadJson?: string | null;
 }
 
 /**

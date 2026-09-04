@@ -61,6 +61,7 @@ impl fleet_application::operation::OperationPort for UnavailableBackend {
         _idempotency_key: Option<&str>,
         _deadline_at: Option<i64>,
         _correlation_id: Option<&str>,
+        _payload_json: Option<&str>,
     ) -> Result<Operation, PortFailure> {
         Err(fleet_application::operation::PortFailure::Backend {
             detail: "no backend is wired".to_owned(),
@@ -263,6 +264,9 @@ pub struct CreateOperationRequest {
     /// accepted.
     #[schema(example = "noop")]
     pub kind: String,
+    /// The bounded provider input for kinds that need one, e.g. the script
+    /// payload of `ssh.exec`.
+    pub payload_json: Option<String>,
     /// A caller-chosen key making this request idempotent: replaying it
     /// returns the original operation instead of creating a second one.
     #[schema(example = "bootstrap-2026-09-03")]
@@ -321,10 +325,13 @@ pub async fn create_operation(
         .create(
             state.authorizer.as_ref(),
             &principal.id,
-            &request.kind,
-            request.idempotency_key.as_deref(),
-            request.deadline_at,
-            Some(&correlation_id.to_string()),
+            &fleet_application::operation::NewOperation {
+                kind: request.kind.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                deadline_at: request.deadline_at,
+                correlation_id: Some(correlation_id.to_string()),
+                payload_json: request.payload_json.clone(),
+            },
         )
         .await
         .map_err(|error| map_use_case_error(&error, correlation_id))?;

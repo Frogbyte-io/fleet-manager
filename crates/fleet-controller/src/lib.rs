@@ -10,6 +10,7 @@
 #![warn(missing_docs)]
 
 pub mod browser;
+pub mod exec;
 pub mod worker;
 
 use std::future::Future;
