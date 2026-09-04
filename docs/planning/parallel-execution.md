@@ -4,7 +4,7 @@ Fleet Manager issues are written so several agents or contributors can work at o
 
 An issue is safe to start when every issue in its **Depends on** list is merged, and no other in-flight issue owns the paths it needs to write.
 
-## M0 execution waves
+## M0 execution waves (historical)
 
 M0 is front-loaded and serial: FM-001 and the workspace scaffolds gate everything else. Maximum useful concurrency is three agents, reached in waves 3 and 4.
 
@@ -30,6 +30,46 @@ wave 5                                   FM-008 image/Compose
 | 5 | FM-008 | 1 | Needs FM-006 and a host with Docker |
 
 FM-002 was split from a single issue precisely because five issues waited on it and its two halves share no files.
+
+## M2 execution waves and current status
+
+M2 started 2026-09-04 after M1 closed. The dependency chain differs from M0: the SSH track (waves 1–2) is serial through the trust/execution/probe stack, and the fleetd track (wave 3) opens a new connection surface.
+
+```text
+wave 1   FM-S05 spike (resolved)  FM-200 model/storage
+            |                          |
+wave 2   FM-201 trust  FM-202 execution
+            |               |
+wave 3   FM-203 probes
+            |
+wave 4   FM-204 enrollment -> FM-205 gateway -> FM-207 journal
+            |                   |
+wave 5   FM-206 fleetd     FM-208 socket    FM-209 machine surfaces
+            inventory          API             (API/web/CLI)
+            |
+wave 6   FM-210 Add Machine -> FM-211 install -> FM-212 upgrade
+            |
+wave 7   FM-213 Tailscale (optional)
+```
+
+| Wave | Issues | Status |
+|---|---|---|
+| 1 | FM-S05, FM-200 | **Done** (2026-09-04) |
+| 2 | FM-201, FM-202 | **Done** (2026-09-04) |
+| 3 | FM-203 | **Done** (2026-09-04) |
+| 4 | FM-204 → FM-205 → FM-207 | serial; FM-204 next |
+| 5 | FM-206, FM-208, FM-209 | parallel after wave 4 |
+| 6 | FM-210 → FM-211 → FM-212 | after FM-209 |
+| 7 | FM-213 | after FM-210; optional |
+
+Handoff guarantees a fresh agent can rely on:
+
+- **FM-200** (#54): the machine aggregate, endpoints, capability facts, tags/groups behind `machine.read/create/update/delete` — hostname/IP are never identity; snapshots and capability upsert are authorized, audited mutations.
+- **FM-201** (#55): the system-OpenSSH provider (`fleet-provider-ssh`) with the isolated config dir, the probe→decide(new/known/changed)→pin→connect trust flow, per-endpoint verified fingerprints, and a real-sshd integration harness reused by FM-202/FM-203's tests. **FM-S05 resolved: direct OpenSSH invocation; Purple is reference only.**
+- **FM-202** (#56): `execute_script` with the metadata-blob transport (caller data never hits a remote shell), 64 KiB stream caps, deadline kills, a permit-pool limiter, the bounded `payload_json` on operations, the `ssh.exec` kind, and the controller's kind-dispatching executor enforcing the trust gate.
+- **FM-203** (#57): the probe script + parser (`fleet-provider-ssh::inventory`), the honest status vocabulary, fixture tests, and the `agentless.inventory` operation kind proven end-to-end. **Note:** capability facts are stored but not yet hydrated into the `Machine` read model — FM-209 owns that surface.
+
+M0's waves below are historical evidence of that milestone's execution, kept because the path-ownership rules are still the operating rules.
 
 ## Path ownership
 

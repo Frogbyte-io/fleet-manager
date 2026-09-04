@@ -36,6 +36,8 @@ An implementation issue should normally fit one focused pull request. A spike en
 
 Created on GitHub 2026-08-25. Planning IDs are stable; GitHub numbers are not, so they are mapped here rather than renaming anything.
 
+**Status: Done 2026-09-04.** FM-000 through FM-008 and FM-002B/002C all closed; the epics (#17, #18, #19) and the milestone are closed. The M0 exit gate — `cargo xtask verify` plus the Compose smoke — runs continuously in CI (`deploy/smoke.sh`).
+
 Execution order, path ownership, and the rules for concurrent agents are in [parallel-execution.md](parallel-execution.md).
 
 | Planning ID | Issue | Epic |
@@ -182,6 +184,8 @@ Split on 2026-08-25 into FM-002, FM-002B, and FM-002C. Five issues depended on t
 
 ## M1 — Controller, API, and trusted-LAN control kernel
 
+**Status: Done 2026-09-04.** FM-100 through FM-110 (FM-105 deferred to M8 with FM-S02 by design) are closed; the four epics (#36–#39) and the milestone are closed. All M1 issues were created as #40–#49. The controller serves typed config, migrated SQLite with the single-controller lock, AEAD secret records with key rotation, the trusted-LAN principal, the authorization catalog, the append-only audit ledger, durable operations with a spike-resolved worker (FM-S03), browser mutation guards, and the system/operations vertical slice in API, web, and `fleetctl`.
+
 ### FM-100 — Implement typed controller configuration and startup validation
 
 **Context:** Controller configuration will include paths, URLs, limits, and secret-key source; unsafe defaults must fail early.  
@@ -297,6 +301,8 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 **Tests:** API-client contract, CLI stdout/stderr snapshots, web component/e2e, SSE reconnect/gap e2e.
 
 ## M2 — Machines, connectivity, and onboarding
+
+**Status: In progress (as of 2026-09-04).** Created as epics #50–#53 with issues #54–#68. Resolved and closed: FM-S05 (spike #68 — SSH transport fallback confirmed), FM-200 (#54 machine model/storage), FM-201 (#55 SSH trust workflow), FM-202 (#56 bounded SSH execution), FM-203 (#57 agentless inventory probes). Remaining, in dependency order: FM-204 (#58 enrollment + key proof — the fleetd track starts here), FM-205 (#59 WSS gateway), FM-207 (#61 command journal), FM-206 (#60 fleetd inventory), FM-208 (#62 local socket API), FM-209 (#63 machine API/web/CLI — also the read surface for the capability facts FM-203 stores), FM-210 (#64 Add Machine), FM-211 (#65 service install), FM-212 (#66 upgrade workflow), FM-213 (#67 Tailscale, optional). FM-214 stays deferred past the first Lab release.
 
 ### FM-200 — Add machine, endpoint, observation, tag, and capability model/storage
 
