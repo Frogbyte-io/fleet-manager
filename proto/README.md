@@ -168,6 +168,40 @@ after it is deliberately split:
   `SESSION_REJECTED` fault is retryable (session state may heal); every
   other fault is a build or wire problem and stops the client.
 
+### Commands and the journal (FM-207)
+
+Command dispatch rides the same channel with FM-007's `Command`/`CommandResult`
+frames — no new payload variants:
+
+- The controller's executor dispatches a command to a live session and awaits
+  its result under the operation's own deadline (a two-minute default when the
+  operation carries none). The per-session in-flight bound
+  (`MAX_IN_FLIGHT_COMMANDS`) is the flow-control gate: a node at its bound is
+  refused, never queued without limit.
+- The node journals **acceptance before execution** and the **result before
+  reporting**, in an append-only NDJSON journal in its state directory. A
+  `Command` whose operation id has a terminal result is answered by replaying
+  the journal — never re-executed; one accepted and unfinished is ignored
+  (its original execution still reports). A torn trailing line is truncated
+  on load; compaction rewrites the file atomically, keeping one record per
+  operation id.
+- Result statuses map onto operation states: `SUCCEEDED → succeeded`,
+  `CANCELLED → cancelled`, `TIMED_OUT → timed_out`, `FAILED`/`REJECTED →
+  failed` with the fault detail in the operation's redacted error. A node
+  disconnecting before the result fails the operation with an explicit
+  "state unknown" — the caller retries, and the journal makes the retry
+  idempotent.
+- Cancellation for the supported kinds (`node.noop`, `node.diagnostic`) is
+  confirmed-before-dispatch (`cancelled` before any frame leaves) or
+  loses the race per the domain machine (`Cancelling → Succeeded/Failed`); a
+  mid-flight `Cancel` frame would be a protocol version change and is
+  deliberately absent. The node's heartbeat `journal_position` now reports
+  the live record count.
+- Later command kinds (shell, provider work, privileged helpers) are
+  distinct kinds with their own review, per
+  `controller-node-protocol.md#commands-and-privilege` — not extensions of
+  these two.
+
 ## Golden fixtures
 
 `fixtures/v1/*.bin` are frozen encodings, one per message family, plus two

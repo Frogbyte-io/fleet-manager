@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use crate::http::Controller;
+use crate::journal::NodeJournal;
 use crate::state::{Jitter, NodeState};
 
 /// The WebSocket subprotocol the client offers. Must match the controller's
@@ -53,6 +54,7 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub async fn connect_once(
     controller: &Controller,
     state: &std::sync::Arc<NodeState>,
+    journal: &std::sync::Arc<NodeJournal>,
     shutdown: &mut (dyn std::future::Future<Output = ()> + Unpin + Send),
 ) -> Attempt {
     // The key proof happens over blocking HTTP on purpose: it is one small
@@ -88,6 +90,10 @@ pub async fn connect_once(
         Err(error) => return Attempt::Reconnect(format!("the upgrade failed: {error}")),
     };
     let (mut sender, mut receiver) = stream.split();
+    // Outbound frames (heartbeats and command results) flow through one
+    // channel into the loop, so a command execution task can reply without
+    // owning the connection.
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<wire::Frame>(16);
     eprintln!("fleetd: session proved (expires at {})", session.expires_at);
 
     // Hello: the node states what it is and what it supports.
@@ -101,7 +107,7 @@ pub async fn connect_once(
             protocol_versions: Some(SUPPORTED_PROTOCOL_VERSIONS.to_wire()),
             inventory_schema_versions: Some(SUPPORTED_PROTOCOL_VERSIONS.to_wire()),
             session_id: uuid::Uuid::now_v7().to_string(),
-            journal_position: 0,
+            journal_position: u64::try_from(journal.record_count()).unwrap_or(u64::MAX),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             feature_flags: Vec::new(),
@@ -140,6 +146,18 @@ pub async fn connect_once(
                 let _ = sender.close().await;
                 return Attempt::Stop("shutdown signal received; session drained".to_owned());
             }
+            frame = outbound_rx.recv() => {
+                match frame {
+                    Some(frame) => {
+                        if let Err(error) = send_frame(&mut sender, frame).await {
+                            return Attempt::Reconnect(error);
+                        }
+                    }
+                    None => {
+                        return Attempt::Reconnect("the outbound channel closed".to_owned());
+                    }
+                }
+            }
             _ = ticker.tick() => {
                 sequence += 1;
                 let heartbeat = wire::Frame {
@@ -152,7 +170,7 @@ pub async fn connect_once(
                             started.elapsed().as_millis(),
                         )
                         .unwrap_or(i64::MAX),
-                        journal_position: 0,
+                        journal_position: u64::try_from(journal.record_count()).unwrap_or(u64::MAX),
                         in_flight_commands: 0,
                     })),
                 };
@@ -161,26 +179,78 @@ pub async fn connect_once(
                 }
             }
             frame = receive_frame(&mut receiver) => {
-                return match frame {
+                match frame {
                     Some(wire::Frame {
                         payload: Some(wire::frame::Payload::Fault(fault)),
                         ..
                     }) => {
                         let fault = ProtocolFault::from_wire(&fault);
                         let message = format!("the controller faulted: {}", fault.message());
-                        match fault.code() {
+                        return match fault.code() {
                             // Session state may heal on its own: re-prove and
                             // try again. Everything else is a build or wire
                             // problem no retry can fix.
                             wire::FaultCode::SessionRejected => Attempt::Reconnect(message),
                             _ => Attempt::Stop(message),
-                        }
+                        };
                     }
-                    Some(_) => Attempt::Reconnect(
-                        "the controller sent an unexpected frame".to_owned(),
-                    ),
-                    None => Attempt::Reconnect("the connection closed".to_owned()),
-                };
+                    Some(wire::Frame {
+                        payload: Some(wire::frame::Payload::Command(command)),
+                        ..
+                    }) => {
+                        // At-least-once dispatch: the journal decides
+                        // between replay, ignore, and execute. The result
+                        // goes back through the outbound channel.
+                        let journal = journal.clone();
+                        let state = state.clone();
+                        let outbound = outbound_tx.clone();
+                        let operation_id = command.operation_id.clone();
+                        tokio::spawn(async move {
+                            let outcome = tokio::task::spawn_blocking(move || {
+                                crate::commands::execute(&journal, &state, &command)
+                            })
+                            .await
+                            .unwrap_or_else(|error| {
+                                Err(format!("the command task failed: {error}"))
+                            });
+                            let result = match outcome {
+                                Ok(outcome) => crate::commands::to_wire(&operation_id, &outcome),
+                                Err(detail) => wire::CommandResult {
+                                    operation_id: operation_id.clone(),
+                                    status: wire::ResultStatus::Failed as i32,
+                                    exit_code: 0,
+                                    output_truncated: false,
+                                    duration_millis: 0,
+                                    stopped: false,
+                                    fault: Some(wire::Fault {
+                                        code: wire::FaultCode::MalformedFrame as i32,
+                                        message: detail,
+                                        retry: wire::FaultRetry::Never as i32,
+                                        supported_protocol_versions: None,
+                                    }),
+                                    payload: Vec::new(),
+                                },
+                            };
+                            let frame = wire::Frame {
+                                message_id: uuid::Uuid::now_v7().to_string(),
+                                correlation_id: String::new(),
+                                sent_at_unix_millis: fleet_core::SystemClock::now_unix_millis(),
+                                payload: Some(wire::frame::Payload::CommandResult(result)),
+                            };
+                            if outbound.send(frame).await.is_err() {
+                                eprintln!("fleetd: the session closed before the result could be sent");
+                            }
+                        });
+                    }
+                    Some(_) => {
+                        return Attempt::Reconnect(
+                            "the controller sent an unexpected frame".to_owned(),
+                        );
+                    }
+                    None => {
+                        return Attempt::Reconnect("the connection closed".to_owned());
+                    }
+                }
             }
         }
     }
@@ -206,7 +276,7 @@ impl Backoff {
     /// The next wait: the current interval, jittered, then doubled for the
     /// caller's next call.
     #[must_use]
-    pub fn next(&mut self) -> Duration {
+    pub fn wait(&mut self) -> Duration {
         let wait = self.jitter.scale(self.current);
         self.current = (self.current * 2).min(MAX_BACKOFF);
         wait
@@ -256,7 +326,7 @@ mod backoff_tests {
         let mut backoff = Backoff::new(FIRST_BACKOFF);
         let mut previous = Duration::ZERO;
         for _ in 0..20 {
-            let wait = backoff.next();
+            let wait = backoff.wait();
             assert!(
                 wait >= Duration::from_millis(100),
                 "{wait:?} must not collapse to zero"
@@ -278,7 +348,7 @@ mod backoff_tests {
     #[test]
     fn the_first_interval_is_inside_the_jitter_band() {
         let mut backoff = Backoff::new(FIRST_BACKOFF);
-        let wait = backoff.next();
+        let wait = backoff.wait();
         assert!(
             wait >= FIRST_BACKOFF * 3 / 4 && wait <= FIRST_BACKOFF * 5 / 4,
             "the first wait must be inside the ±25% band: {wait:?}"

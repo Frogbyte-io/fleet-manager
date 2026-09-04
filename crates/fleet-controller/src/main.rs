@@ -120,16 +120,29 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        // The executor routes by kind: node kinds dispatch through the
+        // gateway, everything else is SSH work.
         let executor = {
-            let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
-                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
-                    store.pool().clone(),
-                ));
-            std::sync::Arc::new(ScriptExecutor::new(
-                machines,
-                config.data_dir.join("ssh"),
-                fleet_provider_ssh::ExecutionLimiter::new(4),
-            ))
+            let ssh: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(ScriptExecutor::new(
+                    machines,
+                    config.data_dir.join("ssh"),
+                    fleet_provider_ssh::ExecutionLimiter::new(4),
+                ))
+            };
+            match &services {
+                Some(services) => {
+                    std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
+                        services.gateway.clone(),
+                        ssh,
+                    ))
+                }
+                None => ssh,
+            }
         };
         let worker_handle = tokio::spawn(run_worker(worker_operations, executor, async move {
             let _ = worker_shutdown_rx.await;

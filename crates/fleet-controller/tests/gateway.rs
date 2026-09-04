@@ -48,6 +48,7 @@ struct Harness {
     machines: fleet_storage_sqlite::MachineRepository,
     nodes: Arc<fleet_application::node::Nodes>,
     gateway: Arc<GatewayService>,
+    operations: Arc<fleet_application::operation::Operations>,
     address: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -98,6 +99,12 @@ async fn harness() -> Harness {
         .expect("the test server must serve");
     });
 
+    let operations = Arc::new(fleet_application::operation::Operations::new(
+        Arc::new(fleet_storage_sqlite::OperationRepository::new(
+            store.pool().clone(),
+        )),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+    ));
     Harness {
         _dist: dist,
         _store_dir: store_dir,
@@ -105,6 +112,7 @@ async fn harness() -> Harness {
         machines,
         nodes: services.nodes.clone(),
         gateway: services.gateway.clone(),
+        operations,
         address,
         shutdown: Some(shutdown_tx),
     }
@@ -119,6 +127,50 @@ impl Drop for Harness {
 }
 
 impl Harness {
+    /// The node-command executor over this harness's gateway.
+    fn node_executor(&self) -> fleet_controller::gateway::NodeCommandExecutor {
+        fleet_controller::gateway::NodeCommandExecutor::new(
+            self.gateway.clone(),
+            Arc::new(fleet_application::worker::NoopExecutor),
+        )
+    }
+
+    /// Creates one node operation and returns it.
+    async fn create_node_operation(
+        &self,
+        kind: &str,
+        machine_id: &str,
+        deadline_at: Option<i64>,
+    ) -> fleet_application::operation::Operation {
+        self.operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                "anonymous-lan-admin",
+                &fleet_application::operation::NewOperation {
+                    kind: kind.to_owned(),
+                    idempotency_key: None,
+                    deadline_at,
+                    correlation_id: None,
+                    payload_json: Some(serde_json::json!({ "machineId": machine_id }).to_string()),
+                },
+            )
+            .await
+            .expect("the operation must be created")
+    }
+
+    /// Runs one worker tick with the node executor.
+    async fn tick(&self) -> fleet_application::worker::TickReport {
+        self.operations
+            .tick(
+                &self.node_executor(),
+                "test-worker",
+                fleet_core::SystemClock::now_unix_millis(),
+                60_000,
+            )
+            .await
+            .expect("the tick must run")
+    }
+
     /// POSTs JSON to the test server and returns the status and body.
     async fn post_json(&self, path: &str, body: Value) -> (StatusCode, Value) {
         let mut stream = tokio::net::TcpStream::connect(self.address).await.unwrap();
@@ -581,4 +633,289 @@ async fn a_quiet_session_goes_stale_and_a_heartbeat_recovers_it() {
 
     let _ = done_tx.send(());
     let _ = sweeper_task.await;
+}
+
+// ---------------------------------------------------------------------------
+// Command dispatch (FM-207)
+// ---------------------------------------------------------------------------
+
+/// Starts a real fleetd gateway loop against the harness and waits for its
+/// session to register.
+async fn start_real_node(
+    harness: &Harness,
+    name: &str,
+) -> (std::path::PathBuf, String, tokio::sync::oneshot::Sender<()>) {
+    let state_dir = tempfile::tempdir().unwrap().keep();
+    let node_state = std::sync::Arc::new(fleetd::state::NodeState::open(&state_dir).unwrap());
+    let machine_id = harness.register_machine(name).await;
+    let (status, body) = harness
+        .post_json(
+            &format!("/api/v1/machines/{machine_id}/node/enrollments"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let token = body["data"]["token"].as_str().unwrap();
+    let controller = fleetd::http::Controller::parse(&format!("http://{}", harness.address))
+        .expect("the harness URL parses");
+    // The node's HTTP client is deliberately blocking; keep it off the
+    // test runtime's only thread.
+    tokio::task::spawn_blocking({
+        let controller = controller.clone();
+        let node_state = node_state.clone();
+        let token = token.to_owned();
+        move || fleetd::session::enroll(&controller, &node_state, &token)
+    })
+    .await
+    .expect("the enroll task must not panic")
+    .expect("the real node must enroll");
+    // Enrollment persists to the state directory; the run loop reloads it
+    // the way a fresh `fleetd run` process would.
+    let node_state = std::sync::Arc::new(
+        fleetd::state::NodeState::open(&state_dir).expect("the enrolled state must reopen"),
+    );
+    let journal = std::sync::Arc::new(
+        fleetd::journal::NodeJournal::open(&state_dir.join("journal.ndjson"))
+            .map_err(|error| error.to_string())
+            .unwrap(),
+    );
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let run_controller = controller.clone();
+    let run_state = node_state;
+    let run_journal = journal.clone();
+    tokio::spawn(async move {
+        let _ = fleetd::run_gateway_connected(run_controller, run_state, run_journal, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
+    });
+    // The gateway loop proves and connects within its bounded backoff.
+    wait_until(
+        async || harness.gateway.session_of(&machine_id).await.is_some(),
+        "the real node's gateway session must register",
+    )
+    .await;
+    (state_dir, machine_id, shutdown_tx)
+}
+
+#[tokio::test]
+async fn a_node_operation_dispatches_and_completes() {
+    let harness = harness().await;
+    let (_state_dir, machine_id, shutdown) = start_real_node(&harness, "dispatched").await;
+
+    let operation = harness
+        .create_node_operation("node.noop", &machine_id, None)
+        .await;
+    let report = harness.tick().await;
+    assert!(report.completed, "{report:?}");
+
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &operation.id,
+        )
+        .await
+        .expect("the operation must read");
+    assert_eq!(
+        finished.state,
+        "succeeded",
+        "{}",
+        finished.error_json.unwrap_or_default()
+    );
+    let result: Value = serde_json::from_str(&finished.result_json.expect("a result")).unwrap();
+    assert_eq!(result["status"], "succeeded");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn a_redelivered_command_replays_the_journaled_result_without_reexecution() {
+    let harness = harness().await;
+    let (_state_dir, machine_id, shutdown) = start_real_node(&harness, "journal").await;
+
+    // First diagnostic run: the journal gains one record.
+    let first = harness
+        .create_node_operation("node.diagnostic", &machine_id, None)
+        .await;
+    assert!(harness.tick().await.completed);
+    let first_finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &first.id,
+        )
+        .await
+        .unwrap();
+    let first_result: Value = serde_json::from_str(&first_finished.result_json.unwrap()).unwrap();
+    let first_payload: Value =
+        serde_json::from_str(first_result["payload"].as_str().unwrap()).unwrap();
+
+    // A second operation executes and gains its own record.
+    let second = harness
+        .create_node_operation("node.diagnostic", &machine_id, None)
+        .await;
+    assert!(harness.tick().await.completed);
+    let second_finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &second.id,
+        )
+        .await
+        .unwrap();
+    let second_result: Value = serde_json::from_str(&second_finished.result_json.unwrap()).unwrap();
+    let second_payload: Value =
+        serde_json::from_str(second_result["payload"].as_str().unwrap()).unwrap();
+    assert_ne!(
+        first_payload["journalRecords"], second_payload["journalRecords"],
+        "a fresh execution observes a grown journal"
+    );
+
+    // Redelivering the FIRST command replays its journaled result verbatim —
+    // the stale journalRecords value proves it was not re-executed.
+    let redelivered = harness
+        .gateway
+        .dispatch(
+            &machine_id,
+            wire::Command {
+                operation_id: first.id.clone(),
+                kind: "node.diagnostic".to_owned(),
+                kind_schema_version: 1,
+                deadline_unix_millis: i64::MAX,
+                idempotency_key: String::new(),
+                authorization_digest: String::new(),
+                max_output_bytes: 256 * 1024,
+                cancellation: wire::CancellationPolicy::BestEffort as i32,
+                payload: Vec::new(),
+            },
+        )
+        .await
+        .expect("the redelivery must be answered from the journal");
+    let replayed: Value =
+        serde_json::from_str(&String::from_utf8_lossy(&redelivered.payload)).unwrap();
+    assert_eq!(
+        replayed, first_payload,
+        "the replay is the original result, not a new execution"
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn a_dispatch_to_an_offline_node_fails_the_operation_honestly() {
+    let harness = harness().await;
+    let operation = harness
+        .create_node_operation("node.noop", "01990000-0000-7000-8000-000000000000", None)
+        .await;
+    let report = harness.tick().await;
+    assert!(report.completed);
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &operation.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(finished.state, "failed");
+    let error: Value = serde_json::from_str(&finished.error_json.unwrap()).unwrap();
+    assert_eq!(error["reason"], "step_failed");
+    assert!(
+        error["detail"].as_str().unwrap().contains("not connected"),
+        "{}",
+        error["detail"]
+    );
+}
+
+#[tokio::test]
+async fn a_silent_node_times_the_operation_out_at_its_deadline() {
+    let harness = harness().await;
+    // A hand-rolled node that negotiates and then ignores commands.
+    let keys = NodeKeys::generate();
+    let (machine_id, credential) = harness.enroll_node("silent", &keys).await;
+    let session = harness.prove_session(&credential, &keys).await;
+    let (stream, _) = connect_node(&harness, &session).await.unwrap();
+    let (mut sink, mut source) = stream.split();
+    send_frame(&mut sink, hello_frame(&machine_id, 1, 1)).await;
+    let _welcome = receive_frame(&mut source).await.expect("a Welcome");
+
+    let deadline = fleet_core::SystemClock::now_unix_millis() + 400;
+    let operation = harness
+        .create_node_operation("node.noop", &machine_id, Some(deadline))
+        .await;
+    let report = harness.tick().await;
+    assert!(report.completed);
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &operation.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        finished.state,
+        "timed_out",
+        "{}",
+        finished.result_json.unwrap_or_default()
+    );
+    sink.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_in_flight_bound_refuses_a_dispatch_beyond_flow_control() {
+    let harness = harness().await;
+    let keys = NodeKeys::generate();
+    let (machine_id, credential) = harness.enroll_node("backpressure", &keys).await;
+    let session = harness.prove_session(&credential, &keys).await;
+    let (stream, _) = connect_node(&harness, &session).await.unwrap();
+    let (mut _sink, mut source) = stream.split();
+    send_frame(&mut _sink, hello_frame(&machine_id, 1, 1)).await;
+    let _welcome = receive_frame(&mut source).await.expect("a Welcome");
+
+    // Fill every in-flight slot against a node that never replies.
+    let command = |operation_id: String| wire::Command {
+        operation_id,
+        kind: "node.noop".to_owned(),
+        kind_schema_version: 1,
+        deadline_unix_millis: i64::MAX,
+        idempotency_key: String::new(),
+        authorization_digest: String::new(),
+        max_output_bytes: 1024,
+        cancellation: wire::CancellationPolicy::BestEffort as i32,
+        payload: Vec::new(),
+    };
+    let mut pending = Vec::new();
+    for index in 0..32_u32 {
+        let gateway = harness.gateway.clone();
+        let machine = machine_id.clone();
+        let dispatch = async move {
+            gateway
+                .dispatch(&machine, command(format!("op-flood-{index}")))
+                .await
+        };
+        pending.push(tokio::spawn(async move {
+            // Each dispatch awaits its own result; keep them alive briefly.
+            tokio::time::timeout(Duration::from_secs(2), dispatch).await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let beyond = harness
+        .gateway
+        .dispatch(&machine_id, command("op-beyond".to_owned()))
+        .await;
+    match beyond {
+        Err(fleet_controller::gateway::DispatchError::Backpressure { limit }) => {
+            assert_eq!(limit, 32);
+        }
+        other => panic!("the 33rd dispatch must hit the bound, not {other:?}"),
+    }
+    // Release the slots.
+    for task in pending {
+        let _ = task.await;
+    }
 }

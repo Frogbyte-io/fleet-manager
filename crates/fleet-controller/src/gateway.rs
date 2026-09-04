@@ -45,9 +45,9 @@ use fleet_application::operation::AuditPort;
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use fleet_protocol::wire;
 use fleet_protocol::{
-    HEARTBEAT_INTERVAL_MILLIS, ProtocolFault, SUPPORTED_PROTOCOL_VERSIONS, VersionRange,
-    decode_frame, encode_frame, negotiate_feature_flags, negotiate_protocol_version,
-    session_limits,
+    HEARTBEAT_INTERVAL_MILLIS, MAX_IN_FLIGHT_COMMANDS, MAX_RESULT_PAYLOAD_BYTES, ProtocolFault,
+    SUPPORTED_PROTOCOL_VERSIONS, VersionRange, decode_frame, encode_frame, negotiate_feature_flags,
+    negotiate_protocol_version, session_limits,
 };
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -81,6 +81,13 @@ pub struct SessionEntry {
     pub journal_position: AtomicU64,
     /// The last heartbeat's arrival, in Unix epoch milliseconds.
     pub last_seen_millis: AtomicI64,
+    /// Commands dispatched and awaiting their results.
+    pub in_flight: std::sync::atomic::AtomicU32,
+    /// The outbound frame channel: dispatch pushes Command frames here and
+    /// the session loop owns the actual send.
+    pub outbound: tokio::sync::mpsc::Sender<wire::Frame>,
+    /// Awaiting command results, keyed by operation id.
+    pub pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<wire::CommandResult>>>>,
     /// The gateway state last persisted for this session.
     pub persisted_state: Mutex<GatewayState>,
     /// The supersede signal: holds a permit when a newer session takes over,
@@ -89,13 +96,21 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
-    fn new(boot_session: String, protocol_version: u32, now_millis: i64) -> Self {
+    fn new(
+        boot_session: String,
+        protocol_version: u32,
+        now_millis: i64,
+        outbound: tokio::sync::mpsc::Sender<wire::Frame>,
+    ) -> Self {
         Self {
             boot_session,
             protocol_version,
             heartbeat_sequence: AtomicU64::new(0),
             journal_position: AtomicU64::new(0),
             last_seen_millis: AtomicI64::new(now_millis),
+            in_flight: std::sync::atomic::AtomicU32::new(0),
+            outbound,
+            pending: Arc::new(Mutex::new(HashMap::new())),
             persisted_state: Mutex::new(GatewayState::Offline),
             superseded: Arc::new(tokio::sync::Notify::new()),
         }
@@ -313,10 +328,14 @@ impl GatewayService {
         };
 
         // Admit the session, superseding any earlier one for this machine.
+        // The outbound channel is the loop's single write path: dispatch
+        // pushes Command frames, the loop sends them.
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<wire::Frame>(32);
         let entry = Arc::new(SessionEntry::new(
             boot_session.clone(),
             negotiated.value(),
             now,
+            outbound_tx,
         ));
         if self.registry.insert(&machine_id, entry.clone()).is_some() {
             self.audit_event(&machine_id, "gateway_superseded");
@@ -354,7 +373,8 @@ impl GatewayService {
             negotiated, hello.feature_flags
         );
 
-        // The session loop: heartbeats in, supersede or close out.
+        // The session loop: heartbeats and command results in, dispatched
+        // commands and supersede out.
         loop {
             tokio::select! {
                 _ = entry.superseded.notified() => {
@@ -362,6 +382,18 @@ impl GatewayService {
                     self.audit_event(&machine_id, "gateway_superseded");
                     self.finish_session(&machine_id, &boot_session, &entry).await;
                     return;
+                }
+                frame = outbound_rx.recv() => {
+                    match frame {
+                        Some(frame) => {
+                            if !send_frame(&mut sender, frame).await {
+                                // The socket is dead; the inbound arm (or the
+                                // next select) will observe it and settle.
+                                continue;
+                            }
+                        }
+                        None => continue,
+                    }
                 }
                 frame = receive_frame(&mut receiver, &machine_id) => {
                     match frame {
@@ -385,6 +417,27 @@ impl GatewayService {
                             // A recovered heartbeat un-marks staleness; the
                             // persist helper writes only on transition.
                             self.persist_transition(&machine_id, GatewayState::Connected, &entry).await;
+                        }
+                        Some(wire::Frame {
+                            payload: Some(wire::frame::Payload::CommandResult(result)),
+                            ..
+                        }) => {
+                            // Route the result to its dispatch; a result with
+                            // no waiter (for example after a cancel) is
+                            // dropped — the journal on the node remembers it.
+                            let waiter = entry
+                                .pending
+                                .lock()
+                                .expect("uncontended")
+                                .remove(&result.operation_id);
+                            if let Some(waiter) = waiter {
+                                let _ = waiter.send(result);
+                            } else {
+                                eprintln!(
+                                    "node gateway: late result for operation {}                                      (no dispatch is waiting)",
+                                    result.operation_id
+                                );
+                            }
                         }
                         Some(_) => {
                             // An unexpected frame cannot be acted on; the
@@ -516,6 +569,357 @@ impl GatewayService {
             .get(machine_id)
             .cloned()
     }
+
+    /// Dispatches one command to a live node and awaits its result.
+    ///
+    /// Delivery is at-least-once by contract: a node that already executed
+    /// the command replays the journaled result, so a retry after a lost
+    /// result is idempotent. The in-flight bound is the flow-control gate —
+    /// a node that is behind answers with [`DispatchError::Backpressure`]
+    /// rather than accumulating unbounded work.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DispatchError`] for every refusal; none of them is
+    /// secret-bearing.
+    pub async fn dispatch(
+        &self,
+        machine_id: &str,
+        command: wire::Command,
+    ) -> Result<wire::CommandResult, DispatchError> {
+        let Some(entry) = self.session_of(machine_id).await else {
+            return Err(DispatchError::Offline {
+                machine_id: machine_id.to_owned(),
+            });
+        };
+        // Flow control: compare-and-set the in-flight counter against the
+        // protocol's advertised bound.
+        let claimed = entry.in_flight.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |current| (current < MAX_IN_FLIGHT_COMMANDS).then_some(current + 1),
+        );
+        if claimed.is_err() {
+            return Err(DispatchError::Backpressure {
+                limit: MAX_IN_FLIGHT_COMMANDS,
+            });
+        }
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let waiter = entry
+            .pending
+            .lock()
+            .expect("uncontended")
+            .insert(command.operation_id.clone(), result_tx);
+        if let Some(previous) = waiter {
+            // A dispatch for this operation is already outstanding; the
+            // protocol treats command ids as unique per operation.
+            let _ = previous.send(wire::CommandResult {
+                operation_id: command.operation_id.clone(),
+                status: wire::ResultStatus::Failed as i32,
+                exit_code: 0,
+                output_truncated: false,
+                duration_millis: 0,
+                stopped: false,
+                fault: Some(wire::Fault {
+                    code: wire::FaultCode::MalformedIdentity as i32,
+                    message: "a dispatch for this operation was already outstanding".to_owned(),
+                    retry: wire::FaultRetry::Never as i32,
+                    supported_protocol_versions: None,
+                }),
+                payload: Vec::new(),
+            });
+            entry.in_flight.fetch_sub(1, Ordering::AcqRel);
+            return Err(DispatchError::Duplicate {
+                operation_id: command.operation_id.clone(),
+            });
+        }
+
+        let frame = wire::Frame {
+            message_id: Uuid::now_v7().to_string(),
+            correlation_id: String::new(),
+            sent_at_unix_millis: fleet_core::SystemClock::now_unix_millis(),
+            payload: Some(wire::frame::Payload::Command(command)),
+        };
+        if entry.outbound.send(frame).await.is_err() {
+            entry
+                .pending
+                .lock()
+                .expect("uncontended")
+                .remove(machine_id);
+            entry.in_flight.fetch_sub(1, Ordering::AcqRel);
+            return Err(DispatchError::Disconnected {
+                machine_id: machine_id.to_owned(),
+            });
+        }
+        match result_rx.await {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                // The session loop dropped the waiter: the node is gone.
+                Err(DispatchError::Disconnected {
+                    machine_id: machine_id.to_owned(),
+                })
+            }
+        }
+    }
+
+    /// Releases one in-flight slot; called by the executor after a result
+    /// or a terminal error.
+    fn release(&self, machine_id: &str) {
+        if let Some(entry) = self
+            .registry
+            .sessions
+            .lock()
+            .expect("uncontended")
+            .get(machine_id)
+        {
+            entry.in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Why a dispatch did not happen or did not finish. None of these is a
+/// secret; they are operation-error material verbatim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DispatchError {
+    /// No live gateway session for the machine.
+    Offline {
+        /// The machine that was unreachable.
+        machine_id: String,
+    },
+    /// The node is at its in-flight bound.
+    Backpressure {
+        /// The bound that refused the dispatch.
+        limit: u32,
+    },
+    /// A dispatch for this operation is already outstanding.
+    Duplicate {
+        /// The operation dispatched twice.
+        operation_id: String,
+    },
+    /// The session ended before the result came back.
+    Disconnected {
+        /// The machine that went away.
+        machine_id: String,
+    },
+    /// The result did not arrive within the dispatch timeout.
+    Timeout {
+        /// The operation whose result never came.
+        operation_id: String,
+    },
+}
+
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Offline { machine_id } => {
+                write!(f, "the node for machine {machine_id} is not connected")
+            }
+            Self::Backpressure { limit } => {
+                write!(f, "the node is at its in-flight command limit ({limit})")
+            }
+            Self::Duplicate { operation_id } => {
+                write!(f, "operation {operation_id} is already dispatched")
+            }
+            Self::Disconnected { machine_id } => write!(
+                f,
+                "the node for machine {machine_id} disconnected before the result; its state is unknown"
+            ),
+            Self::Timeout { operation_id } => {
+                write!(f, "operation {operation_id} produced no result in time")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+/// The operation executor for node-backed kinds: dispatch through the
+/// gateway and map the node's result onto the operation's terminal state.
+///
+/// The timeout story follows the operation, not the executor: an operation
+/// with a deadline awaits exactly that long; one without gets
+/// [`DEFAULT_DISPATCH_TIMEOUT_MILLIS`]. The worker's own deadline sweep
+/// remains the backstop for anything that outlives both.
+#[derive(Debug)]
+pub struct NodeCommandExecutor {
+    gateway: Arc<GatewayService>,
+    fallback: Arc<dyn fleet_application::worker::OperationExecutor>,
+}
+
+/// The default await for node results when the operation carries no
+/// deadline: two minutes covers a slow LAN node with margin.
+pub const DEFAULT_DISPATCH_TIMEOUT_MILLIS: i64 = 120_000;
+
+impl NodeCommandExecutor {
+    /// Composes the executor: node kinds here, everything else through the
+    /// fallback (the SSH executor).
+    #[must_use]
+    pub fn new(
+        gateway: Arc<GatewayService>,
+        fallback: Arc<dyn fleet_application::worker::OperationExecutor>,
+    ) -> Self {
+        Self { gateway, fallback }
+    }
+
+    /// The operation's dispatch deadline in Unix milliseconds.
+    fn deadline_for(operation: &fleet_application::operation::Operation) -> i64 {
+        operation.deadline_at.unwrap_or_else(|| {
+            fleet_core::SystemClock::now_unix_millis() + DEFAULT_DISPATCH_TIMEOUT_MILLIS
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::worker::OperationExecutor for NodeCommandExecutor {
+    async fn execute(
+        &self,
+        operations: &fleet_application::operation::Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        match operation.kind.as_str() {
+            "node.noop" | "node.diagnostic" => self.execute_node(operations, operation).await,
+            _ => self.fallback.execute(operations, operation).await,
+        }
+    }
+}
+
+impl NodeCommandExecutor {
+    /// Dispatches one node command and drives the operation to a terminal
+    /// state from the node's result.
+    async fn execute_node(
+        &self,
+        operations: &fleet_application::operation::Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct NodePayload {
+            machine_id: String,
+        }
+        let payload: NodePayload = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a valid node dispatch: {error}"))?;
+        if payload.machine_id.is_empty() || payload.machine_id.len() > 64 {
+            return Err("the payload's machine id is malformed".to_owned());
+        }
+
+        let deadline = Self::deadline_for(operation);
+        let remaining = deadline - fleet_core::SystemClock::now_unix_millis();
+        if remaining <= 0 {
+            return complete(operations, &operation.id, "timed_out", None, None).await;
+        }
+        operations
+            .record_progress(
+                &operation.id,
+                Some(0),
+                Some(1),
+                Some(&format!("dispatched to machine {}", payload.machine_id)),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let command = wire::Command {
+            operation_id: operation.id.clone(),
+            kind: operation.kind.clone(),
+            kind_schema_version: 1,
+            deadline_unix_millis: deadline,
+            idempotency_key: operation.idempotency_key.clone().unwrap_or_default(),
+            authorization_digest: String::new(),
+            max_output_bytes: MAX_RESULT_PAYLOAD_BYTES,
+            cancellation: wire::CancellationPolicy::BestEffort as i32,
+            payload: Vec::new(),
+        };
+        let dispatch = self.gateway.dispatch(&payload.machine_id, command);
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_millis(u64::try_from(remaining).unwrap_or(u64::MAX)),
+            dispatch,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(DispatchError::Timeout {
+                operation_id: operation.id.clone(),
+            }),
+        };
+        self.gateway.release(&payload.machine_id);
+
+        match outcome {
+            Ok(result) => {
+                let payload_text = String::from_utf8_lossy(&result.payload).into_owned();
+                let result_json = serde_json::json!({
+                    "status": wire::ResultStatus::try_from(result.status)
+                        .map(fleet_result_status_name)
+                        .unwrap_or_else(|_| "failed".to_owned()),
+                    "exitCode": result.exit_code,
+                    "outputTruncated": result.output_truncated,
+                    "durationMillis": result.duration_millis,
+                    "stopped": result.stopped,
+                    "fault": result.fault.as_ref().map(|fault| serde_json::json!({
+                        "code": fault.code,
+                        "message": fault.message,
+                    })),
+                    "payload": payload_text,
+                })
+                .to_string();
+                let state = match wire::ResultStatus::try_from(result.status) {
+                    Ok(wire::ResultStatus::Succeeded) => "succeeded",
+                    Ok(wire::ResultStatus::Cancelled) => "cancelled",
+                    Ok(wire::ResultStatus::TimedOut) => "timed_out",
+                    _ => "failed",
+                };
+                if state == "failed" {
+                    complete(operations, &operation.id, state, None, Some(&result_json)).await
+                } else {
+                    complete(operations, &operation.id, state, Some(&result_json), None).await
+                }
+            }
+            Err(DispatchError::Offline { machine_id }) => Err(format!(
+                "the node for machine {machine_id} is not connected;                  create a new operation once it reconnects"
+            )),
+            Err(DispatchError::Backpressure { limit }) => Err(format!(
+                "the node is at its in-flight command limit ({limit}); retry later"
+            )),
+            Err(DispatchError::Duplicate { operation_id }) => Err(format!(
+                "operation {operation_id} is already dispatched; a duplicate dispatch is refused"
+            )),
+            Err(DispatchError::Disconnected { machine_id }) => Err(format!(
+                "the node for machine {machine_id} disconnected before the result;                  its state is unknown and the operation failed without evidence of execution"
+            )),
+            Err(DispatchError::Timeout { .. }) => {
+                complete(operations, &operation.id, "timed_out", None, None).await
+            }
+        }
+    }
+}
+
+fn fleet_result_status_name(status: wire::ResultStatus) -> String {
+    match status {
+        wire::ResultStatus::Succeeded => "succeeded".to_owned(),
+        wire::ResultStatus::Failed => "failed".to_owned(),
+        wire::ResultStatus::Cancelled => "cancelled".to_owned(),
+        wire::ResultStatus::TimedOut => "timed_out".to_owned(),
+        wire::ResultStatus::Rejected => "rejected".to_owned(),
+        _ => "failed".to_owned(),
+    }
+}
+
+async fn complete(
+    operations: &fleet_application::operation::Operations,
+    id: &str,
+    state: &str,
+    result_json: Option<&str>,
+    error_json: Option<&str>,
+) -> Result<(), String> {
+    operations
+        .complete(id, state, result_json, error_json)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// The node-surface router fragment carrying the gateway route. The
