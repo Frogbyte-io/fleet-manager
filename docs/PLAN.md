@@ -3,8 +3,9 @@
 Status: accepted baseline; product-scope revision in progress
 Prepared: 2026-08-25  
 Accepted: 2026-08-25 — see [planning/fm-000-acceptance.md](planning/fm-000-acceptance.md)  
-Revised: 2026-08-27 — confirmed product decisions from the maintainer planning review below
-Scope: architecture and development planning only; no product features are implemented by this plan
+Revised: 2026-08-27 — confirmed product decisions from the maintainer planning review below  
+Scope: architecture and development planning only; no product features are implemented by this plan  
+Execution: M0 and M1 are complete and their epics are closed; M2 is in progress — waves 1–5 closed as of 2026-09-05, FM-210 (#64) is next and unblocked. Live per-issue status: [planning/parallel-execution.md](planning/parallel-execution.md)
 
 ## Confirmed 2026-08-27 product-scope revision
 
@@ -182,6 +183,8 @@ Milestones are outcome gates, not fixed time boxes. Security, testing, documenta
 
 ### M0 — Architecture and migration foundation
 
+Status: complete (2026-09-04 — epics and milestone closed; recorded in [planning/initial-issues.md](planning/initial-issues.md)).
+
 Outcome: the approved architecture is executable as a repository structure without changing product behavior.
 
 - Approve this plan and proposed ADRs.
@@ -193,6 +196,8 @@ Outcome: the approved architecture is executable as a repository structure witho
 Exit gate: one command verifies Rust, TypeScript, schemas, generated API artifacts, legacy tests, and a minimal Compose build.
 
 ### M1 — Controller, API, and trusted-LAN control kernel
+
+Status: complete (2026-09-04 — epics and milestone closed; recorded in [planning/initial-issues.md](planning/initial-issues.md)).
 
 Outcome: a persistent trusted-LAN controller can be deployed, inspected, and trusted to record work before it controls a machine.
 
@@ -207,6 +212,8 @@ Outcome: a persistent trusted-LAN controller can be deployed, inspected, and tru
 Exit gate: Compose starts a controller bound to its configured local-network interface, API/CLI/web report the same system and operation data, every mutation passes the centralized authorization and audit path, and restart does not lose an accepted operation. Authenticated or Internet-exposed deployment is not supported by this gate.
 
 ### M2 — Machines, connectivity, and onboarding
+
+Status: in progress (2026-09-05 — waves 1–5 closed: FM-S05 and FM-200 through FM-209; next is FM-210 (#64), unblocked. Live wave status: [planning/parallel-execution.md](planning/parallel-execution.md)).
 
 Outcome: users can add agentless SSH machines or enroll `fleetd`, see reliable inventory/health, and upgrade an SSH machine to fully managed mode.
 
