@@ -33,6 +33,14 @@ FM-002 was split from a single issue precisely because five issues waited on it 
 
 ## M2 execution waves and current status
 
+**Checkpoint 2026-09-04 (session handoff).** Waves 1–4 and two of the three wave-5 issues are closed and pushed (`main` at `f309163`); every closed issue has a close-out comment on GitHub with acceptance-criterion evidence, and `cargo xtask verify` plus the policy scripts are green at the checkpoint commit. The next agent starts **FM-209 (#63) — machine list/detail/status in API, web, and fleetctl**: its dependencies (FM-110, FM-200, FM-203, FM-205, FM-206) are all merged, so it is unblocked with no in-flight work to coordinate with. Operating notes for the handoff:
+
+- **Surfaces FM-209 owns:** the `Machine` read model needs capability-fact hydration (the FM-203 note below), endpoints (redacted), node gateway state (`node_identities.gateway_state`, migration `0010`), tag/group/capability filters, and the stale-clock rules — API (OpenAPI + regenerated `openapi.json`/orval client; the regen commands are in the `xtask` steps and must be run when the API changes), web panel (uses the generated client), and `fleetctl machines …` (human text + `--output json` parity).
+- **Verified end-to-end already:** the real fleetd loop (`fleet-controller/tests/gateway.rs::start_real_node`) enrolls, connects, dispatches, collects inventory, and serves the local socket against a real controller — reuse it for the machine-view tests instead of hand-rolling another node.
+- **Composition facts:** `compose_node_services` (controller lib) is the one wiring point for node trust + gateway; the operation executor is a `NodeCommandExecutor` over the SSH executor; the OpenAPI document and the TS client are generated artifacts — never hand-edit.
+- **Docs that are contracts now:** `proto/README.md` (enrollment HTTP, gateway channel, commands/journal, inventory, local agent path) — keep it aligned when touching any node surface.
+- **Remaining after FM-209:** wave 6 (`FM-210 → FM-211 → FM-212`; FM-211 needs a real Linux VM for service-install tests) and wave 7 (`FM-213`, optional). FM-214 stays deferred past the first Lab release.
+
 M2 started 2026-09-04 after M1 closed. The dependency chain differs from M0: the SSH track (waves 1–2) is serial through the trust/execution/probe stack, and the fleetd track (wave 3) opens a new connection surface.
 
 ```text
