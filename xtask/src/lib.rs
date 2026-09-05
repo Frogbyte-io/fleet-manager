@@ -93,6 +93,11 @@ const STEPS: &[VerificationStep] = &[
         args: &["pnpm", "-r", "--if-present", "run", "typecheck"],
     },
     VerificationStep {
+        label: "Web unit tests",
+        program: "corepack",
+        args: &["pnpm", "-r", "--if-present", "run", "test"],
+    },
+    VerificationStep {
         label: "Web build",
         program: "corepack",
         args: &["pnpm", "-r", "--if-present", "run", "build"],

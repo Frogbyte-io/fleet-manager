@@ -10,9 +10,17 @@ use fleet_storage_sqlite::{MachineRepository, Store};
 use std::sync::Arc;
 
 async fn repository() -> (tempfile::TempDir, Arc<MachineRepository>) {
+    let (dir, repo, _pool) = repository_with_pool().await;
+    (dir, repo)
+}
+
+/// The repository plus its pool, for tests that plant rows the machine
+/// tables alone do not write (node identities come from the node surface).
+async fn repository_with_pool() -> (tempfile::TempDir, Arc<MachineRepository>, sqlx::SqlitePool) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
-    (dir, Arc::new(MachineRepository::new(store.pool().clone())))
+    let pool = store.pool().clone();
+    (dir, Arc::new(MachineRepository::new(pool.clone())), pool)
 }
 
 fn registration(name: &str) -> RegisterMachine {
@@ -239,4 +247,129 @@ async fn hydration_keeps_endpoint_identity_stable() {
     assert_eq!(reloaded.name, "machine-d2");
     assert_eq!(reloaded.endpoints[0].id, endpoint_id);
     let _ = std::marker::PhantomData::<Endpoint>;
+}
+
+#[tokio::test]
+async fn the_record_hydrates_facts_snapshot_and_node_link() {
+    use fleet_application::node::{GatewayState, NodePort as _, NodeStatus};
+
+    let (_dir, repo, pool) = repository_with_pool().await;
+    let machine = repo.register(&registration("hydrated")).await.unwrap();
+
+    // An ancient `known` fact is returned as recorded: staleness is a
+    // read-time rule applied by the view, not a storage rule.
+    repo.record_capabilities(
+        &machine.id,
+        &[
+            CapabilityFact {
+                namespace: "os".to_owned(),
+                name: "family".to_owned(),
+                value: Some("linux".to_owned()),
+                status: CapabilityStatus::Known,
+                observed_at: fleet_core::Timestamp::from_unix_millis(1_000),
+                source: "agentless/1".to_owned(),
+            },
+            CapabilityFact {
+                namespace: "tool".to_owned(),
+                name: "git".to_owned(),
+                value: None,
+                status: CapabilityStatus::Unavailable,
+                observed_at: fleet_core::Timestamp::from_unix_millis(2_000),
+                source: "agentless/1".to_owned(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    repo.record_snapshot(&machine.id, "agentless/1", "{}", 5_000)
+        .await
+        .unwrap();
+    repo.record_snapshot(&machine.id, "agentless/2", "{\"v\":2}", 9_000)
+        .await
+        .unwrap();
+
+    let nodes = fleet_storage_sqlite::NodeRepository::new(pool.clone());
+    sqlx::query(
+        "INSERT INTO node_identities (machine_id, public_key, key_version, status, os, arch, node_version, enrolled_at) \
+         VALUES (?1, 'ab', 1, 'active', 'linux', 'x86_64', '0.1.0', 4000)",
+    )
+    .bind(&machine.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    nodes
+        .record_gateway_state(&machine.id, GatewayState::Connected, Some("boot-1"), 8_000)
+        .await
+        .unwrap();
+
+    let machine = repo.get(&machine.id).await.unwrap();
+    assert_eq!(machine.capabilities.len(), 2);
+    assert_eq!(machine.capabilities[0].status, CapabilityStatus::Known);
+    assert_eq!(machine.capabilities[0].observed_at.unix_millis(), 1_000);
+    assert_eq!(
+        machine.capabilities[1].status,
+        CapabilityStatus::Unavailable
+    );
+    let observation = machine.last_observation.expect("an observation");
+    assert_eq!(observation.source, "agentless/2");
+    assert_eq!(observation.collected_at, 9_000);
+    let node = machine.node.expect("a node link");
+    assert_eq!(node.gateway_state, GatewayState::Connected);
+    assert_eq!(node.identity_status, NodeStatus::Active);
+    assert_eq!(node.last_seen_at, Some(8_000));
+}
+
+#[tokio::test]
+async fn the_status_filter_matches_the_derived_states() {
+    use fleet_application::machine::MachineStatus;
+
+    let (_dir, repo, pool) = repository_with_pool().await;
+    let agentless = repo.register(&registration("agentless")).await.unwrap();
+    let connected = repo.register(&registration("connected")).await.unwrap();
+    let offline = repo.register(&registration("offline")).await.unwrap();
+
+    for (machine_id, state) in [(&connected.id, "connected"), (&offline.id, "offline")] {
+        sqlx::query(
+            "INSERT INTO node_identities (machine_id, public_key, key_version, status, enrolled_at, gateway_state) \
+             VALUES (?1, 'cd', 1, 'active', 0, ?2)",
+        )
+        .bind(machine_id)
+        .bind(state)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let filtered = |status: Option<MachineStatus>| {
+        let repo = &repo;
+        async move {
+            let machines = repo
+                .list(
+                    &MachineFilter {
+                        status,
+                        ..MachineFilter::default()
+                    },
+                    50,
+                )
+                .await
+                .unwrap();
+            let mut ids: Vec<String> = machines.iter().map(|m| m.id.clone()).collect();
+            ids.sort();
+            ids
+        }
+    };
+
+    assert_eq!(
+        filtered(Some(MachineStatus::Agentless)).await,
+        vec![agentless.id.clone()]
+    );
+    assert_eq!(
+        filtered(Some(MachineStatus::Connected)).await,
+        vec![connected.id.clone()]
+    );
+    assert_eq!(
+        filtered(Some(MachineStatus::Offline)).await,
+        vec![offline.id.clone()]
+    );
+    assert_eq!(filtered(None).await.len(), 3);
 }

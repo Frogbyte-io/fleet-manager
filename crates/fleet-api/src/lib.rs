@@ -14,6 +14,7 @@
 mod correlation;
 mod envelope;
 mod error;
+pub mod machines;
 mod meta;
 pub mod node;
 pub mod operations;
@@ -66,6 +67,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         OperationStatus,
         operations::CreateOperationRequest,
         operations::OperationDto,
+        machines::CapabilityFactDto,
+        machines::EndpointDto,
+        machines::InventoryObservationDto,
+        machines::MachineDto,
         system::SystemInfo,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
@@ -80,6 +85,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "meta", description = "Service and contract description."),
         (name = "system", description = "The controller's own view of itself."),
         (name = "operations", description = "Durable operations: accepted remote work."),
+        (
+            name = "machines",
+            description = "The operational machine view: identity, endpoints, capability facts, \
+                           connectivity state, and the last observation. Endpoint references are \
+                           redacted unless the caller may read sensitive endpoint detail."
+        ),
         (
             name = "nodes",
             description = "Node enrollment and identity: enrollment tokens, node state, and revocation. \
@@ -108,6 +119,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(operations::cancel_operation))
                 .routes(routes!(system::get_system_info))
                 .routes(routes!(system::stream_operation_events))
+                .routes(routes!(machines::list_machines))
+                .routes(routes!(machines::get_machine))
                 .routes(routes!(
                     node::create_enrollment_token,
                     node::list_enrollment_tokens

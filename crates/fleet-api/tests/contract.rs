@@ -38,6 +38,7 @@ fn test_router() -> (axum::Router, Arc<FakePort>) {
         authorizer: Arc::new(PermitAll),
         system: Arc::new(FakeSystemInfo),
         nodes: None,
+        machines: None,
     });
     (
         router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
@@ -375,6 +376,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
         authorizer,
         system: Arc::new(FakeSystemInfo),
         nodes: None,
+        machines: None,
     })
 }
 
@@ -620,4 +622,374 @@ async fn the_operation_event_stream_snapshots_and_closes_on_terminal() {
     .expect("snapshots must stream");
     assert!(body.contains("event: operation"), "{body}");
     assert!(body.contains("\"kind\":\"noop\""), "{body}");
+}
+
+// Machine endpoints over an in-memory backend (FM-209), so the read
+// contract is proven without a database.
+
+use fleet_application::machine::{
+    Endpoint, InventoryObservation, Machine, MachineFilter, MachinePort, MachineStatus,
+    MachineView, Machines, NewEndpoint, NodeLink, RegisterMachine,
+};
+use fleet_application::node::{GatewayState, NodeStatus};
+use fleet_core::CapabilityFact;
+
+#[derive(Debug, Default)]
+struct FakeMachines {
+    machines: Mutex<Vec<Machine>>,
+    last_filter: Mutex<Option<MachineFilter>>,
+}
+
+impl FakeMachines {
+    fn with(self, machine: Machine) -> Self {
+        self.machines.lock().unwrap().push(machine);
+        self
+    }
+}
+
+#[async_trait]
+impl MachinePort for FakeMachines {
+    async fn register(&self, _registration: &RegisterMachine) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn get(&self, id: &str) -> Result<Machine, PortFailure> {
+        self.machines
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|machine| machine.id == id)
+            .cloned()
+            .ok_or_else(|| PortFailure::NotFound {
+                what: format!("machine {id:?}"),
+            })
+    }
+
+    async fn list(&self, filter: &MachineFilter, limit: u32) -> Result<Vec<Machine>, PortFailure> {
+        *self.last_filter.lock().unwrap() = Some(filter.clone());
+        Ok(self
+            .machines
+            .lock()
+            .unwrap()
+            .iter()
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    async fn update(
+        &self,
+        _id: &str,
+        _name: &str,
+        _description: &str,
+    ) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn set_endpoints(
+        &self,
+        _id: &str,
+        _endpoints: &[NewEndpoint],
+    ) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn add_tag(&self, _id: &str, _tag: &str) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn remove_tag(&self, _id: &str, _tag: &str) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn add_group(&self, _id: &str, _group: &str) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn remove_group(&self, _id: &str, _group: &str) -> Result<Machine, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn record_snapshot(
+        &self,
+        _id: &str,
+        _source: &str,
+        _payload_json: &str,
+        _collected_at: i64,
+    ) -> Result<(), PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn record_capabilities(
+        &self,
+        _id: &str,
+        _facts: &[CapabilityFact],
+    ) -> Result<(), PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn delete(&self, _id: &str) -> Result<(), PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn confirm_fingerprint(
+        &self,
+        _endpoint_id: &str,
+        _fingerprint: &str,
+        _confirmed_at: i64,
+    ) -> Result<(), PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn verified_fingerprint(
+        &self,
+        _endpoint_id: &str,
+    ) -> Result<Option<String>, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+
+    async fn latest_inventory_revision(
+        &self,
+        _machine_id: &str,
+    ) -> Result<Option<u64>, PortFailure> {
+        unimplemented!("not exercised by these tests")
+    }
+}
+
+fn example_machine() -> Machine {
+    Machine {
+        id: "01990000-0000-7000-8000-000000000009".to_owned(),
+        name: "build-host".to_owned(),
+        description: String::new(),
+        endpoints: vec![
+            Endpoint {
+                id: "endpoint-1".to_owned(),
+                kind: fleet_core::EndpointKind::Ssh,
+                reference: "ops@10.0.0.5:22".to_owned(),
+            },
+            Endpoint {
+                id: "endpoint-2".to_owned(),
+                kind: fleet_core::EndpointKind::Fleetd,
+                reference: "0199-node".to_owned(),
+            },
+        ],
+        tags: vec!["linux".to_owned()],
+        groups: Vec::new(),
+        capabilities: Vec::new(),
+        last_observation: Some(InventoryObservation {
+            source: "fleetd/0.1.0".to_owned(),
+            collected_at: 1_000,
+        }),
+        node: Some(NodeLink {
+            gateway_state: GatewayState::Connected,
+            identity_status: NodeStatus::Active,
+            last_seen_at: Some(1_500),
+        }),
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+fn machine_state(
+    authorizer: Arc<dyn fleet_application::authz::Authorizer>,
+    backend: Arc<FakeMachines>,
+) -> Arc<ApiState> {
+    Arc::new(ApiState {
+        operations: Arc::new(Operations::new(
+            Arc::new(FakePort::default()),
+            Arc::new(FakeAudit),
+        )),
+        authorizer,
+        system: Arc::new(FakeSystemInfo),
+        nodes: None,
+        machines: Some(Arc::new(Machines::new(backend, Arc::new(FakeAudit)))),
+    })
+}
+
+fn principal_router(state: Arc<ApiState>) -> axum::Router {
+    router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
+        id: "anonymous-lan-admin".to_owned(),
+    }))
+}
+
+#[tokio::test]
+async fn the_machine_list_is_a_page_and_the_detail_is_a_resource() {
+    let backend = Arc::new(FakeMachines::default().with(example_machine()));
+    let router = principal_router(machine_state(Arc::new(PermitAllAuthorizer), backend));
+
+    let response = router
+        .clone()
+        .oneshot(get(&format!("{API_BASE_PATH}/machines")))
+        .await
+        .unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["page"]["limit"], 50);
+    let machine = &body["items"][0];
+    assert_eq!(machine["machineStatus"], "connected");
+    assert_eq!(machine["endpoints"][0]["kind"], "ssh");
+    assert_eq!(machine["lastObservation"]["source"], "fleetd/0.1.0");
+    assert_eq!(machine["lastSeenAt"], 1_500);
+
+    let id = machine["id"].as_str().unwrap();
+    let response = router
+        .oneshot(get(&format!("{API_BASE_PATH}/machines/{id}")))
+        .await
+        .unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["name"], "build-host");
+}
+
+#[derive(Debug)]
+struct PermitAllAuthorizer;
+
+impl fleet_application::authz::Authorizer for PermitAllAuthorizer {
+    fn decide(
+        &self,
+        _request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        fleet_application::authz::Decision::allow()
+    }
+}
+
+/// Reads machines but not the credential-bearing endpoint detail.
+#[derive(Debug)]
+struct DenySensitiveOnly;
+
+impl fleet_application::authz::Authorizer for DenySensitiveOnly {
+    fn decide(&self, request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+        if request.action == fleet_application::authz::Permission::MachineReadSensitive {
+            Decision::deny(ReasonId::UnknownPrincipal)
+        } else {
+            Decision::allow()
+        }
+    }
+}
+
+#[tokio::test]
+async fn endpoint_usernames_follow_the_sensitive_permission() {
+    let backend = Arc::new(FakeMachines::default().with(example_machine()));
+
+    let router = principal_router(machine_state(
+        Arc::new(PermitAllAuthorizer),
+        backend.clone(),
+    ));
+    let (_, body) = call_via(&router, get(&format!("{API_BASE_PATH}/machines"))).await;
+    assert_eq!(
+        body["items"][0]["endpoints"][0]["reference"],
+        "ops@10.0.0.5:22"
+    );
+
+    let router = principal_router(machine_state(Arc::new(DenySensitiveOnly), backend));
+    let (_, body) = call_via(&router, get(&format!("{API_BASE_PATH}/machines"))).await;
+    assert_eq!(
+        body["items"][0]["endpoints"][0]["reference"],
+        "***@10.0.0.5:22"
+    );
+    // The fleetd reference carries no userinfo and is never redacted.
+    assert_eq!(body["items"][0]["endpoints"][1]["reference"], "0199-node");
+}
+
+async fn call_via(router: &axum::Router, request: Request<Body>) -> (Parts, Value) {
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("the router is infallible");
+    into_parts_json(response).await
+}
+
+#[tokio::test]
+async fn machine_filters_are_validated_and_forwarded() {
+    let backend = Arc::new(FakeMachines::default().with(example_machine()));
+    let router = principal_router(machine_state(
+        Arc::new(PermitAllAuthorizer),
+        backend.clone(),
+    ));
+
+    // A malformed capability filter is a 400, not a silent match-all.
+    let (parts, body) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/machines?capability=toolgit")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+
+    // An unknown status word is a 400: filters mean something specific.
+    let (parts, _) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/machines?status=dormant")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+
+    // A well-formed filter reaches the use case intact.
+    let (parts, _) = call_via(
+        &router,
+        get(&format!(
+            "{API_BASE_PATH}/machines?tag=linux&group=lab&capability=tool:git&status=connected&limit=7"
+        )),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK);
+    let filter = backend.last_filter.lock().unwrap().clone().unwrap();
+    assert_eq!(filter.tag.as_deref(), Some("linux"));
+    assert_eq!(filter.group.as_deref(), Some("lab"));
+    assert_eq!(
+        filter.capability,
+        Some(("tool".to_owned(), "git".to_owned()))
+    );
+    assert_eq!(filter.status, Some(MachineStatus::Connected));
+}
+
+#[tokio::test]
+async fn an_unknown_machine_is_not_found_and_a_denied_reader_is_forbidden() {
+    #[derive(Debug)]
+    struct DenyMachines;
+    impl fleet_application::authz::Authorizer for DenyMachines {
+        fn decide(&self, request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::MachineRead {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+
+    let backend = Arc::new(FakeMachines::default().with(example_machine()));
+    let router = principal_router(machine_state(
+        Arc::new(PermitAllAuthorizer),
+        backend.clone(),
+    ));
+    let (parts, body) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/machines/no-such-machine")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
+
+    let router = principal_router(machine_state(Arc::new(DenyMachines), backend));
+    let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}/machines"))).await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "denied");
+}
+
+#[tokio::test]
+async fn an_unwired_machine_surface_answers_the_standard_envelope() {
+    let state = operation_state(Arc::new(PermitAllAuthorizer));
+    let router = principal_router(state);
+    let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}/machines"))).await;
+    assert_eq!(parts.status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "machine_unavailable");
+}
+
+// Keep the unused view import referenced: the DTO conversion is exercised
+// through the router, not directly.
+#[test]
+fn the_view_converts_into_the_documented_shape() {
+    let _ = MachineView::assemble(example_machine(), 2_000, true);
 }

@@ -39,6 +39,9 @@ pub struct ApiState {
     /// The node trust use cases, when the controller was composed with a
     /// database and a master key; `None` only in document/test states.
     pub nodes: Option<Arc<fleet_application::node::Nodes>>,
+    /// The machine use cases, when the controller was composed with a
+    /// database; `None` only in document/test states.
+    pub machines: Option<Arc<fleet_application::machine::Machines>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -48,6 +51,7 @@ impl std::fmt::Debug for ApiState {
             .field("authorizer", &"dyn Authorizer")
             .field("system", &"dyn SystemInfoSource")
             .field("nodes", &self.nodes)
+            .field("machines", &self.machines)
             .finish()
     }
 }
@@ -183,6 +187,7 @@ impl ApiState {
             authorizer: Arc::new(PermitAllForDocument),
             system: Arc::new(UnavailableSystemInfo),
             nodes: None,
+            machines: None,
         }
     }
 }

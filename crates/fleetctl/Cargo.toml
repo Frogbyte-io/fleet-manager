@@ -20,7 +20,9 @@ workspace = true
 [dev-dependencies]
 fleetd = { path = "../fleetd" }
 axum = "0.8.9"
+fleet-application = { path = "../fleet-application" }
 fleet-controller = { path = "../fleet-controller" }
+fleet-core = { path = "../fleet-core" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros"] }

@@ -1,6 +1,7 @@
 //! Exercises the CLI contract: parsing, both output modes, and a real
 //! end-to-end request against a running controller router.
 
+use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
 use serde_json::json;
 
 #[test]
@@ -61,11 +62,79 @@ fn parsing_refuses_the_undocumented() {
         vec!["operations"],
         vec!["operations", "delete", "id"],
         vec!["--limit", "5", "operations", "list"],
+        vec!["machines", "list", "--dormant", "yes"],
+        vec!["machines", "list", "--tag"],
     ] {
         let args: Vec<String> = args.iter().map(ToString::to_string).collect();
         let error = fleetctl::parse(&args).unwrap_err();
-        assert!(error.message.contains("Usage"), "{error}");
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
+                || error.message.contains("unknown flag"),
+            "{error}"
+        );
     }
+}
+
+#[test]
+fn parsing_accepts_the_machine_grammar() {
+    let args: Vec<String> = ["machines", "get", "0199-machine"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesGet {
+            id: "0199-machine".to_owned()
+        }
+    );
+
+    let args: Vec<String> = [
+        "machines",
+        "list",
+        "--tag",
+        "linux",
+        "--group",
+        "lab",
+        "--capability",
+        "tool:git",
+        "--status",
+        "connected",
+        "--limit",
+        "7",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesList {
+            tag: Some("linux".to_owned()),
+            group: Some("lab".to_owned()),
+            capability: Some("tool:git".to_owned()),
+            status: Some("connected".to_owned()),
+            limit: Some(7),
+        }
+    );
+
+    // Bare `machines list` and a lone `--limit` also parse.
+    let args: Vec<String> = ["machines", "list"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesList {
+            tag: None,
+            group: None,
+            capability: None,
+            status: None,
+            limit: None,
+        }
+    );
 }
 
 #[test]
@@ -92,6 +161,79 @@ fn text_output_renders_an_empty_page_honestly() {
     let page = json!({"items": [], "page": {"limit": 50, "nextCursor": null}});
     let text = fleetctl::render_for_test(&page);
     assert!(text.contains("no operations"), "{text}");
+}
+
+#[test]
+fn text_output_renders_machines_as_a_table() {
+    let page = json!({
+        "items": [
+            {
+                "id": "01990000-0000-7000-8000-000000000001",
+                "name": "build-host",
+                "machineStatus": "connected",
+                "endpoints": [
+                    {"id": "e1", "kind": "ssh", "reference": "ops@build.lan:22"},
+                    {"id": "e2", "kind": "fleetd", "reference": "0199-node"}
+                ],
+                "tags": ["linux", "build"]
+            },
+            {
+                "id": "01990000-0000-7000-8000-000000000002",
+                "name": "lab-box",
+                "machineStatus": "agentless",
+                "endpoints": [],
+                "tags": []
+            }
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_machines_for_test(&page);
+    assert!(text.contains("NAME"), "{text}");
+    assert!(text.contains("STATUS"), "{text}");
+    assert!(text.contains("build-host"), "{text}");
+    assert!(text.contains("connected"), "{text}");
+    assert!(text.contains("agentless"), "{text}");
+    assert!(text.contains("ops@build.lan:22"), "{text}");
+    assert!(text.contains("linux,build"), "{text}");
+}
+
+#[test]
+fn text_output_renders_a_machine_detail_with_facts() {
+    let machine = json!({
+        "id": "01990000-0000-7000-8000-000000000001",
+        "name": "build-host",
+        "description": "the builder",
+        "machineStatus": "connected",
+        "lastSeenAt": 1500,
+        "endpoints": [
+            {"id": "e1", "kind": "ssh", "reference": "ops@build.lan:22"}
+        ],
+        "tags": ["linux"],
+        "groups": [],
+        "lastObservation": {"source": "fleetd/0.1.0", "collectedAt": 900},
+        "capabilities": [
+            {"namespace": "os", "name": "family", "value": "linux", "status": "known", "observedAt": 900, "source": "fleetd/0.1.0"},
+            {"namespace": "tool", "name": "git", "value": null, "status": "unavailable", "observedAt": 900, "source": "fleetd/0.1.0"}
+        ],
+        "createdAt": 0,
+        "updatedAt": 0
+    });
+    let text = fleetctl::render_machines_for_test(&machine);
+    assert!(text.contains("name: build-host"), "{text}");
+    assert!(text.contains("machineStatus: connected"), "{text}");
+    assert!(text.contains("ssh ops@build.lan:22"), "{text}");
+    assert!(
+        text.contains("lastObservation: fleetd/0.1.0 at 900"),
+        "{text}"
+    );
+    assert!(
+        text.contains("os.family = linux (known, fleetd/0.1.0)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("tool.git = – (unavailable, fleetd/0.1.0)"),
+        "{text}"
+    );
 }
 
 /// The end-to-end path: a real HTTP server on an ephemeral port serving the
@@ -165,6 +307,99 @@ fn fleetctl_talks_to_a_real_controller() {
     let invocation = fleetctl::parse(&args).unwrap();
     let listing = fleetctl::run(&invocation).unwrap();
     assert!(listing.contains("no operations"), "{listing}");
+}
+
+/// The machines commands over the same real-router path: register one
+/// machine behind the CLI's back, then list and read it in both modes.
+#[test]
+fn fleetctl_machines_read_a_real_controller() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let addr = runtime.block_on(async {
+        let dist = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
+        let machine = machines
+            .register(&RegisterMachine {
+                name: "cli-box".to_owned(),
+                description: String::new(),
+                endpoints: vec![NewEndpoint {
+                    kind: fleet_core::EndpointKind::Ssh,
+                    reference: "ops@cli-box.lan:22".to_owned(),
+                }],
+                tags: vec!["e2e".to_owned()],
+                groups: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let settings = fleet_controller::Settings {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            web_dist: dist.path().to_path_buf(),
+        };
+        let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::mem::forget((dist, dir, store));
+        tokio::spawn(async move {
+            let server = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            );
+            let _ = server.await;
+        });
+        (address, machine.id)
+    });
+
+    let (address, machine_id) = addr;
+    let base_url = format!("http://{address}");
+    let run = |args: &[&str]| {
+        let mut owned = vec!["--url", base_url.as_str()];
+        owned.extend_from_slice(args);
+        let owned: Vec<String> = owned.iter().map(ToString::to_string).collect();
+        let invocation = fleetctl::parse(&owned).unwrap();
+        fleetctl::run(&invocation).unwrap()
+    };
+
+    // Human text: an aligned table with the machine and its endpoint.
+    let text = run(&["machines", "list"]);
+    assert!(text.contains("cli-box"), "{text}");
+    assert!(text.contains("agentless"), "{text}");
+    assert!(text.contains("ops@cli-box.lan:22"), "{text}");
+    assert!(text.contains("e2e"), "{text}");
+
+    // JSON parity: the same page as the API sent it.
+    let json = run(&["--output", "json", "machines", "list"]);
+    let page: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(page["items"][0]["machineStatus"], "agentless");
+
+    // Filters flow through as query parameters.
+    let filtered = run(&["machines", "list", "--tag", "nothing-matches"]);
+    assert!(filtered.contains("no machines"), "{filtered}");
+
+    // The detail read unwraps the resource envelope.
+    let detail = run(&["machines", "get", &machine_id]);
+    assert!(detail.contains("cli-box"), "{detail}");
+    assert!(detail.contains("machineStatus: agentless"), "{detail}");
+
+    // An unknown machine reports the envelope code.
+    let args: Vec<String> = [
+        "--url",
+        &format!("http://{address}"),
+        "machines",
+        "get",
+        "no-such-machine",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    let error = fleetctl::run(&invocation).unwrap_err();
+    assert!(error.message.contains("not_found"), "{error}");
 }
 
 #[test]

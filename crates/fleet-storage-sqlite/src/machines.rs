@@ -11,10 +11,12 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use fleet_application::machine::{
-    Endpoint, Machine, MachineFilter, MachinePort, NewEndpoint, RegisterMachine,
+    Endpoint, InventoryObservation, Machine, MachineFilter, MachinePort, NewEndpoint, NodeLink,
+    RegisterMachine,
 };
+use fleet_application::node::{GatewayState, NodeStatus};
 use fleet_application::operation::PortFailure;
-use fleet_core::{CapabilityFact, EndpointKind};
+use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
 
 /// The machine repository over a pool.
 #[derive(Debug)]
@@ -106,21 +108,27 @@ impl MachinePort for MachineRepository {
 
     async fn list(&self, filter: &MachineFilter, limit: u32) -> Result<Vec<Machine>, PortFailure> {
         let limit = limit.clamp(1, 200);
+        let status = filter.status.as_ref().map(|status| status.id());
         let rows = sqlx::query(
             "SELECT DISTINCT m.* FROM machines m \
              LEFT JOIN machine_tags mt ON mt.machine_id = m.id \
              LEFT JOIN tags t ON t.id = mt.tag_id \
              LEFT JOIN machine_groups mg ON mg.machine_id = m.id \
              LEFT JOIN machine_capabilities mc ON mc.machine_id = m.id \
+             LEFT JOIN node_identities ni ON ni.machine_id = m.id \
              WHERE (?1 IS NULL OR t.name = ?1) \
                AND (?2 IS NULL OR mg.group_name = ?2) \
                AND (?3 IS NULL OR (mc.namespace = ?3 AND mc.name = ?4)) \
-             ORDER BY m.created_at DESC, m.id DESC LIMIT ?5",
+               AND (?5 IS NULL OR (?5 = 'agentless' AND ni.machine_id IS NULL) \
+                    OR (?5 <> 'agentless' AND ni.gateway_state = ?6)) \
+             ORDER BY m.created_at DESC, m.id DESC LIMIT ?7",
         )
         .bind(&filter.tag)
         .bind(&filter.group)
         .bind(filter.capability.as_ref().map(|(ns, _)| ns))
         .bind(filter.capability.as_ref().map(|(_, name)| name))
+        .bind(status)
+        .bind(status)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -399,6 +407,11 @@ impl MachinePort for MachineRepository {
 }
 
 impl MachineRepository {
+    /// Assembles one machine record with everything that is a fact about
+    /// it: endpoints, tags, groups, capability facts, the newest inventory
+    /// observation, and the node trust link. The read-time rules — fact
+    /// staleness and derived machine status — are applied later, by the
+    /// application's view assembly, so this stays a faithful record.
     async fn hydrate(&self, row: &sqlx::sqlite::SqliteRow) -> Result<Machine, PortFailure> {
         use sqlx::Row as _;
         let id: String = row.get("id");
@@ -421,6 +434,29 @@ impl MachineRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| backend("hydrate_groups", &error))?;
+        let capability_rows = sqlx::query(
+            "SELECT namespace, name, value, status, observed_at, source \
+             FROM machine_capabilities WHERE machine_id = ?1 ORDER BY namespace ASC, name ASC",
+        )
+        .bind(&id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| backend("hydrate_capabilities", &error))?;
+        let snapshot_row: Option<(String, i64)> = sqlx::query_as(
+            "SELECT source, collected_at FROM inventory_snapshots \
+             WHERE machine_id = ?1 ORDER BY collected_at DESC, id DESC LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| backend("hydrate_snapshot", &error))?;
+        let node_row: Option<(String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT gateway_state, status, last_seen_at FROM node_identities WHERE machine_id = ?1",
+        )
+        .bind(&id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| backend("hydrate_node", &error))?;
 
         Ok(Machine {
             id,
@@ -437,6 +473,28 @@ impl MachineRepository {
                 .collect(),
             tags: tag_rows.iter().map(|row| row.get(0)).collect(),
             groups: group_rows.iter().map(|row| row.get(0)).collect(),
+            capabilities: capability_rows
+                .iter()
+                .map(|row| CapabilityFact {
+                    namespace: row.get("namespace"),
+                    name: row.get("name"),
+                    value: row.get("value"),
+                    status: CapabilityStatus::from_id(&row.get::<String, _>("status"))
+                        .unwrap_or(CapabilityStatus::Unknown),
+                    observed_at: Timestamp::from_unix_millis(row.get("observed_at")),
+                    source: row.get("source"),
+                })
+                .collect(),
+            last_observation: snapshot_row.map(|(source, collected_at)| InventoryObservation {
+                source,
+                collected_at,
+            }),
+            node: node_row.map(|(gateway_state, status, last_seen_at)| NodeLink {
+                gateway_state: GatewayState::from_id(&gateway_state)
+                    .unwrap_or(GatewayState::Offline),
+                identity_status: NodeStatus::from_id(&status).unwrap_or(NodeStatus::Revoked),
+                last_seen_at,
+            }),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })

@@ -10,6 +10,150 @@
     "version": "v1"
   },
   "paths": {
+    "/api/v1/machines": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Lists machines, newest first, narrowed by the filters.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listMachines",
+        "parameters": [
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Only machines carrying this tag.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "description": "Only machines in this group.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "capability",
+            "in": "query",
+            "description": "Only machines carrying this capability, as `namespace:name`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only machines in this state: connected, stale, offline, or agentless.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of machines to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MachineDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads one machine.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "getMachine",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such machine.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/node": {
       "get": {
         "tags": [
@@ -602,6 +746,47 @@
           }
         }
       },
+      "CapabilityFactDto": {
+        "type": "object",
+        "description": "One capability fact as the read model displays it: the recorded status\nwith the staleness rule applied at the read time.",
+        "required": [
+          "namespace",
+          "name",
+          "status",
+          "observedAt",
+          "source"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The capability name within the namespace, e.g. `git`, `family`."
+          },
+          "namespace": {
+            "type": "string",
+            "description": "The namespace, e.g. `os`, `tool`, `agent`."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the fact was observed (epoch milliseconds)."
+          },
+          "source": {
+            "type": "string",
+            "description": "What observed it: a probe name and version, e.g. `agentless/1`."
+          },
+          "status": {
+            "type": "string",
+            "description": "The effective status: `known`, `stale`, `unknown`, or `unavailable`.\n`stale` means the fact was once known but nothing re-observed it\nwithin the freshness threshold; `unknown` means no probe ever\nanswered for it; they are deliberately different states."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The observed value, when the capability has one."
+          }
+        }
+      },
       "CreateEnrollmentTokenRequest": {
         "type": "object",
         "description": "The create-enrollment-token request.",
@@ -650,6 +835,29 @@
               "null"
             ],
             "description": "The bounded provider input for kinds that need one, e.g. the script\npayload of `ssh.exec`."
+          }
+        }
+      },
+      "EndpointDto": {
+        "type": "object",
+        "description": "One connection endpoint of a machine. The reference arrives redacted\nfrom the use case unless the caller may read sensitive endpoint detail.",
+        "required": [
+          "id",
+          "kind",
+          "reference"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The endpoint's identity."
+          },
+          "kind": {
+            "type": "string",
+            "description": "How this endpoint reaches the machine: `ssh` or `fleetd`."
+          },
+          "reference": {
+            "type": "string",
+            "description": "The reference, e.g. `***@host:port` for SSH when redacted, or the\nnode id for fleetd. Never carries a secret."
           }
         }
       },
@@ -763,6 +971,116 @@
           "message": {
             "type": "string",
             "description": "Caller-safe explanation."
+          }
+        }
+      },
+      "InventoryObservationDto": {
+        "type": "object",
+        "description": "The newest inventory observation of a machine: what probed it and when.",
+        "required": [
+          "source",
+          "collectedAt"
+        ],
+        "properties": {
+          "collectedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the observation was collected (epoch milliseconds)."
+          },
+          "source": {
+            "type": "string",
+            "description": "What observed it, e.g. `agentless/1` or `fleetd/1.2.3`."
+          }
+        }
+      },
+      "MachineDto": {
+        "type": "object",
+        "description": "A machine, as the list and detail endpoints display it.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "endpoints",
+          "tags",
+          "groups",
+          "machineStatus",
+          "capabilities",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityFactDto"
+            },
+            "description": "The capability facts with effective statuses at the read time."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Registration time (epoch milliseconds)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Operator notes."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EndpointDto"
+            },
+            "description": "How the machine is reached today; endpoint references are redacted\nunless the caller may read sensitive endpoint detail."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups."
+          },
+          "id": {
+            "type": "string",
+            "description": "The stable identity."
+          },
+          "lastObservation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InventoryObservationDto",
+                "description": "The newest inventory observation, when the machine was ever probed."
+              }
+            ]
+          },
+          "lastSeenAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last gateway observation time, when the node ever connected\n(epoch milliseconds)."
+          },
+          "machineStatus": {
+            "type": "string",
+            "description": "The derived connectivity state: `connected`, `stale`, `offline`, or\n`agentless`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The mutable, unique label."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last mutation (epoch milliseconds)."
           }
         }
       },
@@ -1130,6 +1448,115 @@
           }
         }
       },
+      "Page_MachineDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A machine, as the list and detail endpoints display it.",
+              "required": [
+                "id",
+                "name",
+                "description",
+                "endpoints",
+                "tags",
+                "groups",
+                "machineStatus",
+                "capabilities",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CapabilityFactDto"
+                  },
+                  "description": "The capability facts with effective statuses at the read time."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Registration time (epoch milliseconds)."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Operator notes."
+                },
+                "endpoints": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EndpointDto"
+                  },
+                  "description": "How the machine is reached today; endpoint references are redacted\nunless the caller may read sensitive endpoint detail."
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Groups."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The stable identity."
+                },
+                "lastObservation": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/InventoryObservationDto",
+                      "description": "The newest inventory observation, when the machine was ever probed."
+                    }
+                  ]
+                },
+                "lastSeenAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "The last gateway observation time, when the node ever connected\n(epoch milliseconds)."
+                },
+                "machineStatus": {
+                  "type": "string",
+                  "description": "The derived connectivity state: `connected`, `stale`, `offline`, or\n`agentless`."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The mutable, unique label."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Tags."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last mutation (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "Page_OperationDto": {
         "type": "object",
         "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
@@ -1282,6 +1709,106 @@
               "token": {
                 "type": "string",
                 "description": "The token value. Shown once."
+              }
+            }
+          }
+        }
+      },
+      "Resource_MachineDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A machine, as the list and detail endpoints display it.",
+            "required": [
+              "id",
+              "name",
+              "description",
+              "endpoints",
+              "tags",
+              "groups",
+              "machineStatus",
+              "capabilities",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CapabilityFactDto"
+                },
+                "description": "The capability facts with effective statuses at the read time."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Registration time (epoch milliseconds)."
+              },
+              "description": {
+                "type": "string",
+                "description": "Operator notes."
+              },
+              "endpoints": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EndpointDto"
+                },
+                "description": "How the machine is reached today; endpoint references are redacted\nunless the caller may read sensitive endpoint detail."
+              },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Groups."
+              },
+              "id": {
+                "type": "string",
+                "description": "The stable identity."
+              },
+              "lastObservation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InventoryObservationDto",
+                    "description": "The newest inventory observation, when the machine was ever probed."
+                  }
+                ]
+              },
+              "lastSeenAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The last gateway observation time, when the node ever connected\n(epoch milliseconds)."
+              },
+              "machineStatus": {
+                "type": "string",
+                "description": "The derived connectivity state: `connected`, `stale`, `offline`, or\n`agentless`."
+              },
+              "name": {
+                "type": "string",
+                "description": "The mutable, unique label."
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Tags."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last mutation (epoch milliseconds)."
               }
             }
           }
@@ -1579,6 +2106,10 @@
     {
       "name": "operations",
       "description": "Durable operations: accepted remote work."
+    },
+    {
+      "name": "machines",
+      "description": "The operational machine view: identity, endpoints, capability facts, connectivity state, and the last observation. Endpoint references are redacted unless the caller may read sensitive endpoint detail."
     },
     {
       "name": "nodes",

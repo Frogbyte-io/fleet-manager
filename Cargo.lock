@@ -777,8 +777,10 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "fleet-api",
+ "fleet-application",
  "fleet-config",
  "fleet-controller",
+ "fleet-core",
  "fleet-storage-sqlite",
  "fleetd",
  "reqwest",

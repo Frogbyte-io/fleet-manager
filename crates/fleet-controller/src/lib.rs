@@ -99,12 +99,17 @@ fn api_state(
             std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
         );
+        let machines = fleet_application::machine::Machines::new(
+            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+        );
         let system = ControllerSystemInfo { pool: pool.clone() };
         return fleet_api::operations::ApiState {
             operations: std::sync::Arc::new(operations),
             authorizer,
             system: std::sync::Arc::new(system),
             nodes,
+            machines: Some(std::sync::Arc::new(machines)),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -116,6 +121,7 @@ fn api_state(
         authorizer: std::sync::Arc::new(DenyAllForTests),
         system: state.system,
         nodes: None,
+        machines: None,
     }
 }
 

@@ -83,6 +83,24 @@ pub enum Command {
         /// The operation id.
         id: String,
     },
+    /// List machines with optional filters.
+    MachinesList {
+        /// Only machines carrying this tag.
+        tag: Option<String>,
+        /// Only machines in this group.
+        group: Option<String>,
+        /// Only machines carrying this capability, as `namespace:name`.
+        capability: Option<String>,
+        /// Only machines in this state.
+        status: Option<String>,
+        /// Maximum entries to request.
+        limit: Option<u32>,
+    },
+    /// Read one machine.
+    MachinesGet {
+        /// The machine id.
+        id: String,
+    },
 }
 
 /// Parses the command line.
@@ -154,6 +172,10 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["operations", "cancel", id] => Command::OperationsCancel {
             id: (*id).to_owned(),
         },
+        ["machines", "list", rest @ ..] => parse_machines_list(rest)?,
+        ["machines", "get", id] => Command::MachinesGet {
+            id: (*id).to_owned(),
+        },
         _ => return Err(CliError { message: usage() }),
     };
     Ok(Invocation {
@@ -165,9 +187,50 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     })
 }
 
+/// Parses the flags of `machines list`; each takes one value.
+fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
+    let mut tag: Option<String> = None;
+    let mut group: Option<String> = None;
+    let mut capability: Option<String> = None;
+    let mut status: Option<String> = None;
+    let mut limit = None;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--tag" => tag = Some(value("tag")?.to_owned()),
+            "--group" => group = Some(value("group")?.to_owned()),
+            "--capability" => capability = Some(value("capability")?.to_owned()),
+            "--status" => status = Some(value("status")?.to_owned()),
+            "--limit" => {
+                let parsed = value("limit")?;
+                limit = Some(parsed.parse().map_err(|_| CliError {
+                    message: format!("--limit must be a number, not {parsed:?}"),
+                })?);
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    Ok(Command::MachinesList {
+        tag,
+        group,
+        capability,
+        status,
+        limit,
+    })
+}
+
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -212,42 +275,60 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
-    let (method, path) = match &invocation.command {
+    let (method, path, query) = match &invocation.command {
         // `status` took one of the two routes above.
         Command::Status => unreachable!("the status command returned before dispatch"),
-        Command::System => (reqwest::Method::GET, "/api/v1/system".to_owned()),
+        Command::System => (
+            reqwest::Method::GET,
+            "/api/v1/system".to_owned(),
+            Vec::new(),
+        ),
         Command::OperationsList { .. } => {
             let limit = match invocation.command {
                 Command::OperationsList { limit: Some(limit) } => format!("?limit={limit}"),
                 _ => String::new(),
             };
-            (reqwest::Method::GET, format!("/api/v1/operations{limit}"))
+            (
+                reqwest::Method::GET,
+                format!("/api/v1/operations{limit}"),
+                Vec::new(),
+            )
         }
-        Command::OperationsGet { id } => (reqwest::Method::GET, format!("/api/v1/operations/{id}")),
+        Command::OperationsGet { id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/operations/{id}"),
+            Vec::new(),
+        ),
         Command::OperationsCancel { id } => (
             reqwest::Method::POST,
             format!("/api/v1/operations/{id}/cancel"),
+            Vec::new(),
+        ),
+        Command::MachinesList {
+            tag,
+            group,
+            capability,
+            status,
+            limit,
+        } => (
+            reqwest::Method::GET,
+            "/api/v1/machines".to_owned(),
+            machines_list_query(
+                tag.as_ref(),
+                group.as_ref(),
+                capability.as_ref(),
+                status.as_ref(),
+                *limit,
+            ),
+        ),
+        Command::MachinesGet { id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/machines/{id}"),
+            Vec::new(),
         ),
     };
 
-    let request = client
-        .request(method, format!("{}{}", invocation.url, path))
-        .header("x-correlation-id", correlation_id);
-    let response = request.send().map_err(|error| CliError {
-        message: format!("the controller did not answer: {error}"),
-    })?;
-    let status = reqwest::StatusCode::as_u16(&response.status());
-    let body: Value = response.json().map_err(|error| CliError {
-        message: format!("the controller's answer was not JSON: {error}"),
-    })?;
-
-    if !(200..300).contains(&status) {
-        let code = body["code"].as_str().unwrap_or("unknown");
-        let message = body["message"].as_str().unwrap_or("no detail");
-        return Err(CliError {
-            message: format!("the controller refused ({status}, {code}): {message}"),
-        });
-    }
+    let body = send(&client, invocation, method, &path, &query, correlation_id)?;
 
     let is_page = body.get("items").is_some();
     let payload = if is_page {
@@ -259,8 +340,73 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         Output::Json => serde_json::to_string_pretty(&payload).map_err(|error| CliError {
             message: format!("cannot render the answer: {error}"),
         })?,
-        Output::Text => render_text(Some(&payload)),
+        Output::Text => match invocation.command {
+            // The machine surface has its own renderer: an empty page must
+            // say "no machines", not borrow the operations table.
+            Command::MachinesList { .. } | Command::MachinesGet { .. } => {
+                render_machines(Some(&payload))
+            }
+            _ => render_text(Some(&payload)),
+        },
     })
+}
+
+/// The machines-list query parameters, in API order.
+fn machines_list_query(
+    tag: Option<&String>,
+    group: Option<&String>,
+    capability: Option<&String>,
+    status: Option<&String>,
+    limit: Option<u32>,
+) -> Vec<(&'static str, String)> {
+    let mut query: Vec<(&'static str, String)> = Vec::new();
+    for (name, value) in [
+        ("tag", tag),
+        ("group", group),
+        ("capability", capability),
+        ("status", status),
+    ] {
+        if let Some(value) = value {
+            query.push((name, value.clone()));
+        }
+    }
+    if let Some(limit) = limit {
+        query.push(("limit", limit.to_string()));
+    }
+    query
+}
+
+/// Sends one controller request and answers the decoded body, refusing
+/// non-2xx answers with the envelope's code and message.
+fn send(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    method: reqwest::Method,
+    path: &str,
+    query: &[(&'static str, String)],
+    correlation_id: String,
+) -> Result<Value, CliError> {
+    let mut request = client
+        .request(method, format!("{}{}", invocation.url, path))
+        .header("x-correlation-id", correlation_id);
+    if !query.is_empty() {
+        request = request.query(query);
+    }
+    let response = request.send().map_err(|error| CliError {
+        message: format!("the controller did not answer: {error}"),
+    })?;
+    let status = reqwest::StatusCode::as_u16(&response.status());
+    let body: Value = response.json().map_err(|error| CliError {
+        message: format!("the controller's answer was not JSON: {error}"),
+    })?;
+    if !(200..300).contains(&status) {
+        let code = body["code"].as_str().unwrap_or("unknown");
+        let message = body["message"].as_str().unwrap_or("no detail");
+        return Err(CliError {
+            message: format!("the controller refused ({status}, {code}): {message}"),
+        });
+    }
+    Ok(body)
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, CliError> {
@@ -327,6 +473,34 @@ pub fn render_for_test(value: &Value) -> String {
     render_text(Some(value))
 }
 
+/// Renders the machine surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_machines_for_test(value: &Value) -> String {
+    render_machines(Some(value))
+}
+
+fn render_machines(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<24} {:<10} {:<32} {}",
+            "NAME", "STATUS", "ENDPOINT", "TAGS"
+        )];
+        for item in items {
+            lines.push(machine_line(item));
+        }
+        if items.is_empty() {
+            lines.push("(no machines)".to_owned());
+        }
+        lines.join("\n")
+    } else {
+        machine_detail(value)
+    }
+}
+
 fn render_text(value: Option<&Value>) -> String {
     let Some(value) = value else {
         return String::new();
@@ -363,6 +537,109 @@ fn operation_line(operation: &Value) -> String {
         operation["kind"].as_str().unwrap_or("-"),
         operation["state"].as_str().unwrap_or("-")
     )
+}
+
+fn machine_line(machine: &Value) -> String {
+    let endpoint = machine["endpoints"]
+        .as_array()
+        .and_then(|endpoints| endpoints.first())
+        .and_then(|endpoint| endpoint["reference"].as_str())
+        .unwrap_or("-");
+    let tags = machine["tags"]
+        .as_array()
+        .map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    format!(
+        "{:<24} {:<10} {:<32} {}",
+        machine["name"].as_str().unwrap_or("-"),
+        machine["machineStatus"].as_str().unwrap_or("-"),
+        endpoint,
+        tags
+    )
+}
+
+fn machine_detail(machine: &Value) -> String {
+    let mut lines = Vec::new();
+    for key in [
+        "id",
+        "name",
+        "description",
+        "machineStatus",
+        "lastSeenAt",
+        "createdAt",
+        "updatedAt",
+    ] {
+        if let Some(value) = machine.get(key) {
+            let rendered = match value {
+                Value::String(text) => text.clone(),
+                Value::Null => continue,
+                other => other.to_string(),
+            };
+            lines.push(format!("{key}: {rendered}"));
+        }
+    }
+    for (label, key) in [
+        ("endpoints", "endpoints"),
+        ("tags", "tags"),
+        ("groups", "groups"),
+    ] {
+        if let Some(items) = machine.get(key).and_then(Value::as_array) {
+            let rendered = items
+                .iter()
+                .map(|item| match (key, item) {
+                    ("endpoints", endpoint) => format!(
+                        "  {} {}",
+                        endpoint["kind"].as_str().unwrap_or("-"),
+                        endpoint["reference"].as_str().unwrap_or("-")
+                    ),
+                    (_, tag) => format!("  {}", tag.as_str().unwrap_or("-")),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            lines.push(format!(
+                "{label}:{}{}",
+                if rendered.is_empty() { " (none)" } else { "" },
+                if rendered.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{rendered}")
+                }
+            ));
+        }
+    }
+    if let Some(observation) = machine.get("lastObservation")
+        && !observation.is_null()
+    {
+        lines.push(format!(
+            "lastObservation: {} at {}",
+            observation["source"].as_str().unwrap_or("-"),
+            observation["collectedAt"]
+        ));
+    }
+    if let Some(capabilities) = machine.get("capabilities").and_then(Value::as_array) {
+        if capabilities.is_empty() {
+            lines.push("capabilities: (none observed)".to_owned());
+        } else {
+            lines.push("capabilities:".to_owned());
+            for fact in capabilities {
+                lines.push(format!(
+                    "  {}.{} = {} ({}, {}) at {}",
+                    fact["namespace"].as_str().unwrap_or("-"),
+                    fact["name"].as_str().unwrap_or("-"),
+                    fact["value"].as_str().unwrap_or("–"),
+                    fact["status"].as_str().unwrap_or("-"),
+                    fact["source"].as_str().unwrap_or("-"),
+                    fact["observedAt"]
+                ));
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 fn operation_detail(operation: &Value) -> String {

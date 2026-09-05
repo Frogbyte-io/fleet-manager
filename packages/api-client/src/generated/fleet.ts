@@ -51,6 +51,33 @@ export interface ApiError {
 }
 
 /**
+ * One capability fact as the read model displays it: the recorded status
+ * with the staleness rule applied at the read time.
+ */
+export interface CapabilityFactDto {
+  /** The capability name within the namespace, e.g. `git`, `family`. */
+  name: string;
+  /** The namespace, e.g. `os`, `tool`, `agent`. */
+  namespace: string;
+  /** When the fact was observed (epoch milliseconds). */
+  observedAt: number;
+  /** What observed it: a probe name and version, e.g. `agentless/1`. */
+  source: string;
+  /**
+     * The effective status: `known`, `stale`, `unknown`, or `unavailable`.
+     * `stale` means the fact was once known but nothing re-observed it
+     * within the freshness threshold; `unknown` means no probe ever
+     * answered for it; they are deliberately different states.
+     */
+  status: string;
+  /**
+     * The observed value, when the capability has one.
+     * @nullable
+     */
+  value?: string | null;
+}
+
+/**
  * The create-enrollment-token request.
  */
 export interface CreateEnrollmentTokenRequest {
@@ -89,6 +116,22 @@ export interface CreateOperationRequest {
      * @nullable
      */
   payloadJson?: string | null;
+}
+
+/**
+ * One connection endpoint of a machine. The reference arrives redacted
+ * from the use case unless the caller may read sensitive endpoint detail.
+ */
+export interface EndpointDto {
+  /** The endpoint's identity. */
+  id: string;
+  /** How this endpoint reaches the machine: `ssh` or `fleetd`. */
+  kind: string;
+  /**
+     * The reference, e.g. `***@host:port` for SSH when redacted, or the
+     * node id for fleetd. Never carries a secret.
+     */
+  reference: string;
 }
 
 /**
@@ -134,6 +177,55 @@ export interface EnrollmentTokenDto {
 export interface EnrollmentTokenListDto {
   /** The machine's tokens, newest first. */
   items: EnrollmentTokenDto[];
+}
+
+/**
+ * The newest inventory observation of a machine: what probed it and when.
+ */
+export interface InventoryObservationDto {
+  /** When the observation was collected (epoch milliseconds). */
+  collectedAt: number;
+  /** What observed it, e.g. `agentless/1` or `fleetd/1.2.3`. */
+  source: string;
+}
+
+/**
+ * A machine, as the list and detail endpoints display it.
+ */
+export interface MachineDto {
+  /** The capability facts with effective statuses at the read time. */
+  capabilities: CapabilityFactDto[];
+  /** Registration time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes. */
+  description: string;
+  /**
+     * How the machine is reached today; endpoint references are redacted
+     * unless the caller may read sensitive endpoint detail.
+     */
+  endpoints: EndpointDto[];
+  /** Groups. */
+  groups: string[];
+  /** The stable identity. */
+  id: string;
+  lastObservation?: null | InventoryObservationDto;
+  /**
+     * The last gateway observation time, when the node ever connected
+     * (epoch milliseconds).
+     * @nullable
+     */
+  lastSeenAt?: number | null;
+  /**
+     * The derived connectivity state: `connected`, `stale`, `offline`, or
+     * `agentless`.
+     */
+  machineStatus: string;
+  /** The mutable, unique label. */
+  name: string;
+  /** Tags. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
 }
 
 /**
@@ -352,6 +444,58 @@ export interface PageInfo {
 }
 
 /**
+ * A machine, as the list and detail endpoints display it.
+ */
+export type PageMachineDtoItemsItem = {
+  /** The capability facts with effective statuses at the read time. */
+  capabilities: CapabilityFactDto[];
+  /** Registration time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes. */
+  description: string;
+  /**
+     * How the machine is reached today; endpoint references are redacted
+     * unless the caller may read sensitive endpoint detail.
+     */
+  endpoints: EndpointDto[];
+  /** Groups. */
+  groups: string[];
+  /** The stable identity. */
+  id: string;
+  lastObservation?: null | InventoryObservationDto;
+  /**
+     * The last gateway observation time, when the node ever connected
+     * (epoch milliseconds).
+     * @nullable
+     */
+  lastSeenAt?: number | null;
+  /**
+     * The derived connectivity state: `connected`, `stale`, `offline`, or
+     * `agentless`.
+     */
+  machineStatus: string;
+  /** The mutable, unique label. */
+  name: string;
+  /** Tags. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageMachineDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageMachineDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * The public operation resource. The application type is the transport
  * truth; this type is the documented shape, kept one `From` away so the two
  * cannot drift silently.
@@ -454,6 +598,56 @@ export interface ResourceEnrollmentTokenCreatedDto {
      * once; only its hash is stored.
      */
   data: ResourceEnrollmentTokenCreatedDtoData;
+}
+
+/**
+ * A machine, as the list and detail endpoints display it.
+ */
+export type ResourceMachineDtoData = {
+  /** The capability facts with effective statuses at the read time. */
+  capabilities: CapabilityFactDto[];
+  /** Registration time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes. */
+  description: string;
+  /**
+     * How the machine is reached today; endpoint references are redacted
+     * unless the caller may read sensitive endpoint detail.
+     */
+  endpoints: EndpointDto[];
+  /** Groups. */
+  groups: string[];
+  /** The stable identity. */
+  id: string;
+  lastObservation?: null | InventoryObservationDto;
+  /**
+     * The last gateway observation time, when the node ever connected
+     * (epoch milliseconds).
+     * @nullable
+     */
+  lastSeenAt?: number | null;
+  /**
+     * The derived connectivity state: `connected`, `stale`, `offline`, or
+     * `agentless`.
+     */
+  machineStatus: string;
+  /** The mutable, unique label. */
+  name: string;
+  /** Tags. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineDto {
+  /** A machine, as the list and detail endpoints display it. */
+  data: ResourceMachineDtoData;
 }
 
 /**
@@ -622,6 +816,30 @@ export interface SystemInfo {
   version: string;
 }
 
+export type ListMachinesParams = {
+/**
+ * Only machines carrying this tag.
+ */
+tag?: string;
+/**
+ * Only machines in this group.
+ */
+group?: string;
+/**
+ * Only machines carrying this capability, as `namespace:name`.
+ */
+capability?: string;
+/**
+ * Only machines in this state: connected, stale, offline, or agentless.
+ */
+status?: string;
+/**
+ * The maximum number of machines to return.
+ * @minimum 0
+ */
+limit?: number;
+};
+
 export type ListOperationsParams = {
 /**
  * The maximum number of operations to return.
@@ -629,6 +847,129 @@ export type ListOperationsParams = {
  */
 limit?: number;
 };
+
+export type listMachinesResponse200 = {
+  data: PageMachineDto
+  status: 200
+}
+
+export type listMachinesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listMachinesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listMachinesResponseSuccess = (listMachinesResponse200) & {
+  headers: Headers;
+};
+export type listMachinesResponseError = (listMachinesResponse400 | listMachinesResponse403) & {
+  headers: Headers;
+};
+
+export type listMachinesResponse = (listMachinesResponseSuccess | listMachinesResponseError)
+
+export const getListMachinesUrl = (params?: ListMachinesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/machines?${stringifiedParams}` : `/api/v1/machines`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists machines, newest first, narrowed by the filters.
+ */
+export const listMachines = async (params?: ListMachinesParams, options?: RequestInit): Promise<listMachinesResponse> => {
+
+  const res = await fetch(getListMachinesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listMachinesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listMachinesResponse
+}
+
+
+
+export type getMachineResponse200 = {
+  data: ResourceMachineDto
+  status: 200
+}
+
+export type getMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineResponseSuccess = (getMachineResponse200) & {
+  headers: Headers;
+};
+export type getMachineResponseError = (getMachineResponse403 | getMachineResponse404) & {
+  headers: Headers;
+};
+
+export type getMachineResponse = (getMachineResponseSuccess | getMachineResponseError)
+
+export const getGetMachineUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Reads one machine.
+ */
+export const getMachine = async (machineId: string, options?: RequestInit): Promise<getMachineResponse> => {
+
+  const res = await fetch(getGetMachineUrl(machineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineResponse
+}
+
+
 
 export type getNodeResponse200 = {
   data: ResourceNodeViewDto

@@ -47,7 +47,14 @@ pub enum Permission {
     /// did what.
     AuditRead,
     /// List and read machines, endpoints, capabilities, and observations.
+    /// Endpoint references are delivered with credential-bearing detail
+    /// (SSH login names) redacted unless this principal also holds
+    /// [`Permission::MachineReadSensitive`].
     MachineRead,
+    /// Read the unredacted credential-bearing detail of machine endpoints,
+    /// such as SSH login names. A read, but a sensitive one: login names
+    /// are half of a credential.
+    MachineReadSensitive,
     /// Register a machine. A mutation.
     MachineCreate,
     /// Change a machine's mutable facts: name, description, endpoints,
@@ -80,6 +87,7 @@ impl Permission {
         Permission::SecretDelete,
         Permission::AuditRead,
         Permission::MachineRead,
+        Permission::MachineReadSensitive,
         Permission::MachineCreate,
         Permission::MachineUpdate,
         Permission::MachineDelete,
@@ -102,6 +110,7 @@ impl Permission {
             Permission::SecretDelete => "secret.delete",
             Permission::AuditRead => "audit.read",
             Permission::MachineRead => "machine.read",
+            Permission::MachineReadSensitive => "machine.read.sensitive",
             Permission::MachineCreate => "machine.create",
             Permission::MachineUpdate => "machine.update",
             Permission::MachineDelete => "machine.delete",
@@ -112,7 +121,7 @@ impl Permission {
     }
 
     /// Whether performing the action changes state or reveals sensitive
-    /// material. Every mutation is true; the two reads that expose
+    /// material. Every mutation is true; the reads that expose
     /// high-value information are true as well.
     #[must_use]
     pub fn is_risky(self) -> bool {
@@ -123,7 +132,8 @@ impl Permission {
             | Permission::AuditRead
             | Permission::MachineRead
             | Permission::NodeRead => false,
-            Permission::OperationCreate
+            Permission::MachineReadSensitive
+            | Permission::OperationCreate
             | Permission::OperationCancel
             | Permission::SecretRead
             | Permission::SecretWrite
@@ -150,7 +160,8 @@ impl Permission {
             | Permission::AuditRead
             | Permission::MachineRead
             | Permission::MachineCreate => false,
-            Permission::OperationCancel
+            Permission::MachineReadSensitive
+            | Permission::OperationCancel
             | Permission::SecretRead
             | Permission::SecretDelete
             | Permission::MachineUpdate

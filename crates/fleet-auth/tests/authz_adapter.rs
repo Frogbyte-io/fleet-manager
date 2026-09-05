@@ -100,9 +100,10 @@ fn every_catalog_action_has_a_unique_stable_id_and_a_risk_ruling() {
     // Mutations and high-value reads are recorded as risky; nothing else is.
     assert!(Permission::SecretRead.is_risky());
     assert!(Permission::SecretWrite.is_risky());
+    assert!(Permission::MachineReadSensitive.is_risky());
     assert!(!Permission::SystemRead.is_risky());
     // The catalog is the complete vocabulary the adapter permits.
-    assert_eq!(Permission::ALL.len(), 16);
+    assert_eq!(Permission::ALL.len(), 17);
 }
 
 #[test]
