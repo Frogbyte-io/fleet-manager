@@ -42,6 +42,9 @@ pub struct ApiState {
     /// The machine use cases, when the controller was composed with a
     /// database; `None` only in document/test states.
     pub machines: Option<Arc<fleet_application::machine::Machines>>,
+    /// The Add Machine onboarding use cases, when the controller was
+    /// composed with a database; `None` only in document/test states.
+    pub onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -52,6 +55,7 @@ impl std::fmt::Debug for ApiState {
             .field("system", &"dyn SystemInfoSource")
             .field("nodes", &self.nodes)
             .field("machines", &self.machines)
+            .field("onboarding", &self.onboarding)
             .finish()
     }
 }
@@ -188,6 +192,7 @@ impl ApiState {
             system: Arc::new(UnavailableSystemInfo),
             nodes: None,
             machines: None,
+            onboarding: None,
         }
     }
 }

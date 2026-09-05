@@ -764,6 +764,7 @@ dependencies = [
  "fleet-auth",
  "fleet-core",
  "fs4",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",

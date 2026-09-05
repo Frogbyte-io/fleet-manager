@@ -121,7 +121,8 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // The executor routes by kind: node kinds dispatch through the
-        // gateway, everything else is SSH work.
+        // gateway, onboarding kinds work against the draft record, and
+        // everything else is SSH work.
         let executor = {
             let ssh: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -134,6 +135,16 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     fleet_provider_ssh::ExecutionLimiter::new(4),
                 ))
             };
+            let limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
+            let onboarding: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                std::sync::Arc::new(fleet_controller::onboard::OnboardingExecutor::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::OnboardingRepository::new(
+                        store.pool().clone(),
+                    )),
+                    config.data_dir.join("ssh"),
+                    limiter,
+                    ssh.clone(),
+                ));
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -143,16 +154,30 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                         services.gateway.clone(),
                         node_machines,
-                        ssh,
+                        onboarding,
                     ))
                 }
-                None => ssh,
+                None => onboarding,
             }
         };
         let worker_handle = tokio::spawn(run_worker(worker_operations, executor, async move {
             let _ = worker_shutdown_rx.await;
         }));
-        let served = serve(settings, pool, services, shutdown_signal()).await;
+        // The Add Machine workflow serves whenever the store is open: it
+        // needs the draft repository, the machine use cases, and the SSH
+        // trust adapter over the controller's SSH work directory.
+        let onboarding = std::sync::Arc::new(fleet_controller::compose_onboarding(
+            store.pool(),
+            config.data_dir.join("ssh"),
+        ));
+        let served = serve(
+            settings,
+            pool,
+            services,
+            Some(onboarding),
+            shutdown_signal(),
+        )
+        .await;
         let _ = worker_shutdown.send(());
         let _ = worker_handle.await;
         store.close().await;

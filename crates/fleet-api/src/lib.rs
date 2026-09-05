@@ -17,6 +17,7 @@ mod error;
 pub mod machines;
 mod meta;
 pub mod node;
+pub mod onboarding;
 pub mod operations;
 pub mod system;
 
@@ -71,6 +72,16 @@ pub const API_BASE_PATH: &str = "/api/v1";
         machines::EndpointDto,
         machines::InventoryObservationDto,
         machines::MachineDto,
+        onboarding::AddedMachineDto,
+        onboarding::ConfirmHostKeyRequest,
+        onboarding::CreateOnboardingDraftRequest,
+        onboarding::DraftEndpointDto,
+        onboarding::DuplicateCandidateDto,
+        onboarding::OnboardAuthDto,
+        onboarding::OnboardHostKeyDto,
+        onboarding::OnboardingDraftDetailDto,
+        onboarding::OnboardingDraftDto,
+        onboarding::TestOutcomeDto,
         system::SystemInfo,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
@@ -121,6 +132,16 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(system::stream_operation_events))
                 .routes(routes!(machines::list_machines))
                 .routes(routes!(machines::get_machine))
+                .routes(routes!(
+                    onboarding::create_onboarding_draft,
+                    onboarding::list_onboarding_drafts
+                ))
+                .routes(routes!(onboarding::get_onboarding_draft))
+                .routes(routes!(onboarding::test_onboarding_draft))
+                .routes(routes!(onboarding::discover_onboarding_draft))
+                .routes(routes!(onboarding::confirm_onboarding_host_key))
+                .routes(routes!(onboarding::add_onboarding_machine))
+                .routes(routes!(onboarding::cancel_onboarding_draft))
                 .routes(routes!(
                     node::create_enrollment_token,
                     node::list_enrollment_tokens
