@@ -101,6 +101,442 @@
         }
       }
     },
+    "/api/v1/machines/onboarding/drafts": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Lists drafts, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listOnboardingDrafts",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of drafts to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of drafts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_OnboardingDraftDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Creates a draft: the first stage. No network contact happens here.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "createOnboardingDraft",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOnboardingDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The draft was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OnboardingDraftDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/onboarding/drafts/{draftId}": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads one draft in full: the review surface.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "getOnboardingDraft",
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "description": "The draft's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The draft, with facts, hint, and duplicate candidates.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OnboardingDraftDetailDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/onboarding/drafts/{draftId}/add": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Completes onboarding: registers the machine under the draft's identity\nand answers with the new machine plus the duplicates that were warned\nabout. The draft is deleted; its facts, if any, are ingested first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unconfirmed host key, or\na backend failure.",
+        "operationId": "addOnboardingMachine",
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "description": "The draft's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The machine was registered; the draft is gone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_AddedMachineDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The host key is not confirmed, or the draft state forbids the add.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/onboarding/drafts/{draftId}/cancel": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Cancels a draft: the row is deleted and the host's pins are removed\nunless an existing machine endpoint shares the host.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "cancelOnboardingDraft",
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "description": "The draft's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The draft was cancelled and deleted."
+          },
+          "403": {
+            "description": "The caller may not create machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/onboarding/drafts/{draftId}/confirm-host-key": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Confirms the observed fingerprint explicitly. This is the\ntrust-on-first-use act the security architecture requires.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a mismatched fingerprint,\nor a backend failure.",
+        "operationId": "confirmOnboardingHostKey",
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "description": "The draft's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmHostKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The fingerprint was confirmed and pinned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OnboardingDraftDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The fingerprint is malformed or does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create machines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/onboarding/drafts/{draftId}/discover": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Starts a discover: the agentless inventory probe against a confirmed\ndraft, ingested into the draft for review.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown draft, or a\nbackend failure.",
+        "operationId": "discoverOnboardingDraft",
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "description": "The draft's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The discover operation was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/onboarding/drafts/{draftId}/test": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Starts a test: probes the draft's host key and, once the fingerprint is\nconfirmed, tests authentication. The work runs as a durable\n`machine.onboard.test` operation; it has no persistent machine side\neffect.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown draft, or a\nbackend failure.",
+        "operationId": "testOnboardingDraft",
+        "parameters": [
+          {
+            "name": "draftId",
+            "in": "path",
+            "description": "The draft's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The test operation was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}": {
       "get": {
         "tags": [
@@ -709,6 +1145,27 @@
   },
   "components": {
     "schemas": {
+      "AddedMachineDto": {
+        "type": "object",
+        "description": "The outcome of an add: the new machine plus the duplicates that were\nwarned about.",
+        "required": [
+          "machine",
+          "duplicates"
+        ],
+        "properties": {
+          "duplicates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DuplicateCandidateDto"
+            },
+            "description": "Existing machines that shared the draft's host and port. The add\nproceeded anyway: candidates warn, they do not merge."
+          },
+          "machine": {
+            "$ref": "#/components/schemas/MachineDto",
+            "description": "The registered machine, redacted per the caller's permissions."
+          }
+        }
+      },
       "ApiError": {
         "type": "object",
         "description": "The body of every unsuccessful response.\n\nIt is built from [`PublicError`], which is the type that decides what is\nsafe to disclose. Internal causes, provider output, and secret values are\nexcluded there rather than filtered here.",
@@ -787,6 +1244,19 @@
           }
         }
       },
+      "ConfirmHostKeyRequest": {
+        "type": "object",
+        "description": "The body of the confirm-host-key request.",
+        "required": [
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The OpenSSH `SHA256:` fingerprint being confirmed. It must match the\nfingerprint the host presented."
+          }
+        }
+      },
       "CreateEnrollmentTokenRequest": {
         "type": "object",
         "description": "The create-enrollment-token request.",
@@ -798,6 +1268,66 @@
             ],
             "format": "int64",
             "description": "The token's lifetime in milliseconds, between one minute and one day.\nAbsent means one hour."
+          }
+        }
+      },
+      "CreateOnboardingDraftRequest": {
+        "type": "object",
+        "description": "The body of the create-draft request.",
+        "required": [
+          "user",
+          "host",
+          "auth"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/OnboardAuthDto",
+            "description": "How the controller would authenticate."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator notes carried onto the machine."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups carried onto the machine."
+          },
+          "host": {
+            "type": "string",
+            "description": "The host or address."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The proposed machine name; derived from the host when omitted."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The TCP port; 22 when omitted.",
+            "minimum": 0
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags carried onto the machine."
+          },
+          "user": {
+            "type": "string",
+            "description": "The remote login user."
           }
         }
       },
@@ -835,6 +1365,59 @@
               "null"
             ],
             "description": "The bounded provider input for kinds that need one, e.g. the script\npayload of `ssh.exec`."
+          }
+        }
+      },
+      "DraftEndpointDto": {
+        "type": "object",
+        "description": "The proposed endpoint of a draft. The user arrives redacted unless the\ncaller may read sensitive endpoint detail.",
+        "required": [
+          "user",
+          "host",
+          "port"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "The host or address."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The TCP port.",
+            "minimum": 0
+          },
+          "user": {
+            "type": "string",
+            "description": "The remote login user, `***` when redacted."
+          }
+        }
+      },
+      "DuplicateCandidateDto": {
+        "type": "object",
+        "description": "One existing machine whose endpoint matches a draft's host and port.\nCandidates warn; they never merge or block.",
+        "required": [
+          "machineId",
+          "name",
+          "machineStatus",
+          "reference"
+        ],
+        "properties": {
+          "machineId": {
+            "type": "string",
+            "description": "The existing machine's identity."
+          },
+          "machineStatus": {
+            "type": "string",
+            "description": "The existing machine's derived connectivity state."
+          },
+          "name": {
+            "type": "string",
+            "description": "The existing machine's name."
+          },
+          "reference": {
+            "type": "string",
+            "description": "The matching endpoint reference, as the caller may see it."
           }
         }
       },
@@ -1288,6 +1871,267 @@
           }
         }
       },
+      "OnboardAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's running agent supplies the key.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A specific identity file, referenced by path. The path is a\nreference, not a secret.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How the controller would authenticate to a draft's endpoint."
+      },
+      "OnboardHostKeyDto": {
+        "type": "object",
+        "description": "A host key as observed from the network, staged for review. Public data.",
+        "required": [
+          "keyType",
+          "fingerprint",
+          "rawLine"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The OpenSSH `SHA256:` fingerprint to confirm."
+          },
+          "keyType": {
+            "type": "string",
+            "description": "The key type, e.g. `ED25519`."
+          },
+          "rawLine": {
+            "type": "string",
+            "description": "The raw `known_hosts` line behind the fingerprint."
+          }
+        }
+      },
+      "OnboardingDraftDetailDto": {
+        "type": "object",
+        "description": "A draft in full: everything the review step renders.",
+        "required": [
+          "id",
+          "endpoint",
+          "auth",
+          "name",
+          "description",
+          "tags",
+          "groups",
+          "stage",
+          "hostKeyStage",
+          "facts",
+          "duplicates",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/OnboardAuthDto",
+            "description": "How the controller would authenticate."
+          },
+          "confirmedFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The fingerprint the operator confirmed, when any."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (epoch milliseconds)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Operator notes carried onto the machine."
+          },
+          "discoveredAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When discovery completed (epoch milliseconds)."
+          },
+          "duplicates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DuplicateCandidateDto"
+            },
+            "description": "Existing machines whose endpoints share the draft's host and port."
+          },
+          "endpoint": {
+            "$ref": "#/components/schemas/DraftEndpointDto",
+            "description": "The proposed endpoint; the user is redacted unless the caller may\nread sensitive endpoint detail."
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityFactDto"
+            },
+            "description": "The facts discovery recorded for review."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups carried onto the machine."
+          },
+          "hostKey": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OnboardHostKeyDto",
+                "description": "The newest observed host key, when a test ran."
+              }
+            ]
+          },
+          "hostKeyStage": {
+            "type": "string",
+            "description": "The host-key trust stage, as recorded."
+          },
+          "id": {
+            "type": "string",
+            "description": "The draft's identity."
+          },
+          "lastTest": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TestOutcomeDto",
+                "description": "The newest test outcome, when a test ran."
+              }
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The proposed machine name."
+          },
+          "profileHint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The OS/profile hint derived from the facts, when the facts name an\noperating system. A display hint only; nothing is applied."
+          },
+          "stage": {
+            "type": "string",
+            "description": "The derived stage: `untested`, `review`, or `ready`."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags carried onto the machine."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
+      "OnboardingDraftDto": {
+        "type": "object",
+        "description": "The shared fields of a draft, as the list and detail endpoints display\nthem.",
+        "required": [
+          "id",
+          "endpoint",
+          "name",
+          "tags",
+          "groups",
+          "stage",
+          "hostKeyStage",
+          "factCount",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (epoch milliseconds)."
+          },
+          "endpoint": {
+            "$ref": "#/components/schemas/DraftEndpointDto",
+            "description": "The proposed endpoint; the user is redacted unless the caller may\nread sensitive endpoint detail."
+          },
+          "factCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many facts discovery recorded."
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Groups carried onto the machine."
+          },
+          "hostKeyStage": {
+            "type": "string",
+            "description": "The host-key trust stage: `unseen`, `observed`, `confirmed`, or\n`changed`."
+          },
+          "id": {
+            "type": "string",
+            "description": "The draft's identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The proposed machine name."
+          },
+          "stage": {
+            "type": "string",
+            "description": "The derived stage: `untested`, `review`, or `ready`."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags carried onto the machine."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
       "OperationAccepted": {
         "type": "object",
         "description": "What a mutation returns instead of holding the request open.\n\nPer ADR-0002, a long infrastructure workflow is a durable operation the\ncaller polls or subscribes to, not an HTTP request kept alive for minutes.",
@@ -1557,6 +2401,91 @@
           }
         }
       },
+      "Page_OnboardingDraftDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "The shared fields of a draft, as the list and detail endpoints display\nthem.",
+              "required": [
+                "id",
+                "endpoint",
+                "name",
+                "tags",
+                "groups",
+                "stage",
+                "hostKeyStage",
+                "factCount",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Creation time (epoch milliseconds)."
+                },
+                "endpoint": {
+                  "$ref": "#/components/schemas/DraftEndpointDto",
+                  "description": "The proposed endpoint; the user is redacted unless the caller may\nread sensitive endpoint detail."
+                },
+                "factCount": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "How many facts discovery recorded."
+                },
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Groups carried onto the machine."
+                },
+                "hostKeyStage": {
+                  "type": "string",
+                  "description": "The host-key trust stage: `unseen`, `observed`, `confirmed`, or\n`changed`."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The draft's identity."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The proposed machine name."
+                },
+                "stage": {
+                  "type": "string",
+                  "description": "The derived stage: `untested`, `review`, or `ready`."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Tags carried onto the machine."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last mutation (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "Page_OperationDto": {
         "type": "object",
         "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
@@ -1673,6 +2602,36 @@
           "page": {
             "$ref": "#/components/schemas/PageInfo",
             "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Resource_AddedMachineDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The outcome of an add: the new machine plus the duplicates that were\nwarned about.",
+            "required": [
+              "machine",
+              "duplicates"
+            ],
+            "properties": {
+              "duplicates": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DuplicateCandidateDto"
+                },
+                "description": "Existing machines that shared the draft's host and port. The add\nproceeded anyway: candidates warn, they do not merge."
+              },
+              "machine": {
+                "$ref": "#/components/schemas/MachineDto",
+                "description": "The registered machine, redacted per the caller's permissions."
+              }
+            }
           }
         }
       },
@@ -1925,6 +2884,222 @@
           }
         }
       },
+      "Resource_OnboardingDraftDetailDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A draft in full: everything the review step renders.",
+            "required": [
+              "id",
+              "endpoint",
+              "auth",
+              "name",
+              "description",
+              "tags",
+              "groups",
+              "stage",
+              "hostKeyStage",
+              "facts",
+              "duplicates",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "auth": {
+                "$ref": "#/components/schemas/OnboardAuthDto",
+                "description": "How the controller would authenticate."
+              },
+              "confirmedFingerprint": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The fingerprint the operator confirmed, when any."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time (epoch milliseconds)."
+              },
+              "description": {
+                "type": "string",
+                "description": "Operator notes carried onto the machine."
+              },
+              "discoveredAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When discovery completed (epoch milliseconds)."
+              },
+              "duplicates": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DuplicateCandidateDto"
+                },
+                "description": "Existing machines whose endpoints share the draft's host and port."
+              },
+              "endpoint": {
+                "$ref": "#/components/schemas/DraftEndpointDto",
+                "description": "The proposed endpoint; the user is redacted unless the caller may\nread sensitive endpoint detail."
+              },
+              "facts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CapabilityFactDto"
+                },
+                "description": "The facts discovery recorded for review."
+              },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Groups carried onto the machine."
+              },
+              "hostKey": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OnboardHostKeyDto",
+                    "description": "The newest observed host key, when a test ran."
+                  }
+                ]
+              },
+              "hostKeyStage": {
+                "type": "string",
+                "description": "The host-key trust stage, as recorded."
+              },
+              "id": {
+                "type": "string",
+                "description": "The draft's identity."
+              },
+              "lastTest": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TestOutcomeDto",
+                    "description": "The newest test outcome, when a test ran."
+                  }
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "The proposed machine name."
+              },
+              "profileHint": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The OS/profile hint derived from the facts, when the facts name an\noperating system. A display hint only; nothing is applied."
+              },
+              "stage": {
+                "type": "string",
+                "description": "The derived stage: `untested`, `review`, or `ready`."
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Tags carried onto the machine."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last mutation (epoch milliseconds)."
+              }
+            }
+          }
+        }
+      },
+      "Resource_OnboardingDraftDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The shared fields of a draft, as the list and detail endpoints display\nthem.",
+            "required": [
+              "id",
+              "endpoint",
+              "name",
+              "tags",
+              "groups",
+              "stage",
+              "hostKeyStage",
+              "factCount",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time (epoch milliseconds)."
+              },
+              "endpoint": {
+                "$ref": "#/components/schemas/DraftEndpointDto",
+                "description": "The proposed endpoint; the user is redacted unless the caller may\nread sensitive endpoint detail."
+              },
+              "factCount": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many facts discovery recorded."
+              },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Groups carried onto the machine."
+              },
+              "hostKeyStage": {
+                "type": "string",
+                "description": "The host-key trust stage: `unseen`, `observed`, `confirmed`, or\n`changed`."
+              },
+              "id": {
+                "type": "string",
+                "description": "The draft's identity."
+              },
+              "name": {
+                "type": "string",
+                "description": "The proposed machine name."
+              },
+              "stage": {
+                "type": "string",
+                "description": "The derived stage: `untested`, `review`, or `ready`."
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Tags carried onto the machine."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last mutation (epoch milliseconds)."
+              }
+            }
+          }
+        }
+      },
       "Resource_OperationDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -2089,6 +3264,37 @@
             "type": "string",
             "description": "The controller's build version.",
             "example": "0.1.0"
+          }
+        }
+      },
+      "TestOutcomeDto": {
+        "type": "object",
+        "description": "The outcome of the connect check a test performed, when it ran.",
+        "required": [
+          "connectAttempted",
+          "connected",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the test ran (epoch milliseconds)."
+          },
+          "connectAttempted": {
+            "type": "boolean",
+            "description": "Whether the connect check ran."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "Whether the connect check succeeded."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bounded, already-redacted failure detail, when the check failed."
           }
         }
       }

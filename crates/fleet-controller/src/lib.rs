@@ -13,6 +13,7 @@ pub mod browser;
 pub mod exec;
 pub mod gateway;
 pub mod node_crypto;
+pub mod onboard;
 pub mod worker;
 
 use std::future::Future;
@@ -81,16 +82,41 @@ pub fn compose_node_services(
     NodeServices { nodes, gateway }
 }
 
+/// Composes the Add Machine onboarding service over a store: the draft
+/// repository, the SSH trust adapter over the controller's SSH work
+/// directory (the same directory the script executor uses, so one trust
+/// store serves the controller), the machine use cases, and the audit sink.
+#[must_use]
+pub fn compose_onboarding(
+    db: &SqlitePool,
+    ssh_work_dir: PathBuf,
+) -> fleet_application::onboarding::Onboarding {
+    let machines = fleet_application::machine::Machines::new(
+        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(db.clone())),
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    );
+    fleet_application::onboarding::Onboarding::new(
+        std::sync::Arc::new(fleet_storage_sqlite::OnboardingRepository::new(db.clone())),
+        std::sync::Arc::new(onboard::SshTrustAdapter::new(ssh_work_dir)),
+        std::sync::Arc::new(machines),
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    )
+}
+
 /// Builds the API state over an opened store, or a state whose backends
 /// answer nothing when the caller has none (tests). The authorization policy
 /// is the trusted-LAN adapter in both cases.
 ///
 /// `nodes` is the node-trust use-case service, composed by the binary when
 /// the store and the secret store are both available; without it the node
-/// surface answers with the standard envelope.
+/// surface answers with the standard envelope. `onboarding` is the Add
+/// Machine workflow service, composed over the same store and the
+/// controller's SSH work directory; without it the onboarding surface
+/// answers with the standard envelope.
 fn api_state(
     db: Option<SqlitePool>,
     nodes: Option<Arc<fleet_application::node::Nodes>>,
+    onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
@@ -110,6 +136,7 @@ fn api_state(
             system: std::sync::Arc::new(system),
             nodes,
             machines: Some(std::sync::Arc::new(machines)),
+            onboarding,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -122,6 +149,7 @@ fn api_state(
         system: state.system,
         nodes: None,
         machines: None,
+        onboarding: None,
     }
 }
 
@@ -212,7 +240,9 @@ fn shell(settings: &Settings) -> ServeDir {
 /// for tests that do not involve storage. `services` is the node-trust
 /// composition (see [`compose_node_services`]); when present, the
 /// machine-facing node routes — enrollment endpoints and the gateway — are
-/// mounted at `/api/node/v1` alongside the public API. Every request through
+/// mounted at `/api/node/v1` alongside the public API. `onboarding` is the
+/// Add Machine workflow (see [`compose_onboarding`]); when present, the
+/// onboarding routes are part of the public API. Every request through
 /// this router resolves to the trusted-LAN principal with its request
 /// evidence (see `fleet_auth`); the service must be made with connection
 /// info for that evidence to include the peer address.
@@ -220,6 +250,7 @@ pub fn build_router(
     settings: &Settings,
     db: Option<SqlitePool>,
     services: Option<&NodeServices>,
+    onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -228,6 +259,7 @@ pub fn build_router(
     let api_state = Arc::new(api_state(
         db,
         services.map(|services| services.nodes.clone()),
+        onboarding.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let router = Router::new()
@@ -294,6 +326,7 @@ async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
 /// `db` is the opened store's pool, or `None` in tests; see [`build_router`].
 /// `services` is the node-trust composition, when the composition supports
 /// it; its gateway runs the staleness sweeper alongside the server.
+/// `onboarding` is the Add Machine workflow, when the store is available.
 ///
 /// # Errors
 ///
@@ -302,10 +335,11 @@ pub async fn serve(
     settings: Settings,
     db: Option<SqlitePool>,
     services: Option<NodeServices>,
+    onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
-    serve_on(listener, settings, db, services, shutdown).await
+    serve_on(listener, settings, db, services, onboarding, shutdown).await
 }
 
 /// Serves the controller on an already bound listener; [`serve`] is this plus
@@ -320,6 +354,7 @@ pub async fn serve_on(
     settings: Settings,
     db: Option<SqlitePool>,
     services: Option<NodeServices>,
+    onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -349,7 +384,7 @@ pub async fn serve_on(
     }
     axum::serve(
         listener,
-        build_router(&settings, db, services.as_ref())
+        build_router(&settings, db, services.as_ref(), onboarding.as_ref())
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)

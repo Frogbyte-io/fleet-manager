@@ -80,6 +80,7 @@ async fn controller() -> TestController {
         &settings(dist.path()),
         Some(store.pool().clone()),
         Some(&services),
+        None,
     );
     TestController {
         _dist: dist,

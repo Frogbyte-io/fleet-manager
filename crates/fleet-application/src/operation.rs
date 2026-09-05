@@ -28,14 +28,18 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
 /// an unknown kind is refused rather than accepted as an unspecified promise.
 /// `ssh.exec` carries its bounded script payload in `payload_json`; the node
-/// kinds dispatch through the gateway with a `{"machineId": …}` payload.
-pub const CREATABLE_KINDS: [&str; 6] = [
+/// kinds dispatch through the gateway with a `{"machineId": …}` payload; the
+/// onboarding kinds carry a `{"draftId": …}` payload and touch the draft
+/// record, never a machine (FM-210).
+pub const CREATABLE_KINDS: [&str; 8] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
     "node.noop",
     "node.diagnostic",
     "node.inventory",
+    "machine.onboard.test",
+    "machine.onboard.discover",
 ];
 
 /// The payload bound for provider inputs.

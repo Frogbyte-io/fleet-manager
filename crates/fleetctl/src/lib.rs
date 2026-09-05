@@ -101,6 +101,83 @@ pub enum Command {
         /// The machine id.
         id: String,
     },
+    /// Create an Add Machine onboarding draft from address and auth mode.
+    MachinesOnboardCreate {
+        /// The remote login user.
+        user: String,
+        /// The host or address.
+        host: String,
+        /// The TCP port; 22 when omitted.
+        port: Option<u16>,
+        /// The proposed machine name; derived from the host when omitted.
+        name: Option<String>,
+        /// Operator notes carried onto the machine.
+        description: Option<String>,
+        /// Tags carried onto the machine.
+        tags: Vec<String>,
+        /// Groups carried onto the machine.
+        groups: Vec<String>,
+        /// How the controller would authenticate.
+        auth: OnboardAuthArg,
+    },
+    /// List onboarding drafts.
+    MachinesOnboardList {
+        /// Maximum entries to request.
+        limit: Option<u32>,
+    },
+    /// Read one draft in full: the review surface.
+    MachinesOnboardGet {
+        /// The draft id.
+        id: String,
+    },
+    /// Run the test stage: probe the host key, and once confirmed, test
+    /// authentication. With `--wait`, poll the operation and print the
+    /// refreshed draft.
+    MachinesOnboardTest {
+        /// The draft id.
+        id: String,
+        /// Poll the operation to a terminal state, then print the draft.
+        wait: bool,
+        /// The poll bound, in seconds (with `--wait`).
+        timeout: u64,
+    },
+    /// Run the discover stage: the agentless inventory probe into the
+    /// draft, only against a confirmed fingerprint.
+    MachinesOnboardDiscover {
+        /// The draft id.
+        id: String,
+        /// Poll the operation to a terminal state, then print the draft.
+        wait: bool,
+        /// The poll bound, in seconds (with `--wait`).
+        timeout: u64,
+    },
+    /// Confirm the observed fingerprint explicitly (trust-on-first-use).
+    MachinesOnboardConfirm {
+        /// The draft id.
+        id: String,
+        /// The OpenSSH `SHA256:` fingerprint to confirm.
+        fingerprint: String,
+    },
+    /// Complete onboarding: register the machine from the draft.
+    MachinesOnboardAdd {
+        /// The draft id.
+        id: String,
+    },
+    /// Cancel a draft: the row is deleted and an unregistered host's pins
+    /// are removed.
+    MachinesOnboardCancel {
+        /// The draft id.
+        id: String,
+    },
+}
+
+/// How the CLI spells the draft's authentication mode.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OnboardAuthArg {
+    /// The controller's running agent supplies the key.
+    Agent,
+    /// An identity file, by path.
+    IdentityFile(String),
 }
 
 /// Parses the command line.
@@ -176,6 +253,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["machines", "get", id] => Command::MachinesGet {
             id: (*id).to_owned(),
         },
+        ["machines", "onboard", verb, rest @ ..] => parse_onboard_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
     Ok(Invocation {
@@ -230,8 +308,182 @@ fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
+}
+
+/// Parses one `machines onboard` subcommand.
+fn parse_onboard_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match verb {
+        "create" => parse_onboard_create(rest),
+        "list" => {
+            let mut limit = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--limit" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--limit requires a value".to_owned(),
+                        })?;
+                        limit = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--limit must be a number, not {value:?}"),
+                        })?);
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::MachinesOnboardList { limit })
+        }
+        "get" => match rest {
+            [id] => Ok(Command::MachinesOnboardGet {
+                id: (*id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "test" => match rest {
+            [id, flags @ ..] => parse_onboard_stage(id, flags, false),
+            _ => Err(CliError { message: usage() }),
+        },
+        "discover" => match rest {
+            [id, flags @ ..] => parse_onboard_stage(id, flags, true),
+            _ => Err(CliError { message: usage() }),
+        },
+        "confirm" => match rest {
+            [id, "--fingerprint", fingerprint] => Ok(Command::MachinesOnboardConfirm {
+                id: (*id).to_owned(),
+                fingerprint: (*fingerprint).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "add" => match rest {
+            [id] => Ok(Command::MachinesOnboardAdd {
+                id: (*id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "cancel" => match rest {
+            [id] => Ok(Command::MachinesOnboardCancel {
+                id: (*id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
+/// Parses the flags of `machines onboard create`; tags and groups repeat.
+fn parse_onboard_create(rest: &[&str]) -> Result<Command, CliError> {
+    let mut user: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut tags = Vec::new();
+    let mut groups = Vec::new();
+    let mut auth: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--user" => user = Some(value("user")?.to_owned()),
+            "--host" => host = Some(value("host")?.to_owned()),
+            "--port" => {
+                let parsed = value("port")?;
+                port = Some(parsed.parse().map_err(|_| CliError {
+                    message: format!("--port must be a number, not {parsed:?}"),
+                })?);
+            }
+            "--name" => name = Some(value("name")?.to_owned()),
+            "--description" => description = Some(value("description")?.to_owned()),
+            "--tag" => tags.push(value("tag")?.to_owned()),
+            "--group" => groups.push(value("group")?.to_owned()),
+            "--auth" => auth = Some(value("auth")?.to_owned()),
+            "--identity" => identity = Some(value("identity")?.to_owned()),
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    let auth = match (auth.as_deref(), identity) {
+        (Some("agent"), None) => OnboardAuthArg::Agent,
+        (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
+        (Some("identity-file"), None) => {
+            return Err(CliError {
+                message: "--auth identity-file requires --identity <path>".to_owned(),
+            });
+        }
+        (Some(other), _) => {
+            return Err(CliError {
+                message: format!("--auth must be agent or identity-file, not {other:?}"),
+            });
+        }
+        (None, _) => {
+            return Err(CliError {
+                message: "--auth is required: agent or identity-file".to_owned(),
+            });
+        }
+    };
+    let user = user.ok_or_else(|| CliError {
+        message: "--user is required".to_owned(),
+    })?;
+    let host = host.ok_or_else(|| CliError {
+        message: "--host is required".to_owned(),
+    })?;
+    Ok(Command::MachinesOnboardCreate {
+        user,
+        host,
+        port,
+        name,
+        description,
+        tags,
+        groups,
+        auth,
+    })
+}
+
+/// Parses the flags of the `test` and `discover` stages.
+fn parse_onboard_stage(id: &str, rest: &[&str], discover: bool) -> Result<Command, CliError> {
+    let mut wait = false;
+    let mut timeout: u64 = if discover { 300 } else { 60 };
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--wait" => wait = true,
+            "--timeout" => {
+                let value = flags.next().ok_or_else(|| CliError {
+                    message: "--timeout requires a value".to_owned(),
+                })?;
+                timeout = value.parse().map_err(|_| CliError {
+                    message: format!("--timeout must be a number, not {value:?}"),
+                })?;
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    let id = id.to_owned();
+    if discover {
+        Ok(Command::MachinesOnboardDiscover { id, wait, timeout })
+    } else {
+        Ok(Command::MachinesOnboardTest { id, wait, timeout })
+    }
 }
 
 /// Runs one invocation, returning the text for stdout.
@@ -275,16 +527,105 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
-    let (method, path, query) = match &invocation.command {
+    let (method, path, query, request_body) = request_for(&invocation.command);
+
+    let body = send(
+        &client,
+        invocation,
+        method,
+        &path,
+        &query,
+        request_body.as_ref(),
+        correlation_id,
+    )?;
+    let body = follow_wait_stage(&client, invocation, body)?;
+    let payload = if body.get("items").is_some() {
+        body
+    } else {
+        body.get("data").cloned().unwrap_or(body)
+    };
+    Ok(render(invocation, &payload))
+}
+
+/// The `--wait` stages chase their own operation to a terminal state and
+/// then answer with the refreshed draft: the review surface, not the
+/// operation.
+fn follow_wait_stage(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    body: Value,
+) -> Result<Value, CliError> {
+    let (Command::MachinesOnboardTest {
+        id,
+        wait: true,
+        timeout,
+    }
+    | Command::MachinesOnboardDiscover {
+        id,
+        wait: true,
+        timeout,
+    }) = &invocation.command
+    else {
+        return Ok(body);
+    };
+    let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+    wait_for_operation(client, invocation, &operation_id, *timeout)?;
+    send(
+        client,
+        invocation,
+        reqwest::Method::GET,
+        &format!("/api/v1/machines/onboarding/drafts/{id}"),
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )
+}
+
+/// Renders one decoded payload for the invocation's output mode.
+fn render(invocation: &Invocation, payload: &Value) -> String {
+    match invocation.output {
+        Output::Json => serde_json::to_string_pretty(payload)
+            .unwrap_or_else(|error| format!("{{\"code\":\"internal\",\"message\":\"{error}\"}}")),
+        Output::Text => match invocation.command {
+            // The machine surface has its own renderer: an empty page must
+            // say "no machines", not borrow the operations table.
+            Command::MachinesList { .. } | Command::MachinesGet { .. } => {
+                render_machines(Some(payload))
+            }
+            Command::MachinesOnboardList { .. }
+            | Command::MachinesOnboardGet { .. }
+            | Command::MachinesOnboardCreate { .. }
+            | Command::MachinesOnboardConfirm { .. }
+            | Command::MachinesOnboardTest { .. }
+            | Command::MachinesOnboardDiscover { .. }
+            | Command::MachinesOnboardAdd { .. }
+            | Command::MachinesOnboardCancel { .. } => render_onboarding(Some(payload)),
+            _ => render_text(Some(payload)),
+        },
+    }
+}
+
+/// The controller request for one command: method, path, query, and body,
+/// in API order.
+fn request_for(
+    command: &Command,
+) -> (
+    reqwest::Method,
+    String,
+    Vec<(&'static str, String)>,
+    Option<Value>,
+) {
+    match command {
         // `status` took one of the two routes above.
         Command::Status => unreachable!("the status command returned before dispatch"),
         Command::System => (
             reqwest::Method::GET,
             "/api/v1/system".to_owned(),
             Vec::new(),
+            None,
         ),
         Command::OperationsList { .. } => {
-            let limit = match invocation.command {
+            let limit = match command {
                 Command::OperationsList { limit: Some(limit) } => format!("?limit={limit}"),
                 _ => String::new(),
             };
@@ -292,17 +633,20 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
                 reqwest::Method::GET,
                 format!("/api/v1/operations{limit}"),
                 Vec::new(),
+                None,
             )
         }
         Command::OperationsGet { id } => (
             reqwest::Method::GET,
             format!("/api/v1/operations/{id}"),
             Vec::new(),
+            None,
         ),
         Command::OperationsCancel { id } => (
             reqwest::Method::POST,
             format!("/api/v1/operations/{id}/cancel"),
             Vec::new(),
+            None,
         ),
         Command::MachinesList {
             tag,
@@ -320,35 +664,124 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
                 status.as_ref(),
                 *limit,
             ),
+            None,
         ),
         Command::MachinesGet { id } => (
             reqwest::Method::GET,
             format!("/api/v1/machines/{id}"),
             Vec::new(),
+            None,
         ),
-    };
-
-    let body = send(&client, invocation, method, &path, &query, correlation_id)?;
-
-    let is_page = body.get("items").is_some();
-    let payload = if is_page {
-        body.clone()
-    } else {
-        body.get("data").cloned().unwrap_or(body)
-    };
-    Ok(match invocation.output {
-        Output::Json => serde_json::to_string_pretty(&payload).map_err(|error| CliError {
-            message: format!("cannot render the answer: {error}"),
-        })?,
-        Output::Text => match invocation.command {
-            // The machine surface has its own renderer: an empty page must
-            // say "no machines", not borrow the operations table.
-            Command::MachinesList { .. } | Command::MachinesGet { .. } => {
-                render_machines(Some(&payload))
+        command @ (Command::MachinesOnboardCreate { .. }
+        | Command::MachinesOnboardList { .. }
+        | Command::MachinesOnboardGet { .. }
+        | Command::MachinesOnboardTest { .. }
+        | Command::MachinesOnboardDiscover { .. }
+        | Command::MachinesOnboardConfirm { .. }
+        | Command::MachinesOnboardAdd { .. }
+        | Command::MachinesOnboardCancel { .. }) => onboard_request(command),
+    }
+}
+/// The onboarding requests: one dispatch, in API order. The create body
+/// carries only what was supplied, so the controller's defaults apply.
+fn onboard_request(
+    command: &Command,
+) -> (
+    reqwest::Method,
+    String,
+    Vec<(&'static str, String)>,
+    Option<Value>,
+) {
+    match command {
+        Command::MachinesOnboardCreate {
+            user,
+            host,
+            port,
+            name,
+            description,
+            tags,
+            groups,
+            auth,
+        } => {
+            let auth_value = match auth {
+                OnboardAuthArg::Agent => serde_json::json!({ "type": "agent" }),
+                OnboardAuthArg::IdentityFile(path) => {
+                    serde_json::json!({ "type": "identityFile", "path": path })
+                }
+            };
+            let mut body = serde_json::json!({
+                "user": user,
+                "host": host,
+                "auth": auth_value,
+            });
+            if let Some(port) = port {
+                body["port"] = serde_json::json!(port);
             }
-            _ => render_text(Some(&payload)),
-        },
-    })
+            if let Some(name) = name {
+                body["name"] = serde_json::json!(name);
+            }
+            if let Some(description) = description {
+                body["description"] = serde_json::json!(description);
+            }
+            if !tags.is_empty() {
+                body["tags"] = serde_json::json!(tags);
+            }
+            if !groups.is_empty() {
+                body["groups"] = serde_json::json!(groups);
+            }
+            (
+                reqwest::Method::POST,
+                "/api/v1/machines/onboarding/drafts".to_owned(),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::MachinesOnboardList { limit } => (
+            reqwest::Method::GET,
+            "/api/v1/machines/onboarding/drafts".to_owned(),
+            limit
+                .map(|limit| vec![("limit", limit.to_string())])
+                .unwrap_or_default(),
+            None,
+        ),
+        Command::MachinesOnboardGet { id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/machines/onboarding/drafts/{id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::MachinesOnboardTest { id, .. } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/onboarding/drafts/{id}/test"),
+            Vec::new(),
+            None,
+        ),
+        Command::MachinesOnboardDiscover { id, .. } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/onboarding/drafts/{id}/discover"),
+            Vec::new(),
+            None,
+        ),
+        Command::MachinesOnboardConfirm { id, fingerprint } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/onboarding/drafts/{id}/confirm-host-key"),
+            Vec::new(),
+            Some(serde_json::json!({ "fingerprint": fingerprint })),
+        ),
+        Command::MachinesOnboardAdd { id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/onboarding/drafts/{id}/add"),
+            Vec::new(),
+            None,
+        ),
+        Command::MachinesOnboardCancel { id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/onboarding/drafts/{id}/cancel"),
+            Vec::new(),
+            None,
+        ),
+        _ => unreachable!("onboard_request serves onboarding commands only"),
+    }
 }
 
 /// The machines-list query parameters, in API order.
@@ -377,13 +810,15 @@ fn machines_list_query(
 }
 
 /// Sends one controller request and answers the decoded body, refusing
-/// non-2xx answers with the envelope's code and message.
+/// non-2xx answers with the envelope's code and message. An empty 204 body
+/// decodes as `null`.
 fn send(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
     method: reqwest::Method,
     path: &str,
     query: &[(&'static str, String)],
+    body: Option<&Value>,
     correlation_id: String,
 ) -> Result<Value, CliError> {
     let mut request = client
@@ -392,10 +827,16 @@ fn send(
     if !query.is_empty() {
         request = request.query(query);
     }
+    if let Some(body) = body {
+        request = request.json(body);
+    }
     let response = request.send().map_err(|error| CliError {
         message: format!("the controller did not answer: {error}"),
     })?;
     let status = reqwest::StatusCode::as_u16(&response.status());
+    if status == 204 {
+        return Ok(Value::Null);
+    }
     let body: Value = response.json().map_err(|error| CliError {
         message: format!("the controller's answer was not JSON: {error}"),
     })?;
@@ -407,6 +848,41 @@ fn send(
         });
     }
     Ok(body)
+}
+
+/// Polls one operation to a terminal state, answering its body. Polling
+/// ends at the caller's bound; a still-running operation is an error, not a
+/// hang.
+fn wait_for_operation(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    operation_id: &str,
+    timeout_secs: u64,
+) -> Result<Value, CliError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let body = send(
+            client,
+            invocation,
+            reqwest::Method::GET,
+            &format!("/api/v1/operations/{operation_id}"),
+            &[],
+            None,
+            uuid::Uuid::now_v7().to_string(),
+        )?;
+        let state = body["data"]["state"].as_str().unwrap_or("");
+        if !["pending", "running", "cancelling"].contains(&state) {
+            return Ok(body);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError {
+                message: format!(
+                    "the operation {operation_id} did not reach a terminal state within {timeout_secs}s; it is still durable — check `fleetctl operations get {operation_id}`"
+                ),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, CliError> {
@@ -537,6 +1013,171 @@ fn operation_line(operation: &Value) -> String {
         operation["kind"].as_str().unwrap_or("-"),
         operation["state"].as_str().unwrap_or("-")
     )
+}
+
+/// Renders the onboarding surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_onboarding_for_test(value: &Value) -> String {
+    render_onboarding(Some(value))
+}
+
+fn render_onboarding(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<38} {:<10} {:<28} {}",
+            "ID", "STAGE", "ENDPOINT", "NAME"
+        )];
+        for item in items {
+            let endpoint = format!(
+                "***@{}:{}",
+                item["endpoint"]["host"].as_str().unwrap_or("-"),
+                item["endpoint"]["port"]
+            );
+            lines.push(format!(
+                "{:<38} {:<10} {:<28} {}",
+                item["id"].as_str().unwrap_or("-"),
+                item["stage"].as_str().unwrap_or("-"),
+                endpoint,
+                item["name"].as_str().unwrap_or("-"),
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no onboarding drafts)".to_owned());
+        }
+        return lines.join("\n");
+    }
+    if value.get("machine").is_some() {
+        // The add answer: the new machine plus the duplicates that were
+        // warned about, never merged.
+        let machine = &value["machine"];
+        let mut lines = vec![format!(
+            "machine registered: {} ({})",
+            machine["id"].as_str().unwrap_or("-"),
+            machine["name"].as_str().unwrap_or("-")
+        )];
+        for endpoint in machine["endpoints"].as_array().into_iter().flatten() {
+            lines.push(format!(
+                "  endpoint: {} {}",
+                endpoint["kind"].as_str().unwrap_or("-"),
+                endpoint["reference"].as_str().unwrap_or("-")
+            ));
+        }
+        match value["duplicates"].as_array() {
+            Some(candidates) if !candidates.is_empty() => {
+                lines.push("duplicates (warned, not merged):".to_owned());
+                for candidate in candidates {
+                    lines.push(format!(
+                        "  {} {} ({})",
+                        candidate["machineId"].as_str().unwrap_or("-"),
+                        candidate["reference"].as_str().unwrap_or("-"),
+                        candidate["machineStatus"].as_str().unwrap_or("-"),
+                    ));
+                }
+            }
+            _ => lines.push("duplicates: (none)".to_owned()),
+        }
+        return lines.join("\n");
+    }
+    draft_detail(value)
+}
+
+fn draft_detail(draft: &Value) -> String {
+    let mut lines = Vec::new();
+    for key in ["id", "name", "description", "stage", "hostKeyStage"] {
+        if let Some(value) = draft.get(key) {
+            let rendered = match value {
+                Value::String(text) => text.clone(),
+                Value::Null => continue,
+                other => other.to_string(),
+            };
+            lines.push(format!("{key}: {rendered}"));
+        }
+    }
+    lines.push(format!(
+        "endpoint: {}@{}:{}",
+        draft["endpoint"]["user"].as_str().unwrap_or("-"),
+        draft["endpoint"]["host"].as_str().unwrap_or("-"),
+        draft["endpoint"]["port"]
+    ));
+    match &draft["auth"] {
+        auth if auth["type"] == "identityFile" => lines.push(format!(
+            "auth: identity file {}",
+            auth["path"].as_str().unwrap_or("-")
+        )),
+        auth if auth["type"] == "agent" => lines.push("auth: ssh agent".to_owned()),
+        _ => {}
+    }
+    if let Some(key) = draft.get("hostKey")
+        && !key.is_null()
+    {
+        lines.push(format!(
+            "hostKey: {} {}",
+            key["keyType"].as_str().unwrap_or("-"),
+            key["fingerprint"].as_str().unwrap_or("-")
+        ));
+    }
+    if let Some(fingerprint) = draft.get("confirmedFingerprint")
+        && !fingerprint.is_null()
+    {
+        lines.push(format!("confirmedFingerprint: {fingerprint}"));
+    }
+    if let Some(test) = draft.get("lastTest")
+        && !test.is_null()
+    {
+        let outcome = if test["connectAttempted"] == true && test["connected"] == true {
+            "connected"
+        } else if test["connectAttempted"] == true {
+            "failed"
+        } else {
+            "not attempted (fingerprint unconfirmed)"
+        };
+        lines.push(format!(
+            "lastTest: {outcome}{}",
+            test["detail"]
+                .as_str()
+                .map(|detail| format!(" ({detail})"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(hint) = draft.get("profileHint")
+        && !hint.is_null()
+    {
+        lines.push(format!("profileHint: {hint}"));
+    }
+    match draft["facts"].as_array() {
+        Some(facts) if !facts.is_empty() => {
+            lines.push(format!("facts: {}", facts.len()));
+            for fact in facts {
+                lines.push(format!(
+                    "  {}.{} = {} ({})",
+                    fact["namespace"].as_str().unwrap_or("-"),
+                    fact["name"].as_str().unwrap_or("-"),
+                    fact["value"].as_str().unwrap_or("–"),
+                    fact["status"].as_str().unwrap_or("-"),
+                ));
+            }
+        }
+        _ => lines.push("facts: (none discovered)".to_owned()),
+    }
+    match draft["duplicates"].as_array() {
+        Some(candidates) if !candidates.is_empty() => {
+            lines.push("duplicates (warned, not merged):".to_owned());
+            for candidate in candidates {
+                lines.push(format!(
+                    "  {} {} ({})",
+                    candidate["machineId"].as_str().unwrap_or("-"),
+                    candidate["reference"].as_str().unwrap_or("-"),
+                    candidate["machineStatus"].as_str().unwrap_or("-"),
+                ));
+            }
+        }
+        _ => {}
+    }
+    lines.join("\n")
 }
 
 fn machine_line(machine: &Value) -> String {

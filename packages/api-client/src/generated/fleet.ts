@@ -3,51 +3,18 @@
  * Do not edit: run `pnpm --filter @frogbyte-io/fleet-api-client generate`.
  */
 /**
- * One rejected input, identified by its location in the request body or query.
+ * One existing machine whose endpoint matches a draft's host and port.
+ * Candidates warn; they never merge or block.
  */
-export interface FieldViolation {
-  /** Stable machine-readable reason this field was rejected. */
-  code: string;
-  /** JSON pointer into the request body, or a query parameter name. */
-  field: string;
-  /** Caller-safe explanation. */
-  message: string;
-}
-
-/**
- * Whether and how a caller may retry a failed request.
- */
-export type Retry = typeof Retry[keyof typeof Retry];
-
-
-export const Retry = {
-  never: 'never',
-  immediate: 'immediate',
-  backoff: 'backoff',
-} as const;
-
-/**
- * The body of every unsuccessful response.
- *
- * It is built from [`PublicError`], which is the type that decides what is
- * safe to disclose. Internal causes, provider output, and secret values are
- * excluded there rather than filtered here.
- */
-export interface ApiError {
-  /** Stable machine-readable code. Clients branch on this, not on `message`. */
-  code: string;
-  /**
-     * The correlation identity of the request that failed. It is also returned
-     * in the `x-correlation-id` response header, and is what an operator needs
-     * to find the request in the audit trail.
-     */
-  correlationId: string;
-  /** Per-field rejections, when the failure is a validation failure. */
-  fieldViolations?: FieldViolation[];
-  /** Caller-safe human-readable summary. */
-  message: string;
-  /** Retry guidance for this specific failure. */
-  retry: Retry;
+export interface DuplicateCandidateDto {
+  /** The existing machine's identity. */
+  machineId: string;
+  /** The existing machine's derived connectivity state. */
+  machineStatus: string;
+  /** The existing machine's name. */
+  name: string;
+  /** The matching endpoint reference, as the caller may see it. */
+  reference: string;
 }
 
 /**
@@ -78,47 +45,6 @@ export interface CapabilityFactDto {
 }
 
 /**
- * The create-enrollment-token request.
- */
-export interface CreateEnrollmentTokenRequest {
-  /**
-     * The token's lifetime in milliseconds, between one minute and one day.
-     * Absent means one hour.
-     * @nullable
-     */
-  ttlMillis?: number | null;
-}
-
-/**
- * The body of the create-operation request.
- */
-export interface CreateOperationRequest {
-  /**
-     * The absolute deadline, in Unix epoch milliseconds, after which the
-     * operation must be treated as timed out. Absent means no deadline.
-     * @nullable
-     */
-  deadlineAt?: number | null;
-  /**
-     * A caller-chosen key making this request idempotent: replaying it
-     * returns the original operation instead of creating a second one.
-     * @nullable
-     */
-  idempotencyKey?: string | null;
-  /**
-     * The kind of work to create; only kinds the controller can describe are
-     * accepted.
-     */
-  kind: string;
-  /**
-     * The bounded provider input for kinds that need one, e.g. the script
-     * payload of `ssh.exec`.
-     * @nullable
-     */
-  payloadJson?: string | null;
-}
-
-/**
  * One connection endpoint of a machine. The reference arrives redacted
  * from the use case unless the caller may read sensitive endpoint detail.
  */
@@ -132,51 +58,6 @@ export interface EndpointDto {
      * node id for fleetd. Never carries a secret.
      */
   reference: string;
-}
-
-/**
- * The create-enrollment-token response. The token value is shown exactly
- * once; only its hash is stored.
- */
-export interface EnrollmentTokenCreatedDto {
-  /** Expiry (epoch milliseconds). */
-  expiresAt: number;
-  /** The token record's identity. */
-  id: string;
-  /** The machine the token is scoped to. */
-  machineId: string;
-  /** The token value. Shown once. */
-  token: string;
-}
-
-/**
- * An enrollment token's facts. The token value appears only once, in the
- * create response.
- */
-export interface EnrollmentTokenDto {
-  /**
-     * Consumption time, when consumed (epoch milliseconds).
-     * @nullable
-     */
-  consumedAt?: number | null;
-  /** Creation time (epoch milliseconds). */
-  createdAt: number;
-  /** Expiry (epoch milliseconds). */
-  expiresAt: number;
-  /** The token record's identity. */
-  id: string;
-  /** The machine the token is scoped to. */
-  machineId: string;
-  /** `pending`, `consumed`, or `expired`. */
-  status: string;
-}
-
-/**
- * The list-enrollment-tokens response.
- */
-export interface EnrollmentTokenListDto {
-  /** The machine's tokens, newest first. */
-  items: EnrollmentTokenDto[];
 }
 
 /**
@@ -226,6 +107,224 @@ export interface MachineDto {
   tags: string[];
   /** Last mutation (epoch milliseconds). */
   updatedAt: number;
+}
+
+/**
+ * The outcome of an add: the new machine plus the duplicates that were
+ * warned about.
+ */
+export interface AddedMachineDto {
+  /**
+     * Existing machines that shared the draft's host and port. The add
+     * proceeded anyway: candidates warn, they do not merge.
+     */
+  duplicates: DuplicateCandidateDto[];
+  /** The registered machine, redacted per the caller's permissions. */
+  machine: MachineDto;
+}
+
+/**
+ * One rejected input, identified by its location in the request body or query.
+ */
+export interface FieldViolation {
+  /** Stable machine-readable reason this field was rejected. */
+  code: string;
+  /** JSON pointer into the request body, or a query parameter name. */
+  field: string;
+  /** Caller-safe explanation. */
+  message: string;
+}
+
+/**
+ * Whether and how a caller may retry a failed request.
+ */
+export type Retry = typeof Retry[keyof typeof Retry];
+
+
+export const Retry = {
+  never: 'never',
+  immediate: 'immediate',
+  backoff: 'backoff',
+} as const;
+
+/**
+ * The body of every unsuccessful response.
+ *
+ * It is built from [`PublicError`], which is the type that decides what is
+ * safe to disclose. Internal causes, provider output, and secret values are
+ * excluded there rather than filtered here.
+ */
+export interface ApiError {
+  /** Stable machine-readable code. Clients branch on this, not on `message`. */
+  code: string;
+  /**
+     * The correlation identity of the request that failed. It is also returned
+     * in the `x-correlation-id` response header, and is what an operator needs
+     * to find the request in the audit trail.
+     */
+  correlationId: string;
+  /** Per-field rejections, when the failure is a validation failure. */
+  fieldViolations?: FieldViolation[];
+  /** Caller-safe human-readable summary. */
+  message: string;
+  /** Retry guidance for this specific failure. */
+  retry: Retry;
+}
+
+/**
+ * The body of the confirm-host-key request.
+ */
+export interface ConfirmHostKeyRequest {
+  /**
+     * The OpenSSH `SHA256:` fingerprint being confirmed. It must match the
+     * fingerprint the host presented.
+     */
+  fingerprint: string;
+}
+
+/**
+ * The create-enrollment-token request.
+ */
+export interface CreateEnrollmentTokenRequest {
+  /**
+     * The token's lifetime in milliseconds, between one minute and one day.
+     * Absent means one hour.
+     * @nullable
+     */
+  ttlMillis?: number | null;
+}
+
+/**
+ * How the controller would authenticate to a draft's endpoint.
+ */
+export type OnboardAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
+ * The body of the create-draft request.
+ */
+export interface CreateOnboardingDraftRequest {
+  /** How the controller would authenticate. */
+  auth: OnboardAuthDto;
+  /**
+     * Operator notes carried onto the machine.
+     * @nullable
+     */
+  description?: string | null;
+  /** Groups carried onto the machine. */
+  groups?: string[];
+  /** The host or address. */
+  host: string;
+  /**
+     * The proposed machine name; derived from the host when omitted.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * The TCP port; 22 when omitted.
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /** Tags carried onto the machine. */
+  tags?: string[];
+  /** The remote login user. */
+  user: string;
+}
+
+/**
+ * The body of the create-operation request.
+ */
+export interface CreateOperationRequest {
+  /**
+     * The absolute deadline, in Unix epoch milliseconds, after which the
+     * operation must be treated as timed out. Absent means no deadline.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * A caller-chosen key making this request idempotent: replaying it
+     * returns the original operation instead of creating a second one.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /**
+     * The kind of work to create; only kinds the controller can describe are
+     * accepted.
+     */
+  kind: string;
+  /**
+     * The bounded provider input for kinds that need one, e.g. the script
+     * payload of `ssh.exec`.
+     * @nullable
+     */
+  payloadJson?: string | null;
+}
+
+/**
+ * The proposed endpoint of a draft. The user arrives redacted unless the
+ * caller may read sensitive endpoint detail.
+ */
+export interface DraftEndpointDto {
+  /** The host or address. */
+  host: string;
+  /**
+     * The TCP port.
+     * @minimum 0
+     */
+  port: number;
+  /** The remote login user, `***` when redacted. */
+  user: string;
+}
+
+/**
+ * The create-enrollment-token response. The token value is shown exactly
+ * once; only its hash is stored.
+ */
+export interface EnrollmentTokenCreatedDto {
+  /** Expiry (epoch milliseconds). */
+  expiresAt: number;
+  /** The token record's identity. */
+  id: string;
+  /** The machine the token is scoped to. */
+  machineId: string;
+  /** The token value. Shown once. */
+  token: string;
+}
+
+/**
+ * An enrollment token's facts. The token value appears only once, in the
+ * create response.
+ */
+export interface EnrollmentTokenDto {
+  /**
+     * Consumption time, when consumed (epoch milliseconds).
+     * @nullable
+     */
+  consumedAt?: number | null;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Expiry (epoch milliseconds). */
+  expiresAt: number;
+  /** The token record's identity. */
+  id: string;
+  /** The machine the token is scoped to. */
+  machineId: string;
+  /** `pending`, `consumed`, or `expired`. */
+  status: string;
+}
+
+/**
+ * The list-enrollment-tokens response.
+ */
+export interface EnrollmentTokenListDto {
+  /** The machine's tokens, newest first. */
+  items: EnrollmentTokenDto[];
 }
 
 /**
@@ -322,6 +421,121 @@ export interface NodeViewDto {
   machineId: string;
   /** Tokens that are still pending. */
   pendingTokens: EnrollmentTokenDto[];
+}
+
+/**
+ * A host key as observed from the network, staged for review. Public data.
+ */
+export interface OnboardHostKeyDto {
+  /** The OpenSSH `SHA256:` fingerprint to confirm. */
+  fingerprint: string;
+  /** The key type, e.g. `ED25519`. */
+  keyType: string;
+  /** The raw `known_hosts` line behind the fingerprint. */
+  rawLine: string;
+}
+
+/**
+ * The outcome of the connect check a test performed, when it ran.
+ */
+export interface TestOutcomeDto {
+  /** When the test ran (epoch milliseconds). */
+  at: number;
+  /** Whether the connect check ran. */
+  connectAttempted: boolean;
+  /** Whether the connect check succeeded. */
+  connected: boolean;
+  /**
+     * The bounded, already-redacted failure detail, when the check failed.
+     * @nullable
+     */
+  detail?: string | null;
+}
+
+/**
+ * A draft in full: everything the review step renders.
+ */
+export interface OnboardingDraftDetailDto {
+  /** How the controller would authenticate. */
+  auth: OnboardAuthDto;
+  /**
+     * The fingerprint the operator confirmed, when any.
+     * @nullable
+     */
+  confirmedFingerprint?: string | null;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes carried onto the machine. */
+  description: string;
+  /**
+     * When discovery completed (epoch milliseconds).
+     * @nullable
+     */
+  discoveredAt?: number | null;
+  /** Existing machines whose endpoints share the draft's host and port. */
+  duplicates: DuplicateCandidateDto[];
+  /**
+     * The proposed endpoint; the user is redacted unless the caller may
+     * read sensitive endpoint detail.
+     */
+  endpoint: DraftEndpointDto;
+  /** The facts discovery recorded for review. */
+  facts: CapabilityFactDto[];
+  /** Groups carried onto the machine. */
+  groups: string[];
+  hostKey?: null | OnboardHostKeyDto;
+  /** The host-key trust stage, as recorded. */
+  hostKeyStage: string;
+  /** The draft's identity. */
+  id: string;
+  lastTest?: null | TestOutcomeDto;
+  /** The proposed machine name. */
+  name: string;
+  /**
+     * The OS/profile hint derived from the facts, when the facts name an
+     * operating system. A display hint only; nothing is applied.
+     * @nullable
+     */
+  profileHint?: string | null;
+  /** The derived stage: `untested`, `review`, or `ready`. */
+  stage: string;
+  /** Tags carried onto the machine. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+}
+
+/**
+ * The shared fields of a draft, as the list and detail endpoints display
+ * them.
+ */
+export interface OnboardingDraftDto {
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The proposed endpoint; the user is redacted unless the caller may
+     * read sensitive endpoint detail.
+     */
+  endpoint: DraftEndpointDto;
+  /** How many facts discovery recorded. */
+  factCount: number;
+  /** Groups carried onto the machine. */
+  groups: string[];
+  /**
+     * The host-key trust stage: `unseen`, `observed`, `confirmed`, or
+     * `changed`.
+     */
+  hostKeyStage: string;
+  /** The draft's identity. */
+  id: string;
+  /** The proposed machine name. */
+  name: string;
+  /** The derived stage: `untested`, `review`, or `ready`. */
+  stage: string;
+  /** Tags carried onto the machine. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
 }
 
 /**
@@ -496,6 +710,52 @@ export interface PageMachineDto {
 }
 
 /**
+ * The shared fields of a draft, as the list and detail endpoints display
+ * them.
+ */
+export type PageOnboardingDraftDtoItemsItem = {
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The proposed endpoint; the user is redacted unless the caller may
+     * read sensitive endpoint detail.
+     */
+  endpoint: DraftEndpointDto;
+  /** How many facts discovery recorded. */
+  factCount: number;
+  /** Groups carried onto the machine. */
+  groups: string[];
+  /**
+     * The host-key trust stage: `unseen`, `observed`, `confirmed`, or
+     * `changed`.
+     */
+  hostKeyStage: string;
+  /** The draft's identity. */
+  id: string;
+  /** The proposed machine name. */
+  name: string;
+  /** The derived stage: `untested`, `review`, or `ready`. */
+  stage: string;
+  /** Tags carried onto the machine. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageOnboardingDraftDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageOnboardingDraftDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * The public operation resource. The application type is the transport
  * truth; this type is the documented shape, kept one `From` away so the two
  * cannot drift silently.
@@ -569,6 +829,34 @@ export interface PageOperationDto {
   items: PageOperationDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
+}
+
+/**
+ * The outcome of an add: the new machine plus the duplicates that were
+ * warned about.
+ */
+export type ResourceAddedMachineDtoData = {
+  /**
+     * Existing machines that shared the draft's host and port. The add
+     * proceeded anyway: candidates warn, they do not merge.
+     */
+  duplicates: DuplicateCandidateDto[];
+  /** The registered machine, redacted per the caller's permissions. */
+  machine: MachineDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceAddedMachineDto {
+  /**
+     * The outcome of an add: the new machine plus the duplicates that were
+     * warned about.
+     */
+  data: ResourceAddedMachineDtoData;
 }
 
 /**
@@ -719,6 +1007,117 @@ export interface ResourceNodeViewDto {
 }
 
 /**
+ * A draft in full: everything the review step renders.
+ */
+export type ResourceOnboardingDraftDetailDtoData = {
+  /** How the controller would authenticate. */
+  auth: OnboardAuthDto;
+  /**
+     * The fingerprint the operator confirmed, when any.
+     * @nullable
+     */
+  confirmedFingerprint?: string | null;
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes carried onto the machine. */
+  description: string;
+  /**
+     * When discovery completed (epoch milliseconds).
+     * @nullable
+     */
+  discoveredAt?: number | null;
+  /** Existing machines whose endpoints share the draft's host and port. */
+  duplicates: DuplicateCandidateDto[];
+  /**
+     * The proposed endpoint; the user is redacted unless the caller may
+     * read sensitive endpoint detail.
+     */
+  endpoint: DraftEndpointDto;
+  /** The facts discovery recorded for review. */
+  facts: CapabilityFactDto[];
+  /** Groups carried onto the machine. */
+  groups: string[];
+  hostKey?: null | OnboardHostKeyDto;
+  /** The host-key trust stage, as recorded. */
+  hostKeyStage: string;
+  /** The draft's identity. */
+  id: string;
+  lastTest?: null | TestOutcomeDto;
+  /** The proposed machine name. */
+  name: string;
+  /**
+     * The OS/profile hint derived from the facts, when the facts name an
+     * operating system. A display hint only; nothing is applied.
+     * @nullable
+     */
+  profileHint?: string | null;
+  /** The derived stage: `untested`, `review`, or `ready`. */
+  stage: string;
+  /** Tags carried onto the machine. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceOnboardingDraftDetailDto {
+  /** A draft in full: everything the review step renders. */
+  data: ResourceOnboardingDraftDetailDtoData;
+}
+
+/**
+ * The shared fields of a draft, as the list and detail endpoints display
+ * them.
+ */
+export type ResourceOnboardingDraftDtoData = {
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /**
+     * The proposed endpoint; the user is redacted unless the caller may
+     * read sensitive endpoint detail.
+     */
+  endpoint: DraftEndpointDto;
+  /** How many facts discovery recorded. */
+  factCount: number;
+  /** Groups carried onto the machine. */
+  groups: string[];
+  /**
+     * The host-key trust stage: `unseen`, `observed`, `confirmed`, or
+     * `changed`.
+     */
+  hostKeyStage: string;
+  /** The draft's identity. */
+  id: string;
+  /** The proposed machine name. */
+  name: string;
+  /** The derived stage: `untested`, `review`, or `ready`. */
+  stage: string;
+  /** Tags carried onto the machine. */
+  tags: string[];
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceOnboardingDraftDto {
+  /**
+     * The shared fields of a draft, as the list and detail endpoints display
+     * them.
+     */
+  data: ResourceOnboardingDraftDtoData;
+}
+
+/**
  * The public operation resource. The application type is the transport
  * truth; this type is the documented shape, kept one `From` away so the two
  * cannot drift silently.
@@ -840,6 +1239,14 @@ status?: string;
 limit?: number;
 };
 
+export type ListOnboardingDraftsParams = {
+/**
+ * The maximum number of drafts to return.
+ * @minimum 0
+ */
+limit?: number;
+};
+
 export type ListOperationsParams = {
 /**
  * The maximum number of operations to return.
@@ -909,6 +1316,507 @@ export const listMachines = async (params?: ListMachinesParams, options?: Reques
 
   const data: listMachinesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listMachinesResponse
+}
+
+
+
+export type listOnboardingDraftsResponse200 = {
+  data: PageOnboardingDraftDto
+  status: 200
+}
+
+export type listOnboardingDraftsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listOnboardingDraftsResponseSuccess = (listOnboardingDraftsResponse200) & {
+  headers: Headers;
+};
+export type listOnboardingDraftsResponseError = (listOnboardingDraftsResponse403) & {
+  headers: Headers;
+};
+
+export type listOnboardingDraftsResponse = (listOnboardingDraftsResponseSuccess | listOnboardingDraftsResponseError)
+
+export const getListOnboardingDraftsUrl = (params?: ListOnboardingDraftsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/machines/onboarding/drafts?${stringifiedParams}` : `/api/v1/machines/onboarding/drafts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists drafts, newest first.
+ */
+export const listOnboardingDrafts = async (params?: ListOnboardingDraftsParams, options?: RequestInit): Promise<listOnboardingDraftsResponse> => {
+
+  const res = await fetch(getListOnboardingDraftsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listOnboardingDraftsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listOnboardingDraftsResponse
+}
+
+
+
+export type createOnboardingDraftResponse201 = {
+  data: ResourceOnboardingDraftDto
+  status: 201
+}
+
+export type createOnboardingDraftResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createOnboardingDraftResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createOnboardingDraftResponseSuccess = (createOnboardingDraftResponse201) & {
+  headers: Headers;
+};
+export type createOnboardingDraftResponseError = (createOnboardingDraftResponse400 | createOnboardingDraftResponse403) & {
+  headers: Headers;
+};
+
+export type createOnboardingDraftResponse = (createOnboardingDraftResponseSuccess | createOnboardingDraftResponseError)
+
+export const getCreateOnboardingDraftUrl = () => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Creates a draft: the first stage. No network contact happens here.
+ */
+export const createOnboardingDraft = async (createOnboardingDraftRequest: CreateOnboardingDraftRequest, options?: RequestInit): Promise<createOnboardingDraftResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateOnboardingDraftUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createOnboardingDraftRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createOnboardingDraftResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createOnboardingDraftResponse
+}
+
+
+
+export type getOnboardingDraftResponse200 = {
+  data: ResourceOnboardingDraftDetailDto
+  status: 200
+}
+
+export type getOnboardingDraftResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getOnboardingDraftResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getOnboardingDraftResponseSuccess = (getOnboardingDraftResponse200) & {
+  headers: Headers;
+};
+export type getOnboardingDraftResponseError = (getOnboardingDraftResponse403 | getOnboardingDraftResponse404) & {
+  headers: Headers;
+};
+
+export type getOnboardingDraftResponse = (getOnboardingDraftResponseSuccess | getOnboardingDraftResponseError)
+
+export const getGetOnboardingDraftUrl = (draftId: string,) => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts/${draftId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Reads one draft in full: the review surface.
+ */
+export const getOnboardingDraft = async (draftId: string, options?: RequestInit): Promise<getOnboardingDraftResponse> => {
+
+  const res = await fetch(getGetOnboardingDraftUrl(draftId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getOnboardingDraftResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getOnboardingDraftResponse
+}
+
+
+
+export type addOnboardingMachineResponse201 = {
+  data: ResourceAddedMachineDto
+  status: 201
+}
+
+export type addOnboardingMachineResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type addOnboardingMachineResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type addOnboardingMachineResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type addOnboardingMachineResponseSuccess = (addOnboardingMachineResponse201) & {
+  headers: Headers;
+};
+export type addOnboardingMachineResponseError = (addOnboardingMachineResponse403 | addOnboardingMachineResponse404 | addOnboardingMachineResponse409) & {
+  headers: Headers;
+};
+
+export type addOnboardingMachineResponse = (addOnboardingMachineResponseSuccess | addOnboardingMachineResponseError)
+
+export const getAddOnboardingMachineUrl = (draftId: string,) => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts/${draftId}/add`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unconfirmed host key, or
+ * a backend failure.
+ * @summary Completes onboarding: registers the machine under the draft's identity
+and answers with the new machine plus the duplicates that were warned
+about. The draft is deleted; its facts, if any, are ingested first.
+ */
+export const addOnboardingMachine = async (draftId: string, options?: RequestInit): Promise<addOnboardingMachineResponse> => {
+
+  const res = await fetch(getAddOnboardingMachineUrl(draftId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: addOnboardingMachineResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as addOnboardingMachineResponse
+}
+
+
+
+export type cancelOnboardingDraftResponse204 = {
+  data: void
+  status: 204
+}
+
+export type cancelOnboardingDraftResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type cancelOnboardingDraftResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type cancelOnboardingDraftResponseSuccess = (cancelOnboardingDraftResponse204) & {
+  headers: Headers;
+};
+export type cancelOnboardingDraftResponseError = (cancelOnboardingDraftResponse403 | cancelOnboardingDraftResponse404) & {
+  headers: Headers;
+};
+
+export type cancelOnboardingDraftResponse = (cancelOnboardingDraftResponseSuccess | cancelOnboardingDraftResponseError)
+
+export const getCancelOnboardingDraftUrl = (draftId: string,) => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts/${draftId}/cancel`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Cancels a draft: the row is deleted and the host's pins are removed
+unless an existing machine endpoint shares the host.
+ */
+export const cancelOnboardingDraft = async (draftId: string, options?: RequestInit): Promise<cancelOnboardingDraftResponse> => {
+
+  const res = await fetch(getCancelOnboardingDraftUrl(draftId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: cancelOnboardingDraftResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as cancelOnboardingDraftResponse
+}
+
+
+
+export type confirmOnboardingHostKeyResponse200 = {
+  data: ResourceOnboardingDraftDetailDto
+  status: 200
+}
+
+export type confirmOnboardingHostKeyResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type confirmOnboardingHostKeyResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type confirmOnboardingHostKeyResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type confirmOnboardingHostKeyResponseSuccess = (confirmOnboardingHostKeyResponse200) & {
+  headers: Headers;
+};
+export type confirmOnboardingHostKeyResponseError = (confirmOnboardingHostKeyResponse400 | confirmOnboardingHostKeyResponse403 | confirmOnboardingHostKeyResponse404) & {
+  headers: Headers;
+};
+
+export type confirmOnboardingHostKeyResponse = (confirmOnboardingHostKeyResponseSuccess | confirmOnboardingHostKeyResponseError)
+
+export const getConfirmOnboardingHostKeyUrl = (draftId: string,) => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts/${draftId}/confirm-host-key`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a mismatched fingerprint,
+ * or a backend failure.
+ * @summary Confirms the observed fingerprint explicitly. This is the
+trust-on-first-use act the security architecture requires.
+ */
+export const confirmOnboardingHostKey = async (draftId: string,
+    confirmHostKeyRequest: ConfirmHostKeyRequest, options?: RequestInit): Promise<confirmOnboardingHostKeyResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getConfirmOnboardingHostKeyUrl(draftId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(confirmHostKeyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: confirmOnboardingHostKeyResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as confirmOnboardingHostKeyResponse
+}
+
+
+
+export type discoverOnboardingDraftResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type discoverOnboardingDraftResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type discoverOnboardingDraftResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type discoverOnboardingDraftResponseSuccess = (discoverOnboardingDraftResponse202) & {
+  headers: Headers;
+};
+export type discoverOnboardingDraftResponseError = (discoverOnboardingDraftResponse403 | discoverOnboardingDraftResponse404) & {
+  headers: Headers;
+};
+
+export type discoverOnboardingDraftResponse = (discoverOnboardingDraftResponseSuccess | discoverOnboardingDraftResponseError)
+
+export const getDiscoverOnboardingDraftUrl = (draftId: string,) => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts/${draftId}/discover`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown draft, or a
+ * backend failure.
+ * @summary Starts a discover: the agentless inventory probe against a confirmed
+draft, ingested into the draft for review.
+ */
+export const discoverOnboardingDraft = async (draftId: string, options?: RequestInit): Promise<discoverOnboardingDraftResponse> => {
+
+  const res = await fetch(getDiscoverOnboardingDraftUrl(draftId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: discoverOnboardingDraftResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as discoverOnboardingDraftResponse
+}
+
+
+
+export type testOnboardingDraftResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type testOnboardingDraftResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type testOnboardingDraftResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type testOnboardingDraftResponseSuccess = (testOnboardingDraftResponse202) & {
+  headers: Headers;
+};
+export type testOnboardingDraftResponseError = (testOnboardingDraftResponse403 | testOnboardingDraftResponse404) & {
+  headers: Headers;
+};
+
+export type testOnboardingDraftResponse = (testOnboardingDraftResponseSuccess | testOnboardingDraftResponseError)
+
+export const getTestOnboardingDraftUrl = (draftId: string,) => {
+
+
+
+
+  return `/api/v1/machines/onboarding/drafts/${draftId}/test`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown draft, or a
+ * backend failure.
+ * @summary Starts a test: probes the draft's host key and, once the fingerprint is
+confirmed, tests authentication. The work runs as a durable
+`machine.onboard.test` operation; it has no persistent machine side
+effect.
+ */
+export const testOnboardingDraft = async (draftId: string, options?: RequestInit): Promise<testOnboardingDraftResponse> => {
+
+  const res = await fetch(getTestOnboardingDraftUrl(draftId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: testOnboardingDraftResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as testOnboardingDraftResponse
 }
 
 

@@ -14,6 +14,7 @@ fleet-core = { path = "../fleet-core" }
 fs4 = { version = "1.1.0", features = ["sync"] }
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio", "macros", "migrate", "json"] }
 uuid = { version = "1.26.0", features = ["v7", "serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 [lints]
 workspace = true

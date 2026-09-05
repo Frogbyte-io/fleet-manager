@@ -254,7 +254,8 @@ fn fleetctl_talks_to_a_real_controller() {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
         };
-        let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None);
+        let router =
+            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         // Leak the server task and the directories keeping it fed; the test
@@ -341,7 +342,8 @@ fn fleetctl_machines_read_a_real_controller() {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
         };
-        let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None);
+        let router =
+            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         std::mem::forget((dist, dir, store));
@@ -493,7 +495,7 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
     };
-    let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None);
+    let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     std::mem::forget((dist, dir, store));
@@ -523,4 +525,323 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
     let body: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     assert_eq!(body["route"], "controller", "{body}");
     assert_eq!(body["status"]["service"], "fleet-controller", "{body}");
+}
+
+// ---------------------------------------------------------------------------
+// The Add Machine onboarding surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parsing_accepts_the_onboarding_grammar() {
+    let args: Vec<String> = [
+        "machines",
+        "onboard",
+        "create",
+        "--user",
+        "deploy",
+        "--host",
+        "box.lan",
+        "--port",
+        "2222",
+        "--name",
+        "builder",
+        "--description",
+        "the builder",
+        "--tag",
+        "lab",
+        "--group",
+        "bench",
+        "--auth",
+        "identity-file",
+        "--identity",
+        "/keys/deploy",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesOnboardCreate {
+            user: "deploy".to_owned(),
+            host: "box.lan".to_owned(),
+            port: Some(2222),
+            name: Some("builder".to_owned()),
+            description: Some("the builder".to_owned()),
+            tags: vec!["lab".to_owned()],
+            groups: vec!["bench".to_owned()],
+            auth: fleetctl::OnboardAuthArg::IdentityFile("/keys/deploy".to_owned()),
+        }
+    );
+
+    // The agent mode and the defaulted port parse too.
+    let args: Vec<String> = [
+        "machines", "onboard", "create", "--user", "ops", "--host", "box", "--auth", "agent",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesOnboardCreate {
+            user: "ops".to_owned(),
+            host: "box".to_owned(),
+            port: None,
+            name: None,
+            description: None,
+            tags: vec![],
+            groups: vec![],
+            auth: fleetctl::OnboardAuthArg::Agent,
+        }
+    );
+
+    for (args, expected) in [
+        (vec!["machines", "onboard", "list", "--limit", "3"], "list"),
+        (vec!["machines", "onboard", "get", "d1"], "get"),
+        (
+            vec!["machines", "onboard", "test", "d1", "--wait"],
+            "test-wait",
+        ),
+        (vec!["machines", "onboard", "test", "d1"], "test"),
+        (
+            vec![
+                "machines",
+                "onboard",
+                "discover",
+                "d1",
+                "--wait",
+                "--timeout",
+                "30",
+            ],
+            "discover",
+        ),
+        (
+            vec![
+                "machines",
+                "onboard",
+                "confirm",
+                "d1",
+                "--fingerprint",
+                "SHA256:abc",
+            ],
+            "confirm",
+        ),
+        (vec!["machines", "onboard", "add", "d1"], "add"),
+        (vec!["machines", "onboard", "cancel", "d1"], "cancel"),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).unwrap_or_else(|error| panic!("{expected} must parse: {error}"));
+    }
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_onboarding() {
+    for args in [
+        vec![
+            "machines", "onboard", "create", "--host", "box", "--auth", "agent",
+        ],
+        vec![
+            "machines", "onboard", "create", "--user", "ops", "--auth", "agent",
+        ],
+        vec![
+            "machines", "onboard", "create", "--user", "ops", "--host", "box",
+        ],
+        vec![
+            "machines", "onboard", "create", "--user", "o", "--host", "b", "--auth", "password",
+        ],
+        vec![
+            "machines",
+            "onboard",
+            "create",
+            "--user",
+            "o",
+            "--host",
+            "b",
+            "--auth",
+            "identity-file",
+        ],
+        vec!["machines", "onboard", "confirm", "d1"],
+        vec!["machines", "onboard", "test", "d1", "--fingerprint", "x"],
+        vec!["machines", "onboard"],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires")
+                || error.message.contains("is required")
+                || error.message.contains("must be")
+                || error.message.contains("unknown flag"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn text_output_renders_the_onboarding_surface() {
+    let page = json!({
+        "items": [
+            {
+                "id": "draft-1",
+                "endpoint": {"user": "***", "host": "box.lan", "port": 2222},
+                "name": "builder",
+                "tags": ["lab"],
+                "groups": [],
+                "stage": "ready",
+                "hostKeyStage": "confirmed",
+                "factCount": 0,
+                "createdAt": 1,
+                "updatedAt": 2
+            }
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_onboarding_for_test(&page);
+    assert!(text.contains("ID"), "{text}");
+    assert!(text.contains("STAGE"), "{text}");
+    assert!(text.contains("draft-1"), "{text}");
+    assert!(text.contains("***@box.lan:2222"), "{text}");
+
+    let detail = json!({
+        "id": "draft-1",
+        "endpoint": {"user": "deploy", "host": "box.lan", "port": 22},
+        "auth": {"type": "identityFile", "path": "/keys/deploy"},
+        "name": "builder",
+        "description": "",
+        "tags": [],
+        "groups": [],
+        "stage": "review",
+        "hostKeyStage": "observed",
+        "hostKey": {"keyType": "ED25519", "fingerprint": "SHA256:abc", "rawLine": "[box.lan]:22 ssh-ed25519 x"},
+        "confirmedFingerprint": null,
+        "lastTest": {"connectAttempted": false, "connected": false, "detail": null, "at": 5},
+        "facts": [],
+        "discoveredAt": null,
+        "profileHint": null,
+        "duplicates": [
+            {"machineId": "m1", "name": "twin", "machineStatus": "agentless", "reference": "ops@box.lan:22"}
+        ],
+        "createdAt": 1,
+        "updatedAt": 2
+    });
+    let text = fleetctl::render_onboarding_for_test(&detail);
+    assert!(text.contains("stage: review"), "{text}");
+    assert!(text.contains("endpoint: deploy@box.lan:22"), "{text}");
+    assert!(text.contains("auth: identity file /keys/deploy"), "{text}");
+    assert!(text.contains("hostKey: ED25519 SHA256:abc"), "{text}");
+    assert!(
+        text.contains("lastTest: not attempted (fingerprint unconfirmed)"),
+        "{text}"
+    );
+    assert!(text.contains("facts: (none discovered)"), "{text}");
+    assert!(text.contains("duplicates (warned, not merged):"), "{text}");
+    assert!(text.contains("m1 ops@box.lan:22"), "{text}");
+
+    let added = json!({
+        "machine": {
+            "id": "machine-1",
+            "name": "builder",
+            "endpoints": [{"id": "e1", "kind": "ssh", "reference": "deploy@box.lan:22"}]
+        },
+        "duplicates": []
+    });
+    let text = fleetctl::render_onboarding_for_test(&added);
+    assert!(
+        text.contains("machine registered: machine-1 (builder)"),
+        "{text}"
+    );
+    assert!(text.contains("duplicates: (none)"), "{text}");
+}
+
+/// The onboarding commands over a real controller: create, review, list,
+/// and cancel a draft whose test stage never ran.
+#[test]
+fn fleetctl_onboards_a_real_controller() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let addr = runtime.block_on(async {
+        let dist = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let onboarding = std::sync::Arc::new(fleet_controller::compose_onboarding(
+            store.pool(),
+            dir.path().join("ssh"),
+        ));
+        let settings = fleet_controller::Settings {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            web_dist: dist.path().to_path_buf(),
+        };
+        let router = fleet_controller::build_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            Some(&onboarding),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::mem::forget((dist, dir, store));
+        tokio::spawn(async move {
+            let server = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            );
+            let _ = server.await;
+        });
+        address
+    });
+
+    let base_url = format!("http://{addr}");
+    let run = |args: &[&str]| {
+        let mut owned = vec!["--url", base_url.as_str()];
+        owned.extend_from_slice(args);
+        let owned: Vec<String> = owned.iter().map(ToString::to_string).collect();
+        let invocation = fleetctl::parse(&owned).unwrap();
+        fleetctl::run(&invocation).unwrap()
+    };
+
+    // Create in JSON: the draft exists, untested, and the user arrived
+    // unredacted for its creator.
+    let created = run(&[
+        "--output", "json", "machines", "onboard", "create", "--user", "deploy", "--host",
+        "box.lan", "--auth", "agent", "--tag", "lab",
+    ]);
+    let draft: serde_json::Value = serde_json::from_str(&created).unwrap();
+    let draft_id = draft["id"].as_str().unwrap().to_owned();
+    assert_eq!(draft["stage"], "untested");
+    assert_eq!(draft["endpoint"]["user"], "deploy");
+
+    // Text parity: the review surface reads as lines.
+    let detail = run(&["machines", "onboard", "get", &draft_id]);
+    assert!(detail.contains("stage: untested"), "{detail}");
+    assert!(detail.contains("endpoint: deploy@box.lan:22"), "{detail}");
+
+    // The list shows the draft with a redacted user (the default read).
+    let listing = run(&["machines", "onboard", "list"]);
+    assert!(listing.contains("***@box.lan:22"), "{listing}");
+    assert!(listing.contains("untested"), "{listing}");
+
+    // Cancel is a clean 204; the JSON answer is null and the draft is gone.
+    let cancelled = run(&[
+        "--output", "json", "machines", "onboard", "cancel", &draft_id,
+    ]);
+    assert_eq!(cancelled.trim(), "null", "{cancelled}");
+    let args: Vec<String> = [
+        "--url",
+        base_url.as_str(),
+        "machines",
+        "onboard",
+        "get",
+        &draft_id,
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    let error = fleetctl::run(&invocation).unwrap_err();
+    assert!(error.message.contains("not_found"), "{error}");
 }

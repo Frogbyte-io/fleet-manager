@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import MachinesPanel from './components/MachinesPanel.vue'
+import OnboardingPanel from './components/OnboardingPanel.vue'
 import OperationsPanel from './components/OperationsPanel.vue'
 import SystemPanel from './components/SystemPanel.vue'
 </script>
@@ -17,6 +18,7 @@ import SystemPanel from './components/SystemPanel.vue'
 
     <div class="mt-8 space-y-6">
       <SystemPanel />
+      <OnboardingPanel />
       <MachinesPanel />
       <OperationsPanel />
     </div>
