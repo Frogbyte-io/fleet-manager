@@ -6,7 +6,7 @@ use fleetd::{Command, EnrollArgs, RunArgs};
 
 const HELP: &str = "Usage:
   fleetd enroll --controller <url> --token <token> [--state-dir <path>]
-  fleetd run --controller <url> [--state-dir <path>]
+  fleetd run --controller <url> [--state-dir <path>] [--local-group <gid>]
   fleetd [--help|--version]";
 
 fn parse_args() -> Result<Command, String> {
@@ -17,6 +17,7 @@ fn parse_args() -> Result<Command, String> {
     let mut controller = None;
     let mut token = None;
     let mut state_dir = None;
+    let mut local_group = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--controller" => {
@@ -37,6 +38,15 @@ fn parse_args() -> Result<Command, String> {
                         .ok_or_else(|| "the --state-dir flag requires a path".to_owned())?,
                 );
             }
+            "--local-group" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "the --local-group flag requires a gid".to_owned())?;
+                local_group =
+                    Some(value.parse().map_err(|_| {
+                        format!("--local-group must be a gid number, not {value:?}")
+                    })?);
+            }
             other => return Err(format!("unknown argument {other:?}\n{HELP}")),
         }
     }
@@ -49,6 +59,7 @@ fn parse_args() -> Result<Command, String> {
         "run" => Ok(Command::Run(RunArgs {
             controller: controller.ok_or("run requires --controller <url>")?,
             state_dir,
+            local_group,
         })),
         other => Err(format!("unknown command {other:?}\n{HELP}")),
     }

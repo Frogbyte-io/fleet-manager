@@ -51,6 +51,34 @@ impl Controller {
         format!("ws://{}:{}/api/node/v1/connect", self.host, self.port)
     }
 
+    /// A raw connection for surfaces beyond `post_json` (the daemon's own
+    /// unprivileged GET for the local status surface).
+    ///
+    /// # Errors
+    ///
+    /// Fails on transport errors.
+    pub fn connect_raw(&self) -> Result<TcpStream, String> {
+        self.connect()
+    }
+
+    /// The base URL this controller was parsed from.
+    #[must_use]
+    pub fn base_url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
+
+    /// The host this controller was parsed from.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The port this controller was parsed from.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     fn connect(&self) -> Result<TcpStream, String> {
         TcpStream::connect((self.host.as_str(), self.port))
             .map_err(|error| format!("cannot reach {}:{}: {error}", self.host, self.port))

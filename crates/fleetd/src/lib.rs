@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod http;
 pub mod inventory;
 pub mod journal;
+pub mod local;
 pub mod probes;
 pub mod session;
 pub mod state;
@@ -49,14 +50,41 @@ pub async fn run(command: Command) -> Result<(), String> {
                 )
                 .map_err(|error| error.to_string())?,
             );
-            run_gateway_connected(
+            // The local status surface runs beside the gateway loop: a
+            // same-user (or configured-group) peer gets node and Fleet read
+            // facts without controller credentials.
+            let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server = std::sync::Arc::new(local::LocalServer::new(
+                &state_dir(args.state_dir.as_deref()),
+                controller.clone(),
+                node_state.clone(),
+                journal.clone(),
+                inventory.clone(),
+                connected.clone(),
+                args.local_group,
+            ));
+            let local_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_thread = {
+                let server = server.clone();
+                let local_shutdown = local_shutdown.clone();
+                std::thread::spawn(move || {
+                    server.serve_blocking(|| {
+                        local_shutdown.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+                })
+            };
+            let outcome = run_gateway_connected_with_status(
                 controller,
                 node_state,
                 journal,
                 inventory,
+                connected,
                 shutdown_signal(),
             )
-            .await
+            .await;
+            local_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = server_thread.join();
+            outcome
         }
     }
 }
@@ -85,6 +113,9 @@ pub struct RunArgs {
     pub controller: String,
     /// An explicit state directory, overriding the environment/default.
     pub state_dir: Option<String>,
+    /// When set, only local peers whose effective group matches may use
+    /// the local status surface; unset allows same-user peers only.
+    pub local_group: Option<u32>,
 }
 
 /// The state directory for the given explicit path or environment.
@@ -134,13 +165,42 @@ pub async fn run_gateway_connected(
     inventory: std::sync::Arc<inventory::InventoryState>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), String> {
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    run_gateway_connected_with_status(
+        controller, node_state, journal, inventory, connected, shutdown,
+    )
+    .await
+}
+
+/// The run loop with a caller-supplied shutdown and an owned connection
+/// flag, which the local status surface reads.
+///
+/// # Errors
+///
+/// Returns a caller-safe detail when the loop stops on an enrollment or
+/// journal problem; reconnectable failures never end it.
+pub async fn run_gateway_connected_with_status(
+    controller: http::Controller,
+    node_state: std::sync::Arc<state::NodeState>,
+    journal: std::sync::Arc<journal::NodeJournal>,
+    inventory: std::sync::Arc<inventory::InventoryState>,
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<(), String> {
     let mut shutdown = Box::pin(shutdown);
     let mut backoff = gateway::Backoff::new(gateway::FIRST_BACKOFF);
     loop {
         let shutdown_ref: &mut (dyn std::future::Future<Output = ()> + Unpin + Send) =
             &mut shutdown;
-        match gateway::connect_once(&controller, &node_state, &journal, &inventory, shutdown_ref)
-            .await
+        match gateway::connect_once_with_status(
+            &controller,
+            &node_state,
+            &journal,
+            &inventory,
+            &connected,
+            shutdown_ref,
+        )
+        .await
         {
             gateway::Attempt::Stop(reason) => {
                 eprintln!("fleetd: {reason}");

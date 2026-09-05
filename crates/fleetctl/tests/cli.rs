@@ -11,6 +11,7 @@ fn parsing_accepts_the_documented_grammar() {
         .collect();
     let invocation = fleetctl::parse(&args).unwrap();
     assert_eq!(invocation.url, "http://box.lan:9000");
+    assert!(invocation.url_explicit);
     assert_eq!(invocation.output, fleetctl::Output::Text);
     assert_eq!(invocation.command, fleetctl::Command::System);
 
@@ -24,6 +25,33 @@ fn parsing_accepts_the_documented_grammar() {
         invocation.command,
         fleetctl::Command::OperationsList { limit: Some(5) }
     );
+}
+
+#[test]
+fn the_status_command_selects_its_route_explicitly() {
+    // No --url: the local route through the node's socket.
+    let args: Vec<String> = ["status"].iter().map(ToString::to_string).collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert!(!invocation.url_explicit, "the local route is the default");
+    assert_eq!(invocation.command, fleetctl::Command::Status);
+
+    // --socket points the local route elsewhere.
+    let args: Vec<String> = ["--socket", "/run/fleetd/local.sock", "status"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(invocation.socket, "/run/fleetd/local.sock");
+    assert!(!invocation.url_explicit);
+
+    // --url is the explicit direct-controller override.
+    let args: Vec<String> = ["--url", "http://controller:8080", "status"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert!(invocation.url_explicit, "the override must be explicit");
+    assert_eq!(invocation.url, "http://controller:8080");
 }
 
 #[test]
@@ -150,4 +178,114 @@ fn a_refused_request_reports_the_envelope_code() {
     let invocation = fleetctl::parse(&args).unwrap();
     let error = fleetctl::run(&invocation).unwrap_err();
     assert!(error.message.contains("did not answer"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// The status command's two routes
+// ---------------------------------------------------------------------------
+
+fn status_args(extra: &[&str]) -> Vec<String> {
+    let mut args = vec!["--output", "json", "status"];
+    args.extend_from_slice(extra);
+    args.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn status_prefers_the_node_socket_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = std::sync::Arc::new(fleetd::state::NodeState::open(dir.path()).unwrap());
+    let journal = std::sync::Arc::new(
+        fleetd::journal::NodeJournal::open(&dir.path().join("journal.ndjson"))
+            .map_err(|error| error.to_string())
+            .unwrap(),
+    );
+    let inventory = std::sync::Arc::new(
+        fleetd::inventory::InventoryState::open(&dir.path().join("inventory.json"))
+            .map_err(|error| error.to_string())
+            .unwrap(),
+    );
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The controller is unreachable by construction; the route assertion is
+    // what matters here.
+    let controller = fleetd::http::Controller::parse("http://127.0.0.1:1").unwrap();
+    let server = std::sync::Arc::new(fleetd::local::LocalServer::new(
+        dir.path(),
+        controller,
+        state,
+        journal,
+        inventory,
+        connected,
+        None,
+    ));
+    let socket = server.socket_path().to_path_buf();
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag = shutdown.clone();
+    let thread = std::thread::spawn(move || {
+        server.serve_blocking(|| shutdown_flag.load(std::sync::atomic::Ordering::Relaxed));
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the local socket must bind"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let args = status_args(&["--socket", socket.to_str().unwrap()]);
+    let invocation = fleetctl::parse(&args).unwrap();
+    let rendered = fleetctl::run(&invocation).expect("the local route must answer");
+    let body: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(body["route"], "local", "{body}");
+    assert_eq!(
+        body["status"]["node"]["nodeVersion"],
+        env!("CARGO_PKG_VERSION")
+    );
+
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = thread.join();
+}
+
+#[tokio::test]
+async fn an_explicit_url_sends_status_straight_to_the_controller() {
+    let dist = tempfile::tempdir().unwrap();
+    std::fs::write(dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let settings = fleet_controller::Settings {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        web_dist: dist.path().to_path_buf(),
+    };
+    let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    std::mem::forget((dist, dir, store));
+    tokio::spawn(async move {
+        let server = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        );
+        let _ = server.await;
+    });
+
+    let args: Vec<String> = [
+        "--url",
+        &format!("http://{address}"),
+        "--output",
+        "json",
+        "status",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    let rendered = tokio::task::spawn_blocking(move || fleetctl::run(&invocation))
+        .await
+        .expect("the run task must not panic")
+        .expect("the controller route must answer");
+    let body: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+    assert_eq!(body["route"], "controller", "{body}");
+    assert_eq!(body["status"]["service"], "fleet-controller", "{body}");
 }

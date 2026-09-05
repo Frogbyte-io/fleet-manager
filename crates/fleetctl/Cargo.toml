@@ -18,6 +18,7 @@ uuid = { version = "1.26.0", features = ["v7"] }
 workspace = true
 
 [dev-dependencies]
+fleetd = { path = "../fleetd" }
 axum = "0.8.9"
 fleet-controller = { path = "../fleet-controller" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }

@@ -229,6 +229,30 @@ payload carries the report — no new payload variants, no version bump.
 - The journal's dedupe makes collection idempotent: a redelivered inventory
   command replays its report instead of re-probing.
 
+### The local agent path (FM-208)
+
+`fleetd` serves a constrained status surface on a Unix socket
+(`local.sock` inside its state directory, mode `0660`):
+
+- **Admission is the kernel's job first.** The socket file is owner+group
+  only; a peer outside the file's group fails `connect()` before the daemon
+  sees it. The packaged service unit (FM-211) sets the socket's group.
+  Defense in depth re-checks the peer's `SO_PEERCRED`: by default a
+  same-user peer is allowed (the development shape); `fleetd run
+  --local-group <gid>` restricts the surface to peers whose effective group
+  matches, so the daemon's own account is not an implicit superuser of it.
+- **One read, no mutations.** `GET /local/status` answers the node's own
+  facts (machine id, node version, platform, gateway state, journal and
+  inventory positions, public key) plus the controller's public system view,
+  fetched with the daemon's ordinary unprivileged read and reported
+  honestly when the controller is unreachable. Anything else is `404`; any
+  non-GET is `405`; a denied peer is `403` and closed.
+- **No forwarding, no delegation.** The surface never forwards arbitrary
+  requests or mutations — delegation is M8 work, and mutation forwarding is
+  a non-goal. No controller credential or provider secret is reachable.
+- **`fleetctl status`** prefers the local socket (the route it used is in
+  the JSON output); `--url` is the explicit direct-controller override.
+
 ## Golden fixtures
 
 `fixtures/v1/*.bin` are frozen encodings, one per message family, plus two

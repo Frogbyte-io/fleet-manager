@@ -29,6 +29,8 @@ use crate::http::Controller;
 use crate::inventory::InventoryState;
 use crate::journal::NodeJournal;
 use crate::state::{Jitter, NodeState};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The WebSocket subprotocol the client offers. Must match the controller's
 /// `NODE_SUBPROTOCOL`; the negotiation is checked on both sides.
@@ -57,6 +59,28 @@ pub async fn connect_once(
     state: &std::sync::Arc<NodeState>,
     journal: &std::sync::Arc<NodeJournal>,
     inventory: &std::sync::Arc<InventoryState>,
+    shutdown: &mut (dyn std::future::Future<Output = ()> + Unpin + Send),
+) -> Attempt {
+    connect_once_with_status(
+        controller,
+        state,
+        journal,
+        inventory,
+        &Arc::new(AtomicBool::new(false)),
+        shutdown,
+    )
+    .await
+}
+
+/// The connection attempt with an observed connection flag, which the
+/// local status surface reads.
+#[allow(clippy::too_many_lines)]
+pub async fn connect_once_with_status(
+    controller: &Controller,
+    state: &std::sync::Arc<NodeState>,
+    journal: &std::sync::Arc<NodeJournal>,
+    inventory: &std::sync::Arc<InventoryState>,
+    connected: &Arc<AtomicBool>,
     shutdown: &mut (dyn std::future::Future<Output = ()> + Unpin + Send),
 ) -> Attempt {
     // The key proof happens over blocking HTTP on purpose: it is one small
@@ -135,6 +159,7 @@ pub async fn connect_once(
         "fleetd: session accepted (protocol v{}, schema v{}, heartbeat {interval:?}, flags {:?})",
         welcome.protocol_version, welcome.inventory_schema_version, welcome.enabled_feature_flags
     );
+    connected.store(true, Ordering::Relaxed);
 
     // The heartbeat loop. Monotonic uptime so clock steps cannot rewind it.
     let started = tokio::time::Instant::now();
