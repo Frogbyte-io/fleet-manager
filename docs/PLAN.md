@@ -5,7 +5,7 @@ Prepared: 2026-08-25
 Accepted: 2026-08-25 — see [planning/fm-000-acceptance.md](planning/fm-000-acceptance.md)  
 Revised: 2026-08-27 — confirmed product decisions from the maintainer planning review below  
 Scope: architecture and development planning only; no product features are implemented by this plan  
-Execution: M0 and M1 are complete and their epics are closed; M2 is in progress — waves 1–5 closed as of 2026-09-05 and FM-210 is implemented (PR #69), FM-211 is next. Live per-issue status: [planning/parallel-execution.md](planning/parallel-execution.md)
+Execution: M0 and M1 are complete and their epics are closed; M2 is in progress — waves 1–5 closed as of 2026-09-05 and FM-210/FM-211 are implemented (PRs #69/#70), FM-212 is next. Live per-issue status: [planning/parallel-execution.md](planning/parallel-execution.md)
 
 ## Confirmed 2026-08-27 product-scope revision
 
@@ -213,7 +213,7 @@ Exit gate: Compose starts a controller bound to its configured local-network int
 
 ### M2 — Machines, connectivity, and onboarding
 
-Status: in progress (2026-09-05 — waves 1–5 closed, FM-210 implemented (PR #69); next is FM-211 (#65). Live wave status: [planning/parallel-execution.md](planning/parallel-execution.md)).
+Status: in progress (2026-09-07 — waves 1–5 closed, FM-210/FM-211 implemented; next is FM-212 (#66). Live wave status: [planning/parallel-execution.md](planning/parallel-execution.md)).
 
 Outcome: users can add agentless SSH machines or enroll `fleetd`, see reliable inventory/health, and upgrade an SSH machine to fully managed mode.
 

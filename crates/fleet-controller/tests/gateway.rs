@@ -36,6 +36,7 @@ fn settings(web_dist: &std::path::Path) -> Settings {
     Settings {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: web_dist.to_path_buf(),
+        artifacts_dir: None,
     }
 }
 

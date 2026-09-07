@@ -31,6 +31,7 @@ fn settings(web_dist: &Path) -> Settings {
             .parse()
             .expect("the test listen address must parse"),
         web_dist: web_dist.to_path_buf(),
+        artifacts_dir: None,
     }
 }
 
