@@ -180,12 +180,14 @@ pub enum Command {
         endpoint: String,
         /// How the controller authenticates to the endpoint.
         auth: OnboardAuthArg,
-        /// Where the service archive downloads from.
-        artifact_url: String,
-        /// The archive's expected sha256 (mandatory).
-        artifact_sha256: String,
-        /// The controller URL the daemon connects to; derived from the
-        /// artifact URL's origin when omitted.
+        /// Where the service archive downloads from. Absent together with
+        /// the digest in the orchestrated install: the controller selects
+        /// the package for the machine's own platform.
+        artifact_url: Option<String>,
+        /// The archive's expected sha256 (mandatory in explicit mode).
+        artifact_sha256: Option<String>,
+        /// The controller URL the daemon connects to; the CLI defaults it
+        /// to its own `--url` (the node must reach the same controller).
         controller_url: Option<String>,
         /// The whole-install deadline, in seconds.
         install_timeout: u64,
@@ -282,7 +284,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         },
         ["machines", "onboard", verb, rest @ ..] => parse_onboard_command(verb, rest)?,
         ["machines", "install-node", machine_id, rest @ ..] => {
-            parse_install_node(machine_id, rest)?
+            parse_install_node(machine_id, rest, &url)?
         }
         _ => return Err(CliError { message: usage() }),
     };
@@ -338,7 +340,7 @@ fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] --artifact-url <url> --artifact-sha256 <digest> [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -408,8 +410,12 @@ fn parse_onboard_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
     }
 }
 
-/// Parses `machines install-node <machineId>` and its flags.
-fn parse_install_node(machine_id: &str, rest: &[&str]) -> Result<Command, CliError> {
+/// Parses `machines install-node <machineId>` and its flags. The artifact
+/// flags are optional: omitted together, the controller selects the package
+/// for the machine's own platform (the orchestrated install). The
+/// controller URL defaults to the CLI's own `--url`, because the node must
+/// reach the same controller this command talks to.
+fn parse_install_node(machine_id: &str, rest: &[&str], url: &str) -> Result<Command, CliError> {
     let mut endpoint: Option<String> = None;
     let mut auth: Option<String> = None;
     let mut identity: Option<String> = None;
@@ -479,20 +485,21 @@ fn parse_install_node(machine_id: &str, rest: &[&str]) -> Result<Command, CliErr
             });
         }
     };
+    if artifact_url.is_some() != artifact_sha256.is_some() {
+        return Err(CliError {
+            message: "--artifact-url and --artifact-sha256 must be supplied together                      (or both omitted for the orchestrated install)"
+                .to_owned(),
+        });
+    }
     Ok(Command::MachinesInstallNode {
         machine_id: machine_id.to_owned(),
         endpoint: endpoint.ok_or_else(|| CliError {
             message: "--endpoint <endpoint-id> is required".to_owned(),
         })?,
         auth,
-        artifact_url: artifact_url.ok_or_else(|| CliError {
-            message: "--artifact-url <url> is required".to_owned(),
-        })?,
-        artifact_sha256: artifact_sha256.ok_or_else(|| CliError {
-            message: "--artifact-sha256 <digest> is required; an unverified package never installs"
-                .to_owned(),
-        })?,
-        controller_url,
+        artifact_url,
+        artifact_sha256,
+        controller_url: controller_url.or_else(|| Some(url.to_owned())),
         install_timeout,
         connect_wait,
         wait,
@@ -868,9 +875,11 @@ fn install_node_request(
         "endpointId": endpoint,
         "auth": auth_value,
         "timeoutSeconds": install_timeout,
-        "artifactUrl": artifact_url,
-        "artifactSha256": artifact_sha256,
     });
+    if let (Some(artifact_url), Some(artifact_sha256)) = (artifact_url, artifact_sha256) {
+        payload["artifactUrl"] = serde_json::json!(artifact_url);
+        payload["artifactSha256"] = serde_json::json!(artifact_sha256);
+    }
     if let Some(controller_url) = controller_url {
         payload["controllerUrl"] = serde_json::json!(controller_url);
     }

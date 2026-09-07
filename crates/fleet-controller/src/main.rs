@@ -157,8 +157,10 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                                 store.pool().clone(),
                             )),
                             services.nodes.clone(),
+                            services.gateway.clone(),
                             config.data_dir.join("ssh"),
                             limiter.clone(),
+                            Some(config.data_dir.join("artifacts")),
                             onboarding,
                         ))
                     }

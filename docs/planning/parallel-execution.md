@@ -33,12 +33,13 @@ FM-002 was split from a single issue precisely because five issues waited on it 
 
 ## M2 execution waves and current status
 
-**Checkpoint 2026-09-07 (session handoff).** Waves 1–5 are closed; **FM-210 (#64, PR #69) and FM-211 (#65) are implemented and merged**. FM-210 delivered the SSH Add Machine workflow; FM-211 delivered the fleetd service package and the audited SSH bootstrap. The next agent starts **FM-212 (#66) — the "Install Fleet Node" upgrade workflow**: its dependencies (FM-210, FM-211) are merged, so it is unblocked with no in-flight work to coordinate with. Operating notes for the handoff:
+**Checkpoint 2026-09-07 (session handoff).** Waves 1–5 are closed; **FM-210 (#64, PR #69), FM-211 (#65, PR #70), and FM-212 (#66, PR #71) are implemented and merged**. FM-210 delivered the SSH Add Machine workflow; FM-211 the fleetd service package and bootstrap; FM-212 the orchestrated one-command upgrade with inventory verification. **Wave 6 is complete.** The next agent may take **FM-213 (#67) — optional Tailscale discovery** — or move to M3 planning. Operating notes for the handoff:
 
 - **What FM-211 delivered (see the close-out on #65):** `cargo xtask package-fleetd` → `target/dist/fleetd-<version>-linux-x86_64.tar.gz` (binary, hardened systemd unit, install/uninstall scripts, README, SHA256SUMS); the controller serves artifacts from `Settings.artifacts_dir` at `GET /downloads/fleetd/<file>`; the `machine.install-fleetd` operation kind (executor in `fleet-controller::install`) mints the single-use enrollment token itself (never in argv, payload, or files — `fleetd --token-stdin`), installs, enrolls, and waits for a connected gateway session; `fleetctl machines install-node … --wait`. fleetd grew `--token-stdin`.
 - **What FM-212 can rely on:** the install operation is idempotent (upgrade over a live identity mints no token, replaces the binary atomically, keeps the enrollment), failure cleanup leaves the agentless endpoint usable, revocation + reinstall re-enrolls with a fresh key, and reboot re-connects (proven on a real Ubuntu 24.04 VM: ACPI reboot → connected again in ~15 s). The machine stays the same Fleet machine throughout — the upgrade workflow's identity-association work is mostly done by these guarantees.
 - **Real-VM environment:** the integration VM (`fleet-test-01`, Ubuntu 24.04, PVE host 192.168.68.223) is documented on #65; its cloud-init seed must configure **`ens18`** (the actual NIC name — a seed saying `eth0` produces a boot with no network), and the PVE `sshkeys` API parameter rejects values through the API-token path, so seeds travel as a NoCloud ISO.
-- **Remaining after FM-212:** wave 7 (`FM-213`, optional). FM-214 stays deferred past the first Lab release.
+- **What FM-212 added (see the close-out on #66):** the orchestrated auto mode of `machine.install-fleetd` — no artifact fields; the executor selects the package from `Settings.artifacts_dir` against the machine's own facts (os.family linux, case-insensitive; x86_64/aarch64), computes the digest server-side, and after connect verifies the node's inventory by dispatching `node.inventory` through the live session registry and ingesting the report (shared `ingest_inventory_report` helper). The connect wait now polls the **live registry**, not the persisted `gateway_state` (stale after controller restarts). `fleetctl machines install-node` needs no artifact flags (controller URL defaults to `--url`); the web machine detail has the Install Fleet Node flow.
+- **Remaining:** wave 7 (`FM-213`, optional). FM-214 stays deferred past the first Lab release.
 
 M2 started 2026-09-04 after M1 closed. The dependency chain differs from M0: the SSH track (waves 1–2) is serial through the trust/execution/probe stack, and the fleetd track (wave 3) opens a new connection surface.
 
@@ -66,8 +67,8 @@ wave 7   FM-213 Tailscale (optional)
 | 3 | FM-203 | **Done** (2026-09-04) |
 | 4 | FM-204 → FM-205 → FM-207 | **Done** (2026-09-04) |
 | 5 | FM-206, FM-208, FM-209 | **Done** (2026-09-05) |
-| 6 | FM-210 → FM-211 → FM-212 | **FM-210, FM-211 done** (2026-09-07); FM-212 next |
-| 7 | FM-213 | after FM-210; optional |
+| 6 | FM-210 → FM-211 → FM-212 | **Done** (2026-09-07: #69, #70, #71) |
+| 7 | FM-213 | optional; unblocked |
 
 Handoff guarantees a fresh agent can rely on:
 
