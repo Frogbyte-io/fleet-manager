@@ -169,6 +169,33 @@ pub enum Command {
         /// The draft id.
         id: String,
     },
+    /// Start the audited "Install Fleet Node" bootstrap on an agentless
+    /// machine: download the checksummed service package on the node,
+    /// install the systemd service, enroll, and wait for the gateway
+    /// session.
+    MachinesInstallNode {
+        /// The machine gaining the node.
+        machine_id: String,
+        /// The SSH endpoint id to bootstrap over.
+        endpoint: String,
+        /// How the controller authenticates to the endpoint.
+        auth: OnboardAuthArg,
+        /// Where the service archive downloads from.
+        artifact_url: String,
+        /// The archive's expected sha256 (mandatory).
+        artifact_sha256: String,
+        /// The controller URL the daemon connects to; derived from the
+        /// artifact URL's origin when omitted.
+        controller_url: Option<String>,
+        /// The whole-install deadline, in seconds.
+        install_timeout: u64,
+        /// How long to wait for the gateway session, in seconds.
+        connect_wait: Option<u64>,
+        /// Poll the operation to a terminal state.
+        wait: bool,
+        /// The poll bound, in seconds (with `--wait`).
+        poll_timeout: u64,
+    },
 }
 
 /// How the CLI spells the draft's authentication mode.
@@ -254,6 +281,9 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             id: (*id).to_owned(),
         },
         ["machines", "onboard", verb, rest @ ..] => parse_onboard_command(verb, rest)?,
+        ["machines", "install-node", machine_id, rest @ ..] => {
+            parse_install_node(machine_id, rest)?
+        }
         _ => return Err(CliError { message: usage() }),
     };
     Ok(Invocation {
@@ -308,7 +338,7 @@ fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] --artifact-url <url> --artifact-sha256 <digest> [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -376,6 +406,98 @@ fn parse_onboard_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
         },
         _ => Err(CliError { message: usage() }),
     }
+}
+
+/// Parses `machines install-node <machineId>` and its flags.
+fn parse_install_node(machine_id: &str, rest: &[&str]) -> Result<Command, CliError> {
+    let mut endpoint: Option<String> = None;
+    let mut auth: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut artifact_url: Option<String> = None;
+    let mut artifact_sha256: Option<String> = None;
+    let mut controller_url: Option<String> = None;
+    let mut install_timeout: u64 = 300;
+    let mut connect_wait: Option<u64> = None;
+    let mut wait = false;
+    let mut poll_timeout: u64 = 300;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--endpoint" => endpoint = Some(value("endpoint")?.to_owned()),
+            "--auth" => auth = Some(value("auth")?.to_owned()),
+            "--identity" => identity = Some(value("identity")?.to_owned()),
+            "--artifact-url" => artifact_url = Some(value("artifact-url")?.to_owned()),
+            "--artifact-sha256" => artifact_sha256 = Some(value("artifact-sha256")?.to_owned()),
+            "--controller-url" => controller_url = Some(value("controller-url")?.to_owned()),
+            "--install-timeout" => {
+                let parsed = value("install-timeout")?;
+                install_timeout = parsed.parse().map_err(|_| CliError {
+                    message: format!("--install-timeout must be a number, not {parsed:?}"),
+                })?;
+            }
+            "--connect-timeout" => {
+                let parsed = value("connect-timeout")?;
+                connect_wait = Some(parsed.parse().map_err(|_| CliError {
+                    message: format!("--connect-timeout must be a number, not {parsed:?}"),
+                })?);
+            }
+            "--wait" => wait = true,
+            "--timeout" => {
+                let parsed = value("timeout")?;
+                poll_timeout = parsed.parse().map_err(|_| CliError {
+                    message: format!("--timeout must be a number, not {parsed:?}"),
+                })?;
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    let auth = match (auth.as_deref(), identity) {
+        (Some("agent"), None) => OnboardAuthArg::Agent,
+        (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
+        (Some("identity-file"), None) => {
+            return Err(CliError {
+                message: "--auth identity-file requires --identity <path>".to_owned(),
+            });
+        }
+        (Some(other), _) => {
+            return Err(CliError {
+                message: format!("--auth must be agent or identity-file, not {other:?}"),
+            });
+        }
+        (None, _) => {
+            return Err(CliError {
+                message: "--auth is required: agent or identity-file".to_owned(),
+            });
+        }
+    };
+    Ok(Command::MachinesInstallNode {
+        machine_id: machine_id.to_owned(),
+        endpoint: endpoint.ok_or_else(|| CliError {
+            message: "--endpoint <endpoint-id> is required".to_owned(),
+        })?,
+        auth,
+        artifact_url: artifact_url.ok_or_else(|| CliError {
+            message: "--artifact-url <url> is required".to_owned(),
+        })?,
+        artifact_sha256: artifact_sha256.ok_or_else(|| CliError {
+            message: "--artifact-sha256 <digest> is required; an unverified package never installs"
+                .to_owned(),
+        })?,
+        controller_url,
+        install_timeout,
+        connect_wait,
+        wait,
+        poll_timeout,
+    })
 }
 
 /// Parses the flags of `machines onboard create`; tags and groups repeat.
@@ -539,12 +661,38 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         correlation_id,
     )?;
     let body = follow_wait_stage(&client, invocation, body)?;
+    let body = follow_install_wait(&client, invocation, body)?;
     let payload = if body.get("items").is_some() {
         body
     } else {
         body.get("data").cloned().unwrap_or(body)
     };
     Ok(render(invocation, &payload))
+}
+
+/// The install command's `--wait`: chase the install operation to a terminal
+/// state and answer with its outcome — connected, or the bounded failure
+/// reason.
+fn follow_install_wait(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    body: Value,
+) -> Result<Value, CliError> {
+    let Command::MachinesInstallNode {
+        wait: true,
+        poll_timeout,
+        ..
+    } = &invocation.command
+    else {
+        return Ok(body);
+    };
+    let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+    if operation_id.is_empty() {
+        return Err(CliError {
+            message: "the controller did not answer with an operation id".to_owned(),
+        });
+    }
+    wait_for_operation(client, invocation, &operation_id, *poll_timeout)
 }
 
 /// The `--wait` stages chase their own operation to a terminal state and
@@ -680,7 +828,77 @@ fn request_for(
         | Command::MachinesOnboardConfirm { .. }
         | Command::MachinesOnboardAdd { .. }
         | Command::MachinesOnboardCancel { .. }) => onboard_request(command),
+        Command::MachinesInstallNode { .. } => install_node_request(command),
     }
+}
+
+/// The install-node request: a durable `machine.install-fleetd` operation
+/// whose payload carries no secret — the enrollment token is minted inside
+/// the executor at install time.
+fn install_node_request(
+    command: &Command,
+) -> (
+    reqwest::Method,
+    String,
+    Vec<(&'static str, String)>,
+    Option<Value>,
+) {
+    let Command::MachinesInstallNode {
+        machine_id,
+        endpoint,
+        auth,
+        artifact_url,
+        artifact_sha256,
+        controller_url,
+        install_timeout,
+        connect_wait,
+        ..
+    } = command
+    else {
+        unreachable!("install_node_request serves install commands only");
+    };
+    let auth_value = match auth {
+        OnboardAuthArg::Agent => serde_json::json!({ "type": "agent" }),
+        OnboardAuthArg::IdentityFile(path) => {
+            serde_json::json!({ "type": "identityFile", "path": path })
+        }
+    };
+    let mut payload = serde_json::json!({
+        "machineId": machine_id,
+        "endpointId": endpoint,
+        "auth": auth_value,
+        "timeoutSeconds": install_timeout,
+        "artifactUrl": artifact_url,
+        "artifactSha256": artifact_sha256,
+    });
+    if let Some(controller_url) = controller_url {
+        payload["controllerUrl"] = serde_json::json!(controller_url);
+    }
+    if let Some(connect_wait) = connect_wait {
+        payload["connectWaitSeconds"] = serde_json::json!(connect_wait);
+    }
+    let slack = connect_wait.unwrap_or(60) + 120;
+    (
+        reqwest::Method::POST,
+        "/api/v1/operations".to_owned(),
+        Vec::new(),
+        Some(serde_json::json!({
+            "kind": "machine.install-fleetd",
+            "payloadJson": payload.to_string(),
+            "deadlineAt": fleet_now_millis() + (install_timeout + slack) * 1000,
+        })),
+    )
+}
+
+/// Wall-clock now, in epoch milliseconds.
+fn fleet_now_millis() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 /// The onboarding requests: one dispatch, in API order. The create body
 /// carries only what was supplied, so the controller's defaults apply.

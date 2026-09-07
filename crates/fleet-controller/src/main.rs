@@ -51,6 +51,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
     let settings = Settings {
         listen: config.listen,
         web_dist: config.web_dist,
+        artifacts_dir: Some(config.data_dir.join("artifacts")),
     };
     let database_path = config.data_dir.join("fleet.db");
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -142,9 +143,27 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         store.pool().clone(),
                     )),
                     config.data_dir.join("ssh"),
-                    limiter,
+                    limiter.clone(),
                     ssh.clone(),
                 ));
+            // The install executor composes only over node trust services:
+            // it mints enrollment tokens through the authorized use case, so
+            // without them the kind fails honestly as undescribable.
+            let with_install: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match &services {
+                    Some(services) => {
+                        std::sync::Arc::new(fleet_controller::install::InstallExecutor::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            services.nodes.clone(),
+                            config.data_dir.join("ssh"),
+                            limiter.clone(),
+                            onboarding,
+                        ))
+                    }
+                    None => onboarding,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -154,10 +173,10 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                         services.gateway.clone(),
                         node_machines,
-                        onboarding,
+                        with_install,
                     ))
                 }
-                None => onboarding,
+                None => with_install,
             }
         };
         let worker_handle = tokio::spawn(run_worker(worker_operations, executor, async move {

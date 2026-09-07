@@ -15,6 +15,7 @@ pub mod probes;
 pub mod session;
 pub mod state;
 
+use std::io::Read as _;
 use std::process::ExitCode;
 
 /// Runs one command to completion. The binary maps the outcome onto an
@@ -28,7 +29,31 @@ pub async fn run(command: Command) -> Result<(), String> {
         Command::Enroll(args) => {
             let controller = http::Controller::parse(&args.controller)?;
             let node_state = state::NodeState::open(&state_dir(args.state_dir.as_deref()))?;
-            session::enroll(&controller, &node_state, &args.token)
+            let token = match (args.token.as_ref(), args.token_stdin) {
+                (Some(token), false) => token.clone(),
+                (None, true) => {
+                    let mut token = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut token)
+                        .map_err(|error| format!("cannot read the token from stdin: {error}"))?;
+                    let token = token.trim().to_owned();
+                    if token.is_empty() {
+                        return Err("the token from stdin is empty".to_owned());
+                    }
+                    token
+                }
+                (Some(_), true) => {
+                    return Err(
+                        "give the token once: --token or --token-stdin, not both".to_owned()
+                    );
+                }
+                (None, false) => {
+                    return Err(
+                        "enroll requires the token: --token <token> or --token-stdin".to_owned(),
+                    );
+                }
+            };
+            session::enroll(&controller, &node_state, &token)
         }
         Command::Run(args) => {
             let controller = http::Controller::parse(&args.controller)?;
@@ -101,8 +126,12 @@ pub enum Command {
 pub struct EnrollArgs {
     /// The controller base URL.
     pub controller: String,
-    /// The operator's single-use enrollment token.
-    pub token: String,
+    /// The operator's single-use enrollment token, when given on argv.
+    /// Automated installs use `token_stdin` instead: a token on argv is
+    /// readable from the process list.
+    pub token: Option<String>,
+    /// Read the token from standard input instead of argv.
+    pub token_stdin: bool,
     /// An explicit state directory, overriding the environment/default.
     pub state_dir: Option<String>,
 }

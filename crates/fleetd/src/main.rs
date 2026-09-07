@@ -5,9 +5,14 @@
 use fleetd::{Command, EnrollArgs, RunArgs};
 
 const HELP: &str = "Usage:
-  fleetd enroll --controller <url> --token <token> [--state-dir <path>]
+  fleetd enroll --controller <url> (--token <token> | --token-stdin) [--state-dir <path>]
   fleetd run --controller <url> [--state-dir <path>] [--local-group <gid>]
-  fleetd [--help|--version]";
+  fleetd [--help|--version]
+
+--token-stdin reads the enrollment token from standard input. Automated
+installs must use it: a token on argv is readable from the process list,
+and the whole point of a single-use token is that it leaves no reusable
+trace.";
 
 fn parse_args() -> Result<Command, String> {
     let mut args = std::env::args().skip(1);
@@ -16,6 +21,7 @@ fn parse_args() -> Result<Command, String> {
     };
     let mut controller = None;
     let mut token = None;
+    let mut token_stdin = false;
     let mut state_dir = None;
     let mut local_group = None;
     while let Some(arg) = args.next() {
@@ -31,6 +37,9 @@ fn parse_args() -> Result<Command, String> {
                     args.next()
                         .ok_or_else(|| "the --token flag requires a value".to_owned())?,
                 );
+            }
+            "--token-stdin" => {
+                token_stdin = true;
             }
             "--state-dir" => {
                 state_dir = Some(
@@ -53,7 +62,8 @@ fn parse_args() -> Result<Command, String> {
     match command.as_str() {
         "enroll" => Ok(Command::Enroll(EnrollArgs {
             controller: controller.ok_or("enroll requires --controller <url>")?,
-            token: token.ok_or("enroll requires --token <token>")?,
+            token,
+            token_stdin,
             state_dir,
         })),
         "run" => Ok(Command::Run(RunArgs {

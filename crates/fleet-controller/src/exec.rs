@@ -404,54 +404,72 @@ impl ScriptExecutor {
         &self,
         payload: &SshExecPayload,
     ) -> Result<(SshConnectionSpec, String, String), String> {
-        let verified = self
-            .machines
-            .verified_fingerprint(&payload.endpoint_id)
-            .await
-            .map_err(|failure| failure.to_string())?
-            .ok_or("the endpoint's host key was never confirmed; run the trust workflow first")?;
-        let machine = self
-            .machines
-            .get(&payload.machine_id)
-            .await
-            .map_err(|failure| failure.to_string())?;
-        let endpoint = machine
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.id == payload.endpoint_id)
-            .ok_or("the named endpoint does not belong to the machine")?
-            .clone();
-        if endpoint.kind != fleet_core::EndpointKind::Ssh {
-            return Err(format!(
-                "the endpoint is {:?}, not an SSH endpoint",
-                endpoint.kind.id()
-            ));
-        }
-        let (user, host_port) = endpoint
-            .reference
-            .split_once('@')
-            .ok_or("the endpoint reference must be user@host:port")?;
-        let (host, port) = host_port
-            .rsplit_once(':')
-            .ok_or("the endpoint reference must be user@host:port")?;
-        let port: u16 = port
-            .parse()
-            .map_err(|_| "the endpoint reference's port is not a number")?;
         let auth = match &payload.auth {
             SshExecAuth::Agent => SshAuth::Agent,
             SshExecAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
         };
-        Ok((
-            SshConnectionSpec {
-                host: host.to_owned(),
-                port,
-                user: user.to_owned(),
-                auth,
-            },
-            verified,
-            host.to_owned(),
-        ))
+        let (spec, verified, host) = resolve_ssh_endpoint(
+            self.machines.as_ref(),
+            &payload.machine_id,
+            &payload.endpoint_id,
+            auth,
+        )
+        .await?;
+        Ok((spec, verified, host))
     }
+}
+
+/// Resolves a machine's SSH endpoint into a connection spec, enforcing the
+/// trust gate the whole SSH surface shares: the endpoint's host key must be
+/// verified, the endpoint must be the machine's, and it must be an SSH
+/// endpoint. Returns the spec, the verified fingerprint, and the host.
+pub(crate) async fn resolve_ssh_endpoint(
+    machines: &dyn MachinePort,
+    machine_id: &str,
+    endpoint_id: &str,
+    auth: SshAuth,
+) -> Result<(SshConnectionSpec, String, String), String> {
+    let verified = machines
+        .verified_fingerprint(endpoint_id)
+        .await
+        .map_err(|failure| failure.to_string())?
+        .ok_or("the endpoint's host key was never confirmed; run the trust workflow first")?;
+    let machine = machines
+        .get(machine_id)
+        .await
+        .map_err(|failure| failure.to_string())?;
+    let endpoint = machine
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.id == endpoint_id)
+        .ok_or("the named endpoint does not belong to the machine")?
+        .clone();
+    if endpoint.kind != fleet_core::EndpointKind::Ssh {
+        return Err(format!(
+            "the endpoint is {:?}, not an SSH endpoint",
+            endpoint.kind.id()
+        ));
+    }
+    let (user, host_port) = endpoint
+        .reference
+        .split_once('@')
+        .ok_or("the endpoint reference must be user@host:port")?;
+    let (host, port) = host_port
+        .rsplit_once(':')
+        .ok_or("the endpoint reference must be user@host:port")?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| "the endpoint reference's port is not a number")?;
+    Ok((
+        SshConnectionSpec {
+            host: host.to_owned(),
+            port,
+            user: user.to_owned(),
+            auth,
+        },
+        verified,
+        host.to_owned(),
+    ))
 }
 
 fn trim_to_bound(text: &str) -> String {

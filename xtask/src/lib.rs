@@ -1,4 +1,8 @@
-//! Repeatable repository verification tasks.
+//! Repeatable repository verification and packaging tasks.
+
+pub mod package;
+
+pub use package::{archive_name, package_fleetd};
 
 use std::fmt::{self, Display, Formatter};
 use std::io;

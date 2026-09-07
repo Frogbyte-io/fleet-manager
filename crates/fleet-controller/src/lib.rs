@@ -9,9 +9,11 @@
 //! prints the effective (redacted) configuration before readiness.
 #![warn(missing_docs)]
 
+pub mod artifacts;
 pub mod browser;
 pub mod exec;
 pub mod gateway;
+pub mod install;
 pub mod node_crypto;
 pub mod onboard;
 pub mod worker;
@@ -39,6 +41,10 @@ pub struct Settings {
     pub listen: SocketAddr,
     /// The directory holding the built web shell; served at `/`.
     pub web_dist: PathBuf,
+    /// The directory holding downloadable node artifacts; when set,
+    /// `/downloads/fleetd/<file>` serves files under `<dir>/fleetd/` with
+    /// path containment. Unset in most tests.
+    pub artifacts_dir: Option<PathBuf>,
 }
 
 /// The node trust services, composed together by the binary when the store
@@ -262,7 +268,7 @@ pub fn build_router(
         onboarding.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback_service(shell)
@@ -270,6 +276,12 @@ pub fn build_router(
         .layer(axum::middleware::from_fn(browser::security_headers))
         .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
         .with_state(probe);
+    if let Some(artifacts_dir) = &settings.artifacts_dir {
+        router = router.nest(
+            "/downloads",
+            artifacts::artifacts_router(artifacts_dir.clone()),
+        );
+    }
     let Some(services) = services else {
         return router;
     };

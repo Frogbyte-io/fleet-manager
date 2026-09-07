@@ -54,6 +54,7 @@ async fn harness() -> Harness {
     let settings = Settings {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
+        artifacts_dir: None,
     };
     let router = build_router(&settings, Some(store.pool().clone()), Some(&services), None);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -796,16 +796,23 @@ dependencies = [
 name = "fleetd"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "fleet-application",
+ "fleet-auth",
  "fleet-config",
+ "fleet-controller",
  "fleet-core",
  "fleet-protocol",
+ "fleet-provider-ssh",
+ "fleet-secrets",
+ "fleet-storage-sqlite",
  "futures-util",
  "libc",
  "ring",
  "rustix 0.38.44",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.28.0",
@@ -3522,6 +3529,9 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "yoke"

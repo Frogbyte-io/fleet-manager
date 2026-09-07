@@ -253,6 +253,7 @@ fn fleetctl_talks_to_a_real_controller() {
         let settings = fleet_controller::Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
+            artifacts_dir: None,
         };
         let router =
             fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
@@ -341,6 +342,7 @@ fn fleetctl_machines_read_a_real_controller() {
         let settings = fleet_controller::Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
+            artifacts_dir: None,
         };
         let router =
             fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
@@ -494,6 +496,7 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
     let settings = fleet_controller::Settings {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
+        artifacts_dir: None,
     };
     let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -775,6 +778,7 @@ fn fleetctl_onboards_a_real_controller() {
         let settings = fleet_controller::Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
+            artifacts_dir: None,
         };
         let router = fleet_controller::build_router(
             &settings,
@@ -844,4 +848,133 @@ fn fleetctl_onboards_a_real_controller() {
     let invocation = fleetctl::parse(&args).unwrap();
     let error = fleetctl::run(&invocation).unwrap_err();
     assert!(error.message.contains("not_found"), "{error}");
+}
+
+#[test]
+fn parsing_accepts_the_install_node_grammar() {
+    let args: Vec<String> = [
+        "machines",
+        "install-node",
+        "0199-machine",
+        "--endpoint",
+        "0199-endpoint",
+        "--auth",
+        "identity-file",
+        "--identity",
+        "/keys/deploy",
+        "--artifact-url",
+        "http://ctl.lan:8080/downloads/fleetd/fleetd-0.1.0-linux-x86_64.tar.gz",
+        "--artifact-sha256",
+        "2473b62b6d06708ca4fbf1bc45e1cbc5a2df4d7e5c5af25ce437e06ec407efb4",
+        "--controller-url",
+        "http://ctl.lan:8080",
+        "--connect-timeout",
+        "90",
+        "--wait",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesInstallNode {
+            machine_id: "0199-machine".to_owned(),
+            endpoint: "0199-endpoint".to_owned(),
+            auth: fleetctl::OnboardAuthArg::IdentityFile("/keys/deploy".to_owned()),
+            artifact_url: "http://ctl.lan:8080/downloads/fleetd/fleetd-0.1.0-linux-x86_64.tar.gz"
+                .to_owned(),
+            artifact_sha256: "2473b62b6d06708ca4fbf1bc45e1cbc5a2df4d7e5c5af25ce437e06ec407efb4"
+                .to_owned(),
+            controller_url: Some("http://ctl.lan:8080".to_owned()),
+            install_timeout: 300,
+            connect_wait: Some(90),
+            wait: true,
+            poll_timeout: 300,
+        }
+    );
+
+    // The agent mode and the defaults parse too.
+    let args: Vec<String> = [
+        "machines",
+        "install-node",
+        "m",
+        "--endpoint",
+        "e",
+        "--auth",
+        "agent",
+        "--artifact-url",
+        "http://ctl:8080/downloads/fleetd/x.tar.gz",
+        "--artifact-sha256",
+        "abc",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesInstallNode {
+            machine_id: "m".to_owned(),
+            endpoint: "e".to_owned(),
+            auth: fleetctl::OnboardAuthArg::Agent,
+            artifact_url: "http://ctl:8080/downloads/fleetd/x.tar.gz".to_owned(),
+            artifact_sha256: "abc".to_owned(),
+            controller_url: None,
+            install_timeout: 300,
+            connect_wait: None,
+            wait: false,
+            poll_timeout: 300,
+        }
+    );
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_install_node() {
+    for args in [
+        vec!["machines", "install-node", "m"],
+        vec!["machines", "install-node", "m", "--auth", "agent"],
+        vec![
+            "machines",
+            "install-node",
+            "m",
+            "--auth",
+            "agent",
+            "--artifact-url",
+            "http://x/x.tar.gz",
+        ],
+        vec![
+            "machines",
+            "install-node",
+            "m",
+            "--auth",
+            "identity-file",
+            "--identity",
+            "/k",
+            "--artifact-url",
+            "http://x/x.tar.gz",
+            "--artifact-sha256",
+            "d",
+        ],
+        vec![
+            "machines",
+            "install-node",
+            "m",
+            "--auth",
+            "password",
+            "--artifact-url",
+            "u",
+            "--artifact-sha256",
+            "d",
+        ],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("is required")
+                || error.message.contains("must be")
+                || error.message.contains("unknown flag"),
+            "{error}"
+        );
+    }
 }
