@@ -36,7 +36,7 @@ use async_trait::async_trait;
 
 use fleet_application::authz::{ActingPrincipal, Permission};
 use fleet_application::machine::MachinePort;
-use fleet_application::node::{GatewayState, Nodes};
+use fleet_application::node::Nodes;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::{ExecutionLimiter, SshAuth, SshProvider};
@@ -58,7 +58,21 @@ pub const MAX_CONNECT_WAIT_SECONDS: u64 = 300;
 /// The hard bound on the whole install script.
 pub const MAX_INSTALL_TIMEOUT: u64 = 900;
 
+/// How long the post-connect inventory verification waits for the node's
+/// facts.
+pub const INVENTORY_VERIFY_MILLIS: i64 = 120_000;
+
+/// The bounded payload for the inventory command's result.
+pub const INVENTORY_RESULT_BYTES: u32 = 64 * 1024;
+
 /// The payload of a `machine.install-fleetd` operation, as validated JSON.
+///
+/// Two modes share this shape. **Explicit** (FM-211): the caller supplies
+/// `artifactUrl` and `artifactSha256`. **Auto** (FM-212's orchestrated
+/// upgrade): both are omitted and the executor selects the artifact from the
+/// controller's store against the machine's own facts, requires
+/// `controllerUrl`, and — once the session connects — verifies the node's
+/// inventory before completing.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallPayload {
@@ -70,14 +84,14 @@ pub struct InstallPayload {
     pub auth: InstallAuth,
     /// The whole-install deadline, in seconds. Bounded hard.
     pub timeout_seconds: u64,
-    /// Where the service archive downloads from, e.g. the controller's own
-    /// `/downloads/fleetd/...`.
-    pub artifact_url: String,
-    /// The archive's expected sha256. Mandatory: an unverified package
-    /// never installs.
-    pub artifact_sha256: String,
+    /// Where the service archive downloads from. Explicit mode; absent in
+    /// auto mode, where the executor builds it from `controllerUrl`.
+    pub artifact_url: Option<String>,
+    /// The archive's expected sha256. Explicit mode; the executor computes
+    /// it from the store in auto mode. An unverified package never installs.
+    pub artifact_sha256: Option<String>,
     /// The controller base URL the daemon connects to. Derived from the
-    /// artifact URL's origin when absent.
+    /// artifact URL's origin when absent; required in auto mode.
     pub controller_url: Option<String>,
     /// How long to wait for the gateway session, in seconds.
     pub connect_wait_seconds: Option<u64>,
@@ -107,8 +121,12 @@ pub enum InstallAuth {
 pub struct InstallExecutor {
     machines: Arc<dyn MachinePort>,
     nodes: Arc<Nodes>,
+    gateway: Arc<crate::gateway::GatewayService>,
     provider: SshProvider,
     limiter: Arc<ExecutionLimiter>,
+    /// The controller's artifact store; auto mode reads the service package
+    /// from here. Absent in most tests, which supply explicit artifacts.
+    artifacts_dir: Option<std::path::PathBuf>,
     fallback: Arc<dyn OperationExecutor>,
 }
 
@@ -125,16 +143,20 @@ impl InstallExecutor {
     pub fn new(
         machines: Arc<dyn MachinePort>,
         nodes: Arc<Nodes>,
+        gateway: Arc<crate::gateway::GatewayService>,
         work_dir: std::path::PathBuf,
         limiter: Arc<ExecutionLimiter>,
+        artifacts_dir: Option<std::path::PathBuf>,
         fallback: Arc<dyn OperationExecutor>,
     ) -> Self {
         let provider = SshProvider::new(work_dir).expect("the SSH work dir must prepare");
         Self {
             machines,
             nodes,
+            gateway,
             provider,
             limiter,
+            artifacts_dir,
             fallback,
         }
     }
@@ -174,16 +196,55 @@ impl InstallExecutor {
             auth,
         )
         .await?;
+
+        // Artifact resolution: explicit mode carries url + digest; auto mode
+        // selects both from the controller's store against the machine's
+        // own facts. Anything in between is a malformed request.
+        let (artifact_url, artifact_sha256, artifact_name) = match (
+            &payload.artifact_url,
+            &payload.artifact_sha256,
+        ) {
+            (Some(url), Some(digest)) => (url.clone(), digest.clone(), None),
+            (None, None) => {
+                let controller_url = payload.controller_url.clone().ok_or_else(|| {
+                    "controllerUrl is required for the orchestrated install".to_owned()
+                })?;
+                operations
+                    .record_progress(
+                        &operation.id,
+                        Some(0),
+                        Some(3),
+                        Some("selecting the service package"),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let (name, digest) = self.select_artifact(&payload.machine_id).await?;
+                (
+                    format!("{controller_url}/downloads/fleetd/{name}"),
+                    digest,
+                    Some(name),
+                )
+            }
+            _ => {
+                return fail_operation(
+                        operations,
+                        &operation.id,
+                        "invalid_request",
+                        "supply artifactUrl and artifactSha256 together, or neither for the orchestrated install",
+                    )
+                    .await;
+            }
+        };
         let controller_url = payload
             .controller_url
             .clone()
-            .unwrap_or_else(|| origin_of(&payload.artifact_url));
+            .unwrap_or_else(|| origin_of(&artifact_url));
 
         operations
             .record_progress(
                 &operation.id,
                 Some(0),
-                Some(2),
+                Some(3),
                 Some(&format!("checking node trust for {host}")),
             )
             .await
@@ -221,7 +282,7 @@ impl InstallExecutor {
                     .record_progress(
                         &operation.id,
                         Some(0),
-                        Some(2),
+                        Some(3),
                         Some(&format!("minting an enrollment token for {host}")),
                     )
                     .await
@@ -251,7 +312,7 @@ impl InstallExecutor {
             .record_progress(
                 &operation.id,
                 Some(0),
-                Some(2),
+                Some(3),
                 Some(&format!("installing on {host}")),
             )
             .await
@@ -259,7 +320,14 @@ impl InstallExecutor {
 
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_INSTALL_TIMEOUT));
         if let Err(detail) = self
-            .run_install_script(&spec, &script, &payload, deadline)
+            .run_install_script(
+                &spec,
+                &script,
+                &artifact_url,
+                &artifact_sha256,
+                &payload,
+                deadline,
+            )
             .await
         {
             return fail_operation(operations, &operation.id, "install_failed", &detail).await;
@@ -280,15 +348,35 @@ impl InstallExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
-        match self
+        if let Err(detail) = self
             .wait_until_connected(&payload.machine_id, wait_seconds)
             .await
         {
-            Ok(()) => {
+            return fail_operation(operations, &operation.id, "node_did_not_connect", &detail)
+                .await;
+        }
+
+        // FM-212's verification: a connected node must also report facts.
+        operations
+            .record_progress(
+                &operation.id,
+                Some(2),
+                Some(3),
+                Some("verifying the node's inventory"),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        match self
+            .verify_inventory(operations, &operation.id, &payload.machine_id)
+            .await
+        {
+            Ok(facts) => {
                 let result_json = serde_json::json!({
                     "connected": true,
                     "machineId": payload.machine_id,
                     "controllerUrl": controller_url,
+                    "artifact": artifact_name,
+                    "inventoryFacts": facts,
                 })
                 .to_string();
                 operations
@@ -298,9 +386,159 @@ impl InstallExecutor {
                     .map_err(|error| error.to_string())
             }
             Err(detail) => {
-                fail_operation(operations, &operation.id, "node_did_not_connect", &detail).await
+                fail_operation(operations, &operation.id, "inventory_unverified", &detail).await
             }
         }
+    }
+
+    /// Selects the service package for one machine from the controller's
+    /// artifact store: the machine's own facts name the platform, and the
+    /// store must hold an archive for it. The digest comes from the archive
+    /// bytes themselves; the node re-verifies after download.
+    async fn select_artifact(&self, machine_id: &str) -> Result<(String, String), String> {
+        let dir = self.artifacts_dir.as_ref().ok_or_else(|| {
+            "the controller has no artifact store configured; supply artifactUrl and artifactSha256 explicitly".to_owned()
+        })?;
+        let machine = self
+            .machines
+            .get(machine_id)
+            .await
+            .map_err(|failure| format!("the machine is unreadable: {failure}"))?;
+        let fact = |namespace: &str, name: &str| -> Option<String> {
+            machine
+                .capabilities
+                .iter()
+                .find(|candidate| {
+                    candidate.namespace == namespace
+                        && candidate.name == name
+                        && candidate.value.is_some()
+                        && matches!(
+                            candidate.status,
+                            fleet_core::CapabilityStatus::Known
+                                | fleet_core::CapabilityStatus::Stale
+                        )
+                })
+                .and_then(|candidate| candidate.value.clone())
+        };
+        let family = fact("os", "family");
+        if !family
+            .as_deref()
+            .is_some_and(|family| family.eq_ignore_ascii_case("linux"))
+        {
+            return Err(format!(
+                "the automated install supports linux; this machine reports os.family = {family:?}. \
+                 Discover the machine again, or supply artifactUrl and artifactSha256 explicitly"
+            ));
+        }
+        let Some(architecture) = fact("host", "architecture") else {
+            return Err(
+                "the machine's architecture is unknown; discover the machine first, or supply artifactUrl and artifactSha256 explicitly".to_owned(),
+            );
+        };
+        let platform = match architecture.as_str() {
+            "x86_64" | "amd64" => "linux-x86_64",
+            "aarch64" | "arm64" => "linux-aarch64",
+            other => {
+                return Err(format!(
+                    "the automated install supports x86_64 and aarch64; this machine reports {other:?}.                      Supply artifactUrl and artifactSha256 explicitly"
+                ));
+            }
+        };
+        // The store may accumulate several versions; the highest version
+        // string wins. Names are `fleetd-<version>-<platform>.tar.gz`.
+        let suffix = format!("-{platform}.tar.gz");
+        let mut candidates: Vec<String> = match std::fs::read_dir(dir.join("fleetd")) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|name| name.starts_with("fleetd-") && name.ends_with(&suffix))
+                .collect(),
+            Err(error) => {
+                return Err(format!("the artifact store is unreadable: {error}"));
+            }
+        };
+        candidates.sort();
+        let Some(archive) = candidates.pop() else {
+            return Err(format!(
+                "no fleetd package for {platform} in the controller's artifact store;                  the supported platforms are x86_64 and aarch64 on linux"
+            ));
+        };
+        let path = dir.join("fleetd").join(&archive);
+        let digest = file_sha256(&path)
+            .map_err(|error| format!("the artifact {archive} is unreadable: {error}"))?;
+        Ok((archive, digest))
+    }
+
+    /// Dispatches one `node.inventory` command through the live session and
+    /// requires facts with fleetd provenance on the machine afterwards.
+    async fn verify_inventory(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        machine_id: &str,
+    ) -> Result<usize, String> {
+        let deadline = fleet_core::SystemClock::now_unix_millis() + INVENTORY_VERIFY_MILLIS;
+        let command = fleet_protocol::wire::Command {
+            operation_id: operation_id.to_owned(),
+            kind: "node.inventory".to_owned(),
+            kind_schema_version: 1,
+            deadline_unix_millis: deadline,
+            idempotency_key: format!("{operation_id}-inventory"),
+            authorization_digest: String::new(),
+            max_output_bytes: INVENTORY_RESULT_BYTES,
+            cancellation: fleet_protocol::wire::CancellationPolicy::BestEffort as i32,
+            payload: serde_json::to_vec(&serde_json::json!({ "expectedRevision": null }))
+                .unwrap_or_default(),
+        };
+        let dispatch = self.gateway.dispatch(machine_id, command);
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(u64::try_from(INVENTORY_VERIFY_MILLIS).unwrap_or(u64::MAX)),
+            dispatch,
+        )
+        .await;
+        self.gateway.release(machine_id);
+        let result = match outcome {
+            Ok(outcome) => {
+                outcome.map_err(|error| format!("the inventory command failed: {error}"))?
+            }
+            Err(_) => {
+                return Err(
+                    "the node did not answer the inventory request within the bound; \
+                     the install itself succeeded — retry inventory later"
+                        .to_owned(),
+                );
+            }
+        };
+        let succeeded = fleet_protocol::wire::ResultStatus::try_from(result.status)
+            .map(|status| status == fleet_protocol::wire::ResultStatus::Succeeded)
+            .unwrap_or(false);
+        if !succeeded {
+            return Err(format!(
+                "the node refused the inventory request: {}",
+                String::from_utf8_lossy(&result.payload)
+            ));
+        }
+        let facts = crate::gateway::ingest_inventory_report(
+            self.machines.as_ref(),
+            machine_id,
+            &result.payload,
+        )
+        .await?;
+        if facts == 0 {
+            return Err(
+                "the node reported an empty inventory; check the service's journal".to_owned(),
+            );
+        }
+        operations
+            .record_progress(
+                operation_id,
+                Some(3),
+                Some(3),
+                Some(&format!("verified: the node reported {facts} facts")),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(facts)
     }
 
     /// Runs the generated install script over the provider's transport. The
@@ -310,26 +548,25 @@ impl InstallExecutor {
         &self,
         spec: &fleet_provider_ssh::SshConnectionSpec,
         script: &str,
+        artifact_url: &str,
+        artifact_sha256: &str,
         payload: &InstallPayload,
         deadline: Duration,
     ) -> Result<(), String> {
         let metadata = fleet_provider_ssh::ScriptMetadata {
             working_directory: String::new(),
             environment: vec![
-                (
-                    "FLEET_ARTIFACT_URL".to_owned(),
-                    payload.artifact_url.clone(),
-                ),
+                ("FLEET_ARTIFACT_URL".to_owned(), artifact_url.to_owned()),
                 (
                     "FLEET_ARTIFACT_SHA256".to_owned(),
-                    payload.artifact_sha256.clone(),
+                    artifact_sha256.to_owned(),
                 ),
                 (
                     "FLEET_CONTROLLER_URL".to_owned(),
                     payload
                         .controller_url
                         .clone()
-                        .unwrap_or_else(|| origin_of(&payload.artifact_url)),
+                        .unwrap_or_else(|| origin_of(artifact_url)),
                 ),
             ]
             .into_iter()
@@ -372,34 +609,26 @@ impl InstallExecutor {
         Ok(())
     }
 
-    /// Polls the node view until the machine's gateway session reports
-    /// connected, bounded by the wait.
+    /// Polls the LIVE session registry until the machine has an open
+    /// gateway session, bounded by the wait. The persisted `gateway_state`
+    /// is a cache that survives controller restarts; only the registry
+    /// answers "is this session open right now", which is what the
+    /// inventory dispatch will rely on.
     async fn wait_until_connected(
         &self,
         machine_id: &str,
         wait_seconds: u64,
     ) -> Result<(), String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(wait_seconds);
-        let principal = ActingPrincipal {
-            id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
-        };
         loop {
-            let view = self
-                .nodes
-                .node_view(&fleet_auth::LanAllowAllAuthorizer, &principal, machine_id)
-                .await
-                .map_err(|error| format!("the node view is unavailable: {error}"))?;
-            let connected = view
-                .identity
-                .as_ref()
-                .is_some_and(|identity| identity.gateway_state == GatewayState::Connected);
-            if connected {
+            if self.gateway.session_of(machine_id).await.is_some() {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
                 return Err(format!(
                     "the service did not reach a connected gateway session within {wait_seconds}s; \
-                     the install itself may have succeeded — inspect the machine's node surface"
+                     the install itself may have succeeded — check 'systemctl status fleetd' on the \
+                     node, then retry this install (it is idempotent), or revoke and reinstall"
                 ));
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -494,3 +723,20 @@ async fn fail_operation(
 /// the gate it relies on.
 #[allow(dead_code)]
 const IMPLIED_PERMISSION: Permission = Permission::NodeEnroll;
+/// The archive's sha256, computed on the controller so auto mode can hand
+/// the node an authoritative digest. The node re-verifies after download.
+fn file_sha256(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest as _, Sha256};
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(text, "{byte:02x}");
+            text
+        }))
+}

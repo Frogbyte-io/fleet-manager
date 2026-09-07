@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use fleet_application::machine::MachinePort as _;
+use fleet_application::operation::OperationPort as _;
 use fleet_controller::Settings;
 use fleet_controller::build_router;
 use fleet_controller::compose_node_services;
@@ -211,8 +212,10 @@ async fn harness() -> Harness {
         Arc::new(InstallExecutor::new(
             machines.clone(),
             services.nodes.clone(),
+            services.gateway.clone(),
             ssh_dir.path().join("ssh"),
             limiter,
+            Some(artifacts.path().to_path_buf()),
             onboarding_executor,
         ));
     Harness {
@@ -250,10 +253,14 @@ impl Harness {
     /// Registers an agentless machine with a verified fingerprint: the trust
     /// workflow already ran.
     async fn register_machine(&self, sshd: &TestSshd) -> (String, String) {
+        self.register_named(sshd, "install-target").await
+    }
+
+    async fn register_named(&self, sshd: &TestSshd, name: &str) -> (String, String) {
         let machines = MachineRepository::new(self.pool.clone());
         let machine = machines
             .register(&fleet_application::machine::RegisterMachine {
-                name: "install-target".to_owned(),
+                name: name.to_owned(),
                 description: String::new(),
                 endpoints: vec![fleet_application::machine::NewEndpoint {
                     kind: fleet_core::EndpointKind::Ssh,
@@ -880,4 +887,413 @@ async fn the_download_surface_is_contained() {
             "traversal must be contained: {path}"
         );
     }
+}
+
+/// An install payload for the orchestrated mode: no artifact fields at all.
+fn orchestrated_payload(
+    machine_id: &str,
+    endpoint_id: &str,
+    sshd: &TestSshd,
+    address: std::net::SocketAddr,
+    state_dir: &Path,
+    stubs_dir: &Path,
+    connect_wait: Option<u64>,
+) -> Value {
+    let (systemctl, useradd, runuser) = write_stubs(stubs_dir);
+    let mut payload = json!({
+        "machineId": machine_id,
+        "endpointId": endpoint_id,
+        "auth": {"type": "identityFile", "path": sshd.user_key.display().to_string()},
+        "timeoutSeconds": 120,
+        "controllerUrl": format!("http://{address}"),
+        "installerEnv": [
+            ["FLEETD_STATE_DIR", state_dir.display().to_string()],
+            ["FLEETD_BIN_DIR", stubs_dir.join("bin").display().to_string()],
+            ["FLEETD_UNIT_DIR", stubs_dir.join("unit").display().to_string()],
+            ["FLEETD_ENV_FILE", stubs_dir.join("fleetd.env").display().to_string()],
+            ["FLEETD_SYSTEMCTL", systemctl.display().to_string()],
+            ["FLEETD_USER_ADD", useradd.display().to_string()],
+            ["FLEETD_RUNUSER", runuser.display().to_string()],
+            ["FLEETD_STUB_LOG", stubs_dir.join("stubs.log").display().to_string()],
+        ],
+    });
+    if let Some(wait) = connect_wait {
+        payload["connectWaitSeconds"] = json!(wait);
+    }
+    payload
+}
+
+/// Plants the platform facts on a machine so the orchestrated install can
+/// select the artifact.
+async fn plant_facts(harness: &Harness, machine_id: &str, family: &str, architecture: &str) {
+    let machines = MachineRepository::new(harness.pool.clone());
+    let now = fleet_core::SystemClock::now_unix_millis();
+    machines
+        .record_capabilities(
+            machine_id,
+            &[
+                fleet_core::CapabilityFact {
+                    namespace: "os".to_owned(),
+                    name: "family".to_owned(),
+                    value: Some(family.to_owned()),
+                    status: fleet_core::CapabilityStatus::Known,
+                    observed_at: fleet_core::Timestamp::from_unix_millis(now),
+                    source: "agentless/1".to_owned(),
+                },
+                fleet_core::CapabilityFact {
+                    namespace: "host".to_owned(),
+                    name: "architecture".to_owned(),
+                    value: Some(architecture.to_owned()),
+                    status: fleet_core::CapabilityStatus::Known,
+                    observed_at: fleet_core::Timestamp::from_unix_millis(now),
+                    source: "agentless/1".to_owned(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_orchestrated_install_selects_the_package_from_the_machines_facts() {
+    let harness = harness().await;
+    let sshd = start_sshd();
+    let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
+    let package = TestPackage::build();
+    // The artifact store holds the package under its canonical name.
+    let store = harness.artifacts.path().join("fleetd");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::copy(
+        &package.archive,
+        store.join("fleetd-0.1.0-linux-x86_64.tar.gz"),
+    )
+    .unwrap();
+    plant_facts(&harness, &machine_id, "Linux", "x86_64").await;
+
+    let work = tempfile::tempdir().unwrap();
+    let state_dir = work.path().join("state");
+    let payload = orchestrated_payload(
+        &machine_id,
+        &endpoint_id,
+        &sshd,
+        harness.address,
+        &state_dir,
+        &work.path().join("stubs"),
+        None,
+    );
+    let operation_id = harness
+        .create_operation("machine.install-fleetd", payload)
+        .await;
+
+    let controller =
+        fleetd::http::Controller::parse(&format!("http://{}", harness.address)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loop_task = spawn_node_loop(state_dir.clone(), controller, None, stop.clone());
+
+    let operation = harness
+        .run_operation(harness.install_executor.as_ref(), &operation_id)
+        .await;
+    assert_eq!(operation["state"], "succeeded", "{operation}");
+    let result: Value = serde_json::from_str(operation["resultJson"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        result["artifact"], "fleetd-0.1.0-linux-x86_64.tar.gz",
+        "the selection is visible in the result: {result}"
+    );
+    let facts = result["inventoryFacts"].as_u64().unwrap();
+    assert!(facts > 0, "the node reported its facts: {result}");
+
+    // The digest came from the store; the node's download was verified
+    // against it (the install would have refused otherwise).
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loop_task.await;
+}
+
+#[tokio::test]
+async fn the_orchestrated_install_states_the_platform_limitation() {
+    let harness = harness().await;
+    let sshd = start_sshd();
+    let package = TestPackage::build();
+    let store = harness.artifacts.path().join("fleetd");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::copy(
+        &package.archive,
+        store.join("fleetd-0.1.0-linux-x86_64.tar.gz"),
+    )
+    .unwrap();
+
+    for (index, (family, architecture, expected)) in [
+        ("linux", "armv7l", "supports x86_64 and aarch64"),
+        ("darwin", "x86_64", "supports linux"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (machine_id, endpoint_id) = harness
+            .register_named(&sshd, &format!("limit-{index}"))
+            .await;
+        plant_facts(&harness, &machine_id, family, architecture).await;
+        let work = tempfile::tempdir().unwrap();
+        let payload = orchestrated_payload(
+            &machine_id,
+            &endpoint_id,
+            &sshd,
+            harness.address,
+            &work.path().join("state"),
+            &work.path().join("stubs"),
+            None,
+        );
+        let operation_id = harness
+            .create_operation("machine.install-fleetd", payload)
+            .await;
+        let operation = harness
+            .run_operation(harness.install_executor.as_ref(), &operation_id)
+            .await;
+        assert_eq!(operation["state"], "failed", "{operation}");
+        let error: Value = serde_json::from_str(operation["errorJson"].as_str().unwrap()).unwrap();
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expected),
+            "the limitation is stated clearly: {error}"
+        );
+    }
+
+    // A machine with no facts at all is refused just as clearly.
+    let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
+    let work = tempfile::tempdir().unwrap();
+    let payload = orchestrated_payload(
+        &machine_id,
+        &endpoint_id,
+        &sshd,
+        harness.address,
+        &work.path().join("state"),
+        &work.path().join("stubs"),
+        None,
+    );
+    let operation_id = harness
+        .create_operation("machine.install-fleetd", payload)
+        .await;
+    let operation = harness
+        .run_operation(harness.install_executor.as_ref(), &operation_id)
+        .await;
+    assert_eq!(operation["state"], "failed", "{operation}");
+    let error: Value = serde_json::from_str(operation["errorJson"].as_str().unwrap()).unwrap();
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Discover the machine again"),
+        "the no-facts refusal points at discovery: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_connect_timeout_leaves_a_recoverable_state_and_a_retry_succeeds() {
+    let harness = harness().await;
+    let sshd = start_sshd();
+    let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
+    let package = TestPackage::build();
+    publish(&harness, &package);
+
+    let work = tempfile::tempdir().unwrap();
+    let state_dir = work.path().join("state");
+    // The node loop never runs: the connect wait expires. The artifact is
+    // explicit so the test isolates the timeout, not the selection.
+    let mut payload = install_payload(
+        &machine_id,
+        &endpoint_id,
+        &sshd,
+        harness.address,
+        &package,
+        &state_dir,
+        &work.path().join("stubs"),
+    );
+    payload["connectWaitSeconds"] = json!(1);
+    let first_id = harness
+        .create_operation("machine.install-fleetd", payload.clone())
+        .await;
+    let first = harness
+        .run_operation(harness.install_executor.as_ref(), &first_id)
+        .await;
+    assert_eq!(first["state"], "failed", "{first}");
+    let error: Value = serde_json::from_str(first["errorJson"].as_str().unwrap()).unwrap();
+    assert_eq!(error["reason"], "node_did_not_connect");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("retry this install"),
+        "the failure says how to recover: {error}"
+    );
+
+    // The machine kept its id; the identity exists (the enroll succeeded);
+    // the retry is an upgrade and succeeds once the node loop runs.
+    let view = harness.node_view(&machine_id).await;
+    let identity = view.identity.as_ref().expect("the enroll landed");
+    assert_eq!(identity.status, fleet_application::node::NodeStatus::Active);
+    let controller =
+        fleetd::http::Controller::parse(&format!("http://{}", harness.address)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loop_task = spawn_node_loop(state_dir.clone(), controller, None, stop.clone());
+    let retry_id = harness
+        .create_operation("machine.install-fleetd", payload)
+        .await;
+    let retry = harness
+        .run_operation(harness.install_executor.as_ref(), &retry_id)
+        .await;
+    assert_eq!(retry["state"], "succeeded", "{retry}");
+    assert!(
+        harness
+            .node_view(&machine_id)
+            .await
+            .pending_tokens
+            .is_empty(),
+        "the retry mints no token"
+    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loop_task.await;
+}
+
+#[tokio::test]
+async fn a_controller_restart_midway_fails_honestly_and_a_retry_succeeds() {
+    let harness = harness().await;
+    let sshd = start_sshd();
+    let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
+    let package = TestPackage::build();
+    publish(&harness, &package);
+
+    let work = tempfile::tempdir().unwrap();
+    let state_dir = work.path().join("state");
+    let payload = install_payload(
+        &machine_id,
+        &endpoint_id,
+        &sshd,
+        harness.address,
+        &package,
+        &state_dir,
+        &work.path().join("stubs"),
+    );
+    let operation_id = harness
+        .create_operation("machine.install-fleetd", payload.clone())
+        .await;
+
+    // A controller died right after claiming: the claim is on record with a
+    // stale lease, and the next sweep fails the operation honestly.
+    let port = OperationRepository::new(harness.pool.clone());
+    port.claim_pending("dead-worker", fleet_core::SystemClock::now_unix_millis())
+        .await
+        .unwrap();
+    harness
+        .operations
+        .tick(
+            harness.install_executor.as_ref(),
+            "sweeper",
+            fleet_core::SystemClock::now_unix_millis() + 120_000,
+            60_000,
+        )
+        .await
+        .unwrap();
+    let (status, body) = harness
+        .get_json(&format!("/api/v1/operations/{operation_id}"))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["state"], "failed", "{body}");
+    let error: Value = serde_json::from_str(body["data"]["errorJson"].as_str().unwrap()).unwrap();
+    assert_eq!(error["reason"], "worker_lease_expired", "{error}");
+    assert!(
+        harness.node_view(&machine_id).await.identity.is_none(),
+        "the interrupted install enrolled nothing"
+    );
+
+    // The retry is a fresh, clean install.
+    let controller =
+        fleetd::http::Controller::parse(&format!("http://{}", harness.address)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loop_task = spawn_node_loop(state_dir.clone(), controller, None, stop.clone());
+    let retry_id = harness
+        .create_operation("machine.install-fleetd", payload.clone())
+        .await;
+    let retry = harness
+        .run_operation(harness.install_executor.as_ref(), &retry_id)
+        .await;
+    assert_eq!(retry["state"], "succeeded", "{retry}");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loop_task.await;
+}
+
+#[tokio::test]
+async fn a_second_node_cannot_claim_the_association() {
+    let harness = harness().await;
+    let sshd = start_sshd();
+    let (machine_id, endpoint_id) = harness.register_machine(&sshd).await;
+    let package = TestPackage::build();
+    publish(&harness, &package);
+
+    let work = tempfile::tempdir().unwrap();
+    let state_dir = work.path().join("state");
+    let payload = install_payload(
+        &machine_id,
+        &endpoint_id,
+        &sshd,
+        harness.address,
+        &package,
+        &state_dir,
+        &work.path().join("stubs"),
+    );
+    let operation_id = harness
+        .create_operation("machine.install-fleetd", payload)
+        .await;
+    let controller =
+        fleetd::http::Controller::parse(&format!("http://{}", harness.address)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loop_task = spawn_node_loop(state_dir.clone(), controller, None, stop.clone());
+    let operation = harness
+        .run_operation(harness.install_executor.as_ref(), &operation_id)
+        .await;
+    assert_eq!(operation["state"], "succeeded", "{operation}");
+
+    // The enrolled credential is on disk; a second node holds a different
+    // key and cannot prove possession with it.
+    let credential = std::fs::read_to_string(state_dir.join("credential"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let stranger = fleetd::state::NodeState::open(&work.path().join("stranger")).unwrap();
+    let challenge = harness
+        .nodes
+        .challenge(
+            &credential,
+            fleet_application::node::ChallengePurpose::Session,
+            None,
+        )
+        .await
+        .expect("the credential itself is valid");
+    let message = fleet_application::node::proof_message(
+        &challenge.id,
+        &machine_id,
+        fleet_application::node::ChallengePurpose::Session,
+        None,
+    );
+    let forged = stranger.sign_proof(&message);
+    let refused = harness
+        .nodes
+        .prove_session(&credential, &challenge.id, &forged)
+        .await;
+    assert!(
+        refused.is_err(),
+        "a stranger's proof must be refused: {refused:?}"
+    );
+
+    // And the replayed enroll path is single-use: the token is consumed.
+    assert!(
+        harness
+            .node_view(&machine_id)
+            .await
+            .pending_tokens
+            .is_empty(),
+        "no token is left to claim"
+    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loop_task.await;
 }

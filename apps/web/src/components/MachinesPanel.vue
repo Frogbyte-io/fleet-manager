@@ -2,7 +2,10 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
+  createOperation,
+  cancelOperation,
   getMachine,
+  getOperation,
   listMachines,
   type PageMachineDtoItemsItem,
   type ResourceMachineDtoData,
@@ -15,7 +18,15 @@ const machines = ref<readonly Machine[]>([])
 const failed = ref(false)
 const failure = ref('')
 const selected = ref<MachineDetail | null>(null)
+const installForm = ref({ authType: 'identityFile' as 'agent' | 'identityFile', identityPath: '' })
+const installOperationId = ref<string | null>(null)
+const installState = ref('')
+const installProgress = ref('')
+const installResult = ref('')
+const installFailed = ref(false)
+const installBusy = ref(false)
 let refresh: ReturnType<typeof setInterval> | null = null
+let installPoll: ReturnType<typeof setTimeout> | null = null
 
 async function load() {
   try {
@@ -37,6 +48,80 @@ async function open(machine: Machine) {
 
 async function close() {
   selected.value = null
+  resetInstall()
+}
+
+function resetInstall() {
+  installOperationId.value = null
+  installState.value = ''
+  installProgress.value = ''
+  installResult.value = ''
+  installFailed.value = false
+  if (installPoll) clearTimeout(installPoll)
+  installPoll = null
+}
+
+/// Starts the one-click upgrade: the controller selects the package for the
+/// machine's own platform; the node's identity association keeps the
+/// machine's Fleet id. The operation is durable, so a lost browser only
+/// loses the view, not the work.
+async function startInstall() {
+  if (!selected.value) return
+  installBusy.value = true
+  try {
+    const endpoint = selected.value.endpoints.find(e => e.kind === 'ssh') ?? selected.value.endpoints[0]
+    const payload = {
+      machineId: selected.value.id,
+      endpointId: endpoint?.id,
+      auth:
+        installForm.value.authType === 'agent'
+          ? { type: 'agent' }
+          : { type: 'identityFile', path: installForm.value.identityPath },
+      controllerUrl: window.location.origin,
+    }
+    const response = await createOperation({
+      kind: 'machine.install-fleetd',
+      payloadJson: JSON.stringify(payload),
+    })
+    if (response.status === 201) {
+      installOperationId.value = response.data.data.id
+      installState.value = response.data.data.state
+      installFailed.value = false
+      installResult.value = ''
+      pollInstall()
+    }
+  } finally {
+    installBusy.value = false
+  }
+}
+
+async function pollInstall() {
+  if (!installOperationId.value) return
+  try {
+    const response = await getOperation(installOperationId.value)
+    if (response.status === 200) {
+      const operation = response.data.data
+      installState.value = operation.state
+      installProgress.value = operation.progressMessage ?? ''
+      if (operation.state === 'succeeded') {
+        installResult.value = operation.resultJson ?? ''
+        return
+      }
+      if (operation.state !== 'pending' && operation.state !== 'running') {
+        installFailed.value = true
+        installResult.value = operation.errorJson ?? ''
+        return
+      }
+    }
+  } catch {
+    // transient; keep polling
+  }
+  installPoll = setTimeout(pollInstall, 1000)
+}
+
+async function cancelInstall() {
+  if (!installOperationId.value) return
+  await cancelOperation(installOperationId.value)
 }
 
 onMounted(() => {
@@ -46,6 +131,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (refresh) clearInterval(refresh)
+  if (installPoll) clearTimeout(installPoll)
 })
 </script>
 
@@ -211,6 +297,69 @@ onBeforeUnmount(() => {
           </div>
         </dd>
       </dl>
+
+      <div class="mt-4 border-t border-slate-800 pt-3">
+        <p class="text-xs text-slate-500">
+          Install Fleet Node — upgrades this machine to fully managed. The
+          controller picks the package for the machine's platform; the
+          machine's Fleet id is kept.
+        </p>
+        <div
+          v-if="!installOperationId"
+          class="mt-2 flex flex-wrap items-center gap-2 text-xs"
+        >
+          <select
+            v-model="installForm.authType"
+            class="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200"
+          >
+            <option value="identityFile">
+              identity file
+            </option>
+            <option value="agent">
+              ssh agent
+            </option>
+          </select>
+          <input
+            v-if="installForm.authType === 'identityFile'"
+            v-model="installForm.identityPath"
+            placeholder="identity file path"
+            class="rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-slate-200"
+          >
+          <button
+            class="rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50"
+            :disabled="installBusy || (installForm.authType === 'identityFile' && installForm.identityPath === '')"
+            @click="startInstall"
+          >
+            Install
+          </button>
+        </div>
+        <div
+          v-else
+          class="mt-2 text-xs"
+        >
+          <p class="font-mono text-slate-300">
+            {{ installState }}
+            <span
+              v-if="installProgress"
+              class="text-slate-500"
+            >— {{ installProgress }}</span>
+          </p>
+          <p
+            v-if="installResult"
+            class="mt-1 font-mono"
+            :class="installFailed ? 'text-rose-400' : 'text-emerald-300'"
+          >
+            {{ installResult }}
+          </p>
+          <button
+            v-if="installState === 'pending' || installState === 'running'"
+            class="mt-2 rounded border border-rose-500/40 px-2 py-0.5 text-rose-300 hover:bg-rose-500/10"
+            @click="cancelInstall"
+          >
+            Cancel operation
+          </button>
+        </div>
+      </div>
     </div>
   </section>
 </template>

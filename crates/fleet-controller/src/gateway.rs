@@ -665,7 +665,7 @@ impl GatewayService {
 
     /// Releases one in-flight slot; called by the executor after a result
     /// or a terminal error.
-    fn release(&self, machine_id: &str) {
+    pub(crate) fn release(&self, machine_id: &str) {
         if let Some(entry) = self
             .registry
             .sessions
@@ -1002,50 +1002,17 @@ impl NodeCommandExecutor {
             .to_string();
             return complete(operations, &operation.id, "failed", None, Some(&error_json)).await;
         }
+        let facts =
+            ingest_inventory_report(self.machines.as_ref(), &payload.machine_id, &result.payload)
+                .await?;
         let report: serde_json::Value =
             serde_json::from_str(&String::from_utf8_lossy(&result.payload))
                 .map_err(|error| format!("the inventory report is not JSON: {error}"))?;
-        if report["schemaVersion"].as_u64() != Some(1) {
-            return Err(format!(
-                "the inventory report carries schema version {:?}, not 1",
-                report["schemaVersion"]
-            ));
-        }
-        let facts: Vec<fleet_core::CapabilityFact> =
-            serde_json::from_value(report["facts"].clone())
-                .map_err(|error| format!("the inventory report's facts are malformed: {error}"))?;
-        if facts.len() > 256 {
-            return Err("the inventory report carries too many facts".to_owned());
-        }
-        for fact in &facts {
-            fact.validate()
-                .map_err(|detail| format!("the inventory report has a malformed fact: {detail}"))?;
-        }
-        let mode = report["mode"].as_str().unwrap_or("full").to_owned();
-        let revision = report["revision"].as_u64().unwrap_or(0);
-
-        // Provenance: what observed it, when, at which schema version.
-        let observed_at = fleet_core::SystemClock::now_unix_millis();
-        self.machines
-            .record_capabilities(&payload.machine_id, &facts)
-            .await
-            .map_err(|failure| format!("the facts could not be recorded: {failure}"))?;
-        let snapshot = serde_json::to_string(&report)
-            .map_err(|error| format!("the report does not serialize: {error}"))?;
-        self.machines
-            .record_snapshot(
-                &payload.machine_id,
-                &format!("fleetd/{}", env!("CARGO_PKG_VERSION")),
-                &snapshot,
-                observed_at,
-            )
-            .await
-            .map_err(|failure| format!("the snapshot could not be recorded: {failure}"))?;
 
         let result_json = serde_json::json!({
-            "mode": mode,
-            "revision": revision,
-            "facts": facts.len(),
+            "mode": report["mode"],
+            "revision": report["revision"],
+            "facts": facts,
             "probeErrors": report["probeErrors"],
         })
         .to_string();
@@ -1058,6 +1025,53 @@ impl NodeCommandExecutor {
         )
         .await
     }
+}
+
+/// Ingests one node inventory report: validates the envelope, records the
+/// capability facts and the snapshot with fleetd provenance. Shared by the
+/// `node.inventory` operation executor and the install workflow's
+/// verification, so both ingest identically.
+pub(crate) async fn ingest_inventory_report(
+    machines: &dyn fleet_application::machine::MachinePort,
+    machine_id: &str,
+    report_payload: &[u8],
+) -> Result<usize, String> {
+    let report: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(report_payload))
+        .map_err(|error| format!("the inventory report is not JSON: {error}"))?;
+    if report["schemaVersion"].as_u64() != Some(1) {
+        return Err(format!(
+            "the inventory report carries schema version {:?}, not 1",
+            report["schemaVersion"]
+        ));
+    }
+    let facts: Vec<fleet_core::CapabilityFact> = serde_json::from_value(report["facts"].clone())
+        .map_err(|error| format!("the inventory report's facts are malformed: {error}"))?;
+    if facts.len() > 256 {
+        return Err("the inventory report carries too many facts".to_owned());
+    }
+    for fact in &facts {
+        fact.validate()
+            .map_err(|detail| format!("the inventory report has a malformed fact: {detail}"))?;
+    }
+
+    // Provenance: what observed it, when, at which schema version.
+    let observed_at = fleet_core::SystemClock::now_unix_millis();
+    machines
+        .record_capabilities(machine_id, &facts)
+        .await
+        .map_err(|failure| format!("the facts could not be recorded: {failure}"))?;
+    let snapshot = serde_json::to_string(&report)
+        .map_err(|error| format!("the report does not serialize: {error}"))?;
+    machines
+        .record_snapshot(
+            machine_id,
+            &format!("fleetd/{}", env!("CARGO_PKG_VERSION")),
+            &snapshot,
+            observed_at,
+        )
+        .await
+        .map_err(|failure| format!("the snapshot could not be recorded: {failure}"))?;
+    Ok(facts.len())
 }
 
 fn fleet_result_status_name(status: wire::ResultStatus) -> String {

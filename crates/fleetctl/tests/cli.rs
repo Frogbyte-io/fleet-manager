@@ -882,10 +882,12 @@ fn parsing_accepts_the_install_node_grammar() {
             machine_id: "0199-machine".to_owned(),
             endpoint: "0199-endpoint".to_owned(),
             auth: fleetctl::OnboardAuthArg::IdentityFile("/keys/deploy".to_owned()),
-            artifact_url: "http://ctl.lan:8080/downloads/fleetd/fleetd-0.1.0-linux-x86_64.tar.gz"
-                .to_owned(),
-            artifact_sha256: "2473b62b6d06708ca4fbf1bc45e1cbc5a2df4d7e5c5af25ce437e06ec407efb4"
-                .to_owned(),
+            artifact_url: Some(
+                "http://ctl.lan:8080/downloads/fleetd/fleetd-0.1.0-linux-x86_64.tar.gz".to_owned(),
+            ),
+            artifact_sha256: Some(
+                "2473b62b6d06708ca4fbf1bc45e1cbc5a2df4d7e5c5af25ce437e06ec407efb4".to_owned(),
+            ),
             controller_url: Some("http://ctl.lan:8080".to_owned()),
             install_timeout: 300,
             connect_wait: Some(90),
@@ -918,9 +920,9 @@ fn parsing_accepts_the_install_node_grammar() {
             machine_id: "m".to_owned(),
             endpoint: "e".to_owned(),
             auth: fleetctl::OnboardAuthArg::Agent,
-            artifact_url: "http://ctl:8080/downloads/fleetd/x.tar.gz".to_owned(),
-            artifact_sha256: "abc".to_owned(),
-            controller_url: None,
+            artifact_url: Some("http://ctl:8080/downloads/fleetd/x.tar.gz".to_owned()),
+            artifact_sha256: Some("abc".to_owned()),
+            controller_url: Some("http://127.0.0.1:8080".to_owned()),
             install_timeout: 300,
             connect_wait: None,
             wait: false,
