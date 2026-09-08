@@ -41,10 +41,12 @@ use std::time::Duration;
 /// The socket file name inside the state directory.
 pub const LOCAL_SOCKET_NAME: &str = "local.sock";
 
-#[cfg(unix)]
 /// The local request deadline: the status answer must arrive fast, so a
 /// hung controller read cannot wedge a local agent for long.
+#[cfg(unix)]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(unix))]
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The local status surface.
 #[derive(Debug)]
@@ -293,6 +295,7 @@ pub fn peer_credentials(stream: &std::os::unix::net::UnixStream) -> Option<(u32,
     ))
 }
 
+#[cfg(unix)]
 fn own_uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
