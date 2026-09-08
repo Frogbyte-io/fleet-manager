@@ -84,14 +84,20 @@ privileged steps will fail (tests use layout overrides instead)"
 fi
 
 # Runs the enroll step as the service account. The token reaches fleetd on
-# standard input and is never placed in a process argument.
+# standard input and is never placed in a process argument. When the account
+# does not exist (stubbed useradd in tests), the step runs as the invoking
+# user — the state directory is theirs anyway.
 run_as_service() {
     if [ -n "$RUNUSER" ]; then
         "$RUNUSER" -u "$SERVICE_USER" -- "$@"
-    elif [ "$IS_ROOT" = true ]; then
-        runuser -u "$SERVICE_USER" -- "$@"
+    elif getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+        if [ "$IS_ROOT" = true ]; then
+            runuser -u "$SERVICE_USER" -- "$@"
+        else
+            sudo -n -u "$SERVICE_USER" -- "$@"
+        fi
     else
-        sudo -n -u "$SERVICE_USER" -- "$@"
+        env FLEETD_STATE_DIR="$STATE_DIR" "$@"
     fi
 }
 
@@ -212,8 +218,8 @@ else
         log "forced re-enrollment: the previous node identity was wiped"
     fi
     printf '%s' "$FLEET_ENROLL_TOKEN" | \
-        run_as_service env FLEETD_STATE_DIR="$STATE_DIR" \
-        "$BIN" enroll --controller "$FLEET_CONTROLLER_URL" --token-stdin \
+        run_as_service "$BIN" enroll --controller "$FLEET_CONTROLLER_URL" \
+        --token-stdin --state-dir "$STATE_DIR" \
         || die "enrollment failed"
     log "enrolled; the single-use token was consumed and never stored"
 fi
