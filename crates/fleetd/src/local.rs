@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::http::Controller;
 use crate::state::NodeState;
 
-#[cfg(unix)]
 use std::io::{Read as _, Write as _};
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
