@@ -1,3 +1,5 @@
+#![cfg(unix)] // Unix-domain-socket surface; not compiled on other platforms.
+
 //! The local status surface: peer admission, the one-read allowlist, and
 //! the socket's structural permissions. Every test runs the real server on
 //! a real Unix socket.
