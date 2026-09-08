@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use fleet_application::authz::{ActingPrincipal, Permission};
+use fleet_application::authz::ActingPrincipal;
 use fleet_application::machine::MachinePort;
 use fleet_application::node::Nodes;
 use fleet_application::operation::{Operation, Operations};
@@ -718,11 +718,6 @@ async fn fail_operation(
         .map_err(|error| error.to_string())
 }
 
-/// The permission this operation's *creation* implies; minting runs through
-/// the authorized use case. Kept here as the executor's own documentation of
-/// the gate it relies on.
-#[allow(dead_code)]
-const IMPLIED_PERMISSION: Permission = Permission::NodeEnroll;
 /// The archive's sha256, computed on the controller so auto mode can hand
 /// the node an authoritative digest. The node re-verifies after download.
 fn file_sha256(path: &std::path::Path) -> Result<String, String> {

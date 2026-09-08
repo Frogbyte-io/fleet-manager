@@ -22,8 +22,6 @@
 //! won.
 #![warn(missing_docs)]
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
 use crate::operation::{Operation, Operations};
@@ -212,10 +210,4 @@ impl Operations {
         report.running = depths.running;
         Ok(report)
     }
-}
-
-/// Convenience constructor: a worker over the service with the noop executor.
-#[must_use]
-pub fn noop_executor() -> Arc<dyn OperationExecutor> {
-    Arc::new(NoopExecutor)
 }

@@ -156,43 +156,44 @@ pub fn deadline_passed(state: OperationState, deadline: Option<Timestamp>, now: 
 }
 
 #[cfg(test)]
-mod property_tests {
+mod tests {
     use super::*;
-    use proptest::prelude::*;
 
-    fn any_state() -> impl Strategy<Value = OperationState> {
-        (0_u8..7).prop_map(|index| match index {
-            0 => OperationState::Pending,
-            1 => OperationState::Running,
-            2 => OperationState::Cancelling,
-            3 => OperationState::Succeeded,
-            4 => OperationState::Failed,
-            5 => OperationState::Cancelled,
-            _ => OperationState::TimedOut,
-        })
-    }
+    const STATES: [OperationState; 7] = [
+        OperationState::Pending,
+        OperationState::Running,
+        OperationState::Cancelling,
+        OperationState::Succeeded,
+        OperationState::Failed,
+        OperationState::Cancelled,
+        OperationState::TimedOut,
+    ];
 
-    proptest! {
-        #[test]
-        fn terminal_states_never_transition(to in any_state()) {
-            for terminal in [
-                OperationState::Succeeded,
-                OperationState::Failed,
-                OperationState::Cancelled,
-                OperationState::TimedOut,
-            ] {
-                prop_assert!(!can_transition(terminal, to));
+    #[test]
+    fn terminal_states_never_transition() {
+        for terminal in [
+            OperationState::Succeeded,
+            OperationState::Failed,
+            OperationState::Cancelled,
+            OperationState::TimedOut,
+        ] {
+            for to in STATES {
+                assert!(!can_transition(terminal, to), "{terminal:?} -> {to:?}");
             }
         }
+    }
 
-        #[test]
-        fn ids_round_trip(state in any_state()) {
-            prop_assert_eq!(OperationState::from_id(state.id()).unwrap(), state);
+    #[test]
+    fn ids_round_trip() {
+        for state in STATES {
+            assert_eq!(OperationState::from_id(state.id()).unwrap(), state);
         }
+    }
 
-        #[test]
-        fn no_state_transitions_to_itself(from in any_state()) {
-            prop_assert!(!can_transition(from, from));
+    #[test]
+    fn no_state_transitions_to_itself() {
+        for state in STATES {
+            assert!(!can_transition(state, state), "{state:?}");
         }
     }
 }

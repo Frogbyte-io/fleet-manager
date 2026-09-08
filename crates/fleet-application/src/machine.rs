@@ -17,7 +17,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::AuditOutcome;
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::node::{GatewayState, NodeStatus};
 use crate::operation::PortFailure;
@@ -1122,17 +1121,5 @@ fn validate_endpoints(endpoints: &[NewEndpoint]) -> Result<(), MachineUseCaseErr
 impl Machine {
     fn correlation_note(&self) -> String {
         format!("{} endpoint(s)", self.endpoints.len())
-    }
-}
-
-/// The outcome of a machine mutation for the audit ledger; mutations of
-/// machines succeed or fail as a whole, so outcomes are recorded directly.
-impl Machines {
-    /// Records the terminal outcome for a machine mutation whose intent was
-    /// already appended. Machinery for FM-209's API surface; unused until
-    /// then.
-    #[allow(dead_code)]
-    async fn audit_outcome(&self, machine_id: &str, outcome: AuditOutcome) -> Result<(), String> {
-        self.audit.record_outcome(machine_id, outcome).await
     }
 }
