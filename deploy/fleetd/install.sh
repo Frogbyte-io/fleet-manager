@@ -166,12 +166,15 @@ if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
         || die "cannot create the $SERVICE_USER service account"
 fi
 if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
-    INSTALL_OWNER=(-o "$SERVICE_USER" -g "$SERVICE_USER")
+    "${RUN_PRIV[@]}" install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_DIR" \
+        || die "cannot prepare the state directory $STATE_DIR"
 else
-    INSTALL_OWNER=()
+    # No account (stubbed tests): the state directory belongs to the
+    # invoking user, so it is created without privilege escalation —
+    # fleetd must be able to restrict it.
+    install -d -m 0750 "$STATE_DIR" \
+        || die "cannot prepare the state directory $STATE_DIR"
 fi
-"${RUN_PRIV[@]}" install -d -m 0750 "${INSTALL_OWNER[@]}" "$STATE_DIR" \
-    || die "cannot prepare the state directory $STATE_DIR"
 
 # --- binary (atomic replace) -------------------------------------------------
 "${RUN_PRIV[@]}" install -d -m 0755 "$BIN_DIR"
