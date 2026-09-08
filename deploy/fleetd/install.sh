@@ -75,13 +75,10 @@ IS_ROOT=false
 [ "$(id -u)" = "0" ] && IS_ROOT=true
 if [ "$IS_ROOT" = true ]; then
     RUN_PRIV=()
-    INSTALL_OWNER=(-o "$SERVICE_USER" -g "$SERVICE_USER")
 elif sudo -n true >/dev/null 2>&1; then
     RUN_PRIV=(sudo -n)
-    INSTALL_OWNER=(-o "$SERVICE_USER" -g "$SERVICE_USER")
 else
     RUN_PRIV=()
-    INSTALL_OWNER=()
     log "warning: this account is neither root nor a passwordless sudoer; \
 privileged steps will fail (tests use layout overrides instead)"
 fi
@@ -153,11 +150,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- system account ----------------------------------------------------------
+# --- system account and state directory ---------------------------------------
+# Ownership flags derive from the account's actual existence: a stubbed
+# useradd (tests) creates nothing, and `install -o fleet` would then fail
+# even as root.
 if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
     "${RUN_PRIV[@]}" "$USER_ADD" --system --user-group --home-dir "$STATE_DIR" \
         --shell /usr/sbin/nologin "$SERVICE_USER" \
         || die "cannot create the $SERVICE_USER service account"
+fi
+if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+    INSTALL_OWNER=(-o "$SERVICE_USER" -g "$SERVICE_USER")
+else
+    INSTALL_OWNER=()
 fi
 "${RUN_PRIV[@]}" install -d -m 0750 "${INSTALL_OWNER[@]}" "$STATE_DIR" \
     || die "cannot prepare the state directory $STATE_DIR"
