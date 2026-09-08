@@ -726,7 +726,15 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     if invocation.command == Command::Status && !invocation.url_explicit {
         // The local route: the daemon's constrained status surface, reached
         // without controller credentials. The override is explicit --url.
+        #[cfg(unix)]
         let body = local_status(&invocation.socket)?;
+        #[cfg(not(unix))]
+        let body: Value = {
+            let _ = &invocation.socket;
+            return Err(CliError {
+                message: "the node's local surface is only available on Unix platforms".to_owned(),
+            });
+        };
         return render_routed(invocation, &body, "local");
     }
     if invocation.command == Command::Status {
@@ -1265,6 +1273,7 @@ fn http_client() -> Result<reqwest::blocking::Client, CliError> {
 
 /// Reads the node's local status surface over the Unix socket, without any
 /// controller credential.
+#[cfg(unix)]
 fn local_status(socket: &str) -> Result<Value, CliError> {
     use std::io::{Read as _, Write as _};
     let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|error| CliError {
