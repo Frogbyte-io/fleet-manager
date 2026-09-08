@@ -173,7 +173,13 @@ async fn harness() -> Harness {
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: Some(artifacts.path().to_path_buf()),
     };
-    let router = build_router(&settings, Some(store.pool().clone()), Some(&services), None);
+    let router = build_router(
+        &settings,
+        Some(store.pool().clone()),
+        Some(&services),
+        None,
+        None,
+    );
     let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

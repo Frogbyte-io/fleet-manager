@@ -619,6 +619,7 @@ dependencies = [
  "fleet-core",
  "fleet-protocol",
  "fleet-provider-ssh",
+ "fleet-provider-tailscale",
  "fleet-secrets",
  "fleet-storage-sqlite",
  "fleetd",
@@ -724,8 +725,14 @@ dependencies = [
 name = "fleet-provider-tailscale"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64 0.22.1",
  "fleet-application",
  "fleet-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

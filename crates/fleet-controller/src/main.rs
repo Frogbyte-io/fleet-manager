@@ -97,6 +97,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         // store; without both, the node surface serves the standard
         // "unavailable" envelope instead of minting credentials it cannot
         // verify.
+        let secrets = secrets.map(std::sync::Arc::new);
         let services = match secrets.as_ref() {
             Some(secret_store) => {
                 match fleet_controller::node_crypto::NodeCryptoService::open(secret_store).await {
@@ -191,11 +192,34 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             store.pool(),
             config.data_dir.join("ssh"),
         ));
+        // The Tailscale discovery composes only over a secret store: its
+        // OAuth client lives there. Without it the surface serves the
+        // standard "unavailable" envelope.
+        let tailnet = secrets.as_ref().map(|secrets| {
+            std::sync::Arc::new(fleet_controller::tailnet_store::compose_tailnet(
+                secrets.clone(),
+                std::sync::Arc::new(fleet_provider_tailscale::TailscaleClient::new(
+                    std::sync::Arc::new(
+                        fleet_provider_tailscale::ReqwestTransport::new()
+                            .expect("the tailscale transport must build"),
+                    ),
+                )),
+                onboarding.clone(),
+                std::sync::Arc::new(fleet_application::machine::Machines::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ))
+        });
         let served = serve(
             settings,
             pool,
             services,
             Some(onboarding),
+            tailnet,
             shutdown_signal(),
         )
         .await;

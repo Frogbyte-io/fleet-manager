@@ -256,7 +256,7 @@ fn fleetctl_talks_to_a_real_controller() {
             artifacts_dir: None,
         };
         let router =
-            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
+            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None, None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         // Leak the server task and the directories keeping it fed; the test
@@ -345,7 +345,7 @@ fn fleetctl_machines_read_a_real_controller() {
             artifacts_dir: None,
         };
         let router =
-            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
+            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None, None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         std::mem::forget((dist, dir, store));
@@ -498,7 +498,8 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: None,
     };
-    let router = fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None);
+    let router =
+        fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     std::mem::forget((dist, dir, store));
@@ -785,6 +786,7 @@ fn fleetctl_onboards_a_real_controller() {
             Some(store.pool().clone()),
             None,
             Some(&onboarding),
+            None,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

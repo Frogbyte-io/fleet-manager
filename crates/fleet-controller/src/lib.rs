@@ -16,6 +16,7 @@ pub mod gateway;
 pub mod install;
 pub mod node_crypto;
 pub mod onboard;
+pub mod tailnet_store;
 pub mod worker;
 
 use std::future::Future;
@@ -123,6 +124,7 @@ fn api_state(
     db: Option<SqlitePool>,
     nodes: Option<Arc<fleet_application::node::Nodes>>,
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
@@ -143,6 +145,7 @@ fn api_state(
             nodes,
             machines: Some(std::sync::Arc::new(machines)),
             onboarding,
+            tailnet,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -156,6 +159,7 @@ fn api_state(
         nodes: None,
         machines: None,
         onboarding: None,
+        tailnet: None,
     }
 }
 
@@ -257,6 +261,7 @@ pub fn build_router(
     db: Option<SqlitePool>,
     services: Option<&NodeServices>,
     onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -266,6 +271,7 @@ pub fn build_router(
         db,
         services.map(|services| services.nodes.clone()),
         onboarding.cloned(),
+        tailnet.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let mut router = Router::new()
@@ -348,10 +354,14 @@ pub async fn serve(
     db: Option<SqlitePool>,
     services: Option<NodeServices>,
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
-    serve_on(listener, settings, db, services, onboarding, shutdown).await
+    serve_on(
+        listener, settings, db, services, onboarding, tailnet, shutdown,
+    )
+    .await
 }
 
 /// Serves the controller on an already bound listener; [`serve`] is this plus
@@ -367,6 +377,7 @@ pub async fn serve_on(
     db: Option<SqlitePool>,
     services: Option<NodeServices>,
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -396,8 +407,14 @@ pub async fn serve_on(
     }
     axum::serve(
         listener,
-        build_router(&settings, db, services.as_ref(), onboarding.as_ref())
-            .into_make_service_with_connect_info::<SocketAddr>(),
+        build_router(
+            &settings,
+            db,
+            services.as_ref(),
+            onboarding.as_ref(),
+            tailnet.as_ref(),
+        )
+        .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)
     .await?;
