@@ -466,13 +466,13 @@ fn write_stubs(stubs_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let systemctl = stubs_dir.join("systemctl-stub");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"is-active \"*) echo active; exit 0;;\nesac\necho \"systemctl $*\" >> \"$FLEETD_STUB_LOG\"\nexit 0\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"is-active \"*) echo active; exit 0;;\nesac\necho \"systemctl $*\" >> \"${FLEETD_STUB_LOG:-/dev/null}\"\nexit 0\n",
     )
     .unwrap();
     let useradd = stubs_dir.join("useradd-stub");
     std::fs::write(
         &useradd,
-        "#!/bin/sh\necho \"useradd $*\" >> \"$FLEETD_STUB_LOG\"\nexit 0\n",
+        "#!/bin/sh\necho \"useradd $*\" >> \"${FLEETD_STUB_LOG:-/dev/null}\"\nexit 0\n",
     )
     .unwrap();
     let runuser = stubs_dir.join("runuser-stub");
