@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use fleet_controller::exec::ScriptExecutor;
-use fleet_controller::worker::run as run_worker;
+use fleet_controller::worker::WorkerHost;
 use fleet_controller::{Settings, run_healthcheck, serve, shutdown_signal};
 
 const HELP: &str = "Usage: fleet-controller [--config <path>] [--help|--version|serve|healthcheck]";
@@ -182,9 +182,14 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 None => with_install,
             }
         };
-        let worker_handle = tokio::spawn(run_worker(worker_operations, executor, async move {
-            let _ = worker_shutdown_rx.await;
-        }));
+        let worker_host = WorkerHost::new(worker_operations, executor, 4);
+        let worker_handle = tokio::spawn(async move {
+            worker_host
+                .run(async move {
+                    let _ = worker_shutdown_rx.await;
+                })
+                .await;
+        });
         // The Add Machine workflow serves whenever the store is open: it
         // needs the draft repository, the machine use cases, and the SSH
         // trust adapter over the controller's SSH work directory.

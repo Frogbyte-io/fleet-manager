@@ -233,6 +233,12 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
     ///
     /// Fails on backend errors.
     async fn expired_claims(&self, now: i64, lease_ms: i64) -> Result<Vec<Operation>, PortFailure>;
+    /// Renews a running operation's lease: the owning worker proves it is
+    /// alive so the recovery sweep does not resolve work that is still
+    /// running. Returns whether the lease was renewed (false when the
+    /// operation is no longer running under this worker — it was recovered,
+    /// completed, or cancelled out from under the task).
+    async fn renew_lease(&self, id: &str, worker_id: &str, now: i64) -> Result<bool, PortFailure>;
     /// Completes deadline-expired live operations as timed out, returning
     /// the ids that transitioned.
     ///

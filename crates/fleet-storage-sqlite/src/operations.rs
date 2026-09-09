@@ -353,6 +353,25 @@ impl OperationPort for OperationRepository {
         Ok(rows.iter().map(row_to_operation).collect())
     }
 
+    /// Renews a running operation's lease with a compare-and-set: only the
+    /// worker that owns the claim can extend it, so a recovered or terminal
+    /// operation cannot be resurrected by a stale heartbeat.
+    async fn renew_lease(&self, id: &str, worker_id: &str, now: i64) -> Result<bool, PortFailure> {
+        let updated = sqlx::query(
+            "UPDATE operations SET claimed_at = ?3, updated_at = ?3 \
+             WHERE id = ?1 AND worker_id = ?2 AND state IN ('running', 'cancelling')",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("lease renewal failed: {error}"),
+        })?;
+        Ok(updated.rows_affected() > 0)
+    }
+
     async fn sweep_deadlines(&self, now: i64) -> Result<Vec<String>, PortFailure> {
         // Find, do not transition: completing is the service's decision, so
         // the audit outcome and the state change land together.

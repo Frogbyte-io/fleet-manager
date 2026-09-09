@@ -321,6 +321,14 @@ impl OperationPort for FakePort {
     ) -> Result<Vec<Operation>, PortFailure> {
         Ok(Vec::new())
     }
+    async fn renew_lease(
+        &self,
+        _id: &str,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<bool, PortFailure> {
+        Ok(true)
+    }
 
     async fn sweep_deadlines(&self, _now: i64) -> Result<Vec<String>, PortFailure> {
         Ok(Vec::new())

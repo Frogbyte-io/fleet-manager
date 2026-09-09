@@ -144,6 +144,16 @@ impl fleet_application::operation::OperationPort for UnavailableBackend {
             detail: "no backend is wired".to_owned(),
         })
     }
+    async fn renew_lease(
+        &self,
+        _id: &str,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<bool, PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "no backend is wired".to_owned(),
+        })
+    }
     async fn sweep_deadlines(&self, _now: i64) -> Result<Vec<String>, PortFailure> {
         Err(fleet_application::operation::PortFailure::Backend {
             detail: "no backend is wired".to_owned(),
