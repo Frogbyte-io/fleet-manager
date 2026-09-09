@@ -695,6 +695,20 @@ impl TailnetIntegration {
                 detail: "the SSH user must be 1..=64 characters".to_owned(),
             });
         }
+        // Idempotent replay BEFORE any network or store work: a retried
+        // import returns the original draft even when the integration was
+        // cleared in the meantime. The key is scoped to the principal, so a
+        // replay never reveals another caller's draft.
+        if let Some(key) = idempotency_key {
+            let replay = self
+                .onboarding
+                .draft_by_key(authorizer, principal, key)
+                .await
+                .map_err(TailnetUseCaseError::from)?;
+            if let Some(draft) = replay {
+                return Ok(draft);
+            }
+        }
         let credentials = self.require_credentials().await?;
         let devices = self
             .source
@@ -732,7 +746,7 @@ impl TailnetIntegration {
                     ),
                     tags: Vec::new(),
                     groups: Vec::new(),
-                    idempotency_key: idempotency_key.map(str::to_owned),
+                    idempotency_key: idempotency_key.map(|key| format!("{}:{key}", principal.id)),
                 },
             )
             .await

@@ -692,6 +692,42 @@ impl Onboarding {
         Ok(assemble_view(draft, sensitive, Vec::new()))
     }
 
+    /// The draft carrying this caller's idempotency key, as the caller may
+    /// see it. Used by import-style flows whose replay must return the
+    /// original draft even after the integration changed. The lookup is
+    /// keyed to the principal, so a key is never shared across callers.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown key, or a backend failure.
+    pub async fn draft_by_key(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        key: &str,
+    ) -> Result<Option<DraftView>, OnboardingUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: None,
+            },
+        )
+        .map_err(OnboardingUseCaseError::Denied)?;
+        let scoped = format!("{}:{key}", principal.id);
+        let Some(draft) = self
+            .drafts
+            .find_by_idempotency_key(&scoped)
+            .await
+            .map_err(|failure| map_port("find_by_idempotency_key", failure))?
+        else {
+            return Ok(None);
+        };
+        let sensitive = self.may_read_sensitive(authorizer, principal, &draft.id);
+        Ok(Some(assemble_view(draft, sensitive, Vec::new())))
+    }
+
     /// Abandons a draft: the row is deleted — the defined cleanup — and the
     /// host's pins are removed unless an existing machine endpoint shares
     /// the host, so cancelling one draft never breaks another machine's

@@ -204,9 +204,15 @@ impl OnboardingPort for FakeDrafts {
 
     async fn find_by_idempotency_key(
         &self,
-        _key: &str,
+        key: &str,
     ) -> Result<Option<OnboardingDraft>, PortFailure> {
-        Ok(None)
+        Ok(self
+            .drafts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|draft| draft.idempotency_key.as_deref() == Some(key))
+            .cloned())
     }
 }
 

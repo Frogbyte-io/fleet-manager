@@ -43,7 +43,7 @@ impl OnboardingPort for OnboardingRepository {
         let id = Uuid::now_v7().to_string();
         let now = fleet_core::SystemClock::now_unix_millis();
         let (auth_type, identity_path) = split_auth(&draft.auth);
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO onboarding_drafts \
              (id, endpoint_user, endpoint_host, endpoint_port, auth_type, identity_path, \
               name, description, tags_json, groups_json, idempotency_key, created_at, updated_at) \
@@ -62,9 +62,26 @@ impl OnboardingPort for OnboardingRepository {
         .bind(draft.idempotency_key.as_deref())
         .bind(now)
         .execute(&self.pool)
-        .await
-        .map_err(|error| backend("create", &error))?;
-        self.get(&id).await
+        .await;
+        match result {
+            Ok(_) => self.get(&id).await,
+            Err(error) if is_unique_violation(&error) => {
+                // A concurrent create with the same scoped key won; return
+                // the winner's draft — the replay contract, kept atomic by
+                // the unique index.
+                let existing =
+                    sqlx::query("SELECT * FROM onboarding_drafts WHERE idempotency_key = ?1")
+                        .bind(draft.idempotency_key.as_deref().unwrap_or_default())
+                        .fetch_optional(&self.pool)
+                        .await
+                        .map_err(|error| backend("create_replay", &error))?;
+                match existing {
+                    Some(row) => hydrate(&row),
+                    None => Err(backend("create", &error)),
+                }
+            }
+            Err(error) => Err(backend("create", &error)),
+        }
     }
 
     async fn find_by_idempotency_key(
@@ -282,4 +299,13 @@ fn backend(context: &str, error: &sqlx::Error) -> PortFailure {
     PortFailure::Backend {
         detail: format!("onboarding draft {context} failed: {error}"),
     }
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(
+        error
+            .as_database_error()
+            .map(sqlx::error::DatabaseError::kind),
+        Some(sqlx::error::ErrorKind::UniqueViolation)
+    )
 }

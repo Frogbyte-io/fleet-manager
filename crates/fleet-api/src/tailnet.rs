@@ -402,7 +402,7 @@ pub async fn list_tailnet_devices(
         .limit
         .unwrap_or(crate::envelope::DEFAULT_PAGE_LIMIT)
         .min(crate::envelope::MAX_PAGE_LIMIT);
-    let devices = tailnet
+    let mut devices = tailnet
         .list(
             state.authorizer.as_ref(),
             &principal,
@@ -410,13 +410,20 @@ pub async fn list_tailnet_devices(
         )
         .await
         .map_err(|error| map_tailnet_error(&error, correlation_id))?;
-    let total = devices.len();
+    // The cursor is the last node id of the previous page; everything at or
+    // before it is dropped before the limit is applied.
+    if let Some(cursor) = &params.cursor {
+        devices.retain(|correlated| correlated.device.node_id.as_str() > cursor.as_str());
+    }
     let shown = devices
-        .into_iter()
-        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .drain(
+            ..usize::try_from(limit)
+                .unwrap_or(usize::MAX)
+                .min(devices.len()),
+        )
         .map(CorrelatedDeviceDto::from)
         .collect::<Vec<_>>();
-    let next_cursor = (total > shown.len())
+    let next_cursor = (!devices.is_empty())
         .then(|| shown.last().map(|d| d.node_id.clone()))
         .flatten();
     Ok(Json(Page {
