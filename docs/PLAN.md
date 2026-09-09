@@ -5,7 +5,7 @@ Prepared: 2026-08-25
 Accepted: 2026-08-25 — see [planning/fm-000-acceptance.md](planning/fm-000-acceptance.md)  
 Revised: 2026-08-27 — confirmed product decisions from the maintainer planning review below  
 Scope: architecture and development planning only; no product features are implemented by this plan  
-Execution: M0 and M1 are complete and their epics are closed; M2 is in progress — waves 1–5 and 6 closed as of 2026-09-07 (FM-210/FM-211/FM-212 merged, PRs #69–#71); wave 7 (optional Tailscale) remains. Live per-issue status: [planning/parallel-execution.md](planning/parallel-execution.md)
+Execution: M0 and M1 are complete and their epics are closed; M2 is complete as of 2026-09-09 (waves 1–7, FM-200 through FM-213 merged, PRs #54–#74; FM-213's real-tailnet smoke awaits a maintainer OAuth client). M3 planning is next. Live per-issue status: [planning/parallel-execution.md](planning/parallel-execution.md)
 
 ## Confirmed 2026-08-27 product-scope revision
 
@@ -213,7 +213,7 @@ Exit gate: Compose starts a controller bound to its configured local-network int
 
 ### M2 — Machines, connectivity, and onboarding
 
-Status: in progress (2026-09-07 — waves 1–6 closed (FM-210/211/212 merged); wave 7 (optional Tailscale) remains. Live wave status: [planning/parallel-execution.md](planning/parallel-execution.md)).
+Status: complete (2026-09-09 — all waves closed, FM-200 through FM-213 merged; the optional Tailscale smoke against a live tailnet awaits a maintainer OAuth client, tracked on #67). The M2 exit-gate evidence lives in the issue close-outs; M3 planning is next.
 
 Outcome: users can add agentless SSH machines or enroll `fleetd`, see reliable inventory/health, and upgrade an SSH machine to fully managed mode.
 

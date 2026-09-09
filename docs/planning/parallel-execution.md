@@ -33,7 +33,7 @@ FM-002 was split from a single issue precisely because five issues waited on it 
 
 ## M2 execution waves and current status
 
-**Checkpoint 2026-09-07 (session handoff).** Waves 1–5 are closed; **FM-210 (#64, PR #69), FM-211 (#65, PR #70), and FM-212 (#66, PR #71) are implemented and merged**. FM-210 delivered the SSH Add Machine workflow; FM-211 the fleetd service package and bootstrap; FM-212 the orchestrated one-command upgrade with inventory verification. **Wave 6 is complete.** The next agent may take **FM-213 (#67) — optional Tailscale discovery** — or move to M3 planning. Operating notes for the handoff:
+**Checkpoint 2026-09-09 (session handoff).** Waves 1–6 are closed and **M2 is complete except the optional FM-213 follow-through**: FM-210 (#64, PR #69) delivered the SSH Add Machine workflow; FM-211 (#65, PR #70) the fleetd service package and bootstrap; FM-212 (#66, PR #71) the orchestrated one-command upgrade with inventory verification; FM-213 (#67, PR #74) the optional read-only Tailscale discovery with correlation-evidence-only listing and import through the FM-210 flow (two cubic review rounds addressed in-PR; a real-tailnet smoke awaits an OAuth client from the maintainer). Epics #50/#51/#52 are closed; #53 remains open only for FM-213's optional follow-through. The next agent plans **M3 — Projects and developer tooling**. Operating notes for the handoff:
 
 - **What FM-211 delivered (see the close-out on #65):** `cargo xtask package-fleetd` → `target/dist/fleetd-<version>-linux-x86_64.tar.gz` (binary, hardened systemd unit, install/uninstall scripts, README, SHA256SUMS); the controller serves artifacts from `Settings.artifacts_dir` at `GET /downloads/fleetd/<file>`; the `machine.install-fleetd` operation kind (executor in `fleet-controller::install`) mints the single-use enrollment token itself (never in argv, payload, or files — `fleetd --token-stdin`), installs, enrolls, and waits for a connected gateway session; `fleetctl machines install-node … --wait`. fleetd grew `--token-stdin`.
 - **What FM-212 can rely on:** the install operation is idempotent (upgrade over a live identity mints no token, replaces the binary atomically, keeps the enrollment), failure cleanup leaves the agentless endpoint usable, revocation + reinstall re-enrolls with a fresh key, and reboot re-connects (proven on a real Ubuntu 24.04 VM: ACPI reboot → connected again in ~15 s). The machine stays the same Fleet machine throughout — the upgrade workflow's identity-association work is mostly done by these guarantees.
@@ -68,7 +68,7 @@ wave 7   FM-213 Tailscale (optional)
 | 4 | FM-204 → FM-205 → FM-207 | **Done** (2026-09-04) |
 | 5 | FM-206, FM-208, FM-209 | **Done** (2026-09-05) |
 | 6 | FM-210 → FM-211 → FM-212 | **Done** (2026-09-07: #69, #70, #71) |
-| 7 | FM-213 | optional; unblocked |
+| 7 | FM-213 | **Done** (2026-09-09, PR #74); real-tailnet smoke pending maintainer OAuth client |
 
 Handoff guarantees a fresh agent can rely on:
 
