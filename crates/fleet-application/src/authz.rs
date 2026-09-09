@@ -70,6 +70,12 @@ pub enum Permission {
     /// Revoke a machine's node identity and every credential and session
     /// under it. A mutation.
     NodeRevoke,
+    /// List tailnet devices and correlate them with Fleet machines.
+    /// A read, but a topology-revealing one.
+    TailnetRead,
+    /// Configure or clear the Tailscale OAuth integration. A mutation:
+    /// it stores or removes a credential.
+    TailnetConfig,
 }
 
 impl Permission {
@@ -94,6 +100,8 @@ impl Permission {
         Permission::NodeEnroll,
         Permission::NodeRead,
         Permission::NodeRevoke,
+        Permission::TailnetRead,
+        Permission::TailnetConfig,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -117,6 +125,8 @@ impl Permission {
             Permission::NodeEnroll => "node.enroll",
             Permission::NodeRead => "node.read",
             Permission::NodeRevoke => "node.revoke",
+            Permission::TailnetRead => "tailscale.read",
+            Permission::TailnetConfig => "tailscale.config",
         }
     }
 
@@ -142,7 +152,9 @@ impl Permission {
             | Permission::MachineUpdate
             | Permission::MachineDelete
             | Permission::NodeEnroll
-            | Permission::NodeRevoke => true,
+            | Permission::NodeRevoke
+            | Permission::TailnetConfig
+            | Permission::TailnetRead => true,
         }
     }
 
@@ -159,7 +171,9 @@ impl Permission {
             | Permission::SecretWrite
             | Permission::AuditRead
             | Permission::MachineRead
-            | Permission::MachineCreate => false,
+            | Permission::MachineCreate
+            | Permission::TailnetRead
+            | Permission::TailnetConfig => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

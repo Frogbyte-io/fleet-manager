@@ -50,7 +50,7 @@ async fn spawn(
         .expect("bound listener must report its address");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        serve_on(listener, settings, db, None, None, async {
+        serve_on(listener, settings, db, None, None, None, async {
             let _ = shutdown_rx.await;
         })
         .await
@@ -150,9 +150,17 @@ async fn graceful_shutdown_stops_the_server_and_releases_the_listener() {
         .expect("bound listener must report its address");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
-        serve_on(listener, settings(dist.path()), None, None, None, async {
-            let _ = shutdown_rx.await;
-        })
+        serve_on(
+            listener,
+            settings(dist.path()),
+            None,
+            None,
+            None,
+            None,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        )
         .await
     });
 

@@ -45,6 +45,10 @@ pub struct ApiState {
     /// The Add Machine onboarding use cases, when the controller was
     /// composed with a database; `None` only in document/test states.
     pub onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
+    /// The Tailscale discovery use cases, when the controller was composed
+    /// with a database, a secret store, and the integration wired;
+    /// `None` only in document/test states.
+    pub tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -56,6 +60,7 @@ impl std::fmt::Debug for ApiState {
             .field("nodes", &self.nodes)
             .field("machines", &self.machines)
             .field("onboarding", &self.onboarding)
+            .field("tailnet", &self.tailnet)
             .finish()
     }
 }
@@ -193,6 +198,7 @@ impl ApiState {
             nodes: None,
             machines: None,
             onboarding: None,
+            tailnet: None,
         }
     }
 }

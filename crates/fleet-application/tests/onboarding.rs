@@ -42,6 +42,7 @@ fn new_draft() -> NewDraft {
         description: String::new(),
         tags: vec![],
         groups: vec![],
+        idempotency_key: None,
     }
 }
 
@@ -158,6 +159,7 @@ impl OnboardingPort for FakeDrafts {
             facts: Vec::new(),
             discovery_source: None,
             discovered_at: None,
+            idempotency_key: draft.idempotency_key.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -198,6 +200,19 @@ impl OnboardingPort for FakeDrafts {
             });
         }
         Ok(())
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<OnboardingDraft>, PortFailure> {
+        Ok(self
+            .drafts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|draft| draft.idempotency_key.as_deref() == Some(key))
+            .cloned())
     }
 }
 

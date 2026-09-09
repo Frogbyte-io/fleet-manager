@@ -173,7 +173,13 @@ async fn harness() -> Harness {
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: Some(artifacts.path().to_path_buf()),
     };
-    let router = build_router(&settings, Some(store.pool().clone()), Some(&services), None);
+    let router = build_router(
+        &settings,
+        Some(store.pool().clone()),
+        Some(&services),
+        None,
+        None,
+    );
     let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -460,13 +466,13 @@ fn write_stubs(stubs_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let systemctl = stubs_dir.join("systemctl-stub");
     std::fs::write(
         &systemctl,
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"is-active \"*) echo active; exit 0;;\nesac\necho \"systemctl $*\" >> \"$FLEETD_STUB_LOG\"\nexit 0\n",
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"is-active \"*) echo active; exit 0;;\nesac\necho \"systemctl $*\" >> \"${FLEETD_STUB_LOG:-/dev/null}\"\nexit 0\n",
     )
     .unwrap();
     let useradd = stubs_dir.join("useradd-stub");
     std::fs::write(
         &useradd,
-        "#!/bin/sh\necho \"useradd $*\" >> \"$FLEETD_STUB_LOG\"\nexit 0\n",
+        "#!/bin/sh\necho \"useradd $*\" >> \"${FLEETD_STUB_LOG:-/dev/null}\"\nexit 0\n",
     )
     .unwrap();
     let runuser = stubs_dir.join("runuser-stub");

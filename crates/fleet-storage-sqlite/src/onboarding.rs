@@ -43,11 +43,11 @@ impl OnboardingPort for OnboardingRepository {
         let id = Uuid::now_v7().to_string();
         let now = fleet_core::SystemClock::now_unix_millis();
         let (auth_type, identity_path) = split_auth(&draft.auth);
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO onboarding_drafts \
              (id, endpoint_user, endpoint_host, endpoint_port, auth_type, identity_path, \
-              name, description, tags_json, groups_json, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+              name, description, tags_json, groups_json, idempotency_key, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         )
         .bind(&id)
         .bind(&draft.endpoint.user)
@@ -59,11 +59,45 @@ impl OnboardingPort for OnboardingRepository {
         .bind(&draft.description)
         .bind(to_json(&draft.tags)?)
         .bind(to_json(&draft.groups)?)
+        .bind(draft.idempotency_key.as_deref())
         .bind(now)
         .execute(&self.pool)
-        .await
-        .map_err(|error| backend("create", &error))?;
-        self.get(&id).await
+        .await;
+        match result {
+            Ok(_) => self.get(&id).await,
+            Err(error) if is_unique_violation(&error) => {
+                // A concurrent create with the same scoped key won; return
+                // the winner's draft — the replay contract, kept atomic by
+                // the unique index.
+                let existing =
+                    sqlx::query("SELECT * FROM onboarding_drafts WHERE idempotency_key = ?1")
+                        .bind(draft.idempotency_key.as_deref().unwrap_or_default())
+                        .fetch_optional(&self.pool)
+                        .await
+                        .map_err(|error| backend("create_replay", &error))?;
+                match existing {
+                    Some(row) => hydrate(&row),
+                    None => Err(backend("create", &error)),
+                }
+            }
+            Err(error) => Err(backend("create", &error)),
+        }
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<OnboardingDraft>, PortFailure> {
+        let row: Option<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM onboarding_drafts WHERE idempotency_key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| backend("find_by_idempotency_key", &error))?;
+        match row {
+            Some(row) => Ok(Some(hydrate(&row)?)),
+            None => Ok(None),
+        }
     }
 
     async fn get(&self, id: &str) -> Result<OnboardingDraft, PortFailure> {
@@ -229,6 +263,7 @@ fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Result<OnboardingDraft, PortFailure
         facts,
         discovery_source: row.get("discovery_source"),
         discovered_at: row.get("discovered_at"),
+        idempotency_key: row.get("idempotency_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -264,4 +299,13 @@ fn backend(context: &str, error: &sqlx::Error) -> PortFailure {
     PortFailure::Backend {
         detail: format!("onboarding draft {context} failed: {error}"),
     }
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(
+        error
+            .as_database_error()
+            .map(sqlx::error::DatabaseError::kind),
+        Some(sqlx::error::ErrorKind::UniqueViolation)
+    )
 }

@@ -20,6 +20,7 @@ pub mod node;
 pub mod onboarding;
 pub mod operations;
 pub mod system;
+pub mod tailnet;
 
 use std::sync::Arc;
 
@@ -83,6 +84,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         onboarding::OnboardingDraftDto,
         onboarding::TestOutcomeDto,
         system::SystemInfo,
+        tailnet::ConfigureTailnetRequest,
+        tailnet::CorrelatedDeviceDto,
+        tailnet::CorrelationCandidateDto,
+        tailnet::ImportTailnetDeviceRequest,
+        tailnet::TailnetStatusDto,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
         node::EnrollmentTokenDto,
@@ -101,6 +107,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
             description = "The operational machine view: identity, endpoints, capability facts, \
                            connectivity state, and the last observation. Endpoint references are \
                            redacted unless the caller may read sensitive endpoint detail."
+        ),
+        (
+            name = "tailnet",
+            description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
         ),
         (
             name = "nodes",
@@ -148,6 +158,11 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 ))
                 .routes(routes!(node::get_node))
                 .routes(routes!(node::revoke_node))
+                .routes(routes!(tailnet::get_tailnet_status))
+                .routes(routes!(tailnet::configure_tailnet))
+                .routes(routes!(tailnet::clear_tailnet))
+                .routes(routes!(tailnet::list_tailnet_devices))
+                .routes(routes!(tailnet::import_tailnet_device))
                 .with_state(state),
         )
         .split_for_parts();

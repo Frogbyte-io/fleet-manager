@@ -16,6 +16,7 @@ fleet-config = { version = "0.1.0", path = "../fleet-config" }
 fleet-core = { version = "0.1.0", path = "../fleet-core" }
 fleet-protocol = { path = "../fleet-protocol" }
 fleet-provider-ssh = { version = "0.1.0", path = "../providers/fleet-provider-ssh" }
+fleet-provider-tailscale = { path = "../providers/fleet-provider-tailscale" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }
 fleet-storage-sqlite = { version = "0.1.0", path = "../fleet-storage-sqlite" }
 futures-util = "0.3.31"

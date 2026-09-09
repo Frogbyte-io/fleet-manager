@@ -75,26 +75,29 @@ IS_ROOT=false
 [ "$(id -u)" = "0" ] && IS_ROOT=true
 if [ "$IS_ROOT" = true ]; then
     RUN_PRIV=()
-    INSTALL_OWNER=(-o "$SERVICE_USER" -g "$SERVICE_USER")
 elif sudo -n true >/dev/null 2>&1; then
     RUN_PRIV=(sudo -n)
-    INSTALL_OWNER=(-o "$SERVICE_USER" -g "$SERVICE_USER")
 else
     RUN_PRIV=()
-    INSTALL_OWNER=()
     log "warning: this account is neither root nor a passwordless sudoer; \
 privileged steps will fail (tests use layout overrides instead)"
 fi
 
 # Runs the enroll step as the service account. The token reaches fleetd on
-# standard input and is never placed in a process argument.
+# standard input and is never placed in a process argument. When the account
+# does not exist (stubbed useradd in tests), the step runs as the invoking
+# user — the state directory is theirs anyway.
 run_as_service() {
     if [ -n "$RUNUSER" ]; then
         "$RUNUSER" -u "$SERVICE_USER" -- "$@"
-    elif [ "$IS_ROOT" = true ]; then
-        runuser -u "$SERVICE_USER" -- "$@"
+    elif getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+        if [ "$IS_ROOT" = true ]; then
+            runuser -u "$SERVICE_USER" -- "$@"
+        else
+            sudo -n -u "$SERVICE_USER" -- "$@"
+        fi
     else
-        sudo -n -u "$SERVICE_USER" -- "$@"
+        env FLEETD_STATE_DIR="$STATE_DIR" "$@"
     fi
 }
 
@@ -153,14 +156,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- system account ----------------------------------------------------------
+# --- system account and state directory ---------------------------------------
+# Ownership flags derive from the account's actual existence: a stubbed
+# useradd (tests) creates nothing, and `install -o fleet` would then fail
+# even as root.
 if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
     "${RUN_PRIV[@]}" "$USER_ADD" --system --user-group --home-dir "$STATE_DIR" \
         --shell /usr/sbin/nologin "$SERVICE_USER" \
         || die "cannot create the $SERVICE_USER service account"
 fi
-"${RUN_PRIV[@]}" install -d -m 0750 "${INSTALL_OWNER[@]}" "$STATE_DIR" \
-    || die "cannot prepare the state directory $STATE_DIR"
+if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+    "${RUN_PRIV[@]}" install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_DIR" \
+        || die "cannot prepare the state directory $STATE_DIR"
+else
+    # No account (stubbed tests): the state directory belongs to the
+    # invoking user, so it is created without privilege escalation —
+    # fleetd must be able to restrict it.
+    install -d -m 0750 "$STATE_DIR" \
+        || die "cannot prepare the state directory $STATE_DIR"
+fi
 
 # --- binary (atomic replace) -------------------------------------------------
 "${RUN_PRIV[@]}" install -d -m 0755 "$BIN_DIR"
@@ -207,8 +221,8 @@ else
         log "forced re-enrollment: the previous node identity was wiped"
     fi
     printf '%s' "$FLEET_ENROLL_TOKEN" | \
-        run_as_service env FLEETD_STATE_DIR="$STATE_DIR" \
-        "$BIN" enroll --controller "$FLEET_CONTROLLER_URL" --token-stdin \
+        run_as_service "$BIN" enroll --controller "$FLEET_CONTROLLER_URL" \
+        --token-stdin --state-dir "$STATE_DIR" \
         || die "enrollment failed"
     log "enrolled; the single-use token was consumed and never stored"
 fi

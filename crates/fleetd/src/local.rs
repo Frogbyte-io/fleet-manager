@@ -24,22 +24,28 @@
 //! There is no request forwarding in this surface: forwarding arbitrary
 //! reads needs delegation (M8); forwarding mutations is a non-goal.
 
-use std::io::{Read as _, Write as _};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use crate::http::Controller;
 use crate::state::NodeState;
+
+use std::io::{Read as _, Write as _};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+#[cfg(unix)]
+use std::time::Duration;
 
 /// The socket file name inside the state directory.
 pub const LOCAL_SOCKET_NAME: &str = "local.sock";
 
 /// The local request deadline: the status answer must arrive fast, so a
 /// hung controller read cannot wedge a local agent for long.
+#[cfg(unix)]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(unix))]
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The local status surface.
 #[derive(Debug)]
@@ -93,6 +99,25 @@ impl LocalServer {
     /// Panics only if the socket cannot be made non-blocking, which is an
     /// OS-level misconfiguration.
     pub fn serve_blocking(self: Arc<Self>, shutdown: impl Fn() -> bool) {
+        #[cfg(unix)]
+        {
+            self.serve_unix(shutdown);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = shutdown;
+            eprintln!("fleetd: the local status surface is not supported on this platform yet");
+        }
+    }
+
+    /// The Unix-socket serve loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the socket cannot be made non-blocking, which is an
+    /// OS-level misconfiguration.
+    #[cfg(unix)]
+    fn serve_unix(self: Arc<Self>, shutdown: impl Fn() -> bool) {
         let _ = std::fs::remove_file(&self.socket_path);
         let listener = match UnixListener::bind(&self.socket_path) {
             Ok(listener) => listener,
@@ -136,6 +161,7 @@ impl LocalServer {
     }
 
     /// Handles one connection: peer check, one request, one answer.
+    #[cfg(unix)]
     fn handle_connection(&self, mut stream: std::os::unix::net::UnixStream) {
         let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
         let peer = peer_credentials(&stream);
@@ -203,6 +229,7 @@ impl LocalServer {
         }
     }
 
+    #[cfg(unix)]
     fn peer_allowed(&self, peer: Option<(u32, u32, u32)>) -> bool {
         let Some((uid, gid, _)) = peer else {
             return false;
@@ -256,6 +283,7 @@ impl LocalServer {
 ///
 /// Panics never; every conversion degrades to a bounded value.
 #[must_use]
+#[cfg(unix)]
 pub fn peer_credentials(stream: &std::os::unix::net::UnixStream) -> Option<(u32, u32, u32)> {
     use std::os::fd::AsFd as _;
     let credentials = rustix::net::sockopt::get_socket_peercred(stream.as_fd()).ok()?;
@@ -266,6 +294,7 @@ pub fn peer_credentials(stream: &std::os::unix::net::UnixStream) -> Option<(u32,
     ))
 }
 
+#[cfg(unix)]
 fn own_uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
@@ -273,6 +302,7 @@ fn own_uid() -> u32 {
 /// Restricts the socket file to owner+group. The group ownership itself is
 /// the deployment's doing (the packaged service unit sets it; see FM-211):
 /// the daemon never chowns — it cannot assume it has the right.
+#[cfg(unix)]
 fn restrict_socket(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -286,6 +316,7 @@ fn restrict_socket(path: &Path) -> Result<(), String> {
 /// Reads the connection's remaining bytes until the peer stops sending,
 /// so the close is an EOF rather than a reset. Bounded by a short timeout;
 /// a peer that keeps writing is cut off.
+#[cfg(unix)]
 fn drain(stream: &mut std::os::unix::net::UnixStream) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
     let mut buffer = [0_u8; 4096];
@@ -297,6 +328,7 @@ fn drain(stream: &mut std::os::unix::net::UnixStream) {
     }
 }
 
+#[cfg(unix)]
 fn write_response(
     stream: &mut std::os::unix::net::UnixStream,
     status: u16,

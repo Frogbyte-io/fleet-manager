@@ -42,6 +42,7 @@ async fn router_with_db() -> (axum::Router, Vec<tempfile::TempDir>) {
         Some(store.pool().clone()),
         None,
         None,
+        None,
     );
     (router, vec![dist, dir])
 }

@@ -12,6 +12,15 @@
 
 use std::fmt;
 
+/// One controller request in transport-neutral form: method, path, query,
+/// and body.
+type RequestShape = (
+    reqwest::Method,
+    String,
+    Vec<(&'static str, String)>,
+    Option<Value>,
+);
+
 use serde_json::Value;
 
 /// The controller address used when `--url` is absent: the safe default, the
@@ -169,6 +178,32 @@ pub enum Command {
         /// The draft id.
         id: String,
     },
+    /// Show the Tailscale integration's status (configured or not).
+    TailnetStatus,
+    /// Configure the Tailscale OAuth client. The secret is read from
+    /// standard input and never placed in a process argument.
+    TailnetConfigure {
+        /// The OAuth client identifier.
+        client_id: String,
+    },
+    /// Remove the stored Tailscale OAuth client.
+    TailnetClear,
+    /// List tailnet devices, correlated with Fleet machines by evidence
+    /// only.
+    TailnetDevices {
+        /// Maximum entries to request.
+        limit: Option<u32>,
+    },
+    /// Import a tailnet device as an SSH onboarding draft; the standard
+    /// onboarding flow (test, confirm, add) takes it from there.
+    TailnetImport {
+        /// The device's node id.
+        node_id: String,
+        /// The SSH login user on the target machine.
+        user: String,
+        /// The SSH port; 22 when omitted.
+        port: Option<u16>,
+    },
     /// Start the audited "Install Fleet Node" bootstrap on an agentless
     /// machine: download the checksummed service package on the node,
     /// install the systemd service, enroll, and wait for the gateway
@@ -286,6 +321,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["machines", "install-node", machine_id, rest @ ..] => {
             parse_install_node(machine_id, rest, &url)?
         }
+        ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
     Ok(Invocation {
@@ -338,9 +374,73 @@ fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
     })
 }
 
+/// Parses one `fleetctl tailnet` subcommand.
+fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match verb {
+        "status" => match rest {
+            [] => Ok(Command::TailnetStatus),
+            _ => Err(CliError { message: usage() }),
+        },
+        "configure" => match rest {
+            ["--client-id", client_id] => Ok(Command::TailnetConfigure {
+                client_id: (*client_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "clear" => match rest {
+            [] => Ok(Command::TailnetClear),
+            _ => Err(CliError { message: usage() }),
+        },
+        "devices" => {
+            let mut limit = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--limit" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--limit requires a value".to_owned(),
+                        })?;
+                        limit = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--limit must be a number, not {value:?}"),
+                        })?);
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::TailnetDevices { limit })
+        }
+        "import" => match rest {
+            [node_id, "--user", user] => Ok(Command::TailnetImport {
+                node_id: (*node_id).to_owned(),
+                user: (*user).to_owned(),
+                port: None,
+            }),
+            [node_id, "--user", user, "--port", port] => {
+                let parsed = port.parse::<u16>().map_err(|_| CliError {
+                    message: format!("--port must be a number, not {port:?}"),
+                })?;
+                Ok(Command::TailnetImport {
+                    node_id: (*node_id).to_owned(),
+                    user: (*user).to_owned(),
+                    port: Some(parsed),
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -626,7 +726,15 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     if invocation.command == Command::Status && !invocation.url_explicit {
         // The local route: the daemon's constrained status surface, reached
         // without controller credentials. The override is explicit --url.
+        #[cfg(unix)]
         let body = local_status(&invocation.socket)?;
+        #[cfg(not(unix))]
+        let body: Value = {
+            let _ = &invocation.socket;
+            return Err(CliError {
+                message: "the node's local surface is only available on Unix platforms".to_owned(),
+            });
+        };
         return render_routed(invocation, &body, "local");
     }
     if invocation.command == Command::Status {
@@ -656,7 +764,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
-    let (method, path, query, request_body) = request_for(&invocation.command);
+    let (method, path, query, request_body) = request_for(&invocation.command)?;
 
     let body = send(
         &client,
@@ -754,7 +862,12 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::MachinesOnboardTest { .. }
             | Command::MachinesOnboardDiscover { .. }
             | Command::MachinesOnboardAdd { .. }
-            | Command::MachinesOnboardCancel { .. } => render_onboarding(Some(payload)),
+            | Command::MachinesOnboardCancel { .. }
+            | Command::TailnetImport { .. } => render_onboarding(Some(payload)),
+            Command::TailnetStatus
+            | Command::TailnetConfigure { .. }
+            | Command::TailnetClear
+            | Command::TailnetDevices { .. } => render_tailnet(Some(payload)),
             _ => render_text(Some(payload)),
         },
     }
@@ -762,15 +875,9 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
 
 /// The controller request for one command: method, path, query, and body,
 /// in API order.
-fn request_for(
-    command: &Command,
-) -> (
-    reqwest::Method,
-    String,
-    Vec<(&'static str, String)>,
-    Option<Value>,
-) {
-    match command {
+#[allow(clippy::too_many_lines)]
+fn request_for(command: &Command) -> Result<RequestShape, CliError> {
+    Ok(match command {
         // `status` took one of the two routes above.
         Command::Status => unreachable!("the status command returned before dispatch"),
         Command::System => (
@@ -836,20 +943,58 @@ fn request_for(
         | Command::MachinesOnboardAdd { .. }
         | Command::MachinesOnboardCancel { .. }) => onboard_request(command),
         Command::MachinesInstallNode { .. } => install_node_request(command),
-    }
+        Command::TailnetStatus => (
+            reqwest::Method::GET,
+            "/api/v1/tailnet/status".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::TailnetConfigure { client_id } => (
+            reqwest::Method::PUT,
+            "/api/v1/tailnet/config".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "clientId": client_id,
+                "clientSecret": read_stdin_line("the OAuth client secret")?,
+            })),
+        ),
+        Command::TailnetClear => (
+            reqwest::Method::DELETE,
+            "/api/v1/tailnet/config".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::TailnetDevices { limit } => (
+            reqwest::Method::GET,
+            "/api/v1/tailnet/devices".to_owned(),
+            limit
+                .map(|limit| vec![("limit", limit.to_string())])
+                .unwrap_or_default(),
+            None,
+        ),
+        Command::TailnetImport {
+            node_id,
+            user,
+            port,
+        } => {
+            let mut body = serde_json::json!({ "user": user });
+            if let Some(port) = port {
+                body["port"] = serde_json::json!(port);
+            }
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/tailnet/devices/{node_id}/import"),
+                Vec::new(),
+                Some(body),
+            )
+        }
+    })
 }
 
 /// The install-node request: a durable `machine.install-fleetd` operation
 /// whose payload carries no secret — the enrollment token is minted inside
 /// the executor at install time.
-fn install_node_request(
-    command: &Command,
-) -> (
-    reqwest::Method,
-    String,
-    Vec<(&'static str, String)>,
-    Option<Value>,
-) {
+fn install_node_request(command: &Command) -> RequestShape {
     let Command::MachinesInstallNode {
         machine_id,
         endpoint,
@@ -899,6 +1044,23 @@ fn install_node_request(
     )
 }
 
+/// Reads one line from standard input, for write-only secrets.
+fn read_stdin_line(what: &str) -> Result<String, CliError> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| CliError {
+            message: format!("cannot read {what} from stdin: {error}"),
+        })?;
+    let line = line.trim().to_owned();
+    if line.is_empty() {
+        return Err(CliError {
+            message: format!("{what} must not be empty"),
+        });
+    }
+    Ok(line)
+}
+
 /// Wall-clock now, in epoch milliseconds.
 fn fleet_now_millis() -> u64 {
     u64::try_from(
@@ -911,14 +1073,7 @@ fn fleet_now_millis() -> u64 {
 }
 /// The onboarding requests: one dispatch, in API order. The create body
 /// carries only what was supplied, so the controller's defaults apply.
-fn onboard_request(
-    command: &Command,
-) -> (
-    reqwest::Method,
-    String,
-    Vec<(&'static str, String)>,
-    Option<Value>,
-) {
+fn onboard_request(command: &Command) -> RequestShape {
     match command {
         Command::MachinesOnboardCreate {
             user,
@@ -1123,6 +1278,7 @@ fn http_client() -> Result<reqwest::blocking::Client, CliError> {
 
 /// Reads the node's local status surface over the Unix socket, without any
 /// controller credential.
+#[cfg(unix)]
 fn local_status(socket: &str) -> Result<Value, CliError> {
     use std::io::{Read as _, Write as _};
     let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|error| CliError {
@@ -1310,6 +1466,84 @@ fn render_onboarding(value: Option<&Value>) -> String {
         return lines.join("\n");
     }
     draft_detail(value)
+}
+
+/// Renders the tailnet surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_tailnet_for_test(value: &Value) -> String {
+    render_tailnet(Some(value))
+}
+
+fn render_tailnet(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<22} {:<12} {:<30} {}",
+            "NODE ID", "STATE", "DEVICE", "FLEET CANDIDATES"
+        )];
+        for item in items {
+            let state = if item["connectedToControl"] == true {
+                "connected"
+            } else if item["online"] == true {
+                "online"
+            } else {
+                "offline"
+            };
+            let candidates = item["candidates"]
+                .as_array()
+                .map(|candidates| {
+                    candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            Some(format!(
+                                "{} ({})",
+                                candidate["machineName"].as_str()?,
+                                candidate["kind"].as_str()?
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let device = format!(
+                "{} {}",
+                item["hostname"].as_str().unwrap_or("-"),
+                item["addresses"]
+                    .as_array()
+                    .and_then(|addresses| addresses.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+            );
+            lines.push(format!(
+                "{:<22} {:<12} {:<30} {}",
+                item["nodeId"].as_str().unwrap_or("-"),
+                state,
+                device,
+                if candidates.is_empty() {
+                    "-"
+                } else {
+                    &candidates
+                }
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no tailnet devices)".to_owned());
+        }
+        return lines.join("\n");
+    }
+    // Status/configure/clear answer: key facts only.
+    let mut lines = Vec::new();
+    for (key, val) in value.as_object().into_iter().flatten() {
+        let rendered = match val {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        lines.push(format!("{key}: {rendered}"));
+    }
+    lines.join("\n")
 }
 
 fn draft_detail(draft: &Value) -> String {

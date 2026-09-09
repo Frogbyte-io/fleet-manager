@@ -1141,6 +1141,277 @@
           }
         }
       }
+    },
+    "/api/v1/tailnet/config": {
+      "put": {
+        "tags": [
+          "tailnet"
+        ],
+        "summary": "Stores the OAuth client. The secret is write-only.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "configureTailnet",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureTailnetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The integration is configured; the secret is never echoed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_TailnetStatusDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the integration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "tailnet"
+        ],
+        "summary": "Removes the stored OAuth client.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "clearTailnet",
+        "responses": {
+          "200": {
+            "description": "The integration is cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_TailnetStatusDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the integration.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tailnet/devices": {
+      "get": {
+        "tags": [
+          "tailnet"
+        ],
+        "summary": "Lists the tailnet's devices, correlated with Fleet machines by evidence\nonly.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unconfigured\nintegration, a source failure, or a backend failure.",
+        "operationId": "listTailnetDevices",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of devices to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor from a previous page (the last device's node id).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of correlated devices.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CorrelatedDeviceDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the tailnet surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The integration is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The tailnet source asked to slow down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The tailnet source failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tailnet/devices/{nodeId}/import": {
+      "post": {
+        "tags": [
+          "tailnet"
+        ],
+        "summary": "Imports a tailnet device as an SSH onboarding draft: the draft carries\nthe device's Tailscale IPv4 address; everything after is the standard\nstaged flow (test, explicit fingerprint confirm, review, add).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown device, or a\nbackend failure.",
+        "operationId": "importTailnetDevice",
+        "parameters": [
+          {
+            "name": "nodeId",
+            "in": "path",
+            "description": "The device's node id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportTailnetDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The onboarding draft was created; continue with the onboarding flow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OnboardingDraftDetailDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not import.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such device.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The integration is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tailnet/status": {
+      "get": {
+        "tags": [
+          "tailnet"
+        ],
+        "summary": "The integration's status.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "getTailnetStatus",
+        "responses": {
+          "200": {
+            "description": "The integration's status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_TailnetStatusDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the tailnet surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1244,6 +1515,24 @@
           }
         }
       },
+      "ConfigureTailnetRequest": {
+        "type": "object",
+        "description": "The configure request: the OAuth client's id and secret. The secret is\nstored encrypted and never returned by any endpoint.",
+        "required": [
+          "clientId",
+          "clientSecret"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The OAuth client identifier."
+          },
+          "clientSecret": {
+            "type": "string",
+            "description": "The OAuth client secret (write-only)."
+          }
+        }
+      },
       "ConfirmHostKeyRequest": {
         "type": "object",
         "description": "The body of the confirm-host-key request.",
@@ -1254,6 +1543,124 @@
           "fingerprint": {
             "type": "string",
             "description": "The OpenSSH `SHA256:` fingerprint being confirmed. It must match the\nfingerprint the host presented."
+          }
+        }
+      },
+      "CorrelatedDeviceDto": {
+        "type": "object",
+        "description": "One tailnet device with its Fleet-machine candidates (evidence only).",
+        "required": [
+          "nodeId",
+          "name",
+          "hostname",
+          "os",
+          "addresses",
+          "tags",
+          "user",
+          "candidates"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The Tailscale addresses."
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CorrelationCandidateDto"
+            },
+            "description": "Existing machines this device may be — evidence, never merged."
+          },
+          "connectedToControl": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the device recently connected to control."
+          },
+          "hostname": {
+            "type": "string",
+            "description": "The short hostname."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device's legacy numeric identifier, when carried."
+          },
+          "lastSeen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the device was last seen, when carried."
+          },
+          "name": {
+            "type": "string",
+            "description": "The `MagicDNS` name."
+          },
+          "nodeId": {
+            "type": "string",
+            "description": "The device's preferred identifier (`nodeId`)."
+          },
+          "online": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the device reports itself online."
+          },
+          "os": {
+            "type": "string",
+            "description": "The device's operating system."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tailnet policy tags."
+          },
+          "user": {
+            "type": "string",
+            "description": "The registering user."
+          }
+        }
+      },
+      "CorrelationCandidateDto": {
+        "type": "object",
+        "description": "One Fleet machine a tailnet device may be.",
+        "required": [
+          "machineId",
+          "machineName",
+          "machineStatus",
+          "reference",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "Why: `address_match` or `name_match`."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The existing machine's identity."
+          },
+          "machineName": {
+            "type": "string",
+            "description": "The existing machine's name."
+          },
+          "machineStatus": {
+            "type": "string",
+            "description": "The machine's derived connectivity state."
+          },
+          "reference": {
+            "type": "string",
+            "description": "The matching endpoint reference."
           }
         }
       },
@@ -1554,6 +1961,28 @@
           "message": {
             "type": "string",
             "description": "Caller-safe explanation."
+          }
+        }
+      },
+      "ImportTailnetDeviceRequest": {
+        "type": "object",
+        "description": "The import request: the SSH login user and port for the draft.",
+        "required": [
+          "user"
+        ],
+        "properties": {
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The SSH port; 22 when omitted.",
+            "minimum": 0
+          },
+          "user": {
+            "type": "string",
+            "description": "The SSH login user on the target machine."
           }
         }
       },
@@ -2289,6 +2718,109 @@
               "null"
             ],
             "description": "Cursor for the next page, or `null` on the last page."
+          }
+        }
+      },
+      "Page_CorrelatedDeviceDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One tailnet device with its Fleet-machine candidates (evidence only).",
+              "required": [
+                "nodeId",
+                "name",
+                "hostname",
+                "os",
+                "addresses",
+                "tags",
+                "user",
+                "candidates"
+              ],
+              "properties": {
+                "addresses": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The Tailscale addresses."
+                },
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CorrelationCandidateDto"
+                  },
+                  "description": "Existing machines this device may be — evidence, never merged."
+                },
+                "connectedToControl": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Whether the device recently connected to control."
+                },
+                "hostname": {
+                  "type": "string",
+                  "description": "The short hostname."
+                },
+                "id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The device's legacy numeric identifier, when carried."
+                },
+                "lastSeen": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "When the device was last seen, when carried."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The `MagicDNS` name."
+                },
+                "nodeId": {
+                  "type": "string",
+                  "description": "The device's preferred identifier (`nodeId`)."
+                },
+                "online": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Whether the device reports itself online."
+                },
+                "os": {
+                  "type": "string",
+                  "description": "The device's operating system."
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Tailnet policy tags."
+                },
+                "user": {
+                  "type": "string",
+                  "description": "The registering user."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
           }
         }
       },
@@ -3210,6 +3742,40 @@
           }
         }
       },
+      "Resource_TailnetStatusDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The integration's status: configured or not, the client id, and the\nfixed read-only scope.",
+            "required": [
+              "configured",
+              "scope"
+            ],
+            "properties": {
+              "clientId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The configured client identifier, when any. Not secret."
+              },
+              "configured": {
+                "type": "boolean",
+                "description": "Whether an OAuth client is configured."
+              },
+              "scope": {
+                "type": "string",
+                "description": "The scope the integration requests: always `devices:core:read`."
+              }
+            }
+          }
+        }
+      },
       "Retry": {
         "type": "string",
         "description": "Whether and how a caller may retry a failed request.",
@@ -3267,6 +3833,31 @@
           }
         }
       },
+      "TailnetStatusDto": {
+        "type": "object",
+        "description": "The integration's status: configured or not, the client id, and the\nfixed read-only scope.",
+        "required": [
+          "configured",
+          "scope"
+        ],
+        "properties": {
+          "clientId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The configured client identifier, when any. Not secret."
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "Whether an OAuth client is configured."
+          },
+          "scope": {
+            "type": "string",
+            "description": "The scope the integration requests: always `devices:core:read`."
+          }
+        }
+      },
       "TestOutcomeDto": {
         "type": "object",
         "description": "The outcome of the connect check a test performed, when it ran.",
@@ -3316,6 +3907,10 @@
     {
       "name": "machines",
       "description": "The operational machine view: identity, endpoints, capability facts, connectivity state, and the last observation. Endpoint references are redacted unless the caller may read sensitive endpoint detail."
+    },
+    {
+      "name": "tailnet",
+      "description": "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
     },
     {
       "name": "nodes",

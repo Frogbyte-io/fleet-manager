@@ -82,6 +82,7 @@ async fn controller() -> TestController {
         Some(store.pool().clone()),
         Some(&services),
         None,
+        None,
     );
     TestController {
         _dist: dist,

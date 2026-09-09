@@ -172,6 +172,17 @@ export interface ApiError {
 }
 
 /**
+ * The configure request: the OAuth client's id and secret. The secret is
+ * stored encrypted and never returned by any endpoint.
+ */
+export interface ConfigureTailnetRequest {
+  /** The OAuth client identifier. */
+  clientId: string;
+  /** The OAuth client secret (write-only). */
+  clientSecret: string;
+}
+
+/**
  * The body of the confirm-host-key request.
  */
 export interface ConfirmHostKeyRequest {
@@ -180,6 +191,64 @@ export interface ConfirmHostKeyRequest {
      * fingerprint the host presented.
      */
   fingerprint: string;
+}
+
+/**
+ * One Fleet machine a tailnet device may be.
+ */
+export interface CorrelationCandidateDto {
+  /** Why: `address_match` or `name_match`. */
+  kind: string;
+  /** The existing machine's identity. */
+  machineId: string;
+  /** The existing machine's name. */
+  machineName: string;
+  /** The machine's derived connectivity state. */
+  machineStatus: string;
+  /** The matching endpoint reference. */
+  reference: string;
+}
+
+/**
+ * One tailnet device with its Fleet-machine candidates (evidence only).
+ */
+export interface CorrelatedDeviceDto {
+  /** The Tailscale addresses. */
+  addresses: string[];
+  /** Existing machines this device may be — evidence, never merged. */
+  candidates: CorrelationCandidateDto[];
+  /**
+     * Whether the device recently connected to control.
+     * @nullable
+     */
+  connectedToControl?: boolean | null;
+  /** The short hostname. */
+  hostname: string;
+  /**
+     * The device's legacy numeric identifier, when carried.
+     * @nullable
+     */
+  id?: string | null;
+  /**
+     * When the device was last seen, when carried.
+     * @nullable
+     */
+  lastSeen?: string | null;
+  /** The `MagicDNS` name. */
+  name: string;
+  /** The device's preferred identifier (`nodeId`). */
+  nodeId: string;
+  /**
+     * Whether the device reports itself online.
+     * @nullable
+     */
+  online?: boolean | null;
+  /** The device's operating system. */
+  os: string;
+  /** Tailnet policy tags. */
+  tags: string[];
+  /** The registering user. */
+  user: string;
 }
 
 /**
@@ -325,6 +394,20 @@ export interface EnrollmentTokenDto {
 export interface EnrollmentTokenListDto {
   /** The machine's tokens, newest first. */
   items: EnrollmentTokenDto[];
+}
+
+/**
+ * The import request: the SSH login user and port for the draft.
+ */
+export interface ImportTailnetDeviceRequest {
+  /**
+     * The SSH port; 22 when omitted.
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /** The SSH login user on the target machine. */
+  user: string;
 }
 
 /**
@@ -655,6 +738,61 @@ export interface PageInfo {
      * @nullable
      */
   nextCursor?: string | null;
+}
+
+/**
+ * One tailnet device with its Fleet-machine candidates (evidence only).
+ */
+export type PageCorrelatedDeviceDtoItemsItem = {
+  /** The Tailscale addresses. */
+  addresses: string[];
+  /** Existing machines this device may be — evidence, never merged. */
+  candidates: CorrelationCandidateDto[];
+  /**
+     * Whether the device recently connected to control.
+     * @nullable
+     */
+  connectedToControl?: boolean | null;
+  /** The short hostname. */
+  hostname: string;
+  /**
+     * The device's legacy numeric identifier, when carried.
+     * @nullable
+     */
+  id?: string | null;
+  /**
+     * When the device was last seen, when carried.
+     * @nullable
+     */
+  lastSeen?: string | null;
+  /** The `MagicDNS` name. */
+  name: string;
+  /** The device's preferred identifier (`nodeId`). */
+  nodeId: string;
+  /**
+     * Whether the device reports itself online.
+     * @nullable
+     */
+  online?: boolean | null;
+  /** The device's operating system. */
+  os: string;
+  /** Tailnet policy tags. */
+  tags: string[];
+  /** The registering user. */
+  user: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageCorrelatedDeviceDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageCorrelatedDeviceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -1196,6 +1334,36 @@ export interface ResourceOperationDto {
 }
 
 /**
+ * The integration's status: configured or not, the client id, and the
+ * fixed read-only scope.
+ */
+export type ResourceTailnetStatusDtoData = {
+  /**
+     * The configured client identifier, when any. Not secret.
+     * @nullable
+     */
+  clientId?: string | null;
+  /** Whether an OAuth client is configured. */
+  configured: boolean;
+  /** The scope the integration requests: always `devices:core:read`. */
+  scope: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceTailnetStatusDto {
+  /**
+     * The integration's status: configured or not, the client id, and the
+     * fixed read-only scope.
+     */
+  data: ResourceTailnetStatusDtoData;
+}
+
+/**
  * The system view served at `/api/v1/system`.
  */
 export interface SystemInfo {
@@ -1213,6 +1381,22 @@ export interface SystemInfo {
   trustWarning: string;
   /** The controller's build version. */
   version: string;
+}
+
+/**
+ * The integration's status: configured or not, the client id, and the
+ * fixed read-only scope.
+ */
+export interface TailnetStatusDto {
+  /**
+     * The configured client identifier, when any. Not secret.
+     * @nullable
+     */
+  clientId?: string | null;
+  /** Whether an OAuth client is configured. */
+  configured: boolean;
+  /** The scope the integration requests: always `devices:core:read`. */
+  scope: string;
 }
 
 export type ListMachinesParams = {
@@ -1253,6 +1437,18 @@ export type ListOperationsParams = {
  * @minimum 0
  */
 limit?: number;
+};
+
+export type ListTailnetDevicesParams = {
+/**
+ * The maximum number of devices to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor from a previous page (the last device's node id).
+ */
+cursor?: string;
 };
 
 export type listMachinesResponse200 = {
@@ -2530,4 +2726,324 @@ export const getSystemInfo = async ( options?: RequestInit): Promise<getSystemIn
 
   const data: getSystemInfoResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getSystemInfoResponse
+}
+
+
+
+export type configureTailnetResponse200 = {
+  data: ResourceTailnetStatusDto
+  status: 200
+}
+
+export type configureTailnetResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type configureTailnetResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type configureTailnetResponseSuccess = (configureTailnetResponse200) & {
+  headers: Headers;
+};
+export type configureTailnetResponseError = (configureTailnetResponse400 | configureTailnetResponse403) & {
+  headers: Headers;
+};
+
+export type configureTailnetResponse = (configureTailnetResponseSuccess | configureTailnetResponseError)
+
+export const getConfigureTailnetUrl = () => {
+
+
+
+
+  return `/api/v1/tailnet/config`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Stores the OAuth client. The secret is write-only.
+ */
+export const configureTailnet = async (configureTailnetRequest: ConfigureTailnetRequest, options?: RequestInit): Promise<configureTailnetResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getConfigureTailnetUrl(),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(configureTailnetRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: configureTailnetResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as configureTailnetResponse
+}
+
+
+
+export type clearTailnetResponse200 = {
+  data: ResourceTailnetStatusDto
+  status: 200
+}
+
+export type clearTailnetResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearTailnetResponseSuccess = (clearTailnetResponse200) & {
+  headers: Headers;
+};
+export type clearTailnetResponseError = (clearTailnetResponse403) & {
+  headers: Headers;
+};
+
+export type clearTailnetResponse = (clearTailnetResponseSuccess | clearTailnetResponseError)
+
+export const getClearTailnetUrl = () => {
+
+
+
+
+  return `/api/v1/tailnet/config`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Removes the stored OAuth client.
+ */
+export const clearTailnet = async ( options?: RequestInit): Promise<clearTailnetResponse> => {
+
+  const res = await fetch(getClearTailnetUrl(),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearTailnetResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearTailnetResponse
+}
+
+
+
+export type listTailnetDevicesResponse200 = {
+  data: PageCorrelatedDeviceDto
+  status: 200
+}
+
+export type listTailnetDevicesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listTailnetDevicesResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type listTailnetDevicesResponse429 = {
+  data: ApiError
+  status: 429
+}
+
+export type listTailnetDevicesResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type listTailnetDevicesResponseSuccess = (listTailnetDevicesResponse200) & {
+  headers: Headers;
+};
+export type listTailnetDevicesResponseError = (listTailnetDevicesResponse403 | listTailnetDevicesResponse409 | listTailnetDevicesResponse429 | listTailnetDevicesResponse502) & {
+  headers: Headers;
+};
+
+export type listTailnetDevicesResponse = (listTailnetDevicesResponseSuccess | listTailnetDevicesResponseError)
+
+export const getListTailnetDevicesUrl = (params?: ListTailnetDevicesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/tailnet/devices?${stringifiedParams}` : `/api/v1/tailnet/devices`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unconfigured
+ * integration, a source failure, or a backend failure.
+ * @summary Lists the tailnet's devices, correlated with Fleet machines by evidence
+only.
+ */
+export const listTailnetDevices = async (params?: ListTailnetDevicesParams, options?: RequestInit): Promise<listTailnetDevicesResponse> => {
+
+  const res = await fetch(getListTailnetDevicesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listTailnetDevicesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listTailnetDevicesResponse
+}
+
+
+
+export type importTailnetDeviceResponse201 = {
+  data: ResourceOnboardingDraftDetailDto
+  status: 201
+}
+
+export type importTailnetDeviceResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type importTailnetDeviceResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type importTailnetDeviceResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type importTailnetDeviceResponseSuccess = (importTailnetDeviceResponse201) & {
+  headers: Headers;
+};
+export type importTailnetDeviceResponseError = (importTailnetDeviceResponse403 | importTailnetDeviceResponse404 | importTailnetDeviceResponse409) & {
+  headers: Headers;
+};
+
+export type importTailnetDeviceResponse = (importTailnetDeviceResponseSuccess | importTailnetDeviceResponseError)
+
+export const getImportTailnetDeviceUrl = (nodeId: string,) => {
+
+
+
+
+  return `/api/v1/tailnet/devices/${nodeId}/import`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown device, or a
+ * backend failure.
+ * @summary Imports a tailnet device as an SSH onboarding draft: the draft carries
+the device's Tailscale IPv4 address; everything after is the standard
+staged flow (test, explicit fingerprint confirm, review, add).
+ */
+export const importTailnetDevice = async (nodeId: string,
+    importTailnetDeviceRequest: ImportTailnetDeviceRequest, options?: RequestInit): Promise<importTailnetDeviceResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getImportTailnetDeviceUrl(nodeId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(importTailnetDeviceRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: importTailnetDeviceResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as importTailnetDeviceResponse
+}
+
+
+
+export type getTailnetStatusResponse200 = {
+  data: ResourceTailnetStatusDto
+  status: 200
+}
+
+export type getTailnetStatusResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getTailnetStatusResponseSuccess = (getTailnetStatusResponse200) & {
+  headers: Headers;
+};
+export type getTailnetStatusResponseError = (getTailnetStatusResponse403) & {
+  headers: Headers;
+};
+
+export type getTailnetStatusResponse = (getTailnetStatusResponseSuccess | getTailnetStatusResponseError)
+
+export const getGetTailnetStatusUrl = () => {
+
+
+
+
+  return `/api/v1/tailnet/status`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary The integration's status.
+ */
+export const getTailnetStatus = async ( options?: RequestInit): Promise<getTailnetStatusResponse> => {
+
+  const res = await fetch(getGetTailnetStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getTailnetStatusResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getTailnetStatusResponse
 }
