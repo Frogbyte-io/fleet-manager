@@ -46,8 +46,8 @@ impl OnboardingPort for OnboardingRepository {
         sqlx::query(
             "INSERT INTO onboarding_drafts \
              (id, endpoint_user, endpoint_host, endpoint_port, auth_type, identity_path, \
-              name, description, tags_json, groups_json, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+              name, description, tags_json, groups_json, idempotency_key, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         )
         .bind(&id)
         .bind(&draft.endpoint.user)
@@ -59,11 +59,28 @@ impl OnboardingPort for OnboardingRepository {
         .bind(&draft.description)
         .bind(to_json(&draft.tags)?)
         .bind(to_json(&draft.groups)?)
+        .bind(draft.idempotency_key.as_deref())
         .bind(now)
         .execute(&self.pool)
         .await
         .map_err(|error| backend("create", &error))?;
         self.get(&id).await
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<OnboardingDraft>, PortFailure> {
+        let row: Option<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM onboarding_drafts WHERE idempotency_key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| backend("find_by_idempotency_key", &error))?;
+        match row {
+            Some(row) => Ok(Some(hydrate(&row)?)),
+            None => Ok(None),
+        }
     }
 
     async fn get(&self, id: &str) -> Result<OnboardingDraft, PortFailure> {
@@ -229,6 +246,7 @@ fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Result<OnboardingDraft, PortFailure
         facts,
         discovery_source: row.get("discovery_source"),
         discovered_at: row.get("discovered_at"),
+        idempotency_key: row.get("idempotency_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })

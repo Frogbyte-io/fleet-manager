@@ -222,6 +222,9 @@ pub struct OnboardingDraft {
     /// What observed the facts, e.g. `agentless/1`; carried onto the
     /// machine's snapshot at add time.
     pub discovery_source: Option<String>,
+    /// The caller's idempotency key, when the draft was created through an
+    /// idempotent request; replays return this draft.
+    pub idempotency_key: Option<String>,
     /// When discovery completed (epoch milliseconds).
     pub discovered_at: Option<i64>,
     /// Creation time (epoch milliseconds).
@@ -267,6 +270,10 @@ pub struct NewDraft {
     pub tags: Vec<String>,
     /// Groups carried onto the machine.
     pub groups: Vec<String>,
+    /// The caller's idempotency key, when one was supplied: replaying a
+    /// create with the same key returns the original draft instead of
+    /// creating a second one. None for ordinary UI drafts.
+    pub idempotency_key: Option<String>,
 }
 
 /// The storage contract for onboarding drafts. Drafts are controller-owned
@@ -279,6 +286,15 @@ pub trait OnboardingPort: fmt::Debug + Send + Sync {
     ///
     /// Fails on a backend error.
     async fn create(&self, draft: &NewDraft) -> Result<OnboardingDraft, PortFailure>;
+    /// The draft carrying this idempotency key, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a backend error.
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<OnboardingDraft>, PortFailure>;
     /// Reads one draft.
     ///
     /// # Errors
@@ -498,6 +514,19 @@ impl Onboarding {
         )
         .map_err(OnboardingUseCaseError::Denied)?;
         validate_new_draft(&new)?;
+
+        // Idempotent replay: the same key returns the original draft rather
+        // than creating a second one.
+        if let Some(key) = &new.idempotency_key
+            && let Some(existing) = self
+                .drafts
+                .find_by_idempotency_key(key)
+                .await
+                .map_err(|failure| map_port("find_by_idempotency_key", failure))?
+        {
+            let sensitive = self.may_read_sensitive(authorizer, principal, &existing.id);
+            return Ok(assemble_view(existing, sensitive, Vec::new()));
+        }
 
         let draft = self
             .drafts

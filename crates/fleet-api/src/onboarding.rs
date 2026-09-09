@@ -418,6 +418,7 @@ pub async fn create_onboarding_draft(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CreateOnboardingDraftRequest>,
 ) -> Result<(StatusCode, Json<Resource<OnboardingDraftDto>>), ApiErrorResponse> {
     let onboarding = onboarding_or_error(&state, correlation_id)?;
@@ -441,6 +442,10 @@ pub async fn create_onboarding_draft(
                 description: request.description.unwrap_or_default(),
                 tags: request.tags,
                 groups: request.groups,
+                idempotency_key: headers
+                    .get(crate::IDEMPOTENCY_KEY_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned),
             },
         )
         .await

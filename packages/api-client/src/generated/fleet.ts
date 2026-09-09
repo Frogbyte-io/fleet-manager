@@ -1445,6 +1445,10 @@ export type ListTailnetDevicesParams = {
  * @minimum 0
  */
 limit?: number;
+/**
+ * The opaque cursor from a previous page (the last device's node id).
+ */
+cursor?: string;
 };
 
 export type listMachinesResponse200 = {

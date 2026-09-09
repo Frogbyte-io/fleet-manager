@@ -115,13 +115,13 @@ impl TailnetDevice {
         Ok(())
     }
 
-    /// The device's first IPv4 address, when any — the onboarding draft's
-    /// candidate host.
+    /// The device's first real IPv4 address (parsed, not prefix-guessed),
+    /// when any — the onboarding draft's candidate host.
     #[must_use]
     pub fn ipv4(&self) -> Option<&str> {
         self.addresses
             .iter()
-            .find(|address| address.starts_with("100."))
+            .find(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
             .map(String::as_str)
     }
 }
@@ -468,7 +468,21 @@ impl TailnetIntegration {
             })?;
         self.audit_event(principal, "tailscale_configured", Some(client_id))
             .await?;
-        self.status(authorizer, principal).await
+        // The mutator earned this decision already; re-asking tailscale.read
+        // would fail a principal allowed to configure but not to list.
+        let stored =
+            self.credentials
+                .load()
+                .await
+                .map_err(|detail| TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail,
+                })?;
+        Ok(TailnetStatus {
+            configured: stored.is_some(),
+            client_id: stored.map(|credentials| credentials.client_id),
+            scope: TAILNET_SCOPE,
+        })
     }
 
     /// Removes the stored OAuth client. Fleet keeps no other trace: no
@@ -500,7 +514,19 @@ impl TailnetIntegration {
             })?;
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;
-        self.status(authorizer, principal).await
+        let stored =
+            self.credentials
+                .load()
+                .await
+                .map_err(|detail| TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail,
+                })?;
+        Ok(TailnetStatus {
+            configured: stored.is_some(),
+            client_id: stored.map(|credentials| credentials.client_id),
+            scope: TAILNET_SCOPE,
+        })
     }
 
     /// Lists the tailnet's devices, each correlated against Fleet machines
@@ -538,18 +564,39 @@ impl TailnetIntegration {
                 TailnetUseCaseError::Source(TailnetSourceError::InvalidPayload { detail })
             })?;
         }
-        let machines = self
-            .machines
-            .list(authorizer, principal, &MachineFilter::default(), 200, now)
-            .await
-            .map_err(|error| TailnetUseCaseError::Backend {
-                context: "correlation",
-                detail: error.to_string(),
-            })?;
+        // Correlation needs the machine surface, but its denial is a
+        // degraded answer, not a failure: devices still list, candidates
+        // come back empty. The limit matches the machine read model's page
+        // bound; correlation beyond it is re-run per page until exhausted.
+        // Correlation needs the machine surface, but its denial is a
+        // degraded answer, not a failure: devices still list, candidates
+        // come back empty. The bound is the machine read model's own page
+        // cap; a fleet beyond it needs a correlation-specific query (a
+        // documented follow-up), not a silent truncation here.
+        let machine_read = authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: None,
+            },
+        )
+        .is_ok();
+        let views = if machine_read {
+            self.machines
+                .list(authorizer, principal, &MachineFilter::default(), 200, now)
+                .await
+                .map_err(|error| TailnetUseCaseError::Backend {
+                    context: "correlation",
+                    detail: error.to_string(),
+                })?
+        } else {
+            Vec::new()
+        };
         Ok(devices
             .into_iter()
             .map(|device| {
-                let candidates = machines
+                let candidates = views
                     .iter()
                     .filter_map(|view| {
                         let sensitive = authorize(
@@ -563,10 +610,18 @@ impl TailnetIntegration {
                         .is_ok();
                         let matching = view.endpoints.iter().find_map(|endpoint| {
                             let (_, host_port) = endpoint.reference.rsplit_once('@')?;
-                            let (host, _) = host_port.rsplit_once(':')?;
                             if !sensitive {
                                 return None;
                             }
+                            // Bracketed IPv6 (rare in endpoint references
+                            // but legal) strips before comparison.
+                            let host_port = match host_port.strip_prefix('[') {
+                                Some(rest) => {
+                                    rest.split_once(']').map_or(host_port, |(inner, _)| inner)
+                                }
+                                None => host_port,
+                            };
+                            let (host, _) = host_port.rsplit_once(':')?;
                             // The device's names: the short hostname, the
                             // full MagicDNS name (with its trailing dot
                             // stripped), and the MagicDNS first label.
@@ -619,6 +674,7 @@ impl TailnetIntegration {
         node_id: &str,
         user: &str,
         port: Option<u16>,
+        idempotency_key: Option<&str>,
     ) -> Result<DraftView, TailnetUseCaseError> {
         authorize(
             authorizer,
@@ -676,6 +732,7 @@ impl TailnetIntegration {
                     ),
                     tags: Vec::new(),
                     groups: Vec::new(),
+                    idempotency_key: idempotency_key.map(str::to_owned),
                 },
             )
             .await

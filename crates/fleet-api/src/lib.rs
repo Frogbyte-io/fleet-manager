@@ -110,7 +110,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         ),
         (
             name = "tailnet",
-            description = "Optional Tailscale discovery: integration status, correlated tailnet devices,                            and the import handoff into the onboarding flow. Correlation is evidence only;                            Fleet identity never derives from Tailscale."
+            description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
         ),
         (
             name = "nodes",

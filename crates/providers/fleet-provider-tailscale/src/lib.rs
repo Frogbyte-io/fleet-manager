@@ -16,6 +16,10 @@
 //! recorded fixtures; the real transport is reqwest over rustls. The crate
 //! is async on purpose: its caller (the controller's use case) is async.
 //!
+//! The upstream API answers all devices at once; the provider rejects
+//! responses beyond [`MAX_DEVICES`] rather than materializing unbounded
+//! foreign data, and the application layer's own bounds apply afterwards.
+//!
 //! Known upstream limitation (documented, not worked around): access tokens
 //! derived from an OAuth client see only tailnet-owned devices, not devices
 //! shared *into* the tailnet.
@@ -40,9 +44,12 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// The token is refreshed this long before its documented expiry, so a
 /// listing never rides a token that dies mid-flight.
 pub const TOKEN_REFRESH_MARGIN_MILLIS: i64 = 60_000;
+/// The largest device list the provider materializes. A tailnet beyond
+/// this bound is refused rather than silently truncated.
+pub const MAX_DEVICES: usize = 1000;
 
 /// One HTTP request the provider needs, in transport-neutral form.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpRequest {
     /// The absolute URL.
     pub url: String,
@@ -53,6 +60,19 @@ pub struct HttpRequest {
     pub authorization: String,
     /// The form body, when the request carries one.
     pub form: Option<Vec<(String, String)>>,
+}
+
+impl fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The Authorization header carries the client secret (Basic) or a
+        // bearer token; neither may ever surface in diagnostics.
+        f.debug_struct("HttpRequest")
+            .field("url", &self.url)
+            .field("method", &self.method)
+            .field("authorization", &"[REDACTED]")
+            .field("form", &self.form.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// The HTTP response in transport-neutral form.
@@ -72,12 +92,7 @@ impl HttpResponse {
     pub fn bounded_text(&self) -> String {
         let text = String::from_utf8_lossy(&self.body);
         let line = text.lines().map(str::trim).find(|l| !l.is_empty());
-        let detail = line.unwrap_or("no detail");
-        if detail.len() > 200 {
-            format!("{}…", &detail[..200])
-        } else {
-            detail.to_owned()
-        }
+        truncate(line.unwrap_or("no detail"))
     }
 }
 
@@ -94,9 +109,12 @@ pub trait Transport: fmt::Debug + Send + Sync {
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, String>;
 }
 
-/// A cached OAuth access token: the bearer value and its expiry.
+/// A cached OAuth access token: the bearer value, its expiry, and the
+/// client it was minted for. Keying by client keeps a reconfigured
+/// integration from riding the previous client's token for its TTL.
 #[derive(Clone, Debug)]
 struct CachedToken {
+    client_id: String,
     bearer: String,
     expires_at_unix_millis: i64,
 }
@@ -148,6 +166,7 @@ impl TailscaleClient {
         {
             let cached = self.token.lock().expect("the token cache must lock");
             if let Some(token) = cached.as_ref()
+                && token.client_id == credentials.client_id
                 && now_unix_millis < token.expires_at_unix_millis - TOKEN_REFRESH_MARGIN_MILLIS
             {
                 return Ok(token.bearer.clone());
@@ -183,6 +202,11 @@ impl TailscaleClient {
                 detail: response.bounded_text(),
             });
         }
+        if response.status == 429 {
+            return Err(TailnetSourceError::RateLimited {
+                retry_after_secs: response.retry_after_secs,
+            });
+        }
         if !(200..300).contains(&response.status) {
             return Err(TailnetSourceError::Http {
                 status: response.status,
@@ -195,6 +219,7 @@ impl TailscaleClient {
             }
         })?;
         let cached = CachedToken {
+            client_id: credentials.client_id.clone(),
             bearer: token.access_token,
             expires_at_unix_millis: now_unix_millis + token.expires_in.unwrap_or(3600) * 1000,
         };

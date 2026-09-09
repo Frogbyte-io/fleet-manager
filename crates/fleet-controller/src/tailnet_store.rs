@@ -77,23 +77,12 @@ impl TailnetCredentialStore for SecretBackedTailnetStore {
     }
 
     async fn store(&self, client_id: &str, client_secret: &str) -> Result<(), String> {
-        // Replace semantics: clear then create, in that order. The store is
-        // the only writer of these two names.
-        self.clear().await?;
-        self.secrets
-            .create(
-                CLIENT_ID_RECORD,
-                SecretValue::new(client_id.as_bytes().to_vec()),
-            )
-            .await
-            .map_err(|error| format!("cannot store the client id: {error}"))?;
-        self.secrets
-            .create(
-                CLIENT_SECRET_RECORD,
-                SecretValue::new(client_secret.as_bytes().to_vec()),
-            )
-            .await
-            .map_err(|error| format!("cannot store the client secret: {error}"))?;
+        // Replace semantics through upserts, never delete-then-create: a
+        // failed second write must not leave one client's id paired with
+        // another client's secret. The fixed names make this a two-row
+        // upsert; a concurrent configure is a lost race retried once.
+        self.upsert(CLIENT_ID_RECORD, client_id).await?;
+        self.upsert(CLIENT_SECRET_RECORD, client_secret).await?;
         Ok(())
     }
 
@@ -107,6 +96,40 @@ impl TailnetCredentialStore for SecretBackedTailnetStore {
             }
         }
         Ok(())
+    }
+}
+
+impl SecretBackedTailnetStore {
+    /// Creates the record or, when a concurrent configure created it first,
+    /// updates the winner's row — either way the pair ends consistent.
+    async fn upsert(&self, name: &'static str, value: &str) -> Result<(), String> {
+        if let Some(id) = self.record_id(name).await? {
+            return self
+                .secrets
+                .update(&id, SecretValue::new(value.as_bytes().to_vec()))
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("cannot update {name:?}: {error}"));
+        }
+        match self
+            .secrets
+            .create(name, SecretValue::new(value.as_bytes().to_vec()))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(fleet_secrets::SecretError::DuplicateName { .. }) => {
+                let id = self
+                    .record_id(name)
+                    .await?
+                    .ok_or_else(|| format!("cannot store {name:?}: vanished after the race"))?;
+                self.secrets
+                    .update(&id, SecretValue::new(value.as_bytes().to_vec()))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| format!("cannot update {name:?}: {error}"))
+            }
+            Err(other) => Err(format!("cannot store {name:?}: {other}")),
+        }
     }
 }
 

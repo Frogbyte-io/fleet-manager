@@ -342,6 +342,8 @@ pub async fn clear_tailnet(
 pub struct ListTailnetDevicesParams {
     /// The maximum number of devices to return.
     pub limit: Option<u32>,
+    /// The opaque cursor from a previous page (the last device's node id).
+    pub cursor: Option<String>,
 }
 
 /// Lists the tailnet's devices, correlated with Fleet machines by evidence
@@ -357,7 +359,8 @@ pub struct ListTailnetDevicesParams {
     tag = "tailnet",
     operation_id = "listTailnetDevices",
     params(
-        ("limit" = Option<u32>, Query, description = "The maximum number of devices to return.")
+        ("limit" = Option<u32>, Query, description = "The maximum number of devices to return."),
+        ("cursor" = Option<String>, Query, description = "The opaque cursor from a previous page (the last device's node id).")
     ),
     responses(
         (
@@ -466,6 +469,7 @@ pub async fn import_tailnet_device(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Path(node_id): Path<String>,
     Json(request): Json<ImportTailnetDeviceRequest>,
 ) -> Result<
@@ -484,6 +488,9 @@ pub async fn import_tailnet_device(
             &node_id,
             &request.user,
             request.port,
+            headers
+                .get(crate::IDEMPOTENCY_KEY_HEADER)
+                .and_then(|value| value.to_str().ok()),
         )
         .await
         .map_err(|error| map_tailnet_error(&error, correlation_id))?;

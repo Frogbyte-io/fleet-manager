@@ -307,11 +307,25 @@ impl OnboardingPort for FakeOnboarding {
             facts: Vec::new(),
             discovery_source: None,
             discovered_at: None,
+            idempotency_key: draft.idempotency_key.clone(),
             created_at: now,
             updated_at: now,
         };
         self.drafts.lock().unwrap().push(created.clone());
         Ok(created)
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<fleet_application::onboarding::OnboardingDraft>, PortFailure> {
+        Ok(self
+            .drafts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|draft| draft.idempotency_key.as_deref() == Some(key))
+            .cloned())
     }
 
     async fn get(
@@ -556,7 +570,7 @@ async fn import_hands_the_device_to_the_onboarding_flow() {
 
     let draft = fixture
         .tailnet
-        .import(&AllowAll, &principal(), "nABC", "ops", Some(2222))
+        .import(&AllowAll, &principal(), "nABC", "ops", Some(2222), None)
         .await
         .unwrap();
     assert_eq!(draft.endpoint.host, "100.87.74.78");
@@ -590,7 +604,7 @@ async fn import_refuses_an_unknown_device_or_a_device_without_an_ipv4() {
 
     let unknown = fixture
         .tailnet
-        .import(&AllowAll, &principal(), "nMISSING", "ops", None)
+        .import(&AllowAll, &principal(), "nMISSING", "ops", None, None)
         .await
         .unwrap_err();
     assert!(
@@ -600,7 +614,7 @@ async fn import_refuses_an_unknown_device_or_a_device_without_an_ipv4() {
 
     let no_ipv4 = fixture
         .tailnet
-        .import(&AllowAll, &principal(), "nABC", "ops", None)
+        .import(&AllowAll, &principal(), "nABC", "ops", None, None)
         .await
         .unwrap_err();
     assert!(
@@ -623,7 +637,7 @@ async fn an_unconfigured_integration_refuses_listing_and_import() {
     assert!(matches!(listing, TailnetUseCaseError::Unconfigured));
     let import = fixture
         .tailnet
-        .import(&AllowAll, &principal(), "n1", "ops", None)
+        .import(&AllowAll, &principal(), "n1", "ops", None, None)
         .await
         .unwrap_err();
     assert!(matches!(import, TailnetUseCaseError::Unconfigured));
@@ -720,7 +734,7 @@ async fn the_use_case_error_maps_the_onboarding_denial() {
     // check fires.
     let denied = fixture
         .tailnet
-        .import(&DenyAll, &principal(), "nABC", "ops", None)
+        .import(&DenyAll, &principal(), "nABC", "ops", None, None)
         .await
         .unwrap_err();
     assert!(matches!(denied, TailnetUseCaseError::Denied(_)));
@@ -730,7 +744,14 @@ async fn the_use_case_error_maps_the_onboarding_denial() {
     let machine_create_denied = MachineCreateDenied;
     let denied = fixture
         .tailnet
-        .import(&machine_create_denied, &principal(), "nABC", "ops", None)
+        .import(
+            &machine_create_denied,
+            &principal(),
+            "nABC",
+            "ops",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(

@@ -862,7 +862,12 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::MachinesOnboardTest { .. }
             | Command::MachinesOnboardDiscover { .. }
             | Command::MachinesOnboardAdd { .. }
-            | Command::MachinesOnboardCancel { .. } => render_onboarding(Some(payload)),
+            | Command::MachinesOnboardCancel { .. }
+            | Command::TailnetImport { .. } => render_onboarding(Some(payload)),
+            Command::TailnetStatus
+            | Command::TailnetConfigure { .. }
+            | Command::TailnetClear
+            | Command::TailnetDevices { .. } => render_tailnet(Some(payload)),
             _ => render_text(Some(payload)),
         },
     }
@@ -1461,6 +1466,84 @@ fn render_onboarding(value: Option<&Value>) -> String {
         return lines.join("\n");
     }
     draft_detail(value)
+}
+
+/// Renders the tailnet surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_tailnet_for_test(value: &Value) -> String {
+    render_tailnet(Some(value))
+}
+
+fn render_tailnet(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<22} {:<12} {:<30} {}",
+            "NODE ID", "STATE", "DEVICE", "FLEET CANDIDATES"
+        )];
+        for item in items {
+            let state = if item["connectedToControl"] == true {
+                "connected"
+            } else if item["online"] == true {
+                "online"
+            } else {
+                "offline"
+            };
+            let candidates = item["candidates"]
+                .as_array()
+                .map(|candidates| {
+                    candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            Some(format!(
+                                "{} ({})",
+                                candidate["machineName"].as_str()?,
+                                candidate["kind"].as_str()?
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let device = format!(
+                "{} {}",
+                item["hostname"].as_str().unwrap_or("-"),
+                item["addresses"]
+                    .as_array()
+                    .and_then(|addresses| addresses.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+            );
+            lines.push(format!(
+                "{:<22} {:<12} {:<30} {}",
+                item["nodeId"].as_str().unwrap_or("-"),
+                state,
+                device,
+                if candidates.is_empty() {
+                    "-"
+                } else {
+                    &candidates
+                }
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no tailnet devices)".to_owned());
+        }
+        return lines.join("\n");
+    }
+    // Status/configure/clear answer: key facts only.
+    let mut lines = Vec::new();
+    for (key, val) in value.as_object().into_iter().flatten() {
+        let rendered = match val {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        lines.push(format!("{key}: {rendered}"));
+    }
+    lines.join("\n")
 }
 
 fn draft_detail(draft: &Value) -> String {

@@ -141,8 +141,7 @@ impl Permission {
             | Permission::SecretList
             | Permission::AuditRead
             | Permission::MachineRead
-            | Permission::NodeRead
-            | Permission::TailnetRead => false,
+            | Permission::NodeRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -154,7 +153,8 @@ impl Permission {
             | Permission::MachineDelete
             | Permission::NodeEnroll
             | Permission::NodeRevoke
-            | Permission::TailnetConfig => true,
+            | Permission::TailnetConfig
+            | Permission::TailnetRead => true,
         }
     }
 
