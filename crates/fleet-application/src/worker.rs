@@ -121,10 +121,40 @@ impl Operations {
         now: i64,
         lease_ms: i64,
     ) -> Result<TickReport, String> {
+        let mut report = self.maintain(now, lease_ms).await?;
+
+        // Claim and execute one pending operation. Long hosts drive
+        // `maintain` + `claim_only` and execute in tracked tasks instead, so
+        // maintenance and shutdown stay responsive while work runs.
+        if let Some(claimed) = self.claim_only(worker_id, now, &mut report).await? {
+            report.claimed = true;
+            report.completed = self.execute_claimed(executor, claimed).await;
+        }
+
+        // Make the queue depth visible.
+        let depths = self
+            .port
+            .queue_depths()
+            .await
+            .map_err(|failure| failure.to_string())?;
+        report.pending = depths.pending;
+        report.running = depths.running;
+        Ok(report)
+    }
+
+    /// The non-executing half of a tick: recover dead workers' claims, time
+    /// out what passed its deadline, and observe the queue depths. Runs
+    /// even while long operations execute elsewhere, so a blocked executor
+    /// cannot stall maintenance or the shutdown observation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a maintenance query fails.
+    pub async fn maintain(&self, now: i64, lease_ms: i64) -> Result<TickReport, String> {
         let mut report = TickReport::default();
 
-        // 1. Resolve claims whose worker died. The result is unknown, so the
-        //    operation fails instead of being retried.
+        // Resolve claims whose worker died. The result is unknown, so the
+        // operation fails instead of being retried.
         let expired = self
             .port
             .expired_claims(now, lease_ms)
@@ -138,16 +168,26 @@ impl Operations {
             let error_json =
                 serde_json::json!({ "reason": "worker_lease_expired", "detail": detail })
                     .to_string();
+            // The compare-and-set against the claim timestamp keeps a
+            // delayed heartbeat from stranding live work behind a false
+            // failure: if the heartbeat renewed between the select and this
+            // write, the renewal loses its lease and recovery loses the op.
             if self
-                .complete(&operation.id, "failed", None, Some(&error_json))
+                .port
+                .fail_expired_claim(
+                    &operation.id,
+                    operation.claimed_at.unwrap_or_default(),
+                    now,
+                    &error_json,
+                )
                 .await
-                .is_ok()
+                .unwrap_or(false)
             {
                 report.recovered += 1;
             }
         }
 
-        // 2. Time out what passed its deadline.
+        // Time out what passed its deadline.
         for id in self
             .port
             .sweep_deadlines(now)
@@ -159,55 +199,94 @@ impl Operations {
             }
         }
 
-        // 3. Claim and execute one pending operation.
-        if let Some(claimed) = self
+        // Make the queue depth visible. A metrics failure must not skip
+        // claiming or halt maintenance: depths are observation, not truth.
+        if let Ok(depths) = self.port.queue_depths().await {
+            report.pending = depths.pending;
+            report.running = depths.running;
+        }
+        Ok(report)
+    }
+
+    /// The claim half: one compare-and-set from pending to running. The
+    /// caller owns execution; the claim's lease must be renewed while the
+    /// work runs or the recovery sweep will resolve it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the claim query fails.
+    pub async fn claim_only(
+        &self,
+        worker_id: &str,
+        now: i64,
+        report: &mut TickReport,
+    ) -> Result<Option<Operation>, String> {
+        let claimed = self
             .port
             .claim_pending(worker_id, now)
             .await
-            .map_err(|failure| failure.to_string())?
-        {
+            .map_err(|failure| failure.to_string())?;
+        if let Some(claimed) = claimed {
             report.claimed = true;
-            let completed = if claimed.cancel_requested {
-                // The machine routes a running operation through `cancelling`
-                // on its way out; the request was already durable.
-                let cancelling = self
-                    .port
-                    .transition(&claimed.id, "cancelling")
+            Ok(Some(claimed))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Executes one claimed operation to its terminal state. Hosts that
+    /// execute in tracked tasks call this directly; `tick` composes it.
+    pub async fn execute_claimed(
+        &self,
+        executor: &dyn OperationExecutor,
+        claimed: Operation,
+    ) -> bool {
+        if claimed.cancel_requested {
+            let cancelling = self
+                .port
+                .transition(&claimed.id, "cancelling")
+                .await
+                .is_ok();
+            return cancelling
+                && self
+                    .complete(&claimed.id, "cancelled", None, None)
                     .await
                     .is_ok();
-                cancelling
-                    && self
-                        .complete(&claimed.id, "cancelled", None, None)
-                        .await
-                        .is_ok()
-            } else {
-                match executor.execute(self, &claimed).await {
-                    Ok(()) => true,
-                    Err(detail) => self
-                        .complete(
-                            &claimed.id,
-                            "failed",
-                            None,
-                            Some(
-                                &serde_json::json!({ "reason": "step_failed", "detail": detail })
-                                    .to_string(),
-                            ),
-                        )
-                        .await
-                        .is_ok(),
-                }
-            };
-            report.completed = completed;
         }
+        match executor.execute(self, &claimed).await {
+            Ok(()) => true,
+            Err(detail) => self
+                .complete(
+                    &claimed.id,
+                    "failed",
+                    None,
+                    Some(
+                        &serde_json::json!({ "reason": "step_failed", "detail": detail })
+                            .to_string(),
+                    ),
+                )
+                .await
+                .is_ok(),
+        }
+    }
 
-        // 4. Make the queue depth visible.
-        let depths = self
-            .port
-            .queue_depths()
+    /// Renews a running operation's lease from the worker that owns it. A
+    /// long-running task heartbeats this so the recovery sweep never
+    /// resolves work that is still legitimately running.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the renewal query fails.
+    pub async fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+        lease_ms: i64,
+    ) -> Result<bool, String> {
+        self.port
+            .renew_lease(id, worker_id, now, lease_ms)
             .await
-            .map_err(|failure| failure.to_string())?;
-        report.pending = depths.pending;
-        report.running = depths.running;
-        Ok(report)
+            .map_err(|failure| failure.to_string())
     }
 }
