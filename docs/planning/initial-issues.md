@@ -304,6 +304,64 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 
 **Status: In progress (as of 2026-09-05).** Created as epics #50–#53 with issues #54–#68. Resolved and closed: FM-S05 (spike #68 — SSH transport fallback confirmed), FM-200 (#54 machine model/storage), FM-201 (#55 SSH trust workflow), FM-202 (#56 bounded SSH execution), FM-203 (#57 agentless inventory probes), FM-204 (#58 single-use enrollment tokens, key binding, nonce proof, node credential/session issuance, rotation/revocation — machine-facing endpoints at `/api/node/v1` and the operator surface under `machines/{id}/node`), FM-205 (#59 controller WSS gateway + fleetd client — session-by-proof admission at `GET /api/node/v1/connect`, Hello/Welcome negotiation, one-session-per-node supersede, sparse heartbeat state, bounded-jitter reconnect; revocation now both prevents renewal and disconnects via supersede/close), FM-207 (#61 command dispatch + node journal — `node.noop`/`node.diagnostic`/`node.inventory` operations dispatch through the gateway, the fleetd NDJSON journal dedupes replays and survives torn tails, redelivery replays journaled results, flow control bounds in-flight commands), FM-206 (#60 fleetd inventory — pluggable isolated probes, `node.inventory` as a command kind, node-local baseline/delta with the gap rule, controller ingestion with provenance; no per-snapshot audit churn), FM-208 (#62 constrained local socket API — a `0660` Unix socket at `local.sock` with `SO_PEERCRED` defense in depth, one read (`GET /local/status`: node facts + the controller's public system view), no mutations or forwarding, and `fleetctl status` with local-preferred routing and an explicit `--url` override), FM-209 (#63 machine read surface — `GET /api/v1/machines{,/{id}}` with tag/group/capability/status filters, the hydrated `MachineView` with derived `connected|stale|offline|agentless` status, capability facts with the 24 h staleness rule applied at the read time, the newest observation, permission-aware endpoint redaction behind the new `machine.read.sensitive` question, `fleetctl machines list/get` in human text and `--output json`, the web `MachinesPanel` over the regenerated client, and a vitest component harness run by `cargo xtask verify`). Waves 1–6 are complete as of 2026-09-07: FM-210 (#64, PR #69 — the staged SSH Add Machine workflow with explicit fingerprint confirmation, reviewable facts, duplicate warnings, and the defined draft cleanup), FM-211 (#65, PR #70 — the `cargo xtask package-fleetd` archive, the hardened non-root systemd unit with idempotent install/uninstall, the controller's `/downloads` artifact surface, the `machine.install-fleetd` bootstrap operation whose enrollment token lives only in stdin transit via `fleetd --token-stdin`, and `fleetctl machines install-node`), and FM-212 (#66, PR #71 — the orchestrated one-command upgrade: artifact auto-selection from the machine's facts, live-registry session wait, and inventory verification through the gateway; the web machine detail carries the Install Fleet Node flow). All proven on a real Ubuntu 24.04 VM (install, revoke→reinstall with a fresh key, ACPI reboot with ~15 s auto-reconnect, upgrade without a new token). Epics #50/#51/#52 are closed. FM-213 (#67, PR #74) then completed the milestone: a read-only OAuth integration (scope `devices:core:read`), tailnet devices correlated with Fleet machines by evidence only, and import through the FM-210 trust flow, with the client secret held in Fleet's encrypted store and the whole surface opt-in and removable without affecting Fleet identity; two cubic review rounds (26 findings) were addressed in-PR, and the optional live-tailnet smoke awaits a maintainer OAuth client. FM-214 stays deferred past the first Lab release.
 
+## M3 — Projects, tool providers, and the clone-to-ready workflow
+
+**Status: Planned (as of 2026-09-14).** Created as epic #76 with issues #77–#82. The wave order is: FM-300 (#77 project identity/storage) → FM-301 (#78 checkout discovery + guarded actions) → FM-302 (#79 Skills Manager provider) and FM-303 (#80 Frogenv provider) in parallel → FM-304 (#81 tool inventory + mise) → FM-305 (#82 ready-project workflow, the exit gate). FM-215 (responsive worker) is a prerequisite for the long clone/pull/setup operations.
+
+### FM-300 — Add project identity, checkout model, and storage
+
+**Context:** Projects need stable identity that survives moves between machines; the normalized Git remote is the identity, checkouts are facts.  
+**Goal:** Project records keyed by normalized remote, per-machine checkout facts, storage, and authorized use cases behind `projects.read/create/update/delete`.  
+**Dependencies:** FM-200, FM-215.  
+**Acceptance criteria:** normalization is the identity (conflicts refused); checkouts are observed facts, never desired identity; CRUD/list through the authorization funnel with audit; API/CLI/web parity; no secrets in project records.  
+**Non-goals:** cloning or remote execution (FM-301), profiles (M4).  
+**Tests:** normalization/identity-conflict unit tests, repository round-trip, API contract, CLI parity.
+
+### FM-301 — Add checkout discovery and guarded Git/file actions
+
+**Context:** Fleet must discover checkouts and operate on them through bounded, audited actions; project files are potentially hostile input.  
+**Goal:** Agentless checkout discovery over the SSH probe (standard roots, remote matching, branch/dirty facts), clone/pull/status as durable bounded operations, guarded file operations for `AGENTS.md`/`CLAUDE.md`/discovered agent config with path containment and atomic writes; Git hooks disabled for controller-managed clones.  
+**Dependencies:** FM-300, FM-202, FM-203.  
+**Acceptance criteria:** honest discovery states with redaction; argument arrays, bounded output, deadlines, process-tree cancellation; path-traversal refusal; audited actions.  
+**Non-goals:** credentials management, builds/tests, shell launch.  
+**Tests:** probe fixtures (hostile output, detached HEAD), real-sshd executor tests, cancellation mid-pull, denials.
+
+### FM-302 — Add the Skills Manager provider over its public CLI
+
+**Context:** Skills Manager is the upstream skills library; Fleet integrates through its documented, versioned, machine-readable CLI and never touches its database.  
+**Goal:** CLI presence/version probing, agents/skills/presets listing, deploy/undeploy as audited durable operations, skill state as capability facts with provenance; Markdown editing only through an explicit content contract with path containment and atomic writes.  
+**Dependencies:** FM-301.  
+**Acceptance criteria:** pinned CLI range with checksums; contract fixtures over the documented JSON shapes; upgrade-driven shape changes degrade explicitly; secrets never in argv/output/audit.  
+**Non-goals:** editing Skills Manager's database, a marketplace, skill execution.  
+**Tests:** recorded CLI fixtures, executor e2e with a stub CLI, redaction, upgrade-degradation.
+
+### FM-303 — Add the Frogenv provider (status, detection, setup, env run)
+
+**Context:** Frogenv owns project environment secrets; Fleet invokes it and records status — never decrypts, lists, or stores values.  
+**Goal:** Detection/status through the documented CLI, setup/login/request flows as audited operations reporting blocked/manual approval as a first-class state, `frogenv env run` as the only execution path for environment-bound commands.  
+**Dependencies:** FM-301.  
+**Acceptance criteria:** no environment value in output/payloads/audit (redaction tests); blocked/manual approval is a state, not a hang; argument arrays and bounded output; upstream JSON/non-interactive gaps documented for contribution.  
+**Non-goals:** storing or proxying secrets, a Fleet secrets manager.  
+**Tests:** recorded CLI fixtures, redaction, executor e2e with a stub CLI, blocked-approval contract.
+
+### FM-304 — Add tool/coding-agent inventory and the mise provider
+
+**Context:** The ready-project workflow needs tool/agent inventory and optional runtime convergence through mise, with native project files staying authoritative.  
+**Goal:** Tool/coding-agent inventory as capability facts with provenance; an optional mise provider (`mise status/install/exec`) for project runtime convergence.  
+**Dependencies:** FM-301; FM-206 (probe pattern).  
+**Acceptance criteria:** honest version states; isolated bounded probes; durable audited mise operations; pinned versions with checksums; project files never translated into a second tool-version model.  
+**Non-goals:** a Fleet package manager, global tool management, Windows toolchains.  
+**Tests:** probe fixtures, mise fixture/e2e with a stub CLI, idempotent install, project-file authority.
+
+### FM-305 — Add the ready-project workflow (clone → inspect → prerequisites → skills → verify)
+
+**Context:** The first product release: a human or agent asks Fleet to make a project ready, and Fleet plans and executes the steps idempotently with honest reporting.  
+**Goal:** An orchestrated workflow — clone/reuse, inspect declarations, install prerequisites, configure Frogenv, deploy skills, verify readiness — as visible durable operations with progress, blocked/manual steps as first-class states, and no secret exposure.  
+**Dependencies:** FM-300/301/302/303/304.  
+**Acceptance criteria:** inspectable dry-run plan; idempotent re-runs (completed steps skipped, failed steps retryable, blocked steps explicit); progress/rollback/audit visible in operation, CLI, and web; end-to-end proof on the integration VM; blocked/manual Frogenv approval reported as a state.  
+**Non-goals:** profile assignment (M4), bulk operations, Windows targets.  
+**Tests:** plan/idempotency unit tests, real-VM end-to-end (fresh clone → ready, re-run skips, blocked Frogenv), failure injection per step, cancellation, CLI/web contract.
+
 ### FM-200 — Add machine, endpoint, observation, tag, and capability model/storage
 
 **Context:** Machine identity must be stable while hostnames/IPs/endpoints and observations change.  
