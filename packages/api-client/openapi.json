@@ -1110,6 +1110,297 @@
         }
       }
     },
+    "/api/v1/projects": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Lists projects, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listProjects",
+        "parameters": [
+          {
+            "name": "remotePrefix",
+            "in": "query",
+            "description": "Only projects whose normalized remote starts with this prefix.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "nameSubstring",
+            "in": "query",
+            "description": "Only projects whose name contains this substring.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of projects to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ProjectDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Registers a project.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a conflicting remote or\nname, or a backend failure.",
+        "operationId": "createProject",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The project was registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProjectDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The remote or name is malformed (or credential-bearing).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not create projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The remote or name is already registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Reads one project with its observed checkouts.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown project.",
+        "operationId": "getProject",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "description": "The project's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The project with its observed checkouts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProjectDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Removes a project and its observed checkouts. The Git repositories\nthemselves are untouched.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown project.",
+        "operationId": "deleteProject",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "description": "The project's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The project was removed."
+          },
+          "403": {
+            "description": "The caller may not delete projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Renames or re-describes a project.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown project.",
+        "operationId": "updateProject",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "description": "The project's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The project was updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProjectDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name is already taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system": {
       "get": {
         "tags": [
@@ -1515,6 +1806,49 @@
           }
         }
       },
+      "CheckoutFactDto": {
+        "type": "object",
+        "description": "One observed checkout of a project.",
+        "required": [
+          "machineId",
+          "root",
+          "source",
+          "observedAt"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The checked-out branch, when observed."
+          },
+          "dirty": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the worktree was dirty at observation."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine carrying the checkout."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was observed (epoch milliseconds)."
+          },
+          "root": {
+            "type": "string",
+            "description": "The checkout's root path."
+          },
+          "source": {
+            "type": "string",
+            "description": "What observed it."
+          }
+        }
+      },
       "ConfigureTailnetRequest": {
         "type": "object",
         "description": "The configure request: the OAuth client's id and secret. The secret is\nstored encrypted and never returned by any endpoint.",
@@ -1772,6 +2106,31 @@
               "null"
             ],
             "description": "The bounded provider input for kinds that need one, e.g. the script\npayload of `ssh.exec`."
+          }
+        }
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "description": "The create-project request.",
+        "required": [
+          "remote",
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator notes."
+          },
+          "name": {
+            "type": "string",
+            "description": "The mutable, unique display name."
+          },
+          "remote": {
+            "type": "string",
+            "description": "The Git remote, in any common spelling; normalized here."
           }
         }
       },
@@ -3137,6 +3496,120 @@
           }
         }
       },
+      "Page_ProjectDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A project as the detail view displays it.",
+              "required": [
+                "id",
+                "remote",
+                "name",
+                "description",
+                "checkouts",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "checkouts": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CheckoutFactDto"
+                  },
+                  "description": "The observed checkouts across machines, newest observation first."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Creation time (epoch milliseconds)."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Operator notes."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The project's identity."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The display name."
+                },
+                "remote": {
+                  "type": "string",
+                  "description": "The normalized remote."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last mutation (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "ProjectDto": {
+        "type": "object",
+        "description": "A project as the detail view displays it.",
+        "required": [
+          "id",
+          "remote",
+          "name",
+          "description",
+          "checkouts",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "checkouts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckoutFactDto"
+            },
+            "description": "The observed checkouts across machines, newest observation first."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (epoch milliseconds)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Operator notes."
+          },
+          "id": {
+            "type": "string",
+            "description": "The project's identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name."
+          },
+          "remote": {
+            "type": "string",
+            "description": "The normalized remote."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
       "Resource_AddedMachineDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -3742,6 +4215,63 @@
           }
         }
       },
+      "Resource_ProjectDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A project as the detail view displays it.",
+            "required": [
+              "id",
+              "remote",
+              "name",
+              "description",
+              "checkouts",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "checkouts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CheckoutFactDto"
+                },
+                "description": "The observed checkouts across machines, newest observation first."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time (epoch milliseconds)."
+              },
+              "description": {
+                "type": "string",
+                "description": "Operator notes."
+              },
+              "id": {
+                "type": "string",
+                "description": "The project's identity."
+              },
+              "name": {
+                "type": "string",
+                "description": "The display name."
+              },
+              "remote": {
+                "type": "string",
+                "description": "The normalized remote."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last mutation (epoch milliseconds)."
+              }
+            }
+          }
+        }
+      },
       "Resource_TailnetStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -3888,6 +4418,24 @@
             "description": "The bounded, already-redacted failure detail, when the check failed."
           }
         }
+      },
+      "UpdateProjectRequest": {
+        "type": "object",
+        "description": "The update-project request.",
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Operator notes."
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name."
+          }
+        }
       }
     }
   },
@@ -3907,6 +4455,10 @@
     {
       "name": "machines",
       "description": "The operational machine view: identity, endpoints, capability facts, connectivity state, and the last observation. Endpoint references are redacted unless the caller may read sensitive endpoint detail."
+    },
+    {
+      "name": "projects",
+      "description": "Projects keyed by normalized Git remote, with per-machine observed checkouts. The remote is the identity; checkouts are facts."
     },
     {
       "name": "tailnet",

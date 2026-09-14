@@ -76,6 +76,14 @@ pub enum Permission {
     /// Configure or clear the Tailscale OAuth integration. A mutation:
     /// it stores or removes a credential.
     TailnetConfig,
+    /// List and read projects and their observed checkouts.
+    ProjectsRead,
+    /// Register a project. A mutation.
+    ProjectsCreate,
+    /// Change a project's mutable display facts. A mutation.
+    ProjectsUpdate,
+    /// Remove a project and its facts. A mutation.
+    ProjectsDelete,
 }
 
 impl Permission {
@@ -102,6 +110,10 @@ impl Permission {
         Permission::NodeRevoke,
         Permission::TailnetRead,
         Permission::TailnetConfig,
+        Permission::ProjectsRead,
+        Permission::ProjectsCreate,
+        Permission::ProjectsUpdate,
+        Permission::ProjectsDelete,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -127,6 +139,10 @@ impl Permission {
             Permission::NodeRevoke => "node.revoke",
             Permission::TailnetRead => "tailscale.read",
             Permission::TailnetConfig => "tailscale.config",
+            Permission::ProjectsRead => "projects.read",
+            Permission::ProjectsCreate => "projects.create",
+            Permission::ProjectsUpdate => "projects.update",
+            Permission::ProjectsDelete => "projects.delete",
         }
     }
 
@@ -141,7 +157,8 @@ impl Permission {
             | Permission::SecretList
             | Permission::AuditRead
             | Permission::MachineRead
-            | Permission::NodeRead => false,
+            | Permission::NodeRead
+            | Permission::ProjectsRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -154,7 +171,10 @@ impl Permission {
             | Permission::NodeEnroll
             | Permission::NodeRevoke
             | Permission::TailnetConfig
-            | Permission::TailnetRead => true,
+            | Permission::TailnetRead
+            | Permission::ProjectsCreate
+            | Permission::ProjectsUpdate
+            | Permission::ProjectsDelete => true,
         }
     }
 
@@ -173,7 +193,11 @@ impl Permission {
             | Permission::MachineRead
             | Permission::MachineCreate
             | Permission::TailnetRead
-            | Permission::TailnetConfig => false,
+            | Permission::TailnetConfig
+            | Permission::ProjectsRead
+            | Permission::ProjectsCreate
+            | Permission::ProjectsUpdate
+            | Permission::ProjectsDelete => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

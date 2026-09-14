@@ -49,6 +49,9 @@ pub struct ApiState {
     /// with a database, a secret store, and the integration wired;
     /// `None` only in document/test states.
     pub tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
+    /// The project use cases, when the controller was composed with a
+    /// database; `None` only in document/test states.
+    pub projects: Option<Arc<fleet_application::project::Projects>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -61,6 +64,7 @@ impl std::fmt::Debug for ApiState {
             .field("machines", &self.machines)
             .field("onboarding", &self.onboarding)
             .field("tailnet", &self.tailnet)
+            .field("projects", &self.projects)
             .finish()
     }
 }
@@ -221,6 +225,7 @@ impl ApiState {
             machines: None,
             onboarding: None,
             tailnet: None,
+            projects: None,
         }
     }
 }

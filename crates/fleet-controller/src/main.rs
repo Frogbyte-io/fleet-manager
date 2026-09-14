@@ -219,12 +219,21 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ))
         });
+        // The project surface composes over the store alone: identity and
+        // observed checkouts need no secret material.
+        let projects = std::sync::Arc::new(fleet_application::project::Projects::new(
+            std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        ));
         let served = serve(
             settings,
             pool,
             services,
             Some(onboarding),
             tailnet,
+            Some(projects),
             shutdown_signal(),
         )
         .await;

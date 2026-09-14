@@ -10,5 +10,6 @@ pub mod machine;
 pub mod node;
 pub mod onboarding;
 pub mod operation;
+pub mod project;
 pub mod tailnet;
 pub mod worker;

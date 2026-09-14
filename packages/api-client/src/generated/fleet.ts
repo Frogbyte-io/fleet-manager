@@ -172,6 +172,30 @@ export interface ApiError {
 }
 
 /**
+ * One observed checkout of a project.
+ */
+export interface CheckoutFactDto {
+  /**
+     * The checked-out branch, when observed.
+     * @nullable
+     */
+  branch?: string | null;
+  /**
+     * Whether the worktree was dirty at observation.
+     * @nullable
+     */
+  dirty?: boolean | null;
+  /** The machine carrying the checkout. */
+  machineId: string;
+  /** When it was observed (epoch milliseconds). */
+  observedAt: number;
+  /** The checkout's root path. */
+  root: string;
+  /** What observed it. */
+  source: string;
+}
+
+/**
  * The configure request: the OAuth client's id and secret. The secret is
  * stored encrypted and never returned by any endpoint.
  */
@@ -333,6 +357,21 @@ export interface CreateOperationRequest {
      * @nullable
      */
   payloadJson?: string | null;
+}
+
+/**
+ * The create-project request.
+ */
+export interface CreateProjectRequest {
+  /**
+     * Operator notes.
+     * @nullable
+     */
+  description?: string | null;
+  /** The mutable, unique display name. */
+  name: string;
+  /** The Git remote, in any common spelling; normalized here. */
+  remote: string;
 }
 
 /**
@@ -970,6 +1009,59 @@ export interface PageOperationDto {
 }
 
 /**
+ * A project as the detail view displays it.
+ */
+export type PageProjectDtoItemsItem = {
+  /** The observed checkouts across machines, newest observation first. */
+  checkouts: CheckoutFactDto[];
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes. */
+  description: string;
+  /** The project's identity. */
+  id: string;
+  /** The display name. */
+  name: string;
+  /** The normalized remote. */
+  remote: string;
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageProjectDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageProjectDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * A project as the detail view displays it.
+ */
+export interface ProjectDto {
+  /** The observed checkouts across machines, newest observation first. */
+  checkouts: CheckoutFactDto[];
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes. */
+  description: string;
+  /** The project's identity. */
+  id: string;
+  /** The display name. */
+  name: string;
+  /** The normalized remote. */
+  remote: string;
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+}
+
+/**
  * The outcome of an add: the new machine plus the duplicates that were
  * warned about.
  */
@@ -1334,6 +1426,37 @@ export interface ResourceOperationDto {
 }
 
 /**
+ * A project as the detail view displays it.
+ */
+export type ResourceProjectDtoData = {
+  /** The observed checkouts across machines, newest observation first. */
+  checkouts: CheckoutFactDto[];
+  /** Creation time (epoch milliseconds). */
+  createdAt: number;
+  /** Operator notes. */
+  description: string;
+  /** The project's identity. */
+  id: string;
+  /** The display name. */
+  name: string;
+  /** The normalized remote. */
+  remote: string;
+  /** Last mutation (epoch milliseconds). */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProjectDto {
+  /** A project as the detail view displays it. */
+  data: ResourceProjectDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -1399,6 +1522,16 @@ export interface TailnetStatusDto {
   scope: string;
 }
 
+/**
+ * The update-project request.
+ */
+export interface UpdateProjectRequest {
+  /** Operator notes. */
+  description: string;
+  /** The display name. */
+  name: string;
+}
+
 export type ListMachinesParams = {
 /**
  * Only machines carrying this tag.
@@ -1434,6 +1567,22 @@ limit?: number;
 export type ListOperationsParams = {
 /**
  * The maximum number of operations to return.
+ * @minimum 0
+ */
+limit?: number;
+};
+
+export type ListProjectsParams = {
+/**
+ * Only projects whose normalized remote starts with this prefix.
+ */
+remotePrefix?: string;
+/**
+ * Only projects whose name contains this substring.
+ */
+nameSubstring?: string;
+/**
+ * The maximum number of projects to return.
  * @minimum 0
  */
 limit?: number;
@@ -2668,6 +2817,323 @@ export const streamOperationEvents = async (id: string, options?: RequestInit): 
 
   const data: streamOperationEventsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as streamOperationEventsResponse
+}
+
+
+
+export type listProjectsResponse200 = {
+  data: PageProjectDto
+  status: 200
+}
+
+export type listProjectsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listProjectsResponseSuccess = (listProjectsResponse200) & {
+  headers: Headers;
+};
+export type listProjectsResponseError = (listProjectsResponse403) & {
+  headers: Headers;
+};
+
+export type listProjectsResponse = (listProjectsResponseSuccess | listProjectsResponseError)
+
+export const getListProjectsUrl = (params?: ListProjectsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/projects?${stringifiedParams}` : `/api/v1/projects`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists projects, newest first.
+ */
+export const listProjects = async (params?: ListProjectsParams, options?: RequestInit): Promise<listProjectsResponse> => {
+
+  const res = await fetch(getListProjectsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listProjectsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listProjectsResponse
+}
+
+
+
+export type createProjectResponse201 = {
+  data: ResourceProjectDto
+  status: 201
+}
+
+export type createProjectResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createProjectResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createProjectResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createProjectResponseSuccess = (createProjectResponse201) & {
+  headers: Headers;
+};
+export type createProjectResponseError = (createProjectResponse400 | createProjectResponse403 | createProjectResponse409) & {
+  headers: Headers;
+};
+
+export type createProjectResponse = (createProjectResponseSuccess | createProjectResponseError)
+
+export const getCreateProjectUrl = () => {
+
+
+
+
+  return `/api/v1/projects`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a conflicting remote or
+ * name, or a backend failure.
+ * @summary Registers a project.
+ */
+export const createProject = async (createProjectRequest: CreateProjectRequest, options?: RequestInit): Promise<createProjectResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateProjectUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createProjectRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createProjectResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createProjectResponse
+}
+
+
+
+export type getProjectResponse200 = {
+  data: ResourceProjectDto
+  status: 200
+}
+
+export type getProjectResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getProjectResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getProjectResponseSuccess = (getProjectResponse200) & {
+  headers: Headers;
+};
+export type getProjectResponseError = (getProjectResponse403 | getProjectResponse404) & {
+  headers: Headers;
+};
+
+export type getProjectResponse = (getProjectResponseSuccess | getProjectResponseError)
+
+export const getGetProjectUrl = (projectId: string,) => {
+
+
+
+
+  return `/api/v1/projects/${projectId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown project.
+ * @summary Reads one project with its observed checkouts.
+ */
+export const getProject = async (projectId: string, options?: RequestInit): Promise<getProjectResponse> => {
+
+  const res = await fetch(getGetProjectUrl(projectId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getProjectResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getProjectResponse
+}
+
+
+
+export type deleteProjectResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteProjectResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteProjectResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteProjectResponseSuccess = (deleteProjectResponse204) & {
+  headers: Headers;
+};
+export type deleteProjectResponseError = (deleteProjectResponse403 | deleteProjectResponse404) & {
+  headers: Headers;
+};
+
+export type deleteProjectResponse = (deleteProjectResponseSuccess | deleteProjectResponseError)
+
+export const getDeleteProjectUrl = (projectId: string,) => {
+
+
+
+
+  return `/api/v1/projects/${projectId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown project.
+ * @summary Removes a project and its observed checkouts. The Git repositories
+themselves are untouched.
+ */
+export const deleteProject = async (projectId: string, options?: RequestInit): Promise<deleteProjectResponse> => {
+
+  const res = await fetch(getDeleteProjectUrl(projectId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteProjectResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteProjectResponse
+}
+
+
+
+export type updateProjectResponse200 = {
+  data: ResourceProjectDto
+  status: 200
+}
+
+export type updateProjectResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type updateProjectResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type updateProjectResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type updateProjectResponseSuccess = (updateProjectResponse200) & {
+  headers: Headers;
+};
+export type updateProjectResponseError = (updateProjectResponse403 | updateProjectResponse404 | updateProjectResponse409) & {
+  headers: Headers;
+};
+
+export type updateProjectResponse = (updateProjectResponseSuccess | updateProjectResponseError)
+
+export const getUpdateProjectUrl = (projectId: string,) => {
+
+
+
+
+  return `/api/v1/projects/${projectId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown project.
+ * @summary Renames or re-describes a project.
+ */
+export const updateProject = async (projectId: string,
+    updateProjectRequest: UpdateProjectRequest, options?: RequestInit): Promise<updateProjectResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateProjectUrl(projectId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(updateProjectRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateProjectResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateProjectResponse
 }
 
 

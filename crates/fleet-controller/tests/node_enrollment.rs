@@ -83,6 +83,7 @@ async fn controller() -> TestController {
         Some(&services),
         None,
         None,
+        None,
     );
     TestController {
         _dist: dist,

@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use fleet_application::project::ProjectPort as _;
 use fleet_storage_sqlite::{StorageError, Store};
 
 fn db_path(dir: &Path) -> std::path::PathBuf {
@@ -196,4 +197,60 @@ async fn a_backup_restores_into_a_working_store() {
         restored.get_metadata("valuable").await.unwrap().as_deref(),
         Some("fact")
     );
+}
+
+#[tokio::test]
+async fn the_project_repository_round_trips_identity_and_checkouts() {
+    use fleet_core::CheckoutFact;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+
+    let created = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
+            name: "fleet-manager".to_owned(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.remote, "github.com/Frogbyte-io/fleet-manager");
+
+    // A conflicting remote is refused by the unique index.
+    let conflict = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
+            name: "other".to_owned(),
+            description: String::new(),
+        })
+        .await;
+    assert!(conflict.is_err(), "the identity conflict is enforced");
+
+    // Checkout facts upsert per (project, machine, root).
+    let fact = |machine: &str, at: i64| CheckoutFact {
+        project_id: created.id.clone(),
+        machine_id: machine.to_owned(),
+        root: "/home/dev/code/fleet-manager".to_owned(),
+        branch: Some("main".to_owned()),
+        dirty: Some(false),
+        source: "agentless/1".to_owned(),
+        observed_at: at,
+    };
+    projects
+        .record_checkout(&fact("machine-a", 100))
+        .await
+        .unwrap();
+    projects
+        .record_checkout(&fact("machine-a", 200))
+        .await
+        .unwrap();
+    let checkouts = projects.checkouts(&created.id).await.unwrap();
+    assert_eq!(checkouts.len(), 1, "the fact upserted, not appended");
+    assert_eq!(checkouts[0].observed_at, 200, "the newest observation wins");
+
+    // Delete cascades to the checkouts.
+    projects.delete(&created.id).await.unwrap();
+    let view = projects.checkouts(&created.id).await.unwrap();
+    assert!(view.is_empty(), "the checkout facts cascade");
 }
