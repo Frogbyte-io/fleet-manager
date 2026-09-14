@@ -356,18 +356,54 @@ impl OperationPort for OperationRepository {
     /// Renews a running operation's lease with a compare-and-set: only the
     /// worker that owns the claim can extend it, so a recovered or terminal
     /// operation cannot be resurrected by a stale heartbeat.
-    async fn renew_lease(&self, id: &str, worker_id: &str, now: i64) -> Result<bool, PortFailure> {
+    async fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+        lease_ms: i64,
+    ) -> Result<bool, PortFailure> {
+        // The compare-and-set includes the lease age: a claim that recovery
+        // already selected (past its lease) must not be refreshed by a
+        // delayed heartbeat — the recovery's terminal write would otherwise
+        // strand live work behind a false failure.
         let updated = sqlx::query(
-            "UPDATE operations SET claimed_at = ?3, updated_at = ?3 \
-             WHERE id = ?1 AND worker_id = ?2 AND state IN ('running', 'cancelling')",
+            "UPDATE operations SET claimed_at = ?4, updated_at = ?4 \
+             WHERE id = ?1 AND worker_id = ?2 AND state IN ('running', 'cancelling') \
+             AND claimed_at IS NOT NULL AND claimed_at >= ?3",
         )
         .bind(id)
         .bind(worker_id)
+        .bind(now.saturating_sub(lease_ms))
         .bind(now)
         .execute(&self.pool)
         .await
         .map_err(|error| PortFailure::Backend {
             detail: format!("lease renewal failed: {error}"),
+        })?;
+        Ok(updated.rows_affected() > 0)
+    }
+
+    async fn fail_expired_claim(
+        &self,
+        id: &str,
+        expected_claimed_at: i64,
+        now: i64,
+        error_json: &str,
+    ) -> Result<bool, PortFailure> {
+        let updated = sqlx::query(
+            "UPDATE operations SET state = 'failed', error_json = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND state IN ('running', 'cancelling') \
+             AND claimed_at = ?2",
+        )
+        .bind(id)
+        .bind(expected_claimed_at)
+        .bind(error_json)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("expired-claim failure failed: {error}"),
         })?;
         Ok(updated.rows_affected() > 0)
     }
@@ -440,6 +476,8 @@ fn row_to_operation(row: &sqlx::sqlite::SqliteRow) -> Operation {
         correlation_id: row.get("correlation_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        claimed_at: row.get("claimed_at"),
+        worker_id: row.get("worker_id"),
     }
 }
 

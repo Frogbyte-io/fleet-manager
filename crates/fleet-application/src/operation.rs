@@ -80,6 +80,11 @@ pub struct Operation {
     pub created_at: i64,
     /// Last update (epoch milliseconds).
     pub updated_at: i64,
+    /// The claim timestamp the owning worker set, when the operation is
+    /// running under a claim; the lease-recovery compare-and-set uses it.
+    pub claimed_at: Option<i64>,
+    /// The worker that owns the current claim, when any.
+    pub worker_id: Option<String>,
 }
 
 /// A use-case rejection. Variants map onto public API errors by the adapter
@@ -238,7 +243,23 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
     /// running. Returns whether the lease was renewed (false when the
     /// operation is no longer running under this worker — it was recovered,
     /// completed, or cancelled out from under the task).
-    async fn renew_lease(&self, id: &str, worker_id: &str, now: i64) -> Result<bool, PortFailure>;
+    async fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+        lease_ms: i64,
+    ) -> Result<bool, PortFailure>;
+    /// Fails an expired claim with a compare-and-set against the claim
+    /// timestamp recovery selected. Returns false when a heartbeat renewed
+    /// the claim in the interim — recovery then leaves it alone.
+    async fn fail_expired_claim(
+        &self,
+        id: &str,
+        expected_claimed_at: i64,
+        now: i64,
+        error_json: &str,
+    ) -> Result<bool, PortFailure>;
     /// Completes deadline-expired live operations as timed out, returning
     /// the ids that transitioned.
     ///

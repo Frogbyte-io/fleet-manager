@@ -3,11 +3,13 @@
 //!
 //! The loop separates the queue's maintenance (recovery sweeps, deadline
 //! sweeps, queue depths — FM-109) from the execution of claimed work. Each
-//! claimed operation runs in a tracked task that (a) renews its lease on a
+//! claimed operation runs in a tracked task that renews its lease on a
 //! heartbeat, so the recovery sweep never resolves legitimately running
-//! work, and (b) races the executor against a drain future, so shutdown is
-//! observed promptly even while a long install runs. An active-job bound
-//! keeps the host from claiming work it cannot run.
+//! work. On shutdown the host stops claiming, requests durable
+//! cancellation through the store for every in-flight operation, and waits
+//! a bounded grace for the tracked tasks; work that ignores cancellation
+//! is left to the lease recovery, and its outcome stays truthful. An
+//! active-job bound keeps the host from claiming work it cannot run.
 //!
 //! Cancellation semantics are unchanged and remain honest: on drain, the
 //! host requests cancellation through the durable `request_cancel` path and
@@ -88,6 +90,14 @@ impl WorkerHost {
         self
     }
 
+    /// Overrides the claim lease. Tests shorten it so the heartbeat/recovery
+    /// interaction is proven in seconds instead of minutes.
+    #[must_use]
+    pub fn with_lease_ms(mut self, lease_ms: i64) -> Self {
+        self.lease_ms = lease_ms;
+        self
+    }
+
     /// Runs the host until `shutdown` completes, then drains: no new claims,
     /// cancellation requested on in-flight work, bounded wait, exit.
     pub async fn run(&self, shutdown: impl std::future::Future<Output = ()> + Send) {
@@ -99,47 +109,52 @@ impl WorkerHost {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tokio::pin!(shutdown);
 
-        // The tracked set of in-flight tasks, keyed by operation id: the
-        // drain iterates the ids for durable cancellation requests.
-        let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-        let mut in_flight: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
+        // The tracked in-flight tasks: the operation id → the real spawned
+        // task (heartbeat + executor run together). The drain iterates the
+        // ids for durable cancellation and aborts the handles when the
+        // grace expires.
+        let mut in_flight: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
         let permits = Arc::new(tokio::sync::Semaphore::new(self.max_active));
         let mut shutting_down = false;
+        // One absolute drain deadline, computed when shutdown begins: the
+        // documented bound covers the whole drain, not each joined task.
+        let mut drain_deadline: Option<tokio::time::Instant> = None;
 
         loop {
-            if shutting_down && tasks.is_empty() {
-                eprintln!("operation worker drained");
-                break;
-            }
-
-            // Join any finished task first so the set and the id map stay in
-            // step with reality.
-            while let Some(finished) = tasks.try_join_next() {
-                if let Err(error) = finished {
-                    eprintln!("operation task failed: {error}");
-                }
-            }
+            // Reap finished tasks so the map tracks reality.
             in_flight.retain(|_, handle| !handle.is_finished());
 
             if shutting_down {
-                // Waiting for the grace to finish the in-flight work. The
-                // grace is bounded: work that ignores cancellation is left
-                // to the lease recovery, and its outcome stays truthful.
-                match tokio::time::timeout(self.drain_grace, tasks.join_next()).await {
-                    Ok(Some(joined)) => {
-                        if let Err(error) = joined {
-                            eprintln!("operation task failed: {error}");
-                        }
-                    }
-                    Ok(None) => {} // set empty
-                    Err(_) => {
-                        eprintln!("operation drain grace expired; aborting in-flight tasks");
-                        tasks.abort_all();
-                    }
+                if in_flight.is_empty() {
+                    eprintln!("operation worker drained");
+                    break;
                 }
+                let deadline = drain_deadline
+                    .unwrap_or_else(|| tokio::time::Instant::now() + self.drain_grace);
+                if tokio::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "operation drain grace expired; aborting in-flight tasks — \
+                         the lease recovery resolves their truth"
+                    );
+                    for handle in in_flight.values() {
+                        handle.abort();
+                    }
+                    while !in_flight.is_empty() {
+                        for handle in in_flight.values_mut() {
+                            let _ = handle.await;
+                        }
+                        in_flight.retain(|_, handle| !handle.is_finished());
+                    }
+                    eprintln!("operation worker drained after grace");
+                    break;
+                }
+                // Wait out the grace while reaping any task that finishes.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             }
 
+            // Maintenance + claim cadence, raced against shutdown so neither
+            // is dropped while work claims.
             tokio::select! {
                 () = &mut shutdown => {
                     shutting_down = true;
@@ -154,6 +169,7 @@ impl WorkerHost {
                             )
                             .await;
                     }
+                    drain_deadline = Some(tokio::time::Instant::now() + self.drain_grace);
                 }
                 _ = interval.tick() => {
                     let now = fleet_core::SystemClock::now_unix_millis();
@@ -164,7 +180,6 @@ impl WorkerHost {
                             continue;
                         }
                     };
-                    log_tick(&report);
                     // Claim only while there is capacity.
                     let Ok(permit) = permits.clone().try_acquire_owned() else {
                         continue;
@@ -191,22 +206,15 @@ impl WorkerHost {
                                 )
                                 .await;
                             });
-                            in_flight.insert(operation_id, task.abort_handle());
-                            tasks.spawn(async move {
-                                let _ = task.await;
-                            });
+                            in_flight.insert(operation_id, task);
                         }
                         Ok(None) => {}
                         Err(error) => eprintln!("operation worker claim failed: {error}"),
                     }
+                    log_tick(&report);
                 }
             }
         }
-
-        // Bounded drain: cancellation was requested on in-flight work; give
-        // it the grace, then exit. Whatever still runs is resolved by the
-        // lease recovery on the next controller — never reported as stopped.
-        while tasks.join_next().await.is_some() {}
         eprintln!("operation worker stopped");
     }
 }
@@ -226,15 +234,17 @@ async fn run_with_heartbeat(
     let heartbeat_worker = worker_id.clone();
     let heartbeat_operations = operations.clone();
     let heartbeat = tokio::spawn(async move {
+        // A third of the lease, floored at 100 ms: the heartbeat must fire
+        // comfortably inside the lease window, including short test leases.
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-            u64::try_from((lease_ms / 3).max(1_000)).unwrap_or(1_000),
+            u64::try_from((lease_ms / 3).max(100)).unwrap_or(100),
         ));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let now = fleet_core::SystemClock::now_unix_millis();
             match heartbeat_operations
-                .renew_lease(&heartbeat_id, &heartbeat_worker, now)
+                .renew_lease(&heartbeat_id, &heartbeat_worker, now, lease_ms)
                 .await
             {
                 Ok(true) => {}

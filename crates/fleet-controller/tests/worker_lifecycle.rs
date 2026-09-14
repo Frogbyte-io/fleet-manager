@@ -216,7 +216,9 @@ async fn the_lease_is_renewed_while_work_runs() {
     // A short lease: without renewal, the sweep would recover the work.
     let executor = BarrierExecutor::new(2);
     let operations = harness.operations.clone();
-    let host = WorkerHost::new(operations.clone(), executor.clone(), 4);
+    let host = WorkerHost::new(operations.clone(), executor.clone(), 4)
+        .with_lease_ms(1_000)
+        .with_drain_grace(std::time::Duration::from_secs(1));
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let _operation_id = harness.create_operation("noop").await;
@@ -228,16 +230,13 @@ async fn the_lease_is_renewed_while_work_runs() {
     });
     wait_for(|| executor.started() == 1, "the executor to start").await;
 
-    // While the executor is blocked past a full lease interval, the
-    // recovery sweep (driven by the host's own maintenance) does not
-    // recover the running operation: the heartbeat renewed it.
-    tokio::time::sleep(std::time::Duration::from_millis(
-        u64::try_from(LEASE_MS / 3 * 2).unwrap_or(200),
-    ))
-    .await;
-    let report: TickReport = harness
-        .operations
-        .maintain(fleet_core::SystemClock::now_unix_millis(), LEASE_MS / 3)
+    // While the executor is blocked past the whole lease, the recovery
+    // sweep does not recover the running operation: the heartbeat renewed
+    // it. The host runs with a 1s lease (heartbeats at ~333ms), so 1.5s of
+    // blocking covers three heartbeat intervals and two expiries.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let report: TickReport = operations
+        .maintain(fleet_core::SystemClock::now_unix_millis(), 1_000)
         .await
         .unwrap();
     assert_eq!(report.recovered, 0, "a renewed claim is not recovered");

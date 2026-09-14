@@ -168,10 +168,20 @@ impl Operations {
             let error_json =
                 serde_json::json!({ "reason": "worker_lease_expired", "detail": detail })
                     .to_string();
+            // The compare-and-set against the claim timestamp keeps a
+            // delayed heartbeat from stranding live work behind a false
+            // failure: if the heartbeat renewed between the select and this
+            // write, the renewal loses its lease and recovery loses the op.
             if self
-                .complete(&operation.id, "failed", None, Some(&error_json))
+                .port
+                .fail_expired_claim(
+                    &operation.id,
+                    operation.claimed_at.unwrap_or_default(),
+                    now,
+                    &error_json,
+                )
                 .await
-                .is_ok()
+                .unwrap_or(false)
             {
                 report.recovered += 1;
             }
@@ -189,14 +199,12 @@ impl Operations {
             }
         }
 
-        // Make the queue depth visible.
-        let depths = self
-            .port
-            .queue_depths()
-            .await
-            .map_err(|failure| failure.to_string())?;
-        report.pending = depths.pending;
-        report.running = depths.running;
+        // Make the queue depth visible. A metrics failure must not skip
+        // claiming or halt maintenance: depths are observation, not truth.
+        if let Ok(depths) = self.port.queue_depths().await {
+            report.pending = depths.pending;
+            report.running = depths.running;
+        }
         Ok(report)
     }
 
@@ -269,9 +277,15 @@ impl Operations {
     /// # Errors
     ///
     /// Fails when the renewal query fails.
-    pub async fn renew_lease(&self, id: &str, worker_id: &str, now: i64) -> Result<bool, String> {
+    pub async fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+        lease_ms: i64,
+    ) -> Result<bool, String> {
         self.port
-            .renew_lease(id, worker_id, now)
+            .renew_lease(id, worker_id, now, lease_ms)
             .await
             .map_err(|failure| failure.to_string())
     }

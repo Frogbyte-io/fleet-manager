@@ -225,6 +225,8 @@ impl OperationPort for FakePort {
             correlation_id: correlation_id.map(str::to_owned),
             created_at: 0,
             updated_at: 0,
+            claimed_at: None,
+            worker_id: None,
         };
         operations.push(operation.clone());
         Ok(operation)
@@ -326,6 +328,16 @@ impl OperationPort for FakePort {
         _id: &str,
         _worker_id: &str,
         _now: i64,
+        _lease_ms: i64,
+    ) -> Result<bool, PortFailure> {
+        Ok(true)
+    }
+    async fn fail_expired_claim(
+        &self,
+        _id: &str,
+        _expected_claimed_at: i64,
+        _now: i64,
+        _error_json: &str,
     ) -> Result<bool, PortFailure> {
         Ok(true)
     }
