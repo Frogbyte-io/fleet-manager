@@ -59,6 +59,18 @@ pub trait ProjectPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the project is unknown or the backend errors.
     async fn record_checkout(&self, fact: &CheckoutFact) -> Result<(), PortFailure>;
+    /// The project carrying this caller-scoped idempotency key, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<Project>, PortFailure>;
+    /// The project carrying this exact normalized remote, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_remote(&self, remote: &str) -> Result<Option<Project>, PortFailure>;
     /// The observed checkouts of one project, newest observation first.
     ///
     /// # Errors
@@ -73,6 +85,8 @@ pub trait ProjectPort: fmt::Debug + Send + Sync {
 pub struct NewProject {
     /// The normalized remote (set by the use case after parsing).
     pub remote: String,
+    /// The caller-scoped idempotency key, when one was supplied.
+    pub idempotency_key: Option<String>,
     /// The mutable, unique display name.
     pub name: String,
     /// Operator notes.
@@ -158,6 +172,7 @@ impl Projects {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         new: NewProject,
+        idempotency_key: Option<String>,
     ) -> Result<Project, ProjectUseCaseError> {
         authorize(
             authorizer,
@@ -171,29 +186,47 @@ impl Projects {
         let remote = NormalizedRemote::parse(&new.remote)
             .map_err(|detail| ProjectUseCaseError::Invalid { detail })?;
         validate_name(&new.name)?;
-        if new.description.len() > 512 {
+        if new.description.chars().count() > 512 {
             return Err(ProjectUseCaseError::Invalid {
                 detail: "the description must be at most 512 characters".to_owned(),
             });
         }
 
+        // Idempotent replay: the same caller key returns the original
+        // project instead of a conflict. The key is scoped to the caller.
+        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        if let Some(key) = &scoped_key
+            && let Some(existing) = self
+                .port
+                .find_by_idempotency_key(key)
+                .await
+                .map_err(|failure| map_port("find_by_idempotency_key", failure))?
+        {
+            return Ok(existing);
+        }
+
         // The identity conflict is the interesting case: the same repository
         // under a different spelling is refused with the normalized form, so
         // the caller can see what already exists.
-        if let Ok(existing) = self.by_remote(&remote).await {
-            return Err(ProjectUseCaseError::Conflict {
-                detail: format!(
-                    "the remote {raw} is already registered as {existing:?} (normalized: {remote})",
-                    raw = new.remote,
-                    existing = existing.name,
-                ),
-            });
+        match self.by_remote(&remote).await {
+            Ok(Some(existing)) => {
+                return Err(ProjectUseCaseError::Conflict {
+                    detail: format!(
+                        "the remote {raw} is already registered as {existing:?} (normalized: {remote})",
+                        raw = new.remote,
+                        existing = existing.name,
+                    ),
+                });
+            }
+            Ok(None) => {}
+            Err(failure) => return Err(map_port("find_by_remote", failure)),
         }
 
         let stored = NewProject {
             remote: remote.as_str().to_owned(),
             name: new.name.clone(),
             description: new.description.clone(),
+            idempotency_key: scoped_key,
         };
         let project = self
             .port
@@ -299,7 +332,7 @@ impl Projects {
         )
         .map_err(ProjectUseCaseError::Denied)?;
         validate_name(name)?;
-        if description.len() > 512 {
+        if description.chars().count() > 512 {
             return Err(ProjectUseCaseError::Invalid {
                 detail: "the description must be at most 512 characters".to_owned(),
             });
@@ -365,7 +398,7 @@ impl Projects {
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::ProjectsUpdate,
-                resource: Some(fact.machine_id.as_str()),
+                resource: Some(fact.project_id.as_str()),
             },
         )
         .map_err(ProjectUseCaseError::Denied)?;
@@ -377,19 +410,10 @@ impl Projects {
             .map_err(|failure| map_port("record_checkout", failure))
     }
 
-    async fn by_remote(&self, remote: &NormalizedRemote) -> Result<Project, PortFailure> {
-        let filter = ProjectFilter {
-            remote_prefix: Some(remote.as_str().to_owned()),
-            name_substring: None,
-        };
-        self.port
-            .list(&filter, 200)
-            .await?
-            .into_iter()
-            .find(|project| project.remote == remote.as_str())
-            .ok_or_else(|| PortFailure::NotFound {
-                what: format!("project with remote {remote}"),
-            })
+    async fn by_remote(&self, remote: &NormalizedRemote) -> Result<Option<Project>, PortFailure> {
+        // The exact normalized remote, without a prefix-page limit: the
+        // identity conflict must be found wherever it sits in the list.
+        self.port.find_by_remote(remote.as_str()).await
     }
 
     async fn audit_project(
@@ -449,7 +473,7 @@ pub fn assemble_view(project: Project, mut checkouts: Vec<CheckoutFact>) -> Proj
 }
 
 fn validate_name(name: &str) -> Result<(), ProjectUseCaseError> {
-    if name.is_empty() || name.len() > 128 {
+    if name.is_empty() || name.chars().count() > 128 {
         return Err(ProjectUseCaseError::Invalid {
             detail: "the project name must be 1..=128 characters".to_owned(),
         });
@@ -460,6 +484,7 @@ fn validate_name(name: &str) -> Result<(), ProjectUseCaseError> {
 fn map_port(context: &'static str, failure: PortFailure) -> ProjectUseCaseError {
     match failure {
         PortFailure::NotFound { what } => ProjectUseCaseError::NotFound { what },
+        PortFailure::Conflict { detail } => ProjectUseCaseError::Conflict { detail },
         PortFailure::Backend { detail } => ProjectUseCaseError::Backend { context, detail },
     }
 }

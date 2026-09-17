@@ -1368,6 +1368,16 @@
               }
             }
           },
+          "400": {
+            "description": "The name or description is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The caller may not update projects.",
             "content": {
@@ -4423,13 +4433,15 @@
         "type": "object",
         "description": "The update-project request.",
         "required": [
-          "name",
-          "description"
+          "name"
         ],
         "properties": {
           "description": {
-            "type": "string",
-            "description": "Operator notes."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator notes. Absent means \"keep the current description\"."
           },
           "name": {
             "type": "string",

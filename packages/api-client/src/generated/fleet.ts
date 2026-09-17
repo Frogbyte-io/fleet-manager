@@ -1526,8 +1526,11 @@ export interface TailnetStatusDto {
  * The update-project request.
  */
 export interface UpdateProjectRequest {
-  /** Operator notes. */
-  description: string;
+  /**
+     * Operator notes. Absent means "keep the current description".
+     * @nullable
+     */
+  description?: string | null;
   /** The display name. */
   name: string;
 }
@@ -3073,6 +3076,11 @@ export type updateProjectResponse200 = {
   status: 200
 }
 
+export type updateProjectResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type updateProjectResponse403 = {
   data: ApiError
   status: 403
@@ -3091,7 +3099,7 @@ export type updateProjectResponse409 = {
 export type updateProjectResponseSuccess = (updateProjectResponse200) & {
   headers: Headers;
 };
-export type updateProjectResponseError = (updateProjectResponse403 | updateProjectResponse404 | updateProjectResponse409) & {
+export type updateProjectResponseError = (updateProjectResponse400 | updateProjectResponse403 | updateProjectResponse404 | updateProjectResponse409) & {
   headers: Headers;
 };
 

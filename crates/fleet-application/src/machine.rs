@@ -1071,6 +1071,7 @@ impl Machines {
 fn map_port(context: &'static str, failure: PortFailure) -> MachineUseCaseError {
     match failure {
         PortFailure::NotFound { what } => MachineUseCaseError::NotFound { what },
+        PortFailure::Conflict { detail } => MachineUseCaseError::Conflict { detail },
         PortFailure::Backend { detail } => MachineUseCaseError::Backend { context, detail },
     }
 }

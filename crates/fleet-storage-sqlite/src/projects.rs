@@ -37,19 +37,20 @@ impl ProjectPort for ProjectRepository {
         let id = Uuid::now_v7().to_string();
         let now = fleet_core::SystemClock::now_unix_millis();
         let result = sqlx::query(
-            "INSERT INTO projects (id, remote, name, description, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            "INSERT INTO projects (id, remote, name, description, idempotency_key, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         )
         .bind(&id)
         .bind(&project.remote)
         .bind(&project.name)
         .bind(&project.description)
+        .bind(&project.idempotency_key)
         .bind(now)
         .execute(&self.pool)
         .await;
         match result {
             Ok(_) => self.get(&id).await,
-            Err(error) if is_unique_violation(&error) => Err(PortFailure::Backend {
+            Err(error) if is_unique_violation(&error) => Err(PortFailure::Conflict {
                 detail: format!(
                     "the remote {:?} or name {:?} is already registered",
                     project.remote, project.name
@@ -74,14 +75,26 @@ impl ProjectPort for ProjectRepository {
 
     async fn list(&self, filter: &ProjectFilter, limit: u32) -> Result<Vec<Project>, PortFailure> {
         let limit = limit.clamp(1, 200);
+        // The filters match literally: the caller's % and _ are escaped so
+        // they cannot act as wildcards. The name comparison uses lower(),
+        // which folds ASCII case; full Unicode folding arrives with a
+        // case-folding extension and is documented as a limitation.
+        let prefix = filter
+            .remote_prefix
+            .as_deref()
+            .map(|prefix| format!("{}%", escape_like(prefix)));
+        let substring = filter
+            .name_substring
+            .as_deref()
+            .map(|needle| format!("%{}%", escape_like(needle).to_lowercase()));
         let rows = sqlx::query(
             "SELECT * FROM projects \
-             WHERE (?1 IS NULL OR remote LIKE ?1 || '%') \
-               AND (?2 IS NULL OR name LIKE '%' || ?2 || '%') \
+             WHERE (?1 IS NULL OR remote LIKE ?1 ESCAPE '\\') \
+               AND (?2 IS NULL OR lower(name) LIKE ?2 ESCAPE '\\') \
              ORDER BY created_at DESC, id DESC LIMIT ?3",
         )
-        .bind(filter.remote_prefix.as_deref())
-        .bind(filter.name_substring.as_deref())
+        .bind(prefix)
+        .bind(substring)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -138,7 +151,8 @@ impl ProjectPort for ProjectRepository {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT(project_id, machine_id, root) DO UPDATE SET \
              branch = excluded.branch, dirty = excluded.dirty, \
-             source = excluded.source, observed_at = excluded.observed_at",
+             source = excluded.source, observed_at = excluded.observed_at \
+             WHERE excluded.observed_at > project_checkouts.observed_at",
         )
         .bind(Uuid::now_v7().to_string())
         .bind(&fact.project_id)
@@ -157,12 +171,38 @@ impl ProjectPort for ProjectRepository {
                     .as_database_error()
                     .is_some_and(|e| e.to_string().contains("FOREIGN KEY")) =>
             {
+                let detail = error.as_database_error().unwrap().to_string();
+                if detail.contains("machine_id") {
+                    return Err(PortFailure::NotFound {
+                        what: format!("machine {:?}", fact.machine_id),
+                    });
+                }
                 Err(PortFailure::NotFound {
                     what: format!("project {:?}", fact.project_id),
                 })
             }
             Err(error) => Err(backend("record_checkout", &error)),
         }
+    }
+
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<Project>, PortFailure> {
+        let row: Option<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM projects WHERE idempotency_key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| backend("find_by_idempotency_key", &error))?;
+        Ok(row.map(|row| hydrate(&row)))
+    }
+
+    async fn find_by_remote(&self, remote: &str) -> Result<Option<Project>, PortFailure> {
+        let row: Option<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM projects WHERE remote = ?1")
+                .bind(remote)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| backend("find_by_remote", &error))?;
+        Ok(row.map(|row| hydrate(&row)))
     }
 
     async fn checkouts(&self, project_id: &str) -> Result<Vec<CheckoutFact>, PortFailure> {
@@ -205,6 +245,15 @@ fn backend(context: &str, error: &sqlx::Error) -> PortFailure {
     PortFailure::Backend {
         detail: format!("project {context} failed: {error}"),
     }
+}
+
+/// Escapes SQLite LIKE metacharacters so a caller's `%` and `_` match
+/// literally under the `ESCAPE '\'` clause.
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {

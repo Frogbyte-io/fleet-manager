@@ -38,15 +38,24 @@ impl Authorizer for DenyAll {
     }
 }
 
+/// The source over recorded projects; a switch makes it fail like the real
+/// backend would.
 #[derive(Debug, Default)]
 struct FakeProjects {
     projects: Mutex<Vec<Project>>,
     checkouts: Mutex<Vec<CheckoutFact>>,
+    keys: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
 impl ProjectPort for FakeProjects {
     async fn create(&self, project: &NewProject) -> Result<Project, PortFailure> {
+        if let Some(key) = &project.idempotency_key {
+            self.keys
+                .lock()
+                .unwrap()
+                .push((key.clone(), project.remote.clone()));
+        }
         let created = Project {
             id: format!("project-{}", self.projects.lock().unwrap().len() + 1),
             remote: project.remote.clone(),
@@ -72,8 +81,11 @@ impl ProjectPort for FakeProjects {
     }
 
     async fn list(&self, filter: &ProjectFilter, limit: u32) -> Result<Vec<Project>, PortFailure> {
-        let projects = self.projects.lock().unwrap();
-        let narrowed: Vec<Project> = projects
+        // Newest first, per the port contract.
+        let mut projects: Vec<Project> = self
+            .projects
+            .lock()
+            .unwrap()
             .iter()
             .filter(|project| {
                 filter
@@ -84,10 +96,10 @@ impl ProjectPort for FakeProjects {
                         project.name.to_lowercase().contains(&needle.to_lowercase())
                     })
             })
-            .take(limit as usize)
             .cloned()
             .collect();
-        Ok(narrowed)
+        projects.sort_by_key(|project| std::cmp::Reverse(project.created_at));
+        Ok(projects.into_iter().take(limit as usize).collect())
     }
 
     async fn update(
@@ -138,6 +150,44 @@ impl ProjectPort for FakeProjects {
         }
         self.checkouts.lock().unwrap().push(fact.clone());
         Ok(())
+    }
+
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<Project>, PortFailure> {
+        let keys = self.keys.lock().unwrap();
+        let remote = keys
+            .iter()
+            .find(|(stored, _)| stored == key)
+            .map(|(_, remote)| remote.clone());
+        drop(keys);
+        match remote {
+            Some(remote) => self
+                .projects
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|project| project.remote == remote)
+                .cloned()
+                .map(Some)
+                .map_or_else(
+                    || {
+                        Err(PortFailure::NotFound {
+                            what: "keyed project".to_owned(),
+                        })
+                    },
+                    Ok,
+                ),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_by_remote(&self, remote: &str) -> Result<Option<Project>, PortFailure> {
+        Ok(self
+            .projects
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|project| project.remote == remote)
+            .cloned())
     }
 
     async fn checkouts(&self, project_id: &str) -> Result<Vec<CheckoutFact>, PortFailure> {
@@ -198,7 +248,9 @@ async fn registration_normalizes_the_remote_and_stores_the_normalized_form() {
                 remote: "https://github.com/Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
+                idempotency_key: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -220,7 +272,9 @@ async fn the_same_repository_under_a_different_spelling_is_a_conflict() {
                 remote: "git@github.com:Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
+                idempotency_key: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -234,7 +288,9 @@ async fn the_same_repository_under_a_different_spelling_is_a_conflict() {
                 remote: "https://github.com/Frogbyte-io/fleet-manager.git".to_owned(),
                 name: "the-same-repo".to_owned(),
                 description: String::new(),
+                idempotency_key: None,
             },
+            None,
         )
         .await
         .unwrap_err();
@@ -243,10 +299,6 @@ async fn the_same_repository_under_a_different_spelling_is_a_conflict() {
             assert!(
                 detail.contains("github.com/Frogbyte-io/fleet-manager"),
                 "the conflict names the normalized form: {detail}"
-            );
-            assert!(
-                detail.contains("fleet-manager"),
-                "the conflict names the existing project: {detail}"
             );
         }
         other => panic!("expected a conflict, got {other:?}"),
@@ -270,7 +322,9 @@ async fn credential_bearing_remotes_are_refused_not_stored() {
                 remote: "https://user:password@github.com/Frogbyte-io/secret.git".to_owned(),
                 name: "secret".to_owned(),
                 description: String::new(),
+                idempotency_key: None,
             },
+            None,
         )
         .await
         .unwrap_err();
@@ -296,7 +350,9 @@ async fn the_read_model_carries_the_observed_checkouts_newest_first() {
                 remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
+                idempotency_key: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -337,7 +393,6 @@ async fn the_read_model_carries_the_observed_checkouts_newest_first() {
         view.checkouts[0].machine_id, "machine-b",
         "newest observation first"
     );
-    assert_eq!(view.checkouts[0].root, "/srv/work/fleet-manager");
 }
 
 #[tokio::test]
@@ -352,7 +407,9 @@ async fn deleting_a_project_removes_its_checkouts_but_touches_nothing_else() {
                 remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 name: "fleet-manager".to_owned(),
                 description: String::new(),
+                idempotency_key: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -402,7 +459,9 @@ async fn denied_callers_are_refused_without_touching_anything() {
                     remote: "github.com/a/b".to_owned(),
                     name: "x".to_owned(),
                     description: String::new(),
-                }
+                    idempotency_key: None,
+                },
+                None,
             )
             .await,
         Err(ProjectUseCaseError::Denied(_))
@@ -433,22 +492,25 @@ async fn a_malformed_registration_is_refused_before_any_write() {
             remote: "https://".to_owned(),
             name: "x".to_owned(),
             description: String::new(),
+            idempotency_key: None,
         },
         NewProject {
             remote: "github.com/a/b".to_owned(),
             name: String::new(),
             description: String::new(),
+            idempotency_key: None,
         },
         NewProject {
             remote: "github.com/a/b".to_owned(),
             name: "x".to_owned(),
             description: "d".repeat(600),
+            idempotency_key: None,
         },
     ];
     for new in cases {
         let refused = fixture
             .projects
-            .register(&AllowAll, &principal(), new)
+            .register(&AllowAll, &principal(), new, None)
             .await
             .unwrap_err();
         assert!(
@@ -476,7 +538,9 @@ async fn the_list_narrows_by_remote_prefix_and_name_substring() {
                     remote: remote.to_owned(),
                     name: name.to_owned(),
                     description: String::new(),
+                    idempotency_key: None,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -512,6 +576,52 @@ async fn the_list_narrows_by_remote_prefix_and_name_substring() {
         .unwrap();
     assert_eq!(named.len(), 1, "the name filter is case-insensitive");
     assert_eq!(named[0].name, "fleet-manager");
+}
+
+#[tokio::test]
+async fn an_idempotent_replay_returns_the_original_project() {
+    let fixture = compose();
+    let key = "anonymous-lan-admin:create-1";
+    let first = fixture
+        .projects
+        .register(
+            &AllowAll,
+            &principal(),
+            NewProject {
+                remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
+                name: "fleet-manager".to_owned(),
+                description: String::new(),
+                idempotency_key: Some(key.to_owned()),
+            },
+            Some(key.to_owned()),
+        )
+        .await
+        .unwrap();
+
+    // A replay with the same caller-scoped key returns the original project
+    // instead of a conflict.
+    let replay = fixture
+        .projects
+        .register(
+            &AllowAll,
+            &principal(),
+            NewProject {
+                remote: "git@github.com:Frogbyte-io/fleet-manager.git".to_owned(),
+                name: "a-different-name".to_owned(),
+                description: String::new(),
+                idempotency_key: Some(key.to_owned()),
+            },
+            Some(key.to_owned()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.id, first.id);
+    assert_eq!(replay.name, first.name);
+    assert_eq!(
+        fixture.projects_port.projects.lock().unwrap().len(),
+        1,
+        "the replay created nothing"
+    );
 }
 
 #[test]

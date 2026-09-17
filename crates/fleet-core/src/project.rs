@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// to `host/path` with a lowercased host, a `.git` suffix stripped, and a
 /// default-scheme marker. Ports are preserved. Credential-shaped userinfo is
 /// refused, never stored.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct NormalizedRemote {
     /// The normalized remote, e.g. `github.com/Frogbyte-io/fleet-manager`.
     value: String,
@@ -44,58 +44,97 @@ impl NormalizedRemote {
         if raw.len() > 512 {
             return error("it exceeds 512 characters");
         }
-        // Credential-shaped userinfo (user:pass@host) is refused, never
-        // stored or silently stripped: the remote belongs in the user's Git
-        // config, not in Fleet's records with a secret inside it. A userinfo
-        // segment on an https/http remote is always credential-bearing (the
-        // scp spelling only appears scheme-less), so any `@` before the
-        // first `/` of an https/http remote is refused.
-        let (scheme_stripped, is_url) = match raw.split_once("://") {
-            Some((scheme, rest)) => (
-                rest,
-                scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http"),
-            ),
-            None => (raw, false),
-        };
-        if is_url {
-            let authority = scheme_stripped.split('/').next().unwrap_or_default();
-            if authority.contains('@') {
-                return error("it carries embedded credentials; use a remote without userinfo");
+
+        // Step 1: fold the scheme case-insensitively to a canonical lowercase
+        // form (or none), so dispatch below is case-insensitive by
+        // construction.
+        let (scheme, rest) = match raw.split_once("://") {
+            Some((scheme, rest)) => {
+                if !scheme.eq_ignore_ascii_case("https")
+                    && !scheme.eq_ignore_ascii_case("http")
+                    && !scheme.eq_ignore_ascii_case("ssh")
+                    && !scheme.eq_ignore_ascii_case("git")
+                {
+                    return error("it carries an unrecognized scheme");
+                }
+                (Some(scheme), rest)
             }
+            None => (None, raw),
+        };
+
+        // Step 2: split the authority (user@host[:port]) from the path, and
+        // refuse credential-bearing userinfo. The standard `git@host`
+        // spelling (user without a password separator) stays legal;
+        // `user:pass@` is refused in every form.
+        //
+        // The scheme-less scp spelling (`git@host:path`) splits at the COLON
+        // before the first slash, so it is handled before the generic
+        // slash-split below.
+        let (authority, path) = if scheme.is_none() {
+            // The scp spelling's host/path separator is the colon AFTER the
+            // userinfo: `user@host:path`. The authority ends at the LAST `@`
+            // before the first `/` (credentials can contain `@` in the
+            // password), so the host/path colon is found after it.
+            let first_slash = rest.find('/');
+            let authority_end = rest[..first_slash.unwrap_or(rest.len())]
+                .rfind('@')
+                .map_or(0, |at| at + 1);
+            match rest[authority_end..].split_once(':') {
+                Some((host, path)) => (&rest[..authority_end + host.len()], Some(path)),
+                None => match rest.split_once('/') {
+                    Some((authority, path)) => (authority, Some(path)),
+                    None => return error("it carries no path separator"),
+                },
+            }
+        } else {
+            match rest.split_once('/') {
+                Some((authority, path)) => (authority, Some(path)),
+                None => return error("it carries no path after the host"),
+            }
+        };
+        // On scheme-qualified https/http remotes, ANY userinfo is
+        // credential-bearing (basic-auth user, token, or user:password).
+        // On scheme-less/scp/ssh spellings, only `user:pass@` is a
+        // credential — the bare `git@` user is a spelling.
+        let credential_bearing = match scheme {
+            Some(s) if s.eq_ignore_ascii_case("https") || s.eq_ignore_ascii_case("http") => {
+                authority.contains('@')
+            }
+            Some(_) => {
+                matches!(authority.rsplit_once('@'), Some((user, _)) if user.contains(':'))
+            }
+            None => matches!(authority.rsplit_once('@'), Some((user, _)) if user.contains(':')),
+        };
+        if credential_bearing {
+            return error("it carries embedded credentials; use a remote without userinfo");
         }
 
-        // Fold the spellings: scp-style `git@host:path`, `ssh://…`,
-        // `https://…`, and bare `host/path` all reduce to `host/path`.
-        let (host_part, path) = if let Some(rest) = raw.strip_prefix("ssh://") {
-            let rest = rest.strip_prefix("git@").unwrap_or(rest);
-            match rest.split_once('/') {
-                Some((host, path)) => (host, path),
-                None => return error("it carries no path after the host"),
+        // Step 3: extract the host and path per spelling.
+        let (host, path) = match scheme {
+            // URL forms: `authority/path` — the authority is the host (with
+            // an optional port), the path is what follows the first slash.
+            Some(_) => {
+                let Some(path) = path else {
+                    return error("it carries no path after the host");
+                };
+                (authority, path)
             }
-        } else if let Some(rest) = raw
-            .strip_prefix("https://")
-            .or_else(|| raw.strip_prefix("http://"))
-        {
-            match rest.split_once('/') {
-                Some((host, path)) => (host, path),
-                None => return error("it carries no path after the host"),
-            }
-        } else if let Some((host, path)) = raw.split_once(':') {
-            // scp-style `git@host:path` (or bare `host:path`).
-            (host, path)
-        } else {
-            match raw.split_once('/') {
-                Some((host, path)) => (host, path),
-                None => return error("it carries no path separator"),
-            }
+            // Scheme-less: scp-style `user@host:path` or bare `host/path`.
+            // When the slash split set a path, it is used; the scp branch's
+            // colon split set it too.
+            None => match (authority.split_once(':'), path) {
+                (Some((host, path)), _) => (host, path),
+                (None, Some(path)) => (authority, path),
+                (None, None) => return error("it carries no path separator"),
+            },
         };
 
-        if host_part.is_empty() || path.is_empty() {
+        if host.is_empty() || path.is_empty() {
             return error("the host or path is empty");
         }
         // A user segment without a colon (e.g. `git@host:path`) is a common
         // spelling, not a credential: fold it away.
-        let host = host_part.rsplit('@').next().unwrap_or(host_part);
+        let host = host.rsplit('@').next().unwrap_or(host);
         if host.is_empty() {
             return error("the host is empty");
         }
@@ -193,6 +232,9 @@ impl CheckoutFact {
     pub fn validate(&self) -> Result<(), String> {
         if self.project_id.is_empty() || self.project_id.len() > 64 {
             return Err("the project id must be 1..=64 characters".to_owned());
+        }
+        if self.machine_id.is_empty() || self.machine_id.len() > 64 {
+            return Err("the machine id must be 1..=64 characters".to_owned());
         }
         if !self.root.starts_with('/') || self.root.len() > 400 {
             return Err(
@@ -299,6 +341,53 @@ mod tests {
             "github.com/Frogbyte-io/fleet-manager",
             "scp-style user without a colon is a spelling, not a credential"
         );
+    }
+
+    #[test]
+    fn scheme_case_is_folded_before_dispatch() {
+        let upper =
+            NormalizedRemote::parse("HTTPS://GitHub.com/Frogbyte-io/fleet-manager").unwrap();
+        let lower =
+            NormalizedRemote::parse("https://github.com/Frogbyte-io/fleet-manager").unwrap();
+        assert_eq!(upper, lower, "an uppercase scheme is the same identity");
+        let ssh =
+            NormalizedRemote::parse("SSH://git@GitHub.com/Frogbyte-io/fleet-manager.git").unwrap();
+        assert_eq!(ssh, lower, "an uppercase ssh scheme folds too");
+    }
+
+    #[test]
+    fn credential_guards_cover_every_spelling() {
+        let refused = [
+            // https with password
+            "https://user:password@github.com/Frogbyte-io/secret.git",
+            // ssh URL with password
+            "ssh://user:password@github.com/Frogbyte-io/secret.git",
+            // scheme-less scp-style with password
+            "user:password@github.com:Frogbyte-io/secret.git",
+        ];
+        for raw in refused {
+            let error = NormalizedRemote::parse(raw).unwrap_err();
+            assert!(
+                error.contains("embedded credentials") || error.contains("unrecognized scheme"),
+                "{raw:?} must be refused as credential-bearing: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn machine_id_bounds_are_validated() {
+        let fact = |machine_id: &str| CheckoutFact {
+            project_id: "project-1".to_owned(),
+            machine_id: machine_id.to_owned(),
+            root: "/home/dev/code/x".to_owned(),
+            branch: None,
+            dirty: None,
+            source: "agentless/1".to_owned(),
+            observed_at: 0,
+        };
+        assert!(fact("machine-a").validate().is_ok());
+        assert!(fact("").validate().is_err());
+        assert!(fact(&"m".repeat(65)).validate().is_err());
     }
 
     #[test]

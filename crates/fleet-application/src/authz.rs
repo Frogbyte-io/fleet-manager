@@ -195,9 +195,7 @@ impl Permission {
             | Permission::TailnetRead
             | Permission::TailnetConfig
             | Permission::ProjectsRead
-            | Permission::ProjectsCreate
-            | Permission::ProjectsUpdate
-            | Permission::ProjectsDelete => false,
+            | Permission::ProjectsCreate => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -206,7 +204,9 @@ impl Permission {
             | Permission::MachineDelete
             | Permission::NodeEnroll
             | Permission::NodeRead
-            | Permission::NodeRevoke => true,
+            | Permission::NodeRevoke
+            | Permission::ProjectsUpdate
+            | Permission::ProjectsDelete => true,
         }
     }
 }

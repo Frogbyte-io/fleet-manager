@@ -93,6 +93,10 @@ describe('ProjectsPanel', () => {
     )
     await vi.waitFor(() => expect(wrapper.text()).toContain('machine-a'))
     await vi.waitFor(() => expect(wrapper.text()).toContain('/home/dev/code/fleet-manager'))
+    // The detail shows the normalized remote, not the raw spelling.
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain('github.com/Frogbyte-io/fleet-manager'),
+    )
     wrapper.unmount()
   })
 

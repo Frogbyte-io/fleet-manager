@@ -30,7 +30,7 @@ fn projects_or_error(
 ) -> Result<Arc<Projects>, ApiErrorResponse> {
     state.projects.clone().ok_or_else(|| {
         let public = PublicError::new(
-            ErrorCode::from_str("machine_unavailable")
+            ErrorCode::from_str("project_unavailable")
                 .expect("the literal is valid error code syntax"),
             "the project surface is not wired; the controller needs its database",
             RetryClass::Backoff,
@@ -172,8 +172,8 @@ pub struct CreateProjectRequest {
 pub struct UpdateProjectRequest {
     /// The display name.
     pub name: String,
-    /// Operator notes.
-    pub description: String,
+    /// Operator notes. Absent means "keep the current description".
+    pub description: Option<String>,
 }
 
 /// The list-projects query parameters.
@@ -227,10 +227,17 @@ pub async fn create_project(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<Resource<ProjectDto>>), ApiErrorResponse> {
     let projects = projects_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The idempotency key scopes to the caller: a replay returns the
+    // original project instead of a conflict.
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:{key}", principal.id));
     let project = projects
         .register(
             state.authorizer.as_ref(),
@@ -239,7 +246,9 @@ pub async fn create_project(
                 remote: request.remote,
                 name: request.name,
                 description: request.description.unwrap_or_default(),
+                idempotency_key: idempotency_key.clone(),
             },
+            idempotency_key,
         )
         .await
         .map_err(|error| map_project_error(&error, correlation_id))?;
@@ -285,8 +294,11 @@ pub async fn list_projects(
 ) -> Result<Json<Page<ProjectDto>>, ApiErrorResponse> {
     let projects = projects_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // A zero or absent limit means the default; the page never advertises
+    // more than it returns.
     let limit = params
         .limit
+        .filter(|limit| *limit > 0)
         .unwrap_or(DEFAULT_PAGE_LIMIT)
         .min(MAX_PAGE_LIMIT);
     let filter = ProjectFilter {
@@ -383,6 +395,11 @@ pub async fn get_project(
             body = crate::error::ApiError
         ),
         (
+            status = 400,
+            description = "The name or description is malformed.",
+            body = crate::error::ApiError
+        ),
+        (
             status = 403,
             description = "The caller may not update projects.",
             body = crate::error::ApiError
@@ -398,13 +415,24 @@ pub async fn update_project(
 ) -> Result<Json<Resource<ProjectDto>>, ApiErrorResponse> {
     let projects = projects_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // A missing description means "keep the current one": the CLI's rename
+    // path cannot know the current text, so it omits the field.
+    let description = if let Some(description) = request.description {
+        description
+    } else {
+        let current = projects
+            .get(state.authorizer.as_ref(), &principal, &project_id)
+            .await
+            .map_err(|error| map_project_error(&error, correlation_id))?;
+        current.description
+    };
     let project = projects
         .update(
             state.authorizer.as_ref(),
             &principal,
             &project_id,
             &request.name,
-            &request.description,
+            &description,
         )
         .await
         .map_err(|error| map_project_error(&error, correlation_id))?;

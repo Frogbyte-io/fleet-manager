@@ -201,14 +201,15 @@ pub enum Command {
         /// Operator notes.
         description: Option<String>,
     },
-    /// Rename or re-describe a project.
+    /// Rename or re-describe a project. An absent description preserves the
+    /// current one.
     ProjectsUpdate {
         /// The project id.
         id: String,
         /// The display name.
         name: String,
-        /// Operator notes.
-        description: String,
+        /// Operator notes; None preserves the current description.
+        description: Option<String>,
     },
     /// Remove a project and its observed checkouts (repositories untouched).
     ProjectsDelete {
@@ -493,15 +494,17 @@ fn parse_projects_command(verb: &str, rest: &[&str]) -> Result<Command, CliError
             _ => Err(CliError { message: usage() }),
         },
         "update" => match rest {
+            // A rename without --description preserves the current
+            // description: the CLI cannot know it, so it must not clear it.
             [id, "--name", name] => Ok(Command::ProjectsUpdate {
                 id: (*id).to_owned(),
                 name: (*name).to_owned(),
-                description: String::new(),
+                description: None,
             }),
             [id, "--name", name, "--description", description] => Ok(Command::ProjectsUpdate {
                 id: (*id).to_owned(),
                 name: (*name).to_owned(),
-                description: (*description).to_owned(),
+                description: Some((*description).to_owned()),
             }),
             _ => Err(CliError { message: usage() }),
         },
@@ -1139,12 +1142,22 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             id,
             name,
             description,
-        } => (
-            reqwest::Method::PATCH,
-            format!("/api/v1/projects/{id}"),
-            Vec::new(),
-            Some(serde_json::json!({ "name": name, "description": description })),
-        ),
+        } => {
+            // An absent description means "keep the current one": the API
+            // treats a missing field as no change.
+            let body = match description {
+                Some(description) => {
+                    serde_json::json!({ "name": name, "description": description })
+                }
+                None => serde_json::json!({ "name": name }),
+            };
+            (
+                reqwest::Method::PATCH,
+                format!("/api/v1/projects/{id}"),
+                Vec::new(),
+                Some(body),
+            )
+        }
         Command::ProjectsDelete { id } => (
             reqwest::Method::DELETE,
             format!("/api/v1/projects/{id}"),

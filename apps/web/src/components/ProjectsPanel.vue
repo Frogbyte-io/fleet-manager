@@ -26,6 +26,13 @@ async function load() {
     if (response.status === 200) {
       projects.value = response.data.items
       failed.value = false
+    } else {
+      // A refused or failed request must say why, not look like an empty
+      // list.
+      failed.value = true
+      failure.value =
+        (response.data as { message?: string })?.message ??
+        `the controller answered ${response.status}`
     }
   } catch (error) {
     failed.value = true
@@ -54,6 +61,13 @@ async function create() {
       form.value = { remote: '', name: '', description: '' }
       await load()
       await open(response.data.data)
+    } else {
+      // A conflict (the same remote under another spelling) or a refusal
+      // must explain itself.
+      failed.value = true
+      failure.value =
+        (response.data as { message?: string })?.message ??
+        `the controller answered ${response.status}`
     }
   } finally {
     busy.value = false
