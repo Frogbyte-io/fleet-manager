@@ -14,8 +14,8 @@ const TOKEN_BODY: &str = r#"{"access_token":"tskey-access-recorded-token","scope
 
 /// Devices shaped like the API's real response (camelCase, `nodeId` preferred).
 const DEVICES_BODY: &str = r#"{"devices":[
-  {"nodeId":"nABC123","id":"1503","name":"build-host.tail11fe3.ts.net.","hostname":"build-host","os":"linux","addresses":["100.87.74.78","fd7a:115c:a1e0::1"],"tags":["tag:server"],"user":"amelie@example.com","online":true,"connectedToControl":true},
-  {"nodeId":"nDEF456","id":"1504","name":"lab-box.tail11fe3.ts.net.","hostname":"lab-box","os":"linux","addresses":["100.12.12.12"],"user":"amelie@example.com","online":false,"lastSeen":"2026-09-01T05:23:30Z"}
+  {"nodeId":"nABC123","id":"1503","name":"build-host.tail-example.ts.net.","hostname":"build-host","os":"linux","addresses":["100.64.0.10","fd7a:115c:a1e0::1"],"tags":["tag:server"],"user":"amelie@example.com","online":true,"connectedToControl":true},
+  {"nodeId":"nDEF456","id":"1504","name":"lab-box.tail-example.ts.net.","hostname":"lab-box","os":"linux","addresses":["100.64.0.11"],"user":"amelie@example.com","online":false,"lastSeen":"2026-09-01T05:23:30Z"}
 ]}"#;
 
 /// A transport that always fails at the transport level.
@@ -135,7 +135,7 @@ async fn a_listing_fetches_a_token_then_the_devices() {
     assert_eq!(devices.len(), 2);
     assert_eq!(devices[0].node_id, "nABC123");
     assert_eq!(devices[0].id.as_deref(), Some("1503"));
-    assert_eq!(devices[0].addresses[0], "100.87.74.78");
+    assert_eq!(devices[0].addresses[0], "100.64.0.10");
     assert_eq!(devices[0].tags, vec!["tag:server".to_owned()]);
     assert_eq!(devices[0].online, Some(true));
     assert_eq!(devices[0].connected_to_control, Some(true));

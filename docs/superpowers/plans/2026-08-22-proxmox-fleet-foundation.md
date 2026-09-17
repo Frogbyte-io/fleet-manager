@@ -533,12 +533,12 @@ git commit -m "feat: add optional machine.vmid field for the Proxmox adapter"
 - Produces: `class ProxmoxClient` with constructor `new ProxmoxClient({ host, tokenId, apiKey, fingerprint, fetchImpl })`. `fetchImpl` defaults to a real `https.request`-based implementation but is injectable for tests (matches the `git` injection pattern from Task 3).
 - Produces: `client.request(method, path, body)` → returns parsed JSON `data` field of the Proxmox API response (Proxmox always wraps responses as `{ data: ... }`). Throws on non-2xx with the response body's `errors` if present.
 - Produces: `client.waitForTask(node, upid, { pollIntervalMs = 1000, timeoutMs = 300000 } = {})` → polls `GET /nodes/<node>/tasks/<upid>/status` until `status !== 'running'`, resolves with the final status object, rejects if `timeoutMs` elapses first.
-- Produces: `ProxmoxClient.fromEnv(env = process.env)` → reads `PROXMOX_HOST`, `PROXMOX_TOKEN_ID` (e.g. `root@pam!agents`), `PROXMOX_API_KEY`, `PROXMOX_FINGERPRINT` and constructs a client. Throws a clear error naming whichever of those four is missing.
+- Produces: `ProxmoxClient.fromEnv(env = process.env)` → reads `PROXMOX_HOST`, `PROXMOX_TOKEN_ID` (e.g. `<token-id>`), `PROXMOX_API_KEY`, `PROXMOX_FINGERPRINT` and constructs a client. Throws a clear error naming whichever of those four is missing.
 
 **Before writing this task's implementation**, get the real TLS fingerprint from the live host (needed for both the pinning logic and the live smoke test in Step 5):
 
 ```bash
-openssl s_client -connect 192.168.68.223:8006 -showcerts </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+openssl s_client -connect <pve-host-ip>:8006 -showcerts </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
 ```
 
 That command's output (`SHA256 Fingerprint=AA:BB:...`) is the value to export as `PROXMOX_FINGERPRINT` when running the live test in Step 6 — do not hardcode it in source; it's read from the environment.
@@ -736,8 +736,8 @@ and update `realFetch`'s signature to `realFetch({ host, tokenId, apiKey, finger
 - [ ] **Step 6: Live smoke test against the real host (manual, not part of `npm test`)**
 
 ```bash
-export PROXMOX_HOST=192.168.68.223
-export PROXMOX_TOKEN_ID='root@pam!agents'
+export PROXMOX_HOST=<pve-host-ip>
+export PROXMOX_TOKEN_ID='<token-id>'
 export PROXMOX_API_KEY=$(sed -n 's/^PROXMOX_API_KEY=//p' .env | tr -d '\r\n')
 export PROXMOX_FINGERPRINT='<paste the openssl output from before Step 1>'
 node -e "

@@ -19,7 +19,7 @@ use tokio::net::TcpListener as TokioListener;
 const TOKEN_BODY: &str = r#"{"access_token":"tskey-access-recorded","scope":"devices:core:read","token_type":"Bearer","expires_in":3600}"#;
 
 const DEVICES_BODY: &str = r#"{"devices":[
-  {"nodeId":"nVM","name":"fleet-test-01.tail11fe3.ts.net.","hostname":"fleet-test-01","os":"linux","addresses":["100.87.74.78"],"user":"andreas@example.com","online":true,"connectedToControl":true}
+  {"nodeId":"nVM","name":"fleet-test-01.tail-example.ts.net.","hostname":"fleet-test-01","os":"linux","addresses":["100.64.0.10"],"user":"user@example.com","online":true,"connectedToControl":true}
 ]}"#;
 
 #[derive(Debug, Default)]
@@ -94,7 +94,7 @@ async fn harness() -> Harness {
             description: String::new(),
             endpoints: vec![fleet_application::machine::NewEndpoint {
                 kind: fleet_core::EndpointKind::Ssh,
-                reference: "ops@100.87.74.78:22".to_owned(),
+                reference: "ops@100.64.0.10:22".to_owned(),
             }],
             tags: Vec::new(),
             groups: Vec::new(),
@@ -278,7 +278,7 @@ async fn the_tailnet_surface_walks_configure_list_and_import() {
         )
         .await;
     assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
-    assert_eq!(body["data"]["endpoint"]["host"], "100.87.74.78");
+    assert_eq!(body["data"]["endpoint"]["host"], "100.64.0.10");
     assert!(
         body["data"]["description"]
             .as_str()

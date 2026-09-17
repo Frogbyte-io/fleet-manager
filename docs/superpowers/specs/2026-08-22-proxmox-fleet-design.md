@@ -6,7 +6,7 @@ on top of the foundation from #2.
 
 ## Goals
 
-- Stand up a real Proxmox host (`192.168.68.223`, PVE 9.2.2) as the fleet's
+- Stand up a real Proxmox host (`<pve-host-ip>`, PVE 9.2.2) as the fleet's
   VM host for the four machines already declared in `machines/`.
 - Split the current single repo into a reusable engine + per-fleet data, so
   the tool works for fleets beyond this one homelab.
@@ -65,7 +65,7 @@ manual, security-sensitive step the user performs directly — see
 
 ## Proxmox adapter (`fleet-manager/src/proxmox/`)
 
-- HTTPS client using `PVEAPIToken` auth (`root@pam!agents`), TLS pinned to
+- HTTPS client using `PVEAPIToken` auth (`<token-id>`), TLS pinned to
   the host's certificate fingerprint (`DC:2C:11:6E:...:64:98`).
 - Wraps: clone, reset (snapshot rollback or re-clone), start, stop,
   snapshot, template conversion. Proxmox mutating calls return a UPID;

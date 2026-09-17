@@ -65,7 +65,7 @@ fn device(node_id: &str, hostname: &str, address: &str) -> TailnetDevice {
     TailnetDevice {
         node_id: node_id.to_owned(),
         id: Some("1503".to_owned()),
-        name: format!("{hostname}.tail11fe3.ts.net."),
+        name: format!("{hostname}.tail-example.ts.net."),
         hostname: hostname.to_owned(),
         os: "linux".to_owned(),
         addresses: vec![address.to_owned()],
@@ -491,10 +491,10 @@ async fn clear_removes_the_credentials_and_audits() {
 async fn listing_correlates_by_address_and_name_but_never_merges() {
     let fixture = compose(
         FakeMachines::default()
-            .plant(machine_record("by-address", "ops@100.87.74.78:22"))
+            .plant(machine_record("by-address", "ops@100.64.0.10:22"))
             .plant(machine_record("by-name", "ops@build-host:22")),
         vec![
-            device("n1", "build-host", "100.87.74.78"),
+            device("n1", "build-host", "100.64.0.10"),
             device("n2", "unknown-box", "100.99.99.99"),
         ],
     );
@@ -536,8 +536,8 @@ async fn listing_correlates_by_address_and_name_but_never_merges() {
 #[tokio::test]
 async fn correlation_degrades_honestly_without_the_sensitive_permission() {
     let fixture = compose(
-        FakeMachines::default().plant(machine_record("by-address", "ops@100.87.74.78:22")),
-        vec![device("n1", "build-host", "100.87.74.78")],
+        FakeMachines::default().plant(machine_record("by-address", "ops@100.64.0.10:22")),
+        vec![device("n1", "build-host", "100.64.0.10")],
     );
     fixture
         .credentials
@@ -560,7 +560,7 @@ async fn correlation_degrades_honestly_without_the_sensitive_permission() {
 async fn import_hands_the_device_to_the_onboarding_flow() {
     let fixture = compose(
         FakeMachines::default(),
-        vec![device("nABC", "build-host", "100.87.74.78")],
+        vec![device("nABC", "build-host", "100.64.0.10")],
     );
     fixture
         .credentials
@@ -573,7 +573,7 @@ async fn import_hands_the_device_to_the_onboarding_flow() {
         .import(&AllowAll, &principal(), "nABC", "ops", Some(2222), None)
         .await
         .unwrap();
-    assert_eq!(draft.endpoint.host, "100.87.74.78");
+    assert_eq!(draft.endpoint.host, "100.64.0.10");
     assert_eq!(draft.endpoint.user, "ops");
     assert_eq!(draft.endpoint.port, 2222);
     assert_eq!(draft.name, "build-host");
@@ -722,7 +722,7 @@ async fn the_use_case_error_maps_the_onboarding_denial() {
     // An import by a caller without machine.create surfaces as a denial.
     let fixture = compose(
         FakeMachines::default(),
-        vec![device("nABC", "build-host", "100.87.74.78")],
+        vec![device("nABC", "build-host", "100.64.0.10")],
     );
     fixture
         .credentials
