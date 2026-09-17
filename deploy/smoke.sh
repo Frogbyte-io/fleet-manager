@@ -14,6 +14,20 @@ cd "$(dirname "$0")"
 project="fleet-smoke"
 service="controller"
 
+# The host port dodges whatever the machine already uses: pick a free
+# loopback port unless the caller pinned one. The probe URLs below derive
+# from it, so the smoke never assumes 8080 is free.
+if [ -z "${FLEET_SMOKE_PORT:-}" ]; then
+  FLEET_SMOKE_PORT="$(python3 - <<'PORT'
+import socket
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    print(probe.getsockname()[1])
+PORT
+)"
+fi
+export FLEET_SMOKE_PORT
+
 if ! docker compose version >/dev/null 2>&1; then
   echo "error: docker compose (v2 plugin) is required" >&2
   exit 1
@@ -71,11 +85,11 @@ fi
 echo "    healthy"
 
 echo "==> Probing the served surfaces"
-readyz="$(curl -fsS http://127.0.0.1:8080/readyz)"
+readyz="$(curl -fsS "http://127.0.0.1:${FLEET_SMOKE_PORT}/readyz")"
 [ "$readyz" = "ok" ] || { echo "error: /readyz answered '$readyz'" >&2; exit 1; }
-curl -fsS http://127.0.0.1:8080/ | grep -q "Fleet Manager" \
+curl -fsS "http://127.0.0.1:${FLEET_SMOKE_PORT}/" | grep -q "Fleet Manager" \
   || { echo "error: the web shell was not served at /" >&2; exit 1; }
-curl -fsS http://127.0.0.1:8080/api/v1/meta | grep -q '"service":"fleet-controller"' \
+curl -fsS "http://127.0.0.1:${FLEET_SMOKE_PORT}/api/v1/meta" | grep -q '"service":"fleet-controller"' \
   || { echo "error: /api/v1/meta did not answer the public envelope" >&2; exit 1; }
 echo "    web shell, API, and readiness OK"
 
