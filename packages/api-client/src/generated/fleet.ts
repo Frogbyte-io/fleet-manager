@@ -1585,6 +1585,10 @@ remotePrefix?: string;
  */
 nameSubstring?: string;
 /**
+ * The opaque cursor from a previous page (the last project's id).
+ */
+cursor?: string;
+/**
  * The maximum number of projects to return.
  * @minimum 0
  */

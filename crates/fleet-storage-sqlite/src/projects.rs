@@ -75,31 +75,39 @@ impl ProjectPort for ProjectRepository {
 
     async fn list(&self, filter: &ProjectFilter, limit: u32) -> Result<Vec<Project>, PortFailure> {
         let limit = limit.clamp(1, 200);
-        // The filters match literally: the caller's % and _ are escaped so
-        // they cannot act as wildcards. The name comparison uses lower(),
-        // which folds ASCII case; full Unicode folding arrives with a
-        // case-folding extension and is documented as a limitation.
+        // The remote filter matches literally: the caller's % and _ are
+        // escaped so they cannot act as wildcards. The name substring is
+        // folded in the process (Unicode-aware) rather than in SQL, where
+        // LIKE only folds ASCII.
         let prefix = filter
             .remote_prefix
             .as_deref()
             .map(|prefix| format!("{}%", escape_like(prefix)));
-        let substring = filter
-            .name_substring
-            .as_deref()
-            .map(|needle| format!("%{}%", escape_like(needle).to_lowercase()));
+        let substring = filter.name_substring.as_deref().map(str::to_lowercase);
         let rows = sqlx::query(
             "SELECT * FROM projects \
              WHERE (?1 IS NULL OR remote LIKE ?1 ESCAPE '\\') \
-               AND (?2 IS NULL OR lower(name) LIKE ?2 ESCAPE '\\') \
+               AND (?4 IS NULL OR id > ?4) \
              ORDER BY created_at DESC, id DESC LIMIT ?3",
         )
         .bind(prefix)
-        .bind(substring)
+        .bind(&substring)
         .bind(limit)
+        .bind(filter.after_id.as_deref())
         .fetch_all(&self.pool)
         .await
         .map_err(|error| backend("list", &error))?;
-        Ok(rows.iter().map(hydrate).collect())
+        let projects: Vec<Project> = rows
+            .iter()
+            .filter(|row| {
+                substring.as_deref().is_none_or(|needle| {
+                    let name: String = row.get::<String, _>("name").to_lowercase();
+                    name.contains(needle)
+                })
+            })
+            .map(hydrate)
+            .collect();
+        Ok(projects)
     }
 
     async fn update(

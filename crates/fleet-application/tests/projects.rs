@@ -98,7 +98,7 @@ impl ProjectPort for FakeProjects {
             })
             .cloned()
             .collect();
-        projects.sort_by_key(|project| std::cmp::Reverse(project.created_at));
+        projects.sort_by_key(|project| (std::cmp::Reverse(project.created_at), project.id.clone()));
         Ok(projects.into_iter().take(limit as usize).collect())
     }
 
@@ -554,6 +554,7 @@ async fn the_list_narrows_by_remote_prefix_and_name_substring() {
             &ProjectFilter {
                 remote_prefix: Some("github.com/".to_owned()),
                 name_substring: None,
+                after_id: None,
             },
             50,
         )
@@ -569,6 +570,7 @@ async fn the_list_narrows_by_remote_prefix_and_name_substring() {
             &ProjectFilter {
                 remote_prefix: None,
                 name_substring: Some("MANAGER".to_owned()),
+                after_id: None,
             },
             50,
         )

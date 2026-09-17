@@ -101,6 +101,9 @@ pub struct ProjectFilter {
     pub remote_prefix: Option<String>,
     /// Only projects whose name contains this substring (case-insensitive).
     pub name_substring: Option<String>,
+    /// Only projects created after this id (the opaque page cursor), so a
+    /// following page really advances.
+    pub after_id: Option<String>,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -222,6 +225,17 @@ impl Projects {
             Err(failure) => return Err(map_port("find_by_remote", failure)),
         }
 
+        // The audit intent lands BEFORE the mutation: a failure to audit
+        // prevents the mutation, so durable state can never exist without
+        // its intent. The minted id is not known yet; the remote carries the
+        // correlation.
+        self.audit_project(
+            principal,
+            Permission::ProjectsCreate,
+            remote.as_str(),
+            Some(("remote", remote.as_str())),
+        )
+        .await?;
         let stored = NewProject {
             remote: remote.as_str().to_owned(),
             name: new.name.clone(),
@@ -233,13 +247,6 @@ impl Projects {
             .create(&stored)
             .await
             .map_err(|failure| map_port("create", failure))?;
-        self.audit_project(
-            principal,
-            Permission::ProjectsCreate,
-            &project.id,
-            Some(("remote", &project.remote)),
-        )
-        .await?;
         Ok(project)
     }
 
@@ -337,13 +344,13 @@ impl Projects {
                 detail: "the description must be at most 512 characters".to_owned(),
             });
         }
+        self.audit_project(principal, Permission::ProjectsUpdate, id, None)
+            .await?;
         let project = self
             .port
             .update(id, name, description)
             .await
             .map_err(|failure| map_port("update", failure))?;
-        self.audit_project(principal, Permission::ProjectsUpdate, id, None)
-            .await?;
         Ok(project)
     }
 
@@ -369,12 +376,12 @@ impl Projects {
             },
         )
         .map_err(ProjectUseCaseError::Denied)?;
+        self.audit_project(principal, Permission::ProjectsDelete, id, None)
+            .await?;
         self.port
             .delete(id)
             .await
             .map_err(|failure| map_port("delete", failure))?;
-        self.audit_project(principal, Permission::ProjectsDelete, id, None)
-            .await?;
         Ok(())
     }
 

@@ -184,6 +184,8 @@ pub struct ListProjectsParams {
     pub remote_prefix: Option<String>,
     /// Only projects whose name contains this substring.
     pub name_substring: Option<String>,
+    /// The opaque cursor from a previous page (the last project's id).
+    pub cursor: Option<String>,
     /// The maximum number of projects to return.
     pub limit: Option<u32>,
 }
@@ -271,6 +273,7 @@ pub async fn create_project(
     params(
         ("remotePrefix" = Option<String>, Query, description = "Only projects whose normalized remote starts with this prefix."),
         ("nameSubstring" = Option<String>, Query, description = "Only projects whose name contains this substring."),
+        ("cursor" = Option<String>, Query, description = "The opaque cursor from a previous page (the last project's id)."),
         ("limit" = Option<u32>, Query, description = "The maximum number of projects to return.")
     ),
     responses(
@@ -304,6 +307,7 @@ pub async fn list_projects(
     let filter = ProjectFilter {
         remote_prefix: params.remote_prefix,
         name_substring: params.name_substring,
+        after_id: params.cursor,
     };
     let items = projects
         .list(state.authorizer.as_ref(), &principal, &filter, limit)

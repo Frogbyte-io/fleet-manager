@@ -297,6 +297,7 @@ async fn the_project_list_filters_match_literals_and_ignore_stale_observations()
     let filter = ProjectFilter {
         remote_prefix: Some("host/team_a".to_owned()),
         name_substring: None,
+        after_id: None,
     };
     let listed = projects.list(&filter, 50).await.unwrap();
     assert_eq!(listed.len(), 1, "the literal prefix matches: {listed:?}");
@@ -304,6 +305,7 @@ async fn the_project_list_filters_match_literals_and_ignore_stale_observations()
     let wrong = ProjectFilter {
         remote_prefix: Some("host/teamXa".to_owned()),
         name_substring: None,
+        after_id: None,
     };
     let listed = projects.list(&wrong, 50).await.unwrap();
     assert!(listed.is_empty(), "the _ wildcard must not match");

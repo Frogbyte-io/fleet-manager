@@ -1138,6 +1138,15 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor from a previous page (the last project's id).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "The maximum number of projects to return.",
