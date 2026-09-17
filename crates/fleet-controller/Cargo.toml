@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
+base64 = "0.22.1"
 axum = { version = "0.8.9", features = ["ws"] }
 fleet-api = { path = "../fleet-api" }
 fleet-application = { path = "../fleet-application" }

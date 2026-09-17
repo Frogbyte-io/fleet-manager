@@ -76,6 +76,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         machines::MachineDto,
         onboarding::AddedMachineDto,
         projects::CheckoutFactDto,
+        projects::CheckoutAuthDto,
+        projects::DiscoveredCheckoutDto,
+        projects::RecordCheckoutsRequest,
+        projects::StartDiscoveryRequest,
         projects::CreateProjectRequest,
         projects::ProjectDto,
         projects::UpdateProjectRequest,
@@ -155,6 +159,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(projects::get_project))
                 .routes(routes!(projects::update_project))
                 .routes(routes!(projects::delete_project))
+                .routes(routes!(projects::start_discovery))
+                .routes(routes!(projects::record_checkouts))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts

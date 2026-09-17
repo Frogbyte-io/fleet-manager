@@ -84,6 +84,15 @@ pub enum Permission {
     ProjectsUpdate,
     /// Remove a project and its facts. A mutation.
     ProjectsDelete,
+    /// Discover checkouts on a machine by probing its standard roots over
+    /// the SSH transport. A read, but a filesystem-topology-revealing one.
+    ProjectsDiscover,
+    /// Clone, pull, or read the status of a project checkout on a machine.
+    /// A mutation: it changes remote state through the Git CLI.
+    ProjectsGitWrite,
+    /// Write guarded agent configuration files under a checkout root.
+    /// A mutation: it writes files on a managed machine.
+    ProjectsFileWrite,
 }
 
 impl Permission {
@@ -114,6 +123,9 @@ impl Permission {
         Permission::ProjectsCreate,
         Permission::ProjectsUpdate,
         Permission::ProjectsDelete,
+        Permission::ProjectsDiscover,
+        Permission::ProjectsGitWrite,
+        Permission::ProjectsFileWrite,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -143,6 +155,9 @@ impl Permission {
             Permission::ProjectsCreate => "projects.create",
             Permission::ProjectsUpdate => "projects.update",
             Permission::ProjectsDelete => "projects.delete",
+            Permission::ProjectsDiscover => "projects.discover",
+            Permission::ProjectsGitWrite => "projects.git.write",
+            Permission::ProjectsFileWrite => "projects.file.write",
         }
     }
 
@@ -174,7 +189,10 @@ impl Permission {
             | Permission::TailnetRead
             | Permission::ProjectsCreate
             | Permission::ProjectsUpdate
-            | Permission::ProjectsDelete => true,
+            | Permission::ProjectsDelete
+            | Permission::ProjectsDiscover
+            | Permission::ProjectsGitWrite
+            | Permission::ProjectsFileWrite => true,
         }
     }
 
@@ -206,7 +224,10 @@ impl Permission {
             | Permission::NodeRead
             | Permission::NodeRevoke
             | Permission::ProjectsUpdate
-            | Permission::ProjectsDelete => true,
+            | Permission::ProjectsDelete
+            | Permission::ProjectsDiscover
+            | Permission::ProjectsGitWrite
+            | Permission::ProjectsFileWrite => true,
         }
     }
 }

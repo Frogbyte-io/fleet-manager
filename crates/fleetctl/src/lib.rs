@@ -216,6 +216,112 @@ pub enum Command {
         /// The project id.
         id: String,
     },
+    /// Start a checkout discovery for a project on a machine.
+    ProjectsDiscover {
+        /// The project id.
+        id: String,
+        /// The machine whose standard roots to scan.
+        machine: String,
+        /// The SSH endpoint id to probe through.
+        endpoint: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The identity file's path, for identity-file auth.
+        identity: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Record a discovery result as the project's observed checkouts. The
+    /// discovery result JSON is read from standard input.
+    ProjectsRecord {
+        /// The project id.
+        id: String,
+        /// The machine the checkouts were observed on.
+        machine: String,
+    },
+    /// Clone a project's remote into a checkout root on a machine.
+    ProjectsClone {
+        /// The project id.
+        id: String,
+        /// The machine to clone on.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// Where the clone lands, absolute.
+        root: String,
+        /// The branch to check out, when one is named.
+        branch: Option<String>,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The identity file's path, for identity-file auth.
+        identity: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Pull a project's checkout on a machine, fast-forward only.
+    ProjectsPull {
+        /// The project id.
+        id: String,
+        /// The machine to pull on.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// The checkout root, absolute.
+        root: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The identity file's path, for identity-file auth.
+        identity: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Read a checkout's status on a machine.
+    ProjectsStatus {
+        /// The project id.
+        id: String,
+        /// The machine to probe.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// The checkout root, absolute.
+        root: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The identity file's path, for identity-file auth.
+        identity: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Write a guarded agent config file under a checkout root. The
+    /// contents are read from standard input.
+    ProjectsWriteConfig {
+        /// The project id.
+        id: String,
+        /// The machine to write on.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// The checkout root, absolute.
+        root: String,
+        /// Which agent config file to write.
+        file_name: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The identity file's path, for identity-file auth.
+        identity: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Show the Tailscale integration's status (configured or not).
     TailnetStatus,
     /// Configure the Tailscale OAuth client. The secret is read from
@@ -414,6 +520,7 @@ fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
 }
 
 /// Parses one `fleetctl projects` subcommand.
+#[allow(clippy::too_many_lines)]
 fn parse_projects_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
     match verb {
         "list" => {
@@ -514,8 +621,184 @@ fn parse_projects_command(verb: &str, rest: &[&str]) -> Result<Command, CliError
             }),
             _ => Err(CliError { message: usage() }),
         },
+        "discover" => match rest {
+            [id, machine_id, rest @ ..] => {
+                let (flags, wait, timeout) = parse_checkout_flags(rest)?;
+                Ok(Command::ProjectsDiscover {
+                    id: (*id).to_owned(),
+                    machine: (*machine_id).to_owned(),
+                    endpoint: flags.endpoint,
+                    auth: flags.auth,
+                    identity: flags.identity,
+                    wait,
+                    timeout,
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
+        "record" => match rest {
+            [id, machine_id] => Ok(Command::ProjectsRecord {
+                id: (*id).to_owned(),
+                machine: (*machine_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "clone" => match rest {
+            [id, machine_id, "--root", root, rest @ ..] => {
+                let (flags, wait, timeout) = parse_checkout_flags(rest)?;
+                let branch = flags.branch;
+                Ok(Command::ProjectsClone {
+                    id: (*id).to_owned(),
+                    machine: (*machine_id).to_owned(),
+                    endpoint: flags.endpoint,
+                    root: (*root).to_owned(),
+                    branch,
+                    auth: flags.auth,
+                    identity: flags.identity,
+                    wait,
+                    timeout,
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
+        "pull" => match rest {
+            [id, machine_id, "--root", root, rest @ ..] => {
+                let (flags, wait, timeout) = parse_checkout_flags(rest)?;
+                Ok(Command::ProjectsPull {
+                    id: (*id).to_owned(),
+                    machine: (*machine_id).to_owned(),
+                    endpoint: flags.endpoint,
+                    root: (*root).to_owned(),
+                    auth: flags.auth,
+                    identity: flags.identity,
+                    wait,
+                    timeout,
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
+        "status" => match rest {
+            [id, machine_id, "--root", root, rest @ ..] => {
+                let (flags, wait, timeout) = parse_checkout_flags(rest)?;
+                Ok(Command::ProjectsStatus {
+                    id: (*id).to_owned(),
+                    machine: (*machine_id).to_owned(),
+                    endpoint: flags.endpoint,
+                    root: (*root).to_owned(),
+                    auth: flags.auth,
+                    identity: flags.identity,
+                    wait,
+                    timeout,
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
+        "write-config" => match rest {
+            [
+                id,
+                machine_id,
+                "--root",
+                root,
+                "--file",
+                file_name,
+                rest @ ..,
+            ] => {
+                let (flags, wait, timeout) = parse_checkout_flags(rest)?;
+                Ok(Command::ProjectsWriteConfig {
+                    id: (*id).to_owned(),
+                    machine: (*machine_id).to_owned(),
+                    endpoint: flags.endpoint,
+                    root: (*root).to_owned(),
+                    file_name: (*file_name).to_owned(),
+                    auth: flags.auth,
+                    identity: flags.identity,
+                    wait,
+                    timeout,
+                })
+            }
+            _ => Err(CliError { message: usage() }),
+        },
         _ => Err(CliError { message: usage() }),
     }
+}
+
+/// The endpoint/auth flags the checkout commands share.
+struct CheckoutEndpointFlags {
+    endpoint: String,
+    auth: OnboardAuthArg,
+    identity: Option<String>,
+    branch: Option<String>,
+}
+
+/// Parses the flags shared by the checkout commands: `--endpoint`,
+/// `--auth`, `--identity`, and (clone only) `--branch`. Returns the flags
+/// plus the wait/timeout pair.
+fn parse_checkout_flags(
+    rest: &[&str],
+) -> Result<(CheckoutEndpointFlags, bool, Option<u64>), CliError> {
+    let mut endpoint: Option<String> = None;
+    let mut auth: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut branch: Option<String> = None;
+    let mut wait = false;
+    let mut timeout: Option<u64> = None;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--endpoint" => endpoint = Some(value("endpoint")?.to_owned()),
+            "--auth" => auth = Some(value("auth")?.to_owned()),
+            "--identity" => identity = Some(value("identity")?.to_owned()),
+            "--branch" => branch = Some(value("branch")?.to_owned()),
+            "--wait" => wait = true,
+            "--timeout" => {
+                let parsed = value("timeout")?;
+                timeout = Some(parsed.parse().map_err(|_| CliError {
+                    message: format!("--timeout must be a number, not {parsed:?}"),
+                })?);
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    let auth_arg = match (auth.as_deref(), identity.clone()) {
+        (Some("agent"), _) => OnboardAuthArg::Agent,
+        (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
+        (Some("identity-file"), None) => {
+            return Err(CliError {
+                message: "--auth identity-file requires --identity <path>".to_owned(),
+            });
+        }
+        (Some(other), _) => {
+            return Err(CliError {
+                message: format!("--auth must be agent or identity-file, not {other:?}"),
+            });
+        }
+        (None, _) => {
+            return Err(CliError {
+                message: "--auth is required: agent or identity-file".to_owned(),
+            });
+        }
+    };
+    Ok((
+        CheckoutEndpointFlags {
+            endpoint: endpoint.ok_or_else(|| CliError {
+                message: "--endpoint <endpoint-id> is required".to_owned(),
+            })?,
+            auth: auth_arg,
+            identity,
+            branch,
+        },
+        wait,
+        timeout,
+    ))
 }
 
 /// Parses one `fleetctl tailnet` subcommand.
@@ -584,7 +867,7 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -921,6 +1204,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     )?;
     let body = follow_wait_stage(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
+    let body = follow_checkout_wait(&client, invocation, body)?;
     let payload = if body.get("items").is_some() {
         body
     } else {
@@ -988,6 +1272,31 @@ fn follow_wait_stage(
     )
 }
 
+/// Polls a checkout operation to a terminal state when `--wait` was
+/// supplied, then answers the operation's own body.
+fn follow_checkout_wait(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    body: Value,
+) -> Result<Value, CliError> {
+    let wait = match &invocation.command {
+        Command::ProjectsDiscover { wait, timeout, .. }
+        | Command::ProjectsClone { wait, timeout, .. }
+        | Command::ProjectsPull { wait, timeout, .. }
+        | Command::ProjectsStatus { wait, timeout, .. }
+        | Command::ProjectsWriteConfig { wait, timeout, .. } => (*wait, *timeout),
+        _ => return Ok(body),
+    };
+    if !wait.0 {
+        return Ok(body);
+    }
+    let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+    if operation_id.is_empty() {
+        return Ok(body);
+    }
+    wait_for_operation(client, invocation, &operation_id, wait.1.unwrap_or(300))
+}
+
 /// Renders one decoded payload for the invocation's output mode.
 fn render(invocation: &Invocation, payload: &Value) -> String {
     match invocation.output {
@@ -1012,9 +1321,10 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
                 render_project_mutation(payload)
             }
             Command::ProjectsDelete { .. } => render_project_deleted(),
-            Command::ProjectsList { .. } | Command::ProjectsGet { .. } => {
-                render_projects(Some(payload))
-            }
+            Command::ProjectsList { .. }
+            | Command::ProjectsGet { .. }
+            | Command::ProjectsDiscover { .. }
+            | Command::ProjectsRecord { .. } => render_projects(Some(payload)),
             Command::TailnetStatus
             | Command::TailnetConfigure { .. }
             | Command::TailnetClear
@@ -1163,6 +1473,101 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             format!("/api/v1/projects/{id}"),
             Vec::new(),
             None,
+        ),
+        Command::ProjectsDiscover {
+            id,
+            machine,
+            endpoint,
+            auth,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/projects/{id}/discoveries"),
+            Vec::new(),
+            Some(checkout_request_body(machine, endpoint, auth)),
+        ),
+        Command::ProjectsRecord { id, machine } => (
+            reqwest::Method::POST,
+            format!("/api/v1/projects/{id}/checkouts"),
+            Vec::new(),
+            Some(record_checkouts_body(machine)?),
+        ),
+        Command::ProjectsClone {
+            id: _,
+            machine,
+            endpoint,
+            root,
+            branch,
+            auth,
+            ..
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/operations".to_owned(),
+            Vec::new(),
+            Some(checkout_operation_body(
+                "projects.clone",
+                machine,
+                endpoint,
+                auth,
+                Some(root.clone()),
+                branch.clone(),
+            )),
+        ),
+        Command::ProjectsPull {
+            id: _,
+            machine,
+            endpoint,
+            root,
+            auth,
+            ..
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/operations".to_owned(),
+            Vec::new(),
+            Some(checkout_operation_body(
+                "projects.pull",
+                machine,
+                endpoint,
+                auth,
+                Some(root.clone()),
+                None,
+            )),
+        ),
+        Command::ProjectsStatus {
+            id: _,
+            machine,
+            endpoint,
+            root,
+            auth,
+            ..
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/operations".to_owned(),
+            Vec::new(),
+            Some(checkout_operation_body(
+                "projects.status",
+                machine,
+                endpoint,
+                auth,
+                Some(root.clone()),
+                None,
+            )),
+        ),
+        Command::ProjectsWriteConfig {
+            id: _,
+            machine,
+            endpoint,
+            root,
+            file_name,
+            auth,
+            ..
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/operations".to_owned(),
+            Vec::new(),
+            Some(checkout_write_config_body(
+                machine, endpoint, auth, root, file_name,
+            )?),
         ),
         Command::TailnetStatus => (
             reqwest::Method::GET,
@@ -2042,4 +2447,96 @@ fn operation_detail(operation: &Value) -> String {
         lines.push(format!("{key}: {rendered}"));
     }
     lines.join("\n")
+}
+
+/// The auth value the checkout commands share.
+fn checkout_auth_value(auth: &OnboardAuthArg) -> serde_json::Value {
+    match auth {
+        OnboardAuthArg::Agent => serde_json::json!({ "type": "agent" }),
+        OnboardAuthArg::IdentityFile(path) => {
+            serde_json::json!({ "type": "identityFile", "path": path })
+        }
+    }
+}
+
+/// The start-discovery request body.
+fn checkout_request_body(
+    machine: &str,
+    endpoint: &str,
+    auth: &OnboardAuthArg,
+) -> serde_json::Value {
+    serde_json::json!({
+        "machineId": machine,
+        "endpointId": endpoint,
+        "auth": checkout_auth_value(auth),
+        "timeoutSeconds": 120,
+    })
+}
+
+/// The record-checkouts request body: the discovery result read from
+/// standard input supplies the checkouts.
+fn record_checkouts_body(machine: &str) -> Result<serde_json::Value, CliError> {
+    let stdin = read_stdin_line("the discovery result")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdin.trim()).map_err(|error| CliError {
+            message: format!("the discovery result is not JSON: {error}"),
+        })?;
+    Ok(serde_json::json!({
+        "machineId": machine,
+        "checkouts": parsed["data"]["result"]["checkouts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| parsed["checkouts"].as_array().cloned().unwrap_or_default()),
+    }))
+}
+
+/// The create-operation body for one checkout action.
+fn checkout_operation_body(
+    kind: &str,
+    machine: &str,
+    endpoint: &str,
+    auth: &OnboardAuthArg,
+    root: Option<String>,
+    branch: Option<String>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "machineId": machine,
+        "endpointId": endpoint,
+        "auth": checkout_auth_value(auth),
+        "timeoutSeconds": 300,
+    });
+    if let Some(root) = root {
+        payload["root"] = serde_json::json!(root);
+    }
+    if let Some(branch) = branch {
+        payload["branch"] = serde_json::json!(branch);
+    }
+    serde_json::json!({
+        "kind": kind,
+        "payload": payload,
+    })
+}
+
+/// The create-operation body for a guarded agent config write; the
+/// contents arrive on standard input.
+fn checkout_write_config_body(
+    machine: &str,
+    endpoint: &str,
+    auth: &OnboardAuthArg,
+    root: &str,
+    file_name: &str,
+) -> Result<serde_json::Value, CliError> {
+    let contents = read_stdin_line("the file contents")?;
+    Ok(serde_json::json!({
+        "kind": "projects.write-config",
+        "payload": {
+            "machineId": machine,
+            "endpointId": endpoint,
+            "auth": checkout_auth_value(auth),
+            "root": root,
+            "fileName": file_name,
+            "contents": contents,
+            "timeoutSeconds": 120,
+        },
+    }))
 }

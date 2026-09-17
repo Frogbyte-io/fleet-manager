@@ -69,7 +69,7 @@ enum SshExecAuth {
 pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 
 /// The bound for the operation's public result; output is trimmed to fit.
-const RESULT_STRING_BOUND: usize = 3_000;
+pub(crate) const RESULT_STRING_BOUND: usize = 3_000;
 
 /// The kind-dispatching executor.
 #[derive(Debug)]

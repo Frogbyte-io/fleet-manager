@@ -11,6 +11,7 @@
 
 pub mod artifacts;
 pub mod browser;
+pub mod checkout;
 pub mod exec;
 pub mod gateway;
 pub mod install;

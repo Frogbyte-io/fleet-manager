@@ -77,6 +77,17 @@ fn map_project_error(
     ApiError::new(&public, correlation_id).with_status(status)
 }
 
+/// A 400 response with a caller-safe message. Kept as a helper so the
+/// pinned literal error code lives in one place.
+fn invalid_request(message: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
+    let public = PublicError::new(
+        ErrorCode::from_str("invalid_request").expect("the literal is valid error code syntax"),
+        message.to_owned(),
+        RetryClass::Never,
+    );
+    ApiError::new(&public, correlation_id).with_status(StatusCode::BAD_REQUEST)
+}
+
 /// One observed checkout of a project.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -487,4 +498,242 @@ pub async fn delete_project(
         .await
         .map_err(|error| map_project_error(&error, correlation_id))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The body of the start-discovery request: which machine and endpoint to
+/// scan, and how the endpoint authenticates.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartDiscoveryRequest {
+    /// The machine whose standard roots to scan.
+    pub machine_id: String,
+    /// The SSH endpoint id to probe through.
+    pub endpoint_id: String,
+    /// How the endpoint authenticates.
+    pub auth: CheckoutAuthDto,
+    /// The deadline, in seconds. Bounded by the executor.
+    pub timeout_seconds: u64,
+}
+
+/// How a checkout action's endpoint authenticates.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum CheckoutAuthDto {
+    /// The controller's agent supplies the key.
+    Agent,
+    /// A specific identity file.
+    IdentityFile {
+        /// The identity file's path.
+        path: String,
+    },
+}
+
+/// The body of the record-checkouts request: the discovery result to ingest
+/// as observed facts, matched to this project by its normalized remote.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordCheckoutsRequest {
+    /// The machine the checkouts were observed on.
+    pub machine_id: String,
+    /// The observed checkouts, as the discovery operation reported them.
+    pub checkouts: Vec<DiscoveredCheckoutDto>,
+}
+
+/// One discovered checkout, as the discovery operation reported it.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredCheckoutDto {
+    /// The checkout's root path on the machine.
+    pub root: String,
+    /// The checked-out branch, when observed.
+    pub branch: Option<String>,
+    /// The HEAD commit, when observed.
+    pub head: Option<String>,
+    /// Whether the worktree was dirty at observation.
+    pub dirty: Option<bool>,
+    /// The origin remote URL, when one is configured (already redacted).
+    pub remote: Option<String>,
+    /// Whether the observation is complete (`known`) or the checkout was
+    /// unreadable (`unavailable`).
+    pub status: String,
+}
+
+/// Starts a checkout discovery: a `projects.discover` operation against the
+/// named machine's standard roots.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    post,
+    path = "/projects/{projectId}/discoveries",
+    tag = "projects",
+    operation_id = "startProjectDiscovery",
+    request_body = StartDiscoveryRequest,
+    params(
+        ("projectId" = String, Path, description = "The project's identity.")
+    ),
+    responses(
+        (
+            status = 202,
+            description = "The discovery operation was accepted.",
+            body = Resource<crate::operations::OperationDto>
+        ),
+        (
+            status = 403,
+            description = "The caller may not discover checkouts.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn start_discovery(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(id): Path<String>,
+    Json(request): Json<StartDiscoveryRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let projects = projects_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The project must exist and be readable: discovery names it.
+    projects
+        .get(state.authorizer.as_ref(), &principal, &id)
+        .await
+        .map_err(|error| map_project_error(&error, correlation_id))?;
+    // Discovery authorization is machine-scoped: the probe reveals the
+    // machine's filesystem topology.
+    if let Err(decision) = fleet_application::authz::authorize(
+        state.authorizer.as_ref(),
+        fleet_application::authz::AccessRequest {
+            principal_id: &principal.id,
+            action: fleet_application::authz::Permission::ProjectsDiscover,
+            resource: Some(&request.machine_id),
+        },
+    ) {
+        return Err(map_project_error(
+            &ProjectUseCaseError::Denied(decision),
+            correlation_id,
+        ));
+    }
+    let payload = serde_json::json!({
+        "machineId": request.machine_id,
+        "endpointId": request.endpoint_id,
+        "auth": serde_json::to_value(&request.auth)
+            .map_err(|error| invalid_request(&error.to_string(), correlation_id))?,
+        "timeoutSeconds": request.timeout_seconds,
+    })
+    .to_string();
+    let operation = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            &principal.id,
+            &fleet_application::operation::NewOperation {
+                kind: "projects.discover".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: Some(correlation_id.to_string()),
+                payload_json: Some(payload),
+            },
+        )
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(Resource::new(crate::operations::OperationDto::from(
+            operation,
+        ))),
+    ))
+}
+
+/// Records discovered checkouts as this project's observed facts. Checkouts
+/// whose remote does not normalize to this project's remote are refused as
+/// a batch: mixed observations would silently corrupt the identity.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a mismatched remote, or a
+/// backend failure.
+#[utoipa::path(
+    post,
+    path = "/projects/{projectId}/checkouts",
+    tag = "projects",
+    operation_id = "recordProjectCheckouts",
+    request_body = RecordCheckoutsRequest,
+    params(
+        ("projectId" = String, Path, description = "The project's identity.")
+    ),
+    responses(
+        (
+            status = 201,
+            description = "The observations were recorded.",
+            body = Resource<ProjectDto>
+        ),
+        (
+            status = 400,
+            description = "A checkout's remote does not match the project.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 403,
+            description = "The caller may not update the project.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn record_checkouts(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(id): Path<String>,
+    Json(request): Json<RecordCheckoutsRequest>,
+) -> Result<(StatusCode, Json<Resource<ProjectDto>>), ApiErrorResponse> {
+    let projects = projects_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let project = projects
+        .get(state.authorizer.as_ref(), &principal, &id)
+        .await
+        .map_err(|error| map_project_error(&error, correlation_id))?;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    for checkout in &request.checkouts {
+        // The remote must match the project's identity: an observation of a
+        // different repository is refused, not silently re-keyed.
+        if let Some(remote) = &checkout.remote {
+            let normalized = fleet_core::NormalizedRemote::parse(remote)
+                .map_err(|detail| invalid_request(&detail, correlation_id))?;
+            if normalized.as_str() != project.remote {
+                return Err(invalid_request(
+                    &format!(
+                        "the checkout at {} observes remote {}, which is not this project ({})",
+                        checkout.root, remote, project.remote
+                    ),
+                    correlation_id,
+                ));
+            }
+        }
+        projects
+            .record_checkout(
+                state.authorizer.as_ref(),
+                &principal,
+                CheckoutFact {
+                    project_id: id.clone(),
+                    machine_id: request.machine_id.clone(),
+                    root: checkout.root.clone(),
+                    branch: checkout.branch.clone(),
+                    dirty: checkout.dirty,
+                    source: "checkout-discovery/1".to_owned(),
+                    observed_at: now,
+                },
+            )
+            .await
+            .map_err(|error| map_project_error(&error, correlation_id))?;
+    }
+    let view = projects
+        .get(state.authorizer.as_ref(), &principal, &id)
+        .await
+        .map_err(|error| map_project_error(&error, correlation_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(Resource::new(ProjectDto::from(view))),
+    ))
 }

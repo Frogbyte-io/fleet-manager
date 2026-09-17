@@ -1420,6 +1420,122 @@
         }
       }
     },
+    "/api/v1/projects/{projectId}/checkouts": {
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Records discovered checkouts as this project's observed facts. Checkouts\nwhose remote does not normalize to this project's remote are refused as\na batch: mixed observations would silently corrupt the identity.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a mismatched remote, or a\nbackend failure.",
+        "operationId": "recordProjectCheckouts",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "description": "The project's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordCheckoutsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The observations were recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProjectDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A checkout's remote does not match the project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not update the project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{projectId}/discoveries": {
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Starts a checkout discovery: a `projects.discover` operation against the\nnamed machine's standard roots.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "startProjectDiscovery",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "description": "The project's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartDiscoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The discovery operation was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not discover checkouts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system": {
       "get": {
         "tags": [
@@ -1825,6 +1941,46 @@
           }
         }
       },
+      "CheckoutAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's agent supplies the key.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A specific identity file.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How a checkout action's endpoint authenticates."
+      },
       "CheckoutFactDto": {
         "type": "object",
         "description": "One observed checkout of a project.",
@@ -2150,6 +2306,52 @@
           "remote": {
             "type": "string",
             "description": "The Git remote, in any common spelling; normalized here."
+          }
+        }
+      },
+      "DiscoveredCheckoutDto": {
+        "type": "object",
+        "description": "One discovered checkout, as the discovery operation reported it.",
+        "required": [
+          "root",
+          "status"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The checked-out branch, when observed."
+          },
+          "dirty": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the worktree was dirty at observation."
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The HEAD commit, when observed."
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The origin remote URL, when one is configured (already redacted)."
+          },
+          "root": {
+            "type": "string",
+            "description": "The checkout's root path on the machine."
+          },
+          "status": {
+            "type": "string",
+            "description": "Whether the observation is complete (`known`) or the checkout was\nunreadable (`unavailable`)."
           }
         }
       },
@@ -3629,6 +3831,27 @@
           }
         }
       },
+      "RecordCheckoutsRequest": {
+        "type": "object",
+        "description": "The body of the record-checkouts request: the discovery result to ingest\nas observed facts, matched to this project by its normalized remote.",
+        "required": [
+          "machineId",
+          "checkouts"
+        ],
+        "properties": {
+          "checkouts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiscoveredCheckoutDto"
+            },
+            "description": "The observed checkouts, as the discovery operation reported them."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine the checkouts were observed on."
+          }
+        }
+      },
       "Resource_AddedMachineDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -4333,6 +4556,36 @@
           "immediate",
           "backoff"
         ]
+      },
+      "StartDiscoveryRequest": {
+        "type": "object",
+        "description": "The body of the start-discovery request: which machine and endpoint to\nscan, and how the endpoint authenticates.",
+        "required": [
+          "machineId",
+          "endpointId",
+          "auth",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "auth": {
+            "$ref": "#/components/schemas/CheckoutAuthDto",
+            "description": "How the endpoint authenticates."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint id to probe through."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine whose standard roots to scan."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds. Bounded by the executor.",
+            "minimum": 0
+          }
+        }
       },
       "SystemInfo": {
         "type": "object",

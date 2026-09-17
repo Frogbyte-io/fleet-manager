@@ -172,6 +172,17 @@ export interface ApiError {
 }
 
 /**
+ * How a checkout action's endpoint authenticates.
+ */
+export type CheckoutAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
  * One observed checkout of a project.
  */
 export interface CheckoutFactDto {
@@ -372,6 +383,39 @@ export interface CreateProjectRequest {
   name: string;
   /** The Git remote, in any common spelling; normalized here. */
   remote: string;
+}
+
+/**
+ * One discovered checkout, as the discovery operation reported it.
+ */
+export interface DiscoveredCheckoutDto {
+  /**
+     * The checked-out branch, when observed.
+     * @nullable
+     */
+  branch?: string | null;
+  /**
+     * Whether the worktree was dirty at observation.
+     * @nullable
+     */
+  dirty?: boolean | null;
+  /**
+     * The HEAD commit, when observed.
+     * @nullable
+     */
+  head?: string | null;
+  /**
+     * The origin remote URL, when one is configured (already redacted).
+     * @nullable
+     */
+  remote?: string | null;
+  /** The checkout's root path on the machine. */
+  root: string;
+  /**
+     * Whether the observation is complete (`known`) or the checkout was
+     * unreadable (`unavailable`).
+     */
+  status: string;
 }
 
 /**
@@ -1062,6 +1106,17 @@ export interface ProjectDto {
 }
 
 /**
+ * The body of the record-checkouts request: the discovery result to ingest
+ * as observed facts, matched to this project by its normalized remote.
+ */
+export interface RecordCheckoutsRequest {
+  /** The observed checkouts, as the discovery operation reported them. */
+  checkouts: DiscoveredCheckoutDto[];
+  /** The machine the checkouts were observed on. */
+  machineId: string;
+}
+
+/**
  * The outcome of an add: the new machine plus the duplicates that were
  * warned about.
  */
@@ -1484,6 +1539,24 @@ export interface ResourceTailnetStatusDto {
      * fixed read-only scope.
      */
   data: ResourceTailnetStatusDtoData;
+}
+
+/**
+ * The body of the start-discovery request: which machine and endpoint to
+ * scan, and how the endpoint authenticates.
+ */
+export interface StartDiscoveryRequest {
+  /** How the endpoint authenticates. */
+  auth: CheckoutAuthDto;
+  /** The SSH endpoint id to probe through. */
+  endpointId: string;
+  /** The machine whose standard roots to scan. */
+  machineId: string;
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
 }
 
 /**
@@ -3146,6 +3219,135 @@ const res = await fetch(getUpdateProjectUrl(projectId),
 
   const data: updateProjectResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as updateProjectResponse
+}
+
+
+
+export type recordProjectCheckoutsResponse201 = {
+  data: ResourceProjectDto
+  status: 201
+}
+
+export type recordProjectCheckoutsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type recordProjectCheckoutsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type recordProjectCheckoutsResponseSuccess = (recordProjectCheckoutsResponse201) & {
+  headers: Headers;
+};
+export type recordProjectCheckoutsResponseError = (recordProjectCheckoutsResponse400 | recordProjectCheckoutsResponse403) & {
+  headers: Headers;
+};
+
+export type recordProjectCheckoutsResponse = (recordProjectCheckoutsResponseSuccess | recordProjectCheckoutsResponseError)
+
+export const getRecordProjectCheckoutsUrl = (projectId: string,) => {
+
+
+
+
+  return `/api/v1/projects/${projectId}/checkouts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a mismatched remote, or a
+ * backend failure.
+ * @summary Records discovered checkouts as this project's observed facts. Checkouts
+whose remote does not normalize to this project's remote are refused as
+a batch: mixed observations would silently corrupt the identity.
+ */
+export const recordProjectCheckouts = async (projectId: string,
+    recordCheckoutsRequest: RecordCheckoutsRequest, options?: RequestInit): Promise<recordProjectCheckoutsResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRecordProjectCheckoutsUrl(projectId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(recordCheckoutsRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: recordProjectCheckoutsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as recordProjectCheckoutsResponse
+}
+
+
+
+export type startProjectDiscoveryResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startProjectDiscoveryResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startProjectDiscoveryResponseSuccess = (startProjectDiscoveryResponse202) & {
+  headers: Headers;
+};
+export type startProjectDiscoveryResponseError = (startProjectDiscoveryResponse403) & {
+  headers: Headers;
+};
+
+export type startProjectDiscoveryResponse = (startProjectDiscoveryResponseSuccess | startProjectDiscoveryResponseError)
+
+export const getStartProjectDiscoveryUrl = (projectId: string,) => {
+
+
+
+
+  return `/api/v1/projects/${projectId}/discoveries`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Starts a checkout discovery: a `projects.discover` operation against the
+named machine's standard roots.
+ */
+export const startProjectDiscovery = async (projectId: string,
+    startDiscoveryRequest: StartDiscoveryRequest, options?: RequestInit): Promise<startProjectDiscoveryResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartProjectDiscoveryUrl(projectId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startDiscoveryRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startProjectDiscoveryResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startProjectDiscoveryResponse
 }
 
 
