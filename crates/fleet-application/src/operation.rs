@@ -134,6 +134,11 @@ pub enum PortFailure {
         /// The reference that was not found.
         what: String,
     },
+    /// The record conflicts with an existing one (a unique constraint).
+    Conflict {
+        /// The caller-safe detail.
+        detail: String,
+    },
     /// Something failed in the backend; the detail is safe to log.
     Backend {
         /// The failure detail.
@@ -145,6 +150,7 @@ impl fmt::Display for PortFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { what } => write!(f, "not found: {what}"),
+            Self::Conflict { detail } => write!(f, "conflict: {detail}"),
             Self::Backend { detail } => write!(f, "backend failure: {detail}"),
         }
     }
@@ -556,6 +562,7 @@ impl Operations {
 
 fn map_port_failure(context: &'static str) -> impl Fn(PortFailure) -> OperationUseCaseError {
     move |failure| match failure {
+        PortFailure::Conflict { detail } => OperationUseCaseError::Invalid { detail },
         PortFailure::NotFound { what } => OperationUseCaseError::NotFound { what },
         PortFailure::Backend { detail } => OperationUseCaseError::Backend { context, detail },
     }

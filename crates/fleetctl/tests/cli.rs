@@ -255,8 +255,14 @@ fn fleetctl_talks_to_a_real_controller() {
             web_dist: dist.path().to_path_buf(),
             artifacts_dir: None,
         };
-        let router =
-            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None, None);
+        let router = fleet_controller::build_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            None,
+            None,
+            None,
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         // Leak the server task and the directories keeping it fed; the test
@@ -344,8 +350,14 @@ fn fleetctl_machines_read_a_real_controller() {
             web_dist: dist.path().to_path_buf(),
             artifacts_dir: None,
         };
-        let router =
-            fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None, None);
+        let router = fleet_controller::build_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            None,
+            None,
+            None,
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         std::mem::forget((dist, dir, store));
@@ -498,8 +510,14 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: None,
     };
-    let router =
-        fleet_controller::build_router(&settings, Some(store.pool().clone()), None, None, None);
+    let router = fleet_controller::build_router(
+        &settings,
+        Some(store.pool().clone()),
+        None,
+        None,
+        None,
+        None,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     std::mem::forget((dist, dir, store));
@@ -787,6 +805,7 @@ fn fleetctl_onboards_a_real_controller() {
             None,
             Some(&onboarding),
             None,
+            None,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -977,6 +996,67 @@ fn parsing_refuses_the_undocumented_install_node() {
         assert!(
             error.message.contains("is required")
                 || error.message.contains("must be")
+                || error.message.contains("unknown flag"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn parsing_accepts_the_projects_grammar() {
+    let args: Vec<String> = [
+        "projects",
+        "create",
+        "--remote",
+        "git@github.com:Frogbyte-io/fleet-manager.git",
+        "--name",
+        "fleet-manager",
+        "--description",
+        "the manager",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::ProjectsCreate {
+            remote: "git@github.com:Frogbyte-io/fleet-manager.git".to_owned(),
+            name: "fleet-manager".to_owned(),
+            description: Some("the manager".to_owned()),
+        }
+    );
+
+    for (args, expected) in [
+        (vec!["projects", "list"], "list"),
+        (
+            vec!["projects", "list", "--remote-prefix", "github.com/"],
+            "list-prefix",
+        ),
+        (vec!["projects", "get", "p1"], "get"),
+        (vec!["projects", "update", "p1", "--name", "n"], "update"),
+        (vec!["projects", "delete", "p1"], "delete"),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).unwrap_or_else(|error| panic!("{expected} must parse: {error}"));
+    }
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_projects() {
+    for args in [
+        vec!["projects", "create", "--name", "x"],
+        vec!["projects", "create", "--remote", "u"],
+        vec!["projects", "get"],
+        vec!["projects", "update", "p1"],
+        vec!["projects", "delete"],
+        vec!["projects"],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
                 || error.message.contains("unknown flag"),
             "{error}"
         );

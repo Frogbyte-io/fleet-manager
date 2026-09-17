@@ -31,7 +31,7 @@ env:
 jobs:
   detect:
     name: Detect workspaces
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     outputs:
       cargo: ${{ steps.probe.outputs.cargo }}
       pnpm: ${{ steps.probe.outputs.pnpm }}
@@ -72,7 +72,7 @@ jobs:
 
   policy:
     name: Repository policy (Linux)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -118,7 +118,7 @@ jobs:
 
   secrets:
     name: Secret scan (Linux)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -160,7 +160,7 @@ jobs:
     name: Legacy Node suite (Linux)
     needs: detect
     if: needs.detect.outputs.legacy_dir != ''
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -181,7 +181,7 @@ jobs:
     name: Rust full checks (Linux x86_64)
     needs: detect
     if: needs.detect.outputs.cargo == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -198,6 +198,9 @@ jobs:
     name: Rust compatibility checks (Windows)
     needs: detect
     if: needs.detect.outputs.cargo == 'true'
+    # The self-hosted dev box is Linux; a Windows toolchain needs a hosted
+    # runner. Compatibility is informational until a Windows runner exists.
+    continue-on-error: true
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -216,7 +219,7 @@ jobs:
     name: Cargo dependency policy (Linux)
     needs: detect
     if: needs.detect.outputs.cargo == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -240,7 +243,7 @@ jobs:
     name: Compose smoke (Linux)
     needs: detect
     if: needs.detect.outputs.pnpm == 'true' && needs.detect.outputs.cargo == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
       - name: Compose end-to-end smoke
@@ -250,7 +253,7 @@ jobs:
     name: Web workspace (Linux)
     needs: detect
     if: needs.detect.outputs.pnpm == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dev-box]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -272,8 +275,11 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [detect, policy, secrets, legacy-node, rust-linux, rust-windows, cargo-deny, web, deploy-smoke]
-    runs-on: ubuntu-latest
+    # rust-windows is informational: the self-hosted fleet is Linux, and a
+    # hosted Windows runner is billing-dependent. It runs when it can and is
+    # not part of the required gate.
+    needs: [detect, policy, secrets, legacy-node, rust-linux, cargo-deny, web, deploy-smoke]
+    runs-on: [self-hosted, dev-box]
     steps:
       # One status to require on the branch. A gated-off job reports "skipped",
       # which is a pass; anything else is not.

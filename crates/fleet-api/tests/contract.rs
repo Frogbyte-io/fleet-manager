@@ -41,6 +41,7 @@ fn test_router() -> (axum::Router, Arc<FakePort>) {
         machines: None,
         onboarding: None,
         tailnet: None,
+        projects: None,
     });
     (
         router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
@@ -401,6 +402,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
         machines: None,
         onboarding: None,
         tailnet: None,
+        projects: None,
     })
 }
 
@@ -829,6 +831,7 @@ fn machine_state(
         machines: Some(Arc::new(Machines::new(backend, Arc::new(FakeAudit)))),
         onboarding: None,
         tailnet: None,
+        projects: None,
     })
 }
 

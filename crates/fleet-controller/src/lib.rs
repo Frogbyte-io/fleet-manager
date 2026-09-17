@@ -125,6 +125,7 @@ fn api_state(
     nodes: Option<Arc<fleet_application::node::Nodes>>,
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<Arc<fleet_application::project::Projects>>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
@@ -146,6 +147,7 @@ fn api_state(
             machines: Some(std::sync::Arc::new(machines)),
             onboarding,
             tailnet,
+            projects,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -160,6 +162,7 @@ fn api_state(
         machines: None,
         onboarding: None,
         tailnet: None,
+        projects: None,
     }
 }
 
@@ -262,6 +265,7 @@ pub fn build_router(
     services: Option<&NodeServices>,
     onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<&Arc<fleet_application::project::Projects>>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -272,6 +276,7 @@ pub fn build_router(
         services.map(|services| services.nodes.clone()),
         onboarding.cloned(),
         tailnet.cloned(),
+        projects.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let mut router = Router::new()
@@ -355,11 +360,12 @@ pub async fn serve(
     services: Option<NodeServices>,
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<Arc<fleet_application::project::Projects>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
     serve_on(
-        listener, settings, db, services, onboarding, tailnet, shutdown,
+        listener, settings, db, services, onboarding, tailnet, projects, shutdown,
     )
     .await
 }
@@ -371,6 +377,7 @@ pub async fn serve(
 /// # Errors
 ///
 /// Fails if the server stops on an I/O error.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_on(
     listener: tokio::net::TcpListener,
     settings: Settings,
@@ -378,6 +385,7 @@ pub async fn serve_on(
     services: Option<NodeServices>,
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<Arc<fleet_application::project::Projects>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -413,6 +421,7 @@ pub async fn serve_on(
             services.as_ref(),
             onboarding.as_ref(),
             tailnet.as_ref(),
+            projects.as_ref(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
     )

@@ -1111,6 +1111,7 @@ fn reference_port(reference: &str) -> Option<&str> {
 fn map_port(context: &'static str, failure: PortFailure) -> OnboardingUseCaseError {
     match failure {
         PortFailure::NotFound { what } => OnboardingUseCaseError::NotFound { what },
+        PortFailure::Conflict { detail } => OnboardingUseCaseError::Conflict { detail },
         PortFailure::Backend { detail } => OnboardingUseCaseError::Backend { context, detail },
     }
 }

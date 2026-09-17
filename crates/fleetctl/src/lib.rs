@@ -178,6 +178,44 @@ pub enum Command {
         /// The draft id.
         id: String,
     },
+    /// List projects, newest first.
+    ProjectsList {
+        /// Only projects whose normalized remote starts with this prefix.
+        remote_prefix: Option<String>,
+        /// Only projects whose name contains this substring.
+        name_substring: Option<String>,
+        /// Maximum entries to request.
+        limit: Option<u32>,
+    },
+    /// Read one project with its observed checkouts.
+    ProjectsGet {
+        /// The project id.
+        id: String,
+    },
+    /// Register a project from its Git remote (any common spelling).
+    ProjectsCreate {
+        /// The Git remote.
+        remote: String,
+        /// The display name.
+        name: String,
+        /// Operator notes.
+        description: Option<String>,
+    },
+    /// Rename or re-describe a project. An absent description preserves the
+    /// current one.
+    ProjectsUpdate {
+        /// The project id.
+        id: String,
+        /// The display name.
+        name: String,
+        /// Operator notes; None preserves the current description.
+        description: Option<String>,
+    },
+    /// Remove a project and its observed checkouts (repositories untouched).
+    ProjectsDelete {
+        /// The project id.
+        id: String,
+    },
     /// Show the Tailscale integration's status (configured or not).
     TailnetStatus,
     /// Configure the Tailscale OAuth client. The secret is read from
@@ -322,6 +360,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             parse_install_node(machine_id, rest, &url)?
         }
         ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
+        ["projects", verb, rest @ ..] => parse_projects_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
     Ok(Invocation {
@@ -372,6 +411,111 @@ fn parse_machines_list(rest: &[&str]) -> Result<Command, CliError> {
         status,
         limit,
     })
+}
+
+/// Parses one `fleetctl projects` subcommand.
+fn parse_projects_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match verb {
+        "list" => {
+            let mut remote_prefix = None;
+            let mut name_substring = None;
+            let mut limit = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--remote-prefix" => {
+                        remote_prefix = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--remote-prefix requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--name-substring" => {
+                        name_substring = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--name-substring requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--limit" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--limit requires a value".to_owned(),
+                        })?;
+                        limit = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--limit must be a number, not {value:?}"),
+                        })?);
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::ProjectsList {
+                remote_prefix,
+                name_substring,
+                limit,
+            })
+        }
+        "get" => match rest {
+            [id] => Ok(Command::ProjectsGet {
+                id: (*id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "create" => match rest {
+            ["--remote", remote, "--name", name] => Ok(Command::ProjectsCreate {
+                remote: (*remote).to_owned(),
+                name: (*name).to_owned(),
+                description: None,
+            }),
+            [
+                "--remote",
+                remote,
+                "--name",
+                name,
+                "--description",
+                description,
+            ] => Ok(Command::ProjectsCreate {
+                remote: (*remote).to_owned(),
+                name: (*name).to_owned(),
+                description: Some((*description).to_owned()),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "update" => match rest {
+            // A rename without --description preserves the current
+            // description: the CLI cannot know it, so it must not clear it.
+            [id, "--name", name] => Ok(Command::ProjectsUpdate {
+                id: (*id).to_owned(),
+                name: (*name).to_owned(),
+                description: None,
+            }),
+            [id, "--name", name, "--description", description] => Ok(Command::ProjectsUpdate {
+                id: (*id).to_owned(),
+                name: (*name).to_owned(),
+                description: Some((*description).to_owned()),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "delete" => match rest {
+            [id] => Ok(Command::ProjectsDelete {
+                id: (*id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        _ => Err(CliError { message: usage() }),
+    }
 }
 
 /// Parses one `fleetctl tailnet` subcommand.
@@ -440,7 +584,7 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -864,6 +1008,13 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::MachinesOnboardAdd { .. }
             | Command::MachinesOnboardCancel { .. }
             | Command::TailnetImport { .. } => render_onboarding(Some(payload)),
+            Command::ProjectsCreate { .. } | Command::ProjectsUpdate { .. } => {
+                render_project_mutation(payload)
+            }
+            Command::ProjectsDelete { .. } => render_project_deleted(),
+            Command::ProjectsList { .. } | Command::ProjectsGet { .. } => {
+                render_projects(Some(payload))
+            }
             Command::TailnetStatus
             | Command::TailnetConfigure { .. }
             | Command::TailnetClear
@@ -943,6 +1094,76 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
         | Command::MachinesOnboardAdd { .. }
         | Command::MachinesOnboardCancel { .. }) => onboard_request(command),
         Command::MachinesInstallNode { .. } => install_node_request(command),
+        Command::ProjectsList {
+            remote_prefix,
+            name_substring,
+            limit,
+        } => (
+            reqwest::Method::GET,
+            "/api/v1/projects".to_owned(),
+            {
+                let mut query = Vec::new();
+                if let Some(prefix) = remote_prefix {
+                    query.push(("remotePrefix", prefix.clone()));
+                }
+                if let Some(substring) = name_substring {
+                    query.push(("nameSubstring", substring.clone()));
+                }
+                if let Some(limit) = limit {
+                    query.push(("limit", limit.to_string()));
+                }
+                query
+            },
+            None,
+        ),
+        Command::ProjectsGet { id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/projects/{id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::ProjectsCreate {
+            remote,
+            name,
+            description,
+        } => {
+            let mut body = serde_json::json!({ "remote": remote, "name": name });
+            if let Some(description) = description {
+                body["description"] = serde_json::json!(description);
+            }
+            (
+                reqwest::Method::POST,
+                "/api/v1/projects".to_owned(),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::ProjectsUpdate {
+            id,
+            name,
+            description,
+        } => {
+            // An absent description means "keep the current one": the API
+            // treats a missing field as no change.
+            let body = match description {
+                Some(description) => {
+                    serde_json::json!({ "name": name, "description": description })
+                }
+                None => serde_json::json!({ "name": name }),
+            };
+            (
+                reqwest::Method::PATCH,
+                format!("/api/v1/projects/{id}"),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::ProjectsDelete { id } => (
+            reqwest::Method::DELETE,
+            format!("/api/v1/projects/{id}"),
+            Vec::new(),
+            None,
+        ),
         Command::TailnetStatus => (
             reqwest::Method::GET,
             "/api/v1/tailnet/status".to_owned(),
@@ -1466,6 +1687,73 @@ fn render_onboarding(value: Option<&Value>) -> String {
         return lines.join("\n");
     }
     draft_detail(value)
+}
+
+/// Renders the project surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_projects_for_test(value: &Value) -> String {
+    render_projects(Some(value))
+}
+
+fn render_projects(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!("{:<38} {:<28} {}", "ID", "REMOTE", "NAME")];
+        for item in items {
+            lines.push(format!(
+                "{:<38} {:<28} {}",
+                item["id"].as_str().unwrap_or("-"),
+                item["remote"].as_str().unwrap_or("-"),
+                item["name"].as_str().unwrap_or("-"),
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no projects)".to_owned());
+        }
+        return lines.join("\n");
+    }
+    // Detail or mutation answer.
+    let mut lines = Vec::new();
+    for key in ["id", "remote", "name", "description"] {
+        if let Some(rendered) = value.get(key).and_then(Value::as_str) {
+            lines.push(format!("{key}: {rendered}"));
+        }
+    }
+    match value["checkouts"].as_array() {
+        Some(checkouts) if !checkouts.is_empty() => {
+            lines.push("checkouts:".to_owned());
+            for checkout in checkouts {
+                lines.push(format!(
+                    "  {} @ {} ({}{}) at {}",
+                    checkout["machineId"].as_str().unwrap_or("-"),
+                    checkout["root"].as_str().unwrap_or("-"),
+                    checkout["branch"].as_str().unwrap_or("-"),
+                    if checkout["dirty"] == true {
+                        ", dirty"
+                    } else {
+                        ""
+                    },
+                    checkout["observedAt"]
+                ));
+            }
+        }
+        _ => lines.push("checkouts: (none observed)".to_owned()),
+    }
+    lines.join("\n")
+}
+
+/// Renders a project mutation answer (create/update), which the API returns
+/// without hydrated checkouts.
+fn render_project_mutation(payload: &Value) -> String {
+    render_projects(Some(payload))
+}
+
+/// Renders a project deletion answer.
+fn render_project_deleted() -> String {
+    "project removed".to_owned()
 }
 
 /// Renders the tailnet surface as human text; exposed for contract tests.

@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use fleet_application::project::ProjectPort as _;
 use fleet_storage_sqlite::{StorageError, Store};
 
 fn db_path(dir: &Path) -> std::path::PathBuf {
@@ -195,5 +196,194 @@ async fn a_backup_restores_into_a_working_store() {
     assert_eq!(
         restored.get_metadata("valuable").await.unwrap().as_deref(),
         Some("fact")
+    );
+}
+
+#[tokio::test]
+async fn the_project_repository_round_trips_identity_and_checkouts() {
+    use fleet_core::CheckoutFact;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+
+    let created = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
+            name: "fleet-manager".to_owned(),
+            description: String::new(),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.remote, "github.com/Frogbyte-io/fleet-manager");
+
+    // A conflicting remote is refused by the unique index.
+    let conflict = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
+            name: "other".to_owned(),
+            description: String::new(),
+            idempotency_key: None,
+        })
+        .await;
+    assert!(conflict.is_err(), "the identity conflict is enforced");
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    eprintln!("DBG projects in db: {count}");
+    let machines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM machines")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    eprintln!("DBG machines in db: {machines}");
+    // Checkout facts upsert per (project, machine, root). The machine FK
+    // requires a real machine row.
+    let machine_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO machines (id, name, description, created_at, updated_at) VALUES (?1, 'machine-a', '', 0, 0)")
+        .bind(&machine_id)
+        .execute(store.pool())
+        .await
+        .unwrap_or_else(|error| panic!("the machine row must insert: {error}"));
+    let fact = |machine: &str, at: i64| CheckoutFact {
+        project_id: created.id.clone(),
+        machine_id: machine.to_owned(),
+        root: "/home/dev/code/fleet-manager".to_owned(),
+        branch: Some("main".to_owned()),
+        dirty: Some(false),
+        source: "agentless/1".to_owned(),
+        observed_at: at,
+    };
+    projects
+        .record_checkout(&fact(&machine_id, 100))
+        .await
+        .unwrap();
+    projects
+        .record_checkout(&fact(&machine_id, 200))
+        .await
+        .unwrap();
+    let checkouts = projects.checkouts(&created.id).await.unwrap();
+    assert_eq!(checkouts.len(), 1, "the fact upserted, not appended");
+    assert_eq!(checkouts[0].observed_at, 200, "the newest observation wins");
+
+    // Delete cascades to the checkouts.
+    projects.delete(&created.id).await.unwrap();
+    let view = projects.checkouts(&created.id).await.unwrap();
+    assert!(view.is_empty(), "the checkout facts cascade");
+}
+
+#[tokio::test]
+async fn the_project_list_filters_match_literals_and_ignore_stale_observations() {
+    use fleet_application::project::{ProjectFilter, ProjectPort as _};
+    use fleet_core::CheckoutFact;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+
+    // A remote whose path carries LIKE metacharacters: they must match
+    // literally, not as wildcards.
+    let created = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "host/team_a%b/proj_x".to_owned(),
+            name: "metachars".to_owned(),
+            description: String::new(),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let filter = ProjectFilter {
+        remote_prefix: Some("host/team_a".to_owned()),
+        name_substring: None,
+        after_id: None,
+    };
+    let listed = projects.list(&filter, 50).await.unwrap();
+    assert_eq!(listed.len(), 1, "the literal prefix matches: {listed:?}");
+
+    let wrong = ProjectFilter {
+        remote_prefix: Some("host/teamXa".to_owned()),
+        name_substring: None,
+        after_id: None,
+    };
+    let listed = projects.list(&wrong, 50).await.unwrap();
+    assert!(listed.is_empty(), "the _ wildcard must not match");
+
+    // A stale observation does not replace a newer one. The checkout's
+    // machine FK requires a real machine row.
+    let machine_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO machines (id, name, description, created_at, updated_at) VALUES (?1, 'machine-a', '', 0, 0)")
+        .bind(&machine_id)
+        .execute(store.pool())
+        .await
+        .unwrap_or_else(|error| panic!("the machine row must insert: {error}"));
+    let fact = |machine: &str, at: i64| CheckoutFact {
+        project_id: created.id.clone(),
+        machine_id: machine.to_owned(),
+        root: "/home/dev/code/x".to_owned(),
+        branch: Some("main".to_owned()),
+        dirty: Some(false),
+        source: "agentless/1".to_owned(),
+        observed_at: at,
+    };
+    projects
+        .record_checkout(&fact(&machine_id, 200))
+        .await
+        .unwrap();
+    projects
+        .record_checkout(&fact(&machine_id, 100))
+        .await
+        .unwrap();
+    let checkouts = projects.checkouts(&created.id).await.unwrap();
+    assert_eq!(checkouts[0].observed_at, 200, "the newer fact wins");
+}
+
+#[tokio::test]
+async fn the_project_checkouts_cascade_when_the_machine_is_deleted() {
+    use fleet_application::project::ProjectPort as _;
+    use fleet_core::CheckoutFact;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+    let created = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
+            name: "fleet-manager".to_owned(),
+            description: String::new(),
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let machine_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO machines (id, name, description, created_at, updated_at) VALUES (?1, 'gone', '', 0, 0)")
+        .bind(&machine_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    projects
+        .record_checkout(&CheckoutFact {
+            project_id: created.id.clone(),
+            machine_id: machine_id.clone(),
+            root: "/home/dev/code/fleet-manager".to_owned(),
+            branch: Some("main".to_owned()),
+            dirty: Some(false),
+            source: "agentless/1".to_owned(),
+            observed_at: 100,
+        })
+        .await
+        .unwrap();
+    assert_eq!(projects.checkouts(&created.id).await.unwrap().len(), 1);
+
+    // Deleting the machine cascades: its checkout observations are gone.
+    sqlx::query("DELETE FROM machines WHERE id = ?1")
+        .bind(&machine_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(
+        projects.checkouts(&created.id).await.unwrap().is_empty(),
+        "a deleted machine has no checkouts to observe"
     );
 }

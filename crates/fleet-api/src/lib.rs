@@ -19,6 +19,7 @@ mod meta;
 pub mod node;
 pub mod onboarding;
 pub mod operations;
+pub mod projects;
 pub mod system;
 pub mod tailnet;
 
@@ -74,6 +75,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         machines::InventoryObservationDto,
         machines::MachineDto,
         onboarding::AddedMachineDto,
+        projects::CheckoutFactDto,
+        projects::CreateProjectRequest,
+        projects::ProjectDto,
+        projects::UpdateProjectRequest,
         onboarding::ConfirmHostKeyRequest,
         onboarding::CreateOnboardingDraftRequest,
         onboarding::DraftEndpointDto,
@@ -109,6 +114,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
                            redacted unless the caller may read sensitive endpoint detail."
         ),
         (
+            name = "projects",
+            description = "Projects keyed by normalized Git remote, with per-machine observed checkouts. The remote is the identity; checkouts are facts."
+        ),
+        (
             name = "tailnet",
             description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
         ),
@@ -142,6 +151,10 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(system::stream_operation_events))
                 .routes(routes!(machines::list_machines))
                 .routes(routes!(machines::get_machine))
+                .routes(routes!(projects::create_project, projects::list_projects))
+                .routes(routes!(projects::get_project))
+                .routes(routes!(projects::update_project))
+                .routes(routes!(projects::delete_project))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts

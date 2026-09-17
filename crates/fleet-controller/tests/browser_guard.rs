@@ -43,6 +43,7 @@ async fn router_with_db() -> (axum::Router, Vec<tempfile::TempDir>) {
         None,
         None,
         None,
+        None,
     );
     (router, vec![dist, dir])
 }

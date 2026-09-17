@@ -467,6 +467,7 @@ impl From<PortFailure> for NodePortError {
     fn from(failure: PortFailure) -> Self {
         match failure {
             PortFailure::NotFound { what } => Self::NotFound { what },
+            PortFailure::Conflict { detail } => Self::Conflict { detail },
             PortFailure::Backend { detail } => Self::Backend { detail },
         }
     }
