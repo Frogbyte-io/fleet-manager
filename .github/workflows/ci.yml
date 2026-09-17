@@ -198,6 +198,9 @@ jobs:
     name: Rust compatibility checks (Windows)
     needs: detect
     if: needs.detect.outputs.cargo == 'true'
+    # The self-hosted dev box is Linux; a Windows toolchain needs a hosted
+    # runner. Compatibility is informational until a Windows runner exists.
+    continue-on-error: true
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -272,7 +275,10 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [detect, policy, secrets, legacy-node, rust-linux, rust-windows, cargo-deny, web, deploy-smoke]
+    # rust-windows is informational: the self-hosted fleet is Linux, and a
+    # hosted Windows runner is billing-dependent. It runs when it can and is
+    # not part of the required gate.
+    needs: [detect, policy, secrets, legacy-node, rust-linux, cargo-deny, web, deploy-smoke]
     runs-on: [self-hosted, dev-box]
     steps:
       # One status to require on the branch. A gated-off job reports "skipped",
