@@ -33,9 +33,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod discovery;
 pub mod exec;
 pub mod inventory;
 
+pub use discovery::{
+    DISCOVERY_DEADLINE, DISCOVERY_SOURCE, DiscoveredCheckout, MAX_CHECKOUTS, discover,
+    discovery_script, parse_discovery_output,
+};
 pub use exec::{
     ExecutionLimiter, ExecutionResult, MAX_STREAM_BYTES, ScriptMetadata, decode_metadata,
     encode_metadata, execute_script, remote_prologue,

@@ -1062,3 +1062,178 @@ fn parsing_refuses_the_undocumented_projects() {
         );
     }
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parsing_accepts_the_checkout_grammar() {
+    for (args, expected) in [
+        (
+            vec![
+                "projects",
+                "discover",
+                "p1",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--wait",
+                "--timeout",
+                "30",
+            ],
+            "discover",
+        ),
+        (vec!["projects", "record", "p1", "m1"], "record"),
+        (
+            vec![
+                "projects",
+                "clone",
+                "p1",
+                "m1",
+                "--root",
+                "/srv/repo",
+                "--branch",
+                "main",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "clone",
+        ),
+        (
+            vec![
+                "projects",
+                "pull",
+                "p1",
+                "m1",
+                "--root",
+                "/srv/repo",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "identity-file",
+                "--identity",
+                "/keys/id",
+            ],
+            "pull",
+        ),
+        (
+            vec![
+                "projects",
+                "status",
+                "p1",
+                "m1",
+                "--root",
+                "/srv/repo",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "status",
+        ),
+        (
+            vec![
+                "projects",
+                "write-config",
+                "p1",
+                "m1",
+                "--root",
+                "/srv/repo",
+                "--file",
+                "AGENTS.md",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "write-config",
+        ),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).unwrap_or_else(|error| panic!("{expected} must parse: {error}"));
+    }
+
+    let args: Vec<String> = [
+        "projects",
+        "discover",
+        "p1",
+        "m1",
+        "--endpoint",
+        "e1",
+        "--auth",
+        "agent",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::ProjectsDiscover {
+            id: "p1".to_owned(),
+            machine: "m1".to_owned(),
+            endpoint: "e1".to_owned(),
+            auth: fleetctl::OnboardAuthArg::Agent,
+            identity: None,
+            wait: false,
+            timeout: None,
+        }
+    );
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_checkout_forms() {
+    for args in [
+        vec!["projects", "discover", "p1"],
+        vec!["projects", "discover", "p1", "m1", "--auth", "agent"],
+        vec![
+            "projects",
+            "clone",
+            "p1",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+        vec![
+            "projects", "pull", "p1", "m1", "--root", "/x", "--auth", "agent",
+        ],
+        vec![
+            "projects",
+            "write-config",
+            "p1",
+            "m1",
+            "--root",
+            "/x",
+            "--auth",
+            "agent",
+        ],
+        vec![
+            "projects",
+            "clone",
+            "p1",
+            "m1",
+            "--root",
+            "/x",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "identity-file",
+        ],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
+                || error.message.contains("unknown flag")
+                || error.message.contains("--identity")
+                || error.message.contains("--root")
+                || error.message.contains("--endpoint"),
+            "{error}"
+        );
+    }
+}

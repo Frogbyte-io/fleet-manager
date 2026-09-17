@@ -167,19 +167,37 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     }
                     None => onboarding,
                 };
+            // The checkout executor handles the FM-301 kinds over the same
+            // SSH work directory and limiter as the script executor.
+            let with_checkout: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(fleet_controller::checkout::CheckoutExecutor::new(
+                    machines,
+                    config.data_dir.join("ssh"),
+                    limiter.clone(),
+                ))
+            };
+            let with_checkout = std::sync::Arc::new(
+                fleet_controller::checkout::CheckoutDispatch::new(with_install, with_checkout),
+            );
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
                         std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                             store.pool().clone(),
                         ));
-                    std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
-                        services.gateway.clone(),
-                        node_machines,
-                        with_install,
-                    ))
+                    let executor: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                        std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
+                            services.gateway.clone(),
+                            node_machines,
+                            with_checkout.clone(),
+                        ));
+                    executor
                 }
-                None => with_install,
+                None => with_checkout.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

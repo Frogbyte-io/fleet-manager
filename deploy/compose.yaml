@@ -19,7 +19,11 @@ services:
       dockerfile: deploy/controller.Dockerfile
     image: fleet-manager/controller:local
     ports:
-      - "127.0.0.1:8080:8080"
+      # The host port is overridable so the smoke can dodge a port the
+      # machine already uses; the default stays the documented 8080. An
+      # explicit 0 lets Docker allocate a free port atomically, which the
+      # smoke then reads back.
+      - "127.0.0.1:${FLEET_SMOKE_PORT:-8080}:8080"
     environment:
       # Inside the container the listener must bind the container interface;
       # the host-facing reachability is limited by the loopback publish above.

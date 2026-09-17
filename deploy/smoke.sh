@@ -14,6 +14,14 @@ cd "$(dirname "$0")"
 project="fleet-smoke"
 service="controller"
 
+# The host port dodges whatever the machine already uses: unless the caller
+# pinned one, the stack publishes to port 0 and Docker allocates a free
+# loopback port atomically; the smoke reads the mapped port back after the
+# container starts, so a race with another bind cannot wedge it. The probe
+# URLs below derive from it, so the smoke never assumes 8080 is free.
+smoke_port="${FLEET_SMOKE_PORT:-0}"
+export FLEET_SMOKE_PORT="$smoke_port"
+
 if ! docker compose version >/dev/null 2>&1; then
   echo "error: docker compose (v2 plugin) is required" >&2
   exit 1
@@ -51,6 +59,10 @@ if [ -z "$container" ]; then
   exit 1
 fi
 
+if [ "$smoke_port" = "0" ]; then
+  smoke_port="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}' "$container")"
+fi
+
 echo "==> Waiting for healthy"
 healthy=""
 for _ in $(seq 1 60); do
@@ -71,11 +83,11 @@ fi
 echo "    healthy"
 
 echo "==> Probing the served surfaces"
-readyz="$(curl -fsS http://127.0.0.1:8080/readyz)"
+readyz="$(curl -fsS "http://127.0.0.1:${smoke_port}/readyz")"
 [ "$readyz" = "ok" ] || { echo "error: /readyz answered '$readyz'" >&2; exit 1; }
-curl -fsS http://127.0.0.1:8080/ | grep -q "Fleet Manager" \
+curl -fsS "http://127.0.0.1:${smoke_port}/" | grep -q "Fleet Manager" \
   || { echo "error: the web shell was not served at /" >&2; exit 1; }
-curl -fsS http://127.0.0.1:8080/api/v1/meta | grep -q '"service":"fleet-controller"' \
+curl -fsS "http://127.0.0.1:${smoke_port}/api/v1/meta" | grep -q '"service":"fleet-controller"' \
   || { echo "error: /api/v1/meta did not answer the public envelope" >&2; exit 1; }
 echo "    web shell, API, and readiness OK"
 
