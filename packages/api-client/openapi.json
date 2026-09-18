@@ -3455,7 +3455,7 @@
           },
           "state": {
             "type": "string",
-            "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, or `timed_out`.",
+            "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.",
             "example": "pending"
           },
           "updatedAt": {
@@ -3897,7 +3897,7 @@
                 },
                 "state": {
                   "type": "string",
-                  "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, or `timed_out`.",
+                  "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.",
                   "example": "pending"
                 },
                 "updatedAt": {
@@ -4643,7 +4643,7 @@
               },
               "state": {
                 "type": "string",
-                "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, or `timed_out`.",
+                "description": "The current state: `pending`, `running`, `cancelling`, `succeeded`,\n`failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.",
                 "example": "pending"
               },
               "updatedAt": {

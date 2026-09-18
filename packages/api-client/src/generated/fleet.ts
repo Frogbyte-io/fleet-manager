@@ -821,7 +821,7 @@ export interface OperationDto {
   resultJson?: string | null;
   /**
      * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, or `timed_out`.
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
      */
   state: string;
   /** Last update, in epoch milliseconds. */
@@ -1058,7 +1058,7 @@ export type PageOperationDtoItemsItem = {
   resultJson?: string | null;
   /**
      * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, or `timed_out`.
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
      */
   state: string;
   /** Last update, in epoch milliseconds. */
@@ -1484,7 +1484,7 @@ export type ResourceOperationDtoData = {
   resultJson?: string | null;
   /**
      * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, or `timed_out`.
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
      */
   state: string;
   /** Last update, in epoch milliseconds. */
