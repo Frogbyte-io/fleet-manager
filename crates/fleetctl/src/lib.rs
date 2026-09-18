@@ -1655,7 +1655,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 &[],
                 skills_root.as_ref(),
                 false,
-                "probe",
+                None,
                 artifact_url.as_ref(),
                 artifact_sha256.as_ref(),
             )),
@@ -1681,7 +1681,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 agents,
                 skills_root.as_ref(),
                 *dry_run,
-                "deploy",
+                Some("deploy"),
                 None,
                 None,
             )),
@@ -1707,7 +1707,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 agents,
                 skills_root.as_ref(),
                 *dry_run,
-                "undeploy",
+                Some("undeploy"),
                 None,
                 None,
             )),
@@ -2831,7 +2831,7 @@ fn skills_request_body(
     agents: &[String],
     skills_root: Option<&String>,
     dry_run: bool,
-    direction: &str,
+    direction: Option<&str>,
     artifact_url: Option<&String>,
     artifact_sha256: Option<&String>,
 ) -> serde_json::Value {
@@ -2849,7 +2849,9 @@ fn skills_request_body(
     if let Some(root) = skills_root {
         body["skillsRoot"] = serde_json::json!(root);
     }
-    body["direction"] = serde_json::json!(direction);
+    if let Some(direction) = direction {
+        body["direction"] = serde_json::json!(direction);
+    }
     if let Some(url) = artifact_url {
         body["artifactUrl"] = serde_json::json!(url);
     }

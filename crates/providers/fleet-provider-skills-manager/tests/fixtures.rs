@@ -138,6 +138,11 @@ fn hostile_output_is_redacted_and_control_noise_flattened() {
     assert!(redacted.contains("***@host.invalid"), "{redacted}");
     let control = redact("a\u{1b}[31mb");
     assert!(!control.contains('\u{1b}'), "{control}");
+    // The scp-style case the URL pass cannot see: the password is
+    // redacted and the loop terminates.
+    let scp = redact("cannot reach user:secret@host:repo for skills");
+    assert!(!scp.contains("secret"), "{scp}");
+    assert!(scp.contains("***@host:repo"), "{scp}");
 }
 
 #[test]

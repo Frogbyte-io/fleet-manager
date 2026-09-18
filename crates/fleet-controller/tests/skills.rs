@@ -246,6 +246,7 @@ case "$1" in
         skill=$2; shift 2
         agents=""
         for agent in "$@"; do
+          [ "$agent" = "--agent" ] && continue
           [ -z "$agent" ] && continue
           agents="$agents\"$agent\","
         done
@@ -360,6 +361,11 @@ async fn deploy_reaches_the_stub_with_an_argument_array() {
     assert_eq!(state, "succeeded", "{error:?}");
     let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(result["outcome"]["skillId"], "db");
+    assert_eq!(
+        result["outcome"]["deployedTo"],
+        serde_json::json!(["claude_code", "codex"]),
+        "each agent arrives as its own --agent pair, not a marker token"
+    );
 
     let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
     assert!(

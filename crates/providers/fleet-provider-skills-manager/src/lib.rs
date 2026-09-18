@@ -321,7 +321,8 @@ pub async fn skill_status(
     if status.skill_id != skill_id {
         return Err(format!(
             "the CLI answered a status for {} when {} was requested (code: unsupported_version)",
-            status.skill_id, skill_id
+            redact(&status.skill_id),
+            redact(skill_id)
         ));
     }
     Ok(status)
@@ -423,8 +424,8 @@ fn redact_schemeless_credentials(text: &str) -> String {
             .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
         if has_password {
             result.push_str(&text[search..token_start]);
-            result.push_str("***");
-            search = at;
+            result.push_str("***@");
+            search = at + 1;
         } else {
             result.push_str(&text[search..=at]);
             search = at + 1;

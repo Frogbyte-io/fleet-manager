@@ -59,13 +59,28 @@ pub const CREATABLE_KINDS: [&str; 17] = [
 /// their operations is itself the risky act, so the same catalog entry
 /// governs both the dedicated endpoint and the generic one.
 #[must_use]
-fn machine_scoped_kind_permission(kind: &str) -> Option<Permission> {
+fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<Permission> {
     match kind {
         "projects.discover" => Some(Permission::ProjectsDiscover),
-        "projects.clone" | "projects.pull" | "projects.status" | "projects.write-config" => {
+        "projects.clone" | "projects.pull" | "projects.status" => {
             Some(Permission::ProjectsGitWrite)
         }
-        "skills.probe" => Some(Permission::SkillsRead),
+        "projects.write-config" => Some(Permission::ProjectsFileWrite),
+        "skills.probe" => {
+            // A pinned probe downloads and installs a binary: that is a
+            // mutation, never a read.
+            let pinned = payload
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_some_and(|payload| {
+                    payload["artifactUrl"].as_str().is_some()
+                        && payload["artifactSha256"].as_str().is_some()
+                });
+            if pinned {
+                Some(Permission::SkillsDeploy)
+            } else {
+                Some(Permission::SkillsRead)
+            }
+        }
         "skills.deploy" | "skills.undeploy" => Some(Permission::SkillsDeploy),
         _ => None,
     }
@@ -415,7 +430,9 @@ impl Operations {
         // without the kind's permission cannot route around it through
         // the generic surface. The machine id is read from the payload
         // without deserializing the whole record.
-        if let Some(permission) = machine_scoped_kind_permission(&new.kind) {
+        if let Some(permission) =
+            machine_scoped_kind_permission(&new.kind, new.payload_json.as_deref())
+        {
             let machine_id = new
                 .payload_json
                 .as_deref()

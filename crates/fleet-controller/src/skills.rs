@@ -30,6 +30,29 @@ use fleet_provider_ssh::{ExecutionLimiter, ScriptMetadata, SshConnectionSpec};
 
 use crate::exec::{MAX_SCRIPT_TIMEOUT, resolve_ssh_endpoint};
 
+/// The version gate's outcome, typed so each failure keeps its own public
+/// reason.
+#[derive(Debug)]
+enum GateOutcome {
+    /// The CLI is present, identified, and within the tested range.
+    Pass,
+    /// The CLI is absent: the machine answered, the tool is not there.
+    Absent,
+    /// The CLI answered but not in the documented shape, or its version
+    /// is outside the tested range.
+    Unsupported {
+        /// The caller-safe detail.
+        detail: String,
+    },
+    /// The transport failed before the CLI could answer.
+    Connection {
+        /// The redacted detail.
+        detail: String,
+    },
+    /// The deadline killed the gate.
+    Deadline,
+}
+
 /// The highest CLI version the contract fixtures were recorded against.
 /// A CLI answering a higher major version degrades explicitly.
 pub const TESTED_CLI_VERSION: &str = "1.34.2";
@@ -321,13 +344,37 @@ impl SkillsExecutor {
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
         // The version gate runs before every mutation: an untested CLI
-        // degrades explicitly instead of guessing.
-        if let Some(detail) = self
-            .version_gate(&spec, deadline(payload.timeout_seconds))
-            .await
-        {
-            return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+        // degrades explicitly instead of guessing. One deadline covers
+        // the gate and the mutation together.
+        let operation_deadline = deadline(payload.timeout_seconds);
+        match self.version_gate(&spec, operation_deadline).await {
+            GateOutcome::Pass => {}
+            GateOutcome::Absent => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "cli_absent",
+                    "skills-manager-cli is not installed",
+                )
                 .await;
+            }
+            GateOutcome::Unsupported { detail } => {
+                return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+                    .await;
+            }
+            GateOutcome::Connection { detail } => {
+                return complete_failure(operations, &operation.id, "connection_failed", &detail)
+                    .await;
+            }
+            GateOutcome::Deadline => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "deadline_killed",
+                    "the version gate was killed at its deadline; the machine's skill state is unknown",
+                )
+                .await;
+            }
         }
         operations
             .record_progress(
@@ -343,7 +390,6 @@ impl SkillsExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
-        let deadline = deadline(payload.timeout_seconds);
         // The CLI is resolved off-PATH by the fixed script; the skill id
         // and every agent id stay separate positional parameters, and the
         // skills root rides the environment.
@@ -359,7 +405,9 @@ impl SkillsExecutor {
             environment: root_environment(payload.skills_root.as_deref()),
             arguments,
         };
-        let (result, detail) = self.run(&spec, &script, &metadata, deadline).await;
+        let (result, detail) = self
+            .run(&spec, &script, &metadata, operation_deadline)
+            .await;
         finish_cli(operations, &operation.id, result, detail, "deploy").await
     }
 
@@ -376,12 +424,35 @@ impl SkillsExecutor {
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
         // The version gate runs before every mutation.
-        if let Some(detail) = self
-            .version_gate(&spec, deadline(payload.timeout_seconds))
-            .await
-        {
-            return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+        let operation_deadline = deadline(payload.timeout_seconds);
+        match self.version_gate(&spec, operation_deadline).await {
+            GateOutcome::Pass => {}
+            GateOutcome::Absent => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "cli_absent",
+                    "skills-manager-cli is not installed",
+                )
                 .await;
+            }
+            GateOutcome::Unsupported { detail } => {
+                return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+                    .await;
+            }
+            GateOutcome::Connection { detail } => {
+                return complete_failure(operations, &operation.id, "connection_failed", &detail)
+                    .await;
+            }
+            GateOutcome::Deadline => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "deadline_killed",
+                    "the version gate was killed at its deadline; the machine's skill state is unknown",
+                )
+                .await;
+            }
         }
         operations
             .record_progress(
@@ -397,7 +468,6 @@ impl SkillsExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
-        let deadline = deadline(payload.timeout_seconds);
         let mut arguments = vec![payload.skill_id.clone()];
         arguments.extend(payload.agents.iter().cloned());
         let script = mutation_script("undeploy", payload.dry_run);
@@ -406,14 +476,16 @@ impl SkillsExecutor {
             environment: root_environment(payload.skills_root.as_deref()),
             arguments,
         };
-        let (result, detail) = self.run(&spec, &script, &metadata, deadline).await;
+        let (result, detail) = self
+            .run(&spec, &script, &metadata, operation_deadline)
+            .await;
         finish_cli(operations, &operation.id, result, detail, "undeploy").await
     }
 
     /// The version gate shared by every kind: the CLI must identify
     /// itself in a documented shape with a version at or below the tested
     /// one. A failure names the reason; `None` means the gate passed.
-    async fn version_gate(&self, spec: &SshConnectionSpec, deadline: Duration) -> Option<String> {
+    async fn version_gate(&self, spec: &SshConnectionSpec, deadline: Duration) -> GateOutcome {
         let metadata = ScriptMetadata {
             working_directory: String::new(),
             environment: Vec::new(),
@@ -432,13 +504,17 @@ printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
         .to_owned();
         let (result, detail) = self.run(spec, &script, &metadata, deadline).await;
         let Some(result) = result else {
-            return Some(detail.unwrap_or_else(|| "the gate produced no result".to_owned()));
+            return GateOutcome::Connection {
+                detail: detail.unwrap_or_else(|| "the gate produced no result".to_owned()),
+            };
         };
         if result.killed_by_deadline {
-            return Some("the version gate was killed at its deadline".to_owned());
+            return GateOutcome::Deadline;
         }
         if result.exit_code != Some(0) {
-            return Some(redact_output(&result.stderr));
+            return GateOutcome::Connection {
+                detail: redact_output(&result.stderr),
+            };
         }
         // Parse the gate's answer; a malformed answer is an unsupported
         // CLI, not a pass.
@@ -447,30 +523,35 @@ printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
             .lines()
             .find_map(|line| serde_json::from_str(line).ok());
         let Some(parsed) = parsed else {
-            return Some(
-                "the CLI's version gate did not answer in the documented shape".to_owned(),
-            );
+            return GateOutcome::Unsupported {
+                detail: "the CLI's version gate did not answer in the documented shape".to_owned(),
+            };
         };
         if parsed["present"].as_bool() == Some(false) {
-            return Some("skills-manager-cli is not installed".to_owned());
+            return GateOutcome::Absent;
         }
+        // The documented version shapes: the provider's JSON document or
+        // the bare `skills-manager-cli <version>` line, both base64'd by
+        // the gate script.
         let version = decoded_field(&parsed, "version64");
         let Some(version) = version else {
-            return Some("the CLI did not report a version in the documented shape".to_owned());
+            return GateOutcome::Unsupported {
+                detail: "the CLI did not report a version in the documented shape".to_owned(),
+            };
         };
-        // The `--version` line may carry the binary name before the
-        // version; the version is the last token.
-        let version = version
-            .split_whitespace()
-            .next_back()
-            .unwrap_or(&version)
-            .to_owned();
+        let Some(version) = parse_version_text(&version) else {
+            return GateOutcome::Unsupported {
+                detail: "the CLI did not report a version in the documented shape".to_owned(),
+            };
+        };
         if !version_acceptable(&version) {
-            return Some(format!(
-                "the CLI reports {version}, which is outside the tested range (up to {TESTED_CLI_VERSION})"
-            ));
+            return GateOutcome::Unsupported {
+                detail: format!(
+                    "the CLI reports {version}, which is outside the tested range (up to {TESTED_CLI_VERSION})"
+                ),
+            };
         }
-        None
+        GateOutcome::Pass
     }
 }
 
@@ -536,11 +617,7 @@ pub fn mutation_script_for_test(verb: &str, dry_run: bool) -> String {
 }
 
 fn mutation_script(verb: &str, dry_run: bool) -> String {
-    let dry_run_line = if dry_run {
-        "fleet_dry=--dry-run\n"
-    } else {
-        "fleet_dry=\n"
-    };
+    let dry_run_line: &str = if dry_run { "fleet_dry=--dry-run\n" } else { "" };
     format!(
         r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
@@ -556,25 +633,26 @@ fi
 # argument and nothing expands unquoted.
 fleet_skill=$1
 shift
-set -- "$@"
 fleet_agent_args=()
 for fleet_agent in "$@"; do
   fleet_agent_args+=("--agent" "$fleet_agent")
 done
+fleet_dry_args=()
+[ -n "${{fleet_dry:-}}" ] && fleet_dry_args+=(--dry-run)
 fleet_verb={verb:?}
 case "$fleet_verb" in
   deploy)
     if [ -n "$fleet_root_arg" ]; then
-      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills deploy "$fleet_skill" "${{fleet_agent_args[@]}}" "$fleet_dry"
+      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills deploy "$fleet_skill" "${{fleet_agent_args[@]}}" "${{fleet_dry_args[@]}}"
     else
-      "$fleet_cli" --json skills deploy "$fleet_skill" "${{fleet_agent_args[@]}}" "$fleet_dry"
+      "$fleet_cli" --json skills deploy "$fleet_skill" "${{fleet_agent_args[@]}}" "${{fleet_dry_args[@]}}"
     fi
     ;;
   undeploy)
     if [ -n "$fleet_root_arg" ]; then
-      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "$fleet_dry"
+      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "${{fleet_dry_args[@]}}"
     else
-      "$fleet_cli" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "$fleet_dry"
+      "$fleet_cli" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "${{fleet_dry_args[@]}}"
     fi
     ;;
 esac
@@ -588,6 +666,31 @@ fn root_environment(root: Option<&str>) -> Vec<(String, String)> {
         Some(root) => vec![("FLEET_SKILLS_ROOT".to_owned(), root.to_owned())],
         None => Vec::new(),
     }
+}
+
+/// Parses the documented `--version` shapes: the provider's JSON
+/// document, the `skills-manager-cli <version>` line, or a bare semver.
+fn parse_version_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(version) = value["version"].as_str()
+        && !version.is_empty()
+    {
+        return Some(version.to_owned());
+    }
+    let first = trimmed.lines().next().unwrap_or_default().trim();
+    if let Some(version) = first.strip_prefix("skills-manager-cli ") {
+        return Some(version.to_owned());
+    }
+    let parts: Vec<&str> = first.split('.').collect();
+    if (2..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return Some(first.to_owned());
+    }
+    None
 }
 
 /// Whether the CLI's reported version is within the tested range: same
