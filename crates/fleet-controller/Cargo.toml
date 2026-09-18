@@ -17,6 +17,7 @@ fleet-config = { version = "0.1.0", path = "../fleet-config" }
 fleet-core = { version = "0.1.0", path = "../fleet-core" }
 fleet-protocol = { path = "../fleet-protocol" }
 fleet-provider-ssh = { version = "0.1.0", path = "../providers/fleet-provider-ssh" }
+fleet-provider-frogenv = { version = "0.1.0", path = "../providers/fleet-provider-frogenv" }
 fleet-provider-skills-manager = { version = "0.1.0", path = "../providers/fleet-provider-skills-manager" }
 fleet-provider-tailscale = { path = "../providers/fleet-provider-tailscale" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }

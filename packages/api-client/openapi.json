@@ -590,6 +590,79 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/frogenv/operations": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Starts a Frogenv operation.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "startFrogenvOperation",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine to act on.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartFrogenvOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The Frogenv operation was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not perform the Frogenv action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/node": {
       "get": {
         "tags": [
@@ -2616,6 +2689,58 @@
             "description": "Caller-safe explanation."
           }
         }
+      },
+      "FrogenvActionDto": {
+        "type": "string",
+        "description": "The Frogenv action a request names.",
+        "enum": [
+          "status",
+          "setup",
+          "login",
+          "request",
+          "sync",
+          "envRun"
+        ]
+      },
+      "FrogenvAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's agent supplies the key.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A specific identity file.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How a Frogenv operation's endpoint authenticates."
       },
       "ImportTailnetDeviceRequest": {
         "type": "object",
@@ -4699,6 +4824,55 @@
           "machineId": {
             "type": "string",
             "description": "The machine whose standard roots to scan."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds. Bounded by the executor.",
+            "minimum": 0
+          }
+        }
+      },
+      "StartFrogenvOperationRequest": {
+        "type": "object",
+        "description": "The body of the start-frogenv-operation request.",
+        "required": [
+          "machineId",
+          "endpointId",
+          "auth",
+          "action",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/FrogenvActionDto",
+            "description": "The ceremony to run: `status`, `setup`, `login`, `request`, or\n`sync`. A closed enum: anything else is malformed."
+          },
+          "auth": {
+            "$ref": "#/components/schemas/FrogenvAuthDto",
+            "description": "How the endpoint authenticates."
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The command to run under `env run`, as an argument array. Never a\nshell string."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint id to act through."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine to act on (must match the path's machine)."
+          },
+          "root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The checkout root whose environment binds an `env run` command."
           },
           "timeoutSeconds": {
             "type": "integer",

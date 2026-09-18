@@ -1408,3 +1408,186 @@ fn parsing_refuses_the_undocumented_skills_forms() {
         );
     }
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parsing_accepts_the_frogenv_grammar() {
+    for (args, expected) in [
+        (
+            vec![
+                "frogenv",
+                "status",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--wait",
+                "--timeout",
+                "30",
+            ],
+            "status",
+        ),
+        (
+            vec![
+                "frogenv",
+                "setup",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "setup",
+        ),
+        (
+            vec![
+                "frogenv",
+                "login",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "identity-file",
+                "--identity",
+                "/keys/id",
+            ],
+            "login",
+        ),
+        (
+            vec![
+                "frogenv",
+                "request",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "request",
+        ),
+        (
+            vec![
+                "frogenv",
+                "sync",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "sync",
+        ),
+        (
+            vec![
+                "frogenv",
+                "run",
+                "m1",
+                "--root",
+                "/srv/repo",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--",
+                "pytest",
+                "-q",
+            ],
+            "run",
+        ),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).unwrap_or_else(|error| panic!("{expected} must parse: {error}"));
+    }
+
+    let args: Vec<String> = [
+        "frogenv",
+        "run",
+        "m1",
+        "--root",
+        "/srv/repo",
+        "--endpoint",
+        "e1",
+        "--auth",
+        "agent",
+        "--",
+        "pytest",
+        "-q",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::FrogenvOperation {
+            machine: "m1".to_owned(),
+            endpoint: "e1".to_owned(),
+            auth: fleetctl::OnboardAuthArg::Agent,
+            action: "run".to_owned(),
+            root: Some("/srv/repo".to_owned()),
+            command: vec!["pytest".to_owned(), "-q".to_owned()],
+            wait: false,
+            timeout: None,
+        }
+    );
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_frogenv_forms() {
+    for args in [
+        vec!["frogenv", "status", "m1"],
+        vec!["frogenv", "status", "m1", "--auth", "agent"],
+        vec![
+            "frogenv",
+            "run",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+        vec![
+            "frogenv",
+            "run",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--",
+            "pytest",
+        ],
+        vec![
+            "frogenv",
+            "status",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--root",
+            "/srv/repo",
+        ],
+        vec![
+            "frogenv",
+            "deploy",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
+                || error.message.contains("unknown flag")
+                || error.message.contains("is required")
+                || error.message.contains("apply to env run only"),
+            "{error}"
+        );
+    }
+}

@@ -14,6 +14,7 @@
 mod correlation;
 mod envelope;
 mod error;
+pub mod frogenv;
 pub mod machines;
 mod meta;
 pub mod node;
@@ -83,6 +84,9 @@ pub const API_BASE_PATH: &str = "/api/v1";
         projects::StartDiscoveryRequest,
         skills::SkillsAuthDto,
         skills::StartSkillsOperationRequest,
+        frogenv::FrogenvActionDto,
+        frogenv::FrogenvAuthDto,
+        frogenv::StartFrogenvOperationRequest,
         projects::CreateProjectRequest,
         projects::ProjectDto,
         projects::UpdateProjectRequest,
@@ -165,6 +169,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(projects::start_discovery))
                 .routes(routes!(projects::record_checkouts))
                 .routes(routes!(skills::start_skills_operation))
+                .routes(routes!(frogenv::start_frogenv_operation))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts
