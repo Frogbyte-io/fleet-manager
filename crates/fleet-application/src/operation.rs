@@ -31,7 +31,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// kinds dispatch through the gateway with a `{"machineId": …}` payload; the
 /// onboarding kinds carry a `{"draftId": …}` payload and touch the draft
 /// record, never a machine (FM-210).
-pub const CREATABLE_KINDS: [&str; 14] = [
+pub const CREATABLE_KINDS: [&str; 17] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -46,6 +46,9 @@ pub const CREATABLE_KINDS: [&str; 14] = [
     "projects.pull",
     "projects.status",
     "projects.write-config",
+    "skills.probe",
+    "skills.deploy",
+    "skills.undeploy",
 ];
 
 /// The payload bound for provider inputs.

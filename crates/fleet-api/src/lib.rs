@@ -20,6 +20,7 @@ pub mod node;
 pub mod onboarding;
 pub mod operations;
 pub mod projects;
+pub mod skills;
 pub mod system;
 pub mod tailnet;
 
@@ -80,6 +81,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         projects::DiscoveredCheckoutDto,
         projects::RecordCheckoutsRequest,
         projects::StartDiscoveryRequest,
+        skills::SkillsAuthDto,
+        skills::StartSkillsOperationRequest,
         projects::CreateProjectRequest,
         projects::ProjectDto,
         projects::UpdateProjectRequest,
@@ -161,6 +164,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(projects::delete_project))
                 .routes(routes!(projects::start_discovery))
                 .routes(routes!(projects::record_checkouts))
+                .routes(routes!(skills::start_skills_operation))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts

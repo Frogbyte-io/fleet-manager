@@ -183,6 +183,22 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             let with_checkout = std::sync::Arc::new(
                 fleet_controller::checkout::CheckoutDispatch::new(with_install, with_checkout),
             );
+            // The skills executor handles the FM-302 kinds over the same
+            // SSH work directory and limiter.
+            let with_skills: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(fleet_controller::skills::SkillsDispatch::new(
+                    with_checkout.clone(),
+                    std::sync::Arc::new(fleet_controller::skills::SkillsExecutor::new(
+                        machines,
+                        config.data_dir.join("ssh"),
+                        limiter.clone(),
+                    )),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -197,7 +213,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         ));
                     executor
                 }
-                None => with_checkout.clone(),
+                None => with_skills.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

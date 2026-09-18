@@ -93,6 +93,13 @@ pub enum Permission {
     /// Write guarded agent configuration files under a checkout root.
     /// A mutation: it writes files on a managed machine.
     ProjectsFileWrite,
+    /// Probe and read the Skills Manager CLI's state on a machine: the
+    /// library, agents, and deployments. A read, but an
+    /// agent-topology-revealing one.
+    SkillsRead,
+    /// Deploy or undeploy skills through the Skills Manager CLI. A
+    /// mutation: it changes agent state on a managed machine.
+    SkillsDeploy,
 }
 
 impl Permission {
@@ -126,6 +133,8 @@ impl Permission {
         Permission::ProjectsDiscover,
         Permission::ProjectsGitWrite,
         Permission::ProjectsFileWrite,
+        Permission::SkillsRead,
+        Permission::SkillsDeploy,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -158,6 +167,8 @@ impl Permission {
             Permission::ProjectsDiscover => "projects.discover",
             Permission::ProjectsGitWrite => "projects.git.write",
             Permission::ProjectsFileWrite => "projects.file.write",
+            Permission::SkillsRead => "skills.read",
+            Permission::SkillsDeploy => "skills.deploy",
         }
     }
 
@@ -192,7 +203,9 @@ impl Permission {
             | Permission::ProjectsDelete
             | Permission::ProjectsDiscover
             | Permission::ProjectsGitWrite
-            | Permission::ProjectsFileWrite => true,
+            | Permission::ProjectsFileWrite
+            | Permission::SkillsRead
+            | Permission::SkillsDeploy => true,
         }
     }
 
@@ -227,7 +240,9 @@ impl Permission {
             | Permission::ProjectsDelete
             | Permission::ProjectsDiscover
             | Permission::ProjectsGitWrite
-            | Permission::ProjectsFileWrite => true,
+            | Permission::ProjectsFileWrite
+            | Permission::SkillsRead
+            | Permission::SkillsDeploy => true,
         }
     }
 }

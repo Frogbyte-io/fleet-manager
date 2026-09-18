@@ -820,6 +820,79 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/skills/operations": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Starts a skills operation: `probe` reads the CLI's state (and may\ninstall a pinned release); `deploy` and `undeploy` change agent state.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "startSkillsOperation",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine to act on.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSkillsOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The skills operation was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not perform the skills action.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/meta": {
       "get": {
         "tags": [
@@ -4557,6 +4630,46 @@
           "backoff"
         ]
       },
+      "SkillsAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's agent supplies the key.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A specific identity file.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How a skills operation's endpoint authenticates."
+      },
       "StartDiscoveryRequest": {
         "type": "object",
         "description": "The body of the start-discovery request: which machine and endpoint to\nscan, and how the endpoint authenticates.",
@@ -4578,6 +4691,82 @@
           "machineId": {
             "type": "string",
             "description": "The machine whose standard roots to scan."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds. Bounded by the executor.",
+            "minimum": 0
+          }
+        }
+      },
+      "StartSkillsOperationRequest": {
+        "type": "object",
+        "description": "The body of the start-skills-operation request.",
+        "required": [
+          "machineId",
+          "endpointId",
+          "auth",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The agents to deploy to or undeploy from, as documented ids."
+          },
+          "artifactSha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pinned release's expected sha256."
+          },
+          "artifactUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional pinned release for the probe's install: the URL."
+          },
+          "auth": {
+            "$ref": "#/components/schemas/SkillsAuthDto",
+            "description": "How the endpoint authenticates."
+          },
+          "direction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operation's direction: `deploy` (the default when a skill is\nnamed) or `undeploy`."
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "Preserve a dry run: never upgraded to a real mutation."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint id to act through."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine to act on (must match the path's machine)."
+          },
+          "skillId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The skill to deploy or undeploy; absent for a probe."
+          },
+          "skillsRoot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An external skills root, when the operation targets one."
           },
           "timeoutSeconds": {
             "type": "integer",
