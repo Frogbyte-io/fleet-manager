@@ -33,7 +33,7 @@ impl Drop for TestSshd {
 pub fn start_sshd() -> TestSshd {
     let _guard = STARTUP_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
     let user_key = dir.path().join("user_ed25519");
