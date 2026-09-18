@@ -46,7 +46,7 @@ fn acquire_startup_lock() -> std::fs::File {
         std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600))
             .expect("the startup lock file must be ours to chmod");
         file.lock().expect("the startup lock must acquire");
-        return file;
+        file
     }
     #[cfg(not(unix))]
     {
