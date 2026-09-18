@@ -7,8 +7,18 @@
 -- runs inside the controller's startup migration transaction, before the
 -- HTTP surface or the worker accepts work, so no operation processing can
 -- contend with it: the single-controller deployment has no concurrent
--- writers at migration time. The table is bounded by Fleet's own
--- retention, not unbounded in practice.
+-- writers at migration time.
+--
+-- Recovery plan: the migration is transactional — a failure rolls the
+-- whole rebuild back to the pre-migration schema, and the controller
+-- refuses to start rather than serving against a half-migrated store. The
+-- copy cost grows with the operations row count, which accumulates until
+-- an operator prunes it; the startup cost is paid once per install, and
+-- an operator with a very old store can archive and prune before
+-- upgrading. The PRAGMA foreign_keys wrapper is a no-op inside a
+-- transaction (enforcement stays ON); it is kept only as documentation
+-- that nothing FK-references this table today, and a future FK into
+-- operations must reorder migrations instead of relying on it.
 PRAGMA foreign_keys = OFF;
 
 CREATE TABLE operations_new (

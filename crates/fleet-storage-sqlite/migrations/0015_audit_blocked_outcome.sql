@@ -4,7 +4,14 @@
 -- append-only triggers are recreated exactly as 0003 defined them.
 --
 -- As with 0014, the rebuild runs inside the controller's startup
--- migration transaction, before any surface accepts work.
+-- migration transaction, before any surface accepts work. The audit
+-- ledger is append-only, so it grows with the install's history: the
+-- one-time copy cost is bounded by the operator's own retention choices,
+-- the migration is transactional (a failure rolls back to the
+-- pre-migration schema), and the controller refuses to start rather than
+-- serving against a half-migrated ledger. The PRAGMA foreign_keys wrapper
+-- is a no-op inside a transaction (enforcement stays ON); it is kept only
+-- as documentation that nothing FK-references this table today.
 PRAGMA foreign_keys = OFF;
 
 CREATE TABLE audit_events_new (
