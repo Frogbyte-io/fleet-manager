@@ -219,6 +219,43 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     )),
                 ))
             };
+            // The mise executor handles the FM-304 kinds over the same
+            // SSH work directory and limiter.
+            let with_mise: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(fleet_controller::mise::MiseDispatch::new(
+                    with_skills.clone(),
+                    std::sync::Arc::new(fleet_controller::mise::MiseExecutor::new(
+                        machines,
+                        config.data_dir.join("ssh"),
+                        limiter.clone(),
+                    )),
+                ))
+            };
+            // The ready executor composes the FM-305 workflow. It runs the
+            // plan's steps through the chain itself (with_mise, which
+            // falls through to skills → frogenv → checkout → install), so
+            // inner steps execute in-process without re-entering the
+            // queue.
+            let with_ready: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(fleet_controller::ready::ReadyDispatch::new(
+                    with_mise.clone(),
+                    std::sync::Arc::new(fleet_controller::ready::ReadyExecutor::new(
+                        machines,
+                        worker_operations.clone(),
+                        with_mise.clone(),
+                        config.data_dir.join("ssh"),
+                        limiter.clone(),
+                    )),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -229,11 +266,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_skills.clone(),
+                            with_ready.clone(),
                         ));
                     executor
                 }
-                None => with_skills.clone(),
+                None => with_ready.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

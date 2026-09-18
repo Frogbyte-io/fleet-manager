@@ -15,6 +15,7 @@
 //! remaining steps named, never a failure or a hang.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::{Operation, Operations};
@@ -23,8 +24,10 @@ use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::ExecutionLimiter;
 
 use crate::exec::resolve_ssh_endpoint;
-use crate::frogenv::FrogenvExecutor;
-use crate::mise::MiseExecutor;
+
+/// The workflow deadline's ceiling: the step deadlines bound the real
+/// work, this bounds the whole workflow.
+pub const MAX_WORKFLOW_TIMEOUT: u64 = crate::exec::MAX_SCRIPT_TIMEOUT;
 
 /// How the endpoint authenticates.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -82,37 +85,32 @@ struct PinnedTool {
 pub struct ReadyExecutor {
     machines: Arc<dyn MachinePort>,
     operations: Arc<Operations>,
-    /// Retained for the step executors the workflow composes; the
-    /// executors carry their own SSH providers over the same work dir.
-    #[allow(dead_code)]
-    frogenv: Arc<FrogenvExecutor>,
-    #[allow(dead_code)]
-    mise: Arc<MiseExecutor>,
+    /// The composed executor chain the plan's steps run through, WITHOUT
+    /// the ready dispatch itself: inner steps execute in-process through
+    /// the same executors the queue would use, so each step is audited in
+    /// its own right and no queue re-entry can deadlock.
+    inner: Arc<dyn OperationExecutor>,
     limiter: Arc<ExecutionLimiter>,
     work_dir: std::path::PathBuf,
 }
 
 impl ReadyExecutor {
-    /// Composes the executor from its parts.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the SSH work directory cannot be prepared, which the
-    /// store's own data-directory preparation already ensures.
+    /// Composes the executor from its parts. The `inner` chain is the
+    /// composed executor WITHOUT the ready dispatch: the plan's steps run
+    /// through it in-process, so each step is audited in its own right
+    /// and no queue re-entry can deadlock.
     #[must_use]
     pub fn new(
         machines: Arc<dyn MachinePort>,
         operations: Arc<Operations>,
+        inner: Arc<dyn OperationExecutor>,
         work_dir: std::path::PathBuf,
         limiter: Arc<ExecutionLimiter>,
     ) -> Self {
-        let frogenv = FrogenvExecutor::new(machines.clone(), work_dir.clone(), limiter.clone());
-        let mise = MiseExecutor::new(machines.clone(), work_dir.clone(), limiter.clone());
         Self {
             machines,
             operations,
-            frogenv: Arc::new(frogenv),
-            mise: Arc::new(mise),
+            inner,
             limiter,
             work_dir,
         }
@@ -146,6 +144,8 @@ impl ReadyExecutor {
         // The plan is computed from observed state at execution time: a
         // retry after a partial run sees the completed steps satisfied and
         // plans only the remainder.
+        let workflow_deadline = std::time::Instant::now()
+            + Duration::from_secs(payload.timeout_seconds.min(MAX_WORKFLOW_TIMEOUT));
         let observed = self.observe(&payload).await;
         let tools: Vec<ToolRequest> = payload
             .tools
@@ -196,11 +196,29 @@ impl ReadyExecutor {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            match self.run_step(&payload, step).await {
+            if std::time::Instant::now() >= workflow_deadline {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    step,
+                    "the workflow exceeded its deadline; the completed steps are durable and a retry re-runs only the remainder",
+                    &completed,
+                    &plan[index..],
+                )
+                .await;
+            }
+            match self.run_step(&payload, step, workflow_deadline).await {
                 StepOutcome::Done => completed.push(step.name().to_owned()),
                 StepOutcome::Blocked(reason) => {
-                    return complete_blocked(operations, &operation.id, step, &reason, &completed)
-                        .await;
+                    return complete_blocked(
+                        operations,
+                        &operation.id,
+                        step,
+                        &reason,
+                        &completed,
+                        &plan[index + 1..],
+                    )
+                    .await;
                 }
                 StepOutcome::Failed(reason) => {
                     return complete_failed(
@@ -233,15 +251,21 @@ impl ReadyExecutor {
     async fn observe(&self, payload: &ReadyPayload) -> ObservedState {
         let mut observed = ObservedState::default();
         // The checkout discovery rides the same probe the FM-301 surface
-        // uses; a matching remote means the clone step is skippable.
+        // uses; a matching remote means the clone step is skippable. Both
+        // sides are normalized, so a checkout under a different remote
+        // spelling still matches.
         if let Ok(checkouts) = self.discover_checkouts(payload).await {
+            let project_remote = fleet_core::NormalizedRemote::parse(&payload.remote)
+                .map(|normalized| normalized.as_str().to_owned())
+                .unwrap_or_else(|_| payload.remote.clone());
             observed.matching_checkout = checkouts
                 .into_iter()
                 .find(|checkout| {
-                    checkout
-                        .remote
-                        .as_deref()
-                        .is_some_and(|remote| remote == payload.remote)
+                    checkout.remote.as_deref().is_some_and(|remote| {
+                        fleet_core::NormalizedRemote::parse(remote)
+                            .map(|normalized| normalized.as_str() == project_remote)
+                            .unwrap_or(false)
+                    })
                 })
                 .map(|checkout| checkout.root);
         }
@@ -299,15 +323,37 @@ impl ReadyExecutor {
                 .to_string(),
             )
             .await?;
-        let result = self.await_inner(&operation).await?;
+        self.operations
+            .claim_only_execute(
+                self.inner.as_ref(),
+                &operation.id,
+                fleet_auth::LAN_PRINCIPAL_ID,
+            )
+            .await?;
+        let finished = self
+            .operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &operation.id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if finished.state != "succeeded" {
+            return Err("the mise status observation did not succeed".to_owned());
+        }
+        let result: serde_json::Value =
+            serde_json::from_str(&finished.result_json.unwrap_or_default())
+                .map_err(|error| error.to_string())?;
         let mut installed = Vec::new();
         if let Some(object) = result.get("mise").and_then(|mise| mise.as_object()) {
             for (tool, records) in object {
-                if let Some(record) = records.get(0)
-                    && record["installed"].as_bool() == Some(true)
-                    && let Some(version) = record["version"].as_str()
-                {
-                    installed.push((tool.clone(), version.to_owned()));
+                for record in records.as_array().unwrap_or(&Vec::new()) {
+                    if record["installed"].as_bool() == Some(true)
+                        && let Some(version) = record["version"].as_str()
+                    {
+                        installed.push((tool.clone(), version.to_owned()));
+                    }
                 }
             }
         }
@@ -327,12 +373,40 @@ impl ReadyExecutor {
                 .to_string(),
             )
             .await?;
-        let result = self.await_inner(&operation).await?;
+        self.operations
+            .claim_only_execute(
+                self.inner.as_ref(),
+                &operation.id,
+                fleet_auth::LAN_PRINCIPAL_ID,
+            )
+            .await?;
+        let finished = self
+            .operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &operation.id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if finished.state != "succeeded" {
+            return Err("the frogenv status observation did not succeed".to_owned());
+        }
+        let result: serde_json::Value =
+            serde_json::from_str(&finished.result_json.unwrap_or_default())
+                .map_err(|error| error.to_string())?;
         Ok(result["status"]["configured"].as_bool() == Some(true))
     }
 
-    /// Runs one step by creating and awaiting its underlying operation.
-    async fn run_step(&self, payload: &ReadyPayload, step: &ReadyStep) -> StepOutcome {
+    /// Runs one step: the inner operation is created for audit (durable
+    /// record), claimed, executed in-process through the composed chain,
+    /// and completed — the same shape a queue tick would produce.
+    async fn run_step(
+        &self,
+        payload: &ReadyPayload,
+        step: &ReadyStep,
+        workflow_deadline: std::time::Instant,
+    ) -> StepOutcome {
         let (kind, payload_json) = match step {
             ReadyStep::Clone { root } => (
                 "projects.clone",
@@ -386,21 +460,56 @@ impl ReadyExecutor {
                 }),
             ),
         };
+        let _ = workflow_deadline;
         let operation = match self.spawn_inner(kind, &payload_json.to_string()).await {
             Ok(operation) => operation,
             Err(detail) => return StepOutcome::Failed(detail),
         };
-        match self.await_inner(&operation).await {
-            Ok(_) => StepOutcome::Done,
-            Err(failure) => {
+        if let Err(detail) = self
+            .operations
+            .claim_only_execute(
+                self.inner.as_ref(),
+                &operation.id,
+                fleet_auth::LAN_PRINCIPAL_ID,
+            )
+            .await
+        {
+            return StepOutcome::Failed(detail);
+        }
+        let finished = match self.operations.get_state(&operation.id).await {
+            Ok(state) => state,
+            Err(failure) => return StepOutcome::Failed(failure.to_string()),
+        };
+        let record = self
+            .operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &operation.id,
+            )
+            .await
+            .map_err(|error| error.to_string());
+        let Ok(record) = record else {
+            return StepOutcome::Failed("the step's record is unreadable".to_owned());
+        };
+        match finished.as_str() {
+            "succeeded" => StepOutcome::Done,
+            "blocked_manual_approval" => {
                 let error: serde_json::Value =
-                    serde_json::from_str(&failure).unwrap_or(serde_json::Value::Null);
-                let reason = error["reason"].as_str().unwrap_or_default().to_owned();
-                if reason == "blocked_manual_approval" {
-                    StepOutcome::Blocked(error["detail"].as_str().unwrap_or_default().to_owned())
-                } else {
-                    StepOutcome::Failed(error["detail"].as_str().unwrap_or(&failure).to_owned())
-                }
+                    serde_json::from_str(&record.error_json.unwrap_or_default())
+                        .unwrap_or(serde_json::Value::Null);
+                StepOutcome::Blocked(error["detail"].as_str().unwrap_or_default().to_owned())
+            }
+            _ => {
+                let error: serde_json::Value =
+                    serde_json::from_str(&record.error_json.unwrap_or_default())
+                        .unwrap_or(serde_json::Value::Null);
+                StepOutcome::Failed(
+                    error["detail"]
+                        .as_str()
+                        .unwrap_or("the step failed without a detail")
+                        .to_owned(),
+                )
             }
         }
     }
@@ -410,7 +519,7 @@ impl ReadyExecutor {
         self.operations
             .create(
                 &fleet_auth::LanAllowAllAuthorizer,
-                "ready-workflow",
+                fleet_auth::LAN_PRINCIPAL_ID,
                 &fleet_application::operation::NewOperation {
                     kind: kind.to_owned(),
                     idempotency_key: None,
@@ -421,67 +530,6 @@ impl ReadyExecutor {
             )
             .await
             .map_err(|error| error.to_string())
-    }
-
-    /// Drives one inner operation to a terminal state by ticking the
-    /// worker with this executor: the workflow's own steps execute
-    /// through the same composed chain.
-    async fn await_inner(&self, operation: &Operation) -> Result<serde_json::Value, String> {
-        loop {
-            self.operations
-                .tick(
-                    self,
-                    "ready-workflow",
-                    fleet_core::SystemClock::now_unix_millis(),
-                    60_000,
-                )
-                .await
-                .ok();
-            let current = self
-                .operations
-                .get_state(&operation.id)
-                .await
-                .unwrap_or_else(|_| "pending".to_owned());
-            match current.as_str() {
-                "succeeded" | "blocked_manual_approval" => {
-                    let finished = self
-                        .operations
-                        .get(
-                            &fleet_auth::LanAllowAllAuthorizer,
-                            "ready-workflow",
-                            &operation.id,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    if finished.state == "blocked_manual_approval" {
-                        return Err(finished.error_json.unwrap_or_else(|| {
-                            serde_json::json!({"reason": "blocked_manual_approval"}).to_string()
-                        }));
-                    }
-                    return serde_json::from_str(
-                        &finished.result_json.unwrap_or_else(|| "{}".to_owned()),
-                    )
-                    .map_err(|error| error.to_string());
-                }
-                "failed" | "cancelled" | "timed_out" => {
-                    let finished = self
-                        .operations
-                        .get(
-                            &fleet_auth::LanAllowAllAuthorizer,
-                            "ready-workflow",
-                            &operation.id,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    return Err(finished.error_json.unwrap_or_else(|| {
-                        serde_json::json!({"reason": finished.state}).to_string()
-                    }));
-                }
-                _ => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        }
     }
 
     async fn resolve(
@@ -526,12 +574,14 @@ async fn complete_blocked(
     step: &ReadyStep,
     reason: &str,
     completed: &[String],
+    remaining: &[ReadyStep],
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
         "reason": "blocked_manual_approval",
         "detail": reason,
         "blockedAt": step.name(),
         "completed": completed,
+        "remaining": remaining.iter().map(ToString::to_string).collect::<Vec<_>>(),
     })
     .to_string();
     operations

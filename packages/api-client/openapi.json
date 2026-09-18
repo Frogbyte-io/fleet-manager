@@ -1786,11 +1786,11 @@
         },
         "responses": {
           "200": {
-            "description": "The dry run's plan.",
+            "description": "The dry run's plan description.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Resource_ProjectDto"
+                  "$ref": "#/components/schemas/Resource_ReadyPlanDto"
                 }
               }
             }
@@ -4275,6 +4275,60 @@
         ],
         "description": "How the workflow's endpoint authenticates."
       },
+      "ReadyPlanDto": {
+        "type": "object",
+        "description": "The dry run's plan response: the step vocabulary and the conditions\nunder which each step runs.",
+        "required": [
+          "projectId",
+          "machineId",
+          "root",
+          "steps",
+          "note"
+        ],
+        "properties": {
+          "machineId": {
+            "type": "string",
+            "description": "The machine the plan targets."
+          },
+          "note": {
+            "type": "string",
+            "description": "How the executed plan relates to this description."
+          },
+          "projectId": {
+            "type": "string",
+            "description": "The project the plan targets."
+          },
+          "root": {
+            "type": "string",
+            "description": "The checkout root the plan targets."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadyPlanStepDto"
+            },
+            "description": "The steps, in execution order."
+          }
+        }
+      },
+      "ReadyPlanStepDto": {
+        "type": "object",
+        "description": "One step in the dry run's plan response.",
+        "required": [
+          "kind",
+          "when"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The step's kind."
+          },
+          "when": {
+            "type": "string",
+            "description": "The condition under which the step runs (it is skipped otherwise)."
+          }
+        }
+      },
       "ReadyToolDto": {
         "type": "object",
         "description": "A pinned tool request the workflow installs through mise.",
@@ -4971,6 +5025,51 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Last mutation (epoch milliseconds)."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ReadyPlanDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The dry run's plan response: the step vocabulary and the conditions\nunder which each step runs.",
+            "required": [
+              "projectId",
+              "machineId",
+              "root",
+              "steps",
+              "note"
+            ],
+            "properties": {
+              "machineId": {
+                "type": "string",
+                "description": "The machine the plan targets."
+              },
+              "note": {
+                "type": "string",
+                "description": "How the executed plan relates to this description."
+              },
+              "projectId": {
+                "type": "string",
+                "description": "The project the plan targets."
+              },
+              "root": {
+                "type": "string",
+                "description": "The checkout root the plan targets."
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ReadyPlanStepDto"
+                },
+                "description": "The steps, in execution order."
               }
             }
           }

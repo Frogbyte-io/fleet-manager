@@ -303,6 +303,20 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
         worker_id: &str,
         now: i64,
     ) -> Result<Option<Operation>, PortFailure>;
+    /// Atomically claims one specific operation by id for `worker_id`:
+    /// pending to running with the claim recorded, or `None` when the
+    /// operation is not pending. The addressed claim the ready workflow's
+    /// steps use.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn claim_pending_by_id(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+    ) -> Result<Option<Operation>, PortFailure>;
     /// Returns live operations whose worker claim is older than
     /// `lease_ms`: a crashed worker's leftovers, ready to be resolved.
     ///
@@ -513,6 +527,49 @@ impl Operations {
                 detail,
             })?;
         Ok(operation)
+    }
+
+    /// Claims one specific operation for `worker_id` if it is still
+    /// pending, executes it through `executor`, and records the terminal
+    /// state — the same shape a queue tick produces, but addressed. The
+    /// ready workflow's steps run through this so each inner operation is
+    /// durable and audited without re-entering the queue.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the claim or execution fails; the operation records its
+    /// own terminal state either way.
+    pub async fn claim_only_execute(
+        &self,
+        executor: &dyn crate::worker::OperationExecutor,
+        id: &str,
+        worker_id: &str,
+    ) -> Result<(), String> {
+        let now = fleet_core::SystemClock::now_unix_millis();
+        self.port
+            .claim_pending_by_id(id, worker_id, now)
+            .await
+            .map_err(|failure| failure.to_string())?;
+        let operation = self
+            .port
+            .get(id)
+            .await
+            .map_err(|failure| failure.to_string())?;
+        if operation.state == "pending" {
+            return Err(format!("the operation {id} could not be claimed"));
+        }
+        if let Err(detail) = executor.execute(self, &operation).await {
+            let error_json = serde_json::json!({
+                "reason": "step_failed",
+                "detail": detail,
+            })
+            .to_string();
+            self.port
+                .complete(id, "failed", None, Some(&error_json))
+                .await
+                .map_err(|failure| failure.to_string())?;
+        }
+        Ok(())
     }
 
     /// Reads one operation's current state id, when it exists. The

@@ -71,6 +71,33 @@ fn default_timeout() -> u64 {
     1800
 }
 
+/// The dry run's plan response: the step vocabulary and the conditions
+/// under which each step runs.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadyPlanDto {
+    /// The project the plan targets.
+    pub project_id: String,
+    /// The machine the plan targets.
+    pub machine_id: String,
+    /// The checkout root the plan targets.
+    pub root: String,
+    /// The steps, in execution order.
+    pub steps: Vec<ReadyPlanStepDto>,
+    /// How the executed plan relates to this description.
+    pub note: String,
+}
+
+/// One step in the dry run's plan response.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadyPlanStepDto {
+    /// The step's kind.
+    pub kind: String,
+    /// The condition under which the step runs (it is skipped otherwise).
+    pub when: String,
+}
+
 /// Starts the ready-project workflow, or answers the plan on a dry run.
 ///
 /// # Errors
@@ -93,8 +120,8 @@ fn default_timeout() -> u64 {
         ),
         (
             status = 200,
-            description = "The dry run's plan.",
-            body = Resource<crate::projects::ProjectDto>
+            description = "The dry run's plan description.",
+            body = Resource<ReadyPlanDto>
         ),
         (
             status = 400,
@@ -140,12 +167,15 @@ pub async fn start_ready_workflow(
         )
         .await
         .map_err(|error| crate::machines::map_machine_error(&error, correlation_id))?;
+    // The resource is the MACHINE, matching the kind's machine-scoped
+    // creation check in Operations::create: one documented resource on
+    // both paths, so a resource-scoped authorizer sees one answer.
     if let Err(decision) = fleet_application::authz::authorize(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
             action: fleet_application::authz::Permission::ProjectsReady,
-            resource: Some(&project_id),
+            resource: Some(&request.machine_id),
         },
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
@@ -172,24 +202,43 @@ pub async fn start_ready_workflow(
         ));
     }
     if request.dry_run {
-        // The dry run answers the plan shape without creating anything:
-        // the plan itself is computed at execution time from observed
-        // state, so the dry run documents the step vocabulary and the
-        // caller's inputs instead of pretending to know the machine.
-        let plan = serde_json::json!({
-            "projectId": project_id,
-            "machineId": request.machine_id,
-            "root": root,
-            "steps": [
-                {"kind": "clone", "when": "no checkout matches the project's remote"},
-                {"kind": "miseInstall", "when": "mise does not report the requested versions installed"},
-                {"kind": "frogenvSetup", "when": "Frogenv is not configured"},
-                {"kind": "skillsDeploy", "when": "the deployment status does not match"},
-                {"kind": "verify", "when": "always"},
+        // The dry run answers a dedicated plan-response schema without
+        // creating anything: the executed plan is computed from observed
+        // state at execution time, so this documents the step vocabulary
+        // and the caller's inputs rather than pretending to know the
+        // machine's state.
+        let plan = ReadyPlanDto {
+            project_id: project_id.clone(),
+            machine_id: request.machine_id.clone(),
+            root: root.clone(),
+            steps: vec![
+                ReadyPlanStepDto {
+                    kind: "clone".to_owned(),
+                    when: "no checkout matches the project's normalized remote".to_owned(),
+                },
+                ReadyPlanStepDto {
+                    kind: "miseInstall".to_owned(),
+                    when: "mise does not report the requested versions installed".to_owned(),
+                },
+                ReadyPlanStepDto {
+                    kind: "frogenvSetup".to_owned(),
+                    when: "Frogenv is not configured".to_owned(),
+                },
+                ReadyPlanStepDto {
+                    kind: "skillsDeploy".to_owned(),
+                    when: "the deployment status does not match".to_owned(),
+                },
+                ReadyPlanStepDto {
+                    kind: "verify".to_owned(),
+                    when: "always".to_owned(),
+                },
             ],
-            "note": "the executed plan is computed from observed state at execution time; completed steps are skipped",
-        });
-        return Ok((StatusCode::OK, Json(Resource::new(plan))));
+            note: "the executed plan is computed from observed state at execution time; completed steps are skipped".to_owned(),
+        };
+        let value = serde_json::to_value(&plan).map_err(|error| {
+            crate::machines::invalid_request(&error.to_string(), correlation_id)
+        })?;
+        return Ok((StatusCode::OK, Json(Resource::new(value))));
     }
     let payload = serde_json::json!({
         "machineId": request.machine_id,

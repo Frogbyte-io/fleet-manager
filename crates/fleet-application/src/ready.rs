@@ -100,17 +100,19 @@ impl fmt::Display for ReadyStep {
 /// step than to guess).
 #[derive(Clone, Debug, Default)]
 pub struct ObservedState {
-    /// A checkout root on the machine whose remote matches the project,
-    /// when discovery found one.
+    /// A checkout root on the machine whose NORMALIZED remote matches the
+    /// project, when discovery found one. The observer normalizes both
+    /// sides, so a checkout under a different remote spelling still
+    /// matches.
     pub matching_checkout: Option<String>,
     /// The tools mise reports installed with their versions, when mise is
     /// present and answered.
     pub mise_installed: Vec<(String, String)>,
     /// Whether Frogenv is configured on the machine, when status answered.
     pub frogenv_configured: Option<bool>,
-    /// The skill deployments the machine's agents already carry, when the
-    /// CLI answered.
-    pub skills_deployed: Vec<String>,
+    /// The skill deployments the machine's agents already carry, as
+    /// (skill id, agent) pairs, when the CLI answered.
+    pub skills_deployed: Vec<(String, String)>,
 }
 
 /// The tool requests a plan's mise step needs, as declared by the project
@@ -156,9 +158,16 @@ pub fn plan_ready(
         steps.push(ReadyStep::FrogenvSetup);
     }
     if let Some((skill_id, agents)) = skill {
-        let deployed = agents
-            .iter()
-            .all(|agent| observed.skills_deployed.contains(&(*agent).clone()));
+        // The deployment predicate names the skill: an observed
+        // deployment of another skill is not a match.
+        let deployed = agents.iter().all(|agent| {
+            observed
+                .skills_deployed
+                .iter()
+                .any(|(observed_skill, observed_agent)| {
+                    observed_skill == skill_id && observed_agent == agent
+                })
+        });
         if !deployed {
             steps.push(ReadyStep::SkillsDeploy {
                 skill_id: skill_id.to_owned(),
@@ -208,7 +217,7 @@ mod tests {
             matching_checkout: Some("/srv/repo".to_owned()),
             mise_installed: vec![("node".to_owned(), "20.11.0".to_owned())],
             frogenv_configured: Some(true),
-            skills_deployed: vec!["claude_code".to_owned()],
+            skills_deployed: vec![("db".to_owned(), "claude_code".to_owned())],
         };
         let steps = plan_ready(
             "/srv/repo",
@@ -244,6 +253,21 @@ mod tests {
             .iter()
             .any(|step| matches!(step, ReadyStep::MiseInstall { version, .. } if version == "20.11.0")),
             "a different installed version is not a match");
+    }
+
+    #[test]
+    fn a_deployment_of_another_skill_does_not_skip() {
+        let observed = ObservedState {
+            skills_deployed: vec![("other".to_owned(), "claude_code".to_owned())],
+            ..ObservedState::default()
+        };
+        let steps = plan_ready(
+            "/srv/repo",
+            &[],
+            Some(("db", &["claude_code".to_owned()])),
+            &observed,
+        );
+        assert!(steps.iter().any(|step| step.name() == "skills_deploy"));
     }
 
     #[test]

@@ -1167,6 +1167,33 @@ export type ReadyAuthDto = {
 };
 
 /**
+ * One step in the dry run's plan response.
+ */
+export interface ReadyPlanStepDto {
+  /** The step's kind. */
+  kind: string;
+  /** The condition under which the step runs (it is skipped otherwise). */
+  when: string;
+}
+
+/**
+ * The dry run's plan response: the step vocabulary and the conditions
+ * under which each step runs.
+ */
+export interface ReadyPlanDto {
+  /** The machine the plan targets. */
+  machineId: string;
+  /** How the executed plan relates to this description. */
+  note: string;
+  /** The project the plan targets. */
+  projectId: string;
+  /** The checkout root the plan targets. */
+  root: string;
+  /** The steps, in execution order. */
+  steps: ReadyPlanStepDto[];
+}
+
+/**
  * A pinned tool request the workflow installs through mise.
  */
 export interface ReadyToolDto {
@@ -1580,6 +1607,37 @@ export type ResourceProjectDtoData = {
 export interface ResourceProjectDto {
   /** A project as the detail view displays it. */
   data: ResourceProjectDtoData;
+}
+
+/**
+ * The dry run's plan response: the step vocabulary and the conditions
+ * under which each step runs.
+ */
+export type ResourceReadyPlanDtoData = {
+  /** The machine the plan targets. */
+  machineId: string;
+  /** How the executed plan relates to this description. */
+  note: string;
+  /** The project the plan targets. */
+  projectId: string;
+  /** The checkout root the plan targets. */
+  root: string;
+  /** The steps, in execution order. */
+  steps: ReadyPlanStepDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceReadyPlanDto {
+  /**
+     * The dry run's plan response: the step vocabulary and the conditions
+     * under which each step runs.
+     */
+  data: ResourceReadyPlanDtoData;
 }
 
 /**
@@ -3798,7 +3856,7 @@ const res = await fetch(getStartProjectDiscoveryUrl(projectId),
 
 
 export type startReadyWorkflowResponse200 = {
-  data: ResourceProjectDto
+  data: ResourceReadyPlanDto
   status: 200
 }
 

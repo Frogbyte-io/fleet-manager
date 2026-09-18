@@ -790,15 +790,16 @@ fn parse_projects_command(verb: &str, rest: &[&str]) -> Result<Command, CliError
         },
         "ready" => match rest {
             [id, machine_id, "--root", root, rest @ ..] => {
-                let (flags, wait, timeout) = parse_checkout_flags(rest)?;
-                let mut dry_run = false;
-                // --dry-run is a ready-only flag; the shared parser does
-                // not carry it.
-                for flag in rest {
-                    if *flag == "--dry-run" {
-                        dry_run = true;
-                    }
-                }
+                // --dry-run is a ready-only flag and is consumed before
+                // the shared parser sees the rest, so a documented
+                // invocation is never refused as an unknown flag.
+                let dry_run = rest.contains(&"--dry-run");
+                let remaining: Vec<&str> = rest
+                    .iter()
+                    .copied()
+                    .filter(|flag| *flag != "--dry-run")
+                    .collect();
+                let (flags, wait, timeout) = parse_checkout_flags(&remaining)?;
                 Ok(Command::ProjectsReady {
                     id: (*id).to_owned(),
                     machine: (*machine_id).to_owned(),
