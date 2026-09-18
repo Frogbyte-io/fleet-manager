@@ -68,6 +68,10 @@ fn credential_shaped_urls_are_scrubbed() {
     let redacted = redact("cannot reach https://user:secret@host.invalid/tool.tar.gz");
     assert!(!redacted.contains("secret"), "{redacted}");
     assert!(redacted.contains("***@host.invalid"), "{redacted}");
+    // The schemeless scp-style form the URL pass cannot see.
+    let scp = redact("cannot reach user:secret@host:repo for install");
+    assert!(!scp.contains("secret"), "{scp}");
+    assert!(scp.contains("***@host:repo"), "{scp}");
 }
 
 #[test]

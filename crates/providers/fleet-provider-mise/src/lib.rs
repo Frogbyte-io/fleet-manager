@@ -230,7 +230,39 @@ pub fn redact(text: &str) -> String {
         .chars()
         .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect();
-    redact_url_credentials(&cleaned)
+    let with_urls = redact_url_credentials(&cleaned);
+    redact_schemeless_credentials(&with_urls)
+}
+
+/// Redacts `user:password@` patterns anywhere in the text — scp-style
+/// remotes and error text the URL pass cannot see. The `'@'` is consumed
+/// with the userinfo so the loop always advances.
+fn redact_schemeless_credentials(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut search = 0;
+    while let Some(offset) = text[search..].find('@') {
+        let at = search + offset;
+        let token_start = text[..at]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"' || *c == '\'')
+            .map_or(0, |(index, c)| index + c.len_utf8());
+        let token = &text[token_start..at];
+        let has_password = token
+            .split_once(':')
+            .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
+        if has_password {
+            let flush_start = search.min(token_start);
+            result.push_str(&text[flush_start..token_start]);
+            result.push_str("***@");
+            search = at + 1;
+        } else {
+            result.push_str(&text[search..=at]);
+            search = at + 1;
+        }
+    }
+    result.push_str(&text[search..]);
+    result
 }
 
 fn redact_url_credentials(text: &str) -> String {

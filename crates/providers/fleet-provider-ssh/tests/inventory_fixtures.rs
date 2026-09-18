@@ -173,6 +173,14 @@ fn a_tool_reports_its_version_as_a_separate_fact() {
         .unwrap();
     assert_eq!(mysterious.status, fleet_core::CapabilityStatus::Known);
     assert_eq!(mysterious.value, None, "no version is an honest gap");
+    // The version surface is the separate namespace: a tool whose version
+    // probe failed has no version fact at all.
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| { fact.namespace == "tool-version" && fact.name == "mysterious-agent" }),
+        "a version-less tool has no version fact"
+    );
     assert!(
         !facts
             .iter()

@@ -148,13 +148,20 @@ impl MiseExecutor {
         Ok(spec)
     }
 
+    /// Runs one script; the third element distinguishes a thread/join
+    /// failure from a connection failure, which are different diagnostic
+    /// paths.
     async fn run(
         &self,
         spec: &SshConnectionSpec,
         script: &str,
         metadata: &ScriptMetadata,
         deadline: Duration,
-    ) -> (Option<fleet_provider_ssh::ExecutionResult>, Option<String>) {
+    ) -> (
+        Option<fleet_provider_ssh::ExecutionResult>,
+        Option<String>,
+        Option<String>,
+    ) {
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
         let spec = spec.clone();
@@ -170,12 +177,13 @@ impl MiseExecutor {
             |join_error| {
                 (
                     None,
+                    None,
                     Some(format!("the execution thread failed: {join_error}")),
                 )
             },
             |outcome| match outcome {
-                Ok(result) => (Some(result), None),
-                Err(error) => (None, Some(error.to_string())),
+                Ok(result) => (Some(result), None, None),
+                Err(error) => (None, Some(error.to_string()), None),
             },
         )
     }
@@ -210,7 +218,7 @@ impl MiseExecutor {
             .map_err(|error| error.to_string())?;
         let deadline = deadline(payload.timeout_seconds);
         let metadata = ScriptMetadata::default();
-        let (result, detail) = self
+        let (result, detail, thread_failure) = self
             .run(&spec, &inventory_script(), &metadata, deadline)
             .await;
         finish_json(
@@ -218,6 +226,7 @@ impl MiseExecutor {
             &operation.id,
             result,
             detail,
+            thread_failure,
             "inventory",
             "tools",
         )
@@ -235,12 +244,14 @@ impl MiseExecutor {
             .map_err(|error| error.to_string())?;
         let deadline = deadline(payload.timeout_seconds);
         let metadata = ScriptMetadata::default();
-        let (result, detail) = self.run(&spec, &status_script(), &metadata, deadline).await;
+        let (result, detail, thread_failure) =
+            self.run(&spec, &status_script(), &metadata, deadline).await;
         finish_json(
             operations,
             &operation.id,
             result,
             detail,
+            thread_failure,
             "mise status",
             "mise",
         )
@@ -272,10 +283,18 @@ impl MiseExecutor {
             environment: Vec::new(),
             arguments: vec![payload.tool, payload.version],
         };
-        let (result, detail) = self
+        let (result, detail, thread_failure) = self
             .run(&spec, &install_script(), &metadata, deadline)
             .await;
-        finish_cli(operations, &operation.id, result, detail, "mise install").await
+        finish_cli(
+            operations,
+            &operation.id,
+            result,
+            detail,
+            thread_failure,
+            "mise install",
+        )
+        .await
     }
 
     async fn exec(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
@@ -318,8 +337,17 @@ impl MiseExecutor {
             environment: Vec::new(),
             arguments,
         };
-        let (result, detail) = self.run(&spec, &exec_script(), &metadata, deadline).await;
-        finish_cli(operations, &operation.id, result, detail, "mise exec").await
+        let (result, detail, thread_failure) =
+            self.run(&spec, &exec_script(), &metadata, deadline).await;
+        finish_cli(
+            operations,
+            &operation.id,
+            result,
+            detail,
+            thread_failure,
+            "mise exec",
+        )
+        .await
     }
 }
 
@@ -471,6 +499,7 @@ async fn finish_json(
     operation_id: &str,
     result: Option<fleet_provider_ssh::ExecutionResult>,
     detail: Option<String>,
+    thread_failure: Option<String>,
     what: &str,
     field: &str,
 ) -> Result<(), String> {
@@ -517,7 +546,10 @@ async fn finish_json(
         (None, Some(detail)) => {
             complete_failure(operations, operation_id, "connection_failed", &detail).await
         }
-        (None, None) => Err(format!("the {what} produced neither a result nor a detail")),
+        (None, None) => match thread_failure {
+            Some(detail) => complete_failure(operations, operation_id, "internal", &detail).await,
+            None => Err(format!("the {what} produced neither a result nor a detail")),
+        },
     }
 }
 
@@ -527,6 +559,7 @@ async fn finish_cli(
     operation_id: &str,
     result: Option<fleet_provider_ssh::ExecutionResult>,
     detail: Option<String>,
+    thread_failure: Option<String>,
     what: &str,
 ) -> Result<(), String> {
     match (result, detail) {
@@ -559,7 +592,10 @@ async fn finish_cli(
         (None, Some(detail)) => {
             complete_failure(operations, operation_id, "connection_failed", &detail).await
         }
-        (None, None) => Err(format!("the {what} produced neither a result nor a detail")),
+        (None, None) => match thread_failure {
+            Some(detail) => complete_failure(operations, operation_id, "internal", &detail).await,
+            None => Err(format!("the {what} produced neither a result nor a detail")),
+        },
     }
 }
 

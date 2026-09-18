@@ -189,18 +189,23 @@ pub async fn start_mise_operation(
                     correlation_id,
                 ));
             };
-            if tool.is_empty() || tool.starts_with('-') || tool.chars().any(char::is_control) {
+            if tool.is_empty()
+                || tool.len() > 255
+                || tool.starts_with('-')
+                || tool.chars().any(char::is_control)
+            {
                 return Err(crate::machines::invalid_request(
-                    "the tool name must carry no leading dash or control characters",
+                    "the tool name must be 1..=255 characters with no leading dash or control characters",
                     correlation_id,
                 ));
             }
             if version.is_empty()
+                || version.len() > 64
                 || version.starts_with('-')
                 || version.chars().any(char::is_control)
             {
                 return Err(crate::machines::invalid_request(
-                    "the version must carry no leading dash or control characters",
+                    "the version must be 1..=64 characters with no leading dash or control characters",
                     correlation_id,
                 ));
             }

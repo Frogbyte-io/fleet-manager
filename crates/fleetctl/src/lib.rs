@@ -509,8 +509,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     // `--version`/`--help` are parsed only before the command word: after
     // the first positional, everything belongs to the subcommand, so a
     // subcommand's own `--version` (mise install) is never mistaken for
-    // the CLI's own. `--url`/`--socket`/`--output` stay global anywhere;
-    // no subcommand claims those names.
+    // the CLI's own. The connection/output globals must precede the
+    // command word, matching the documented grammar.
     let mut command_started = false;
     while index < args.len() {
         if command_started {

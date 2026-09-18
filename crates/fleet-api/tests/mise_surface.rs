@@ -24,6 +24,23 @@ impl fleet_application::authz::Authorizer for PermitAll {
     }
 }
 
+#[derive(Debug, Default)]
+struct Recording {
+    resources: Mutex<Vec<(String, Option<String>)>>,
+}
+impl fleet_application::authz::Authorizer for Recording {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        self.resources.lock().unwrap().push((
+            request.action.id().to_owned(),
+            request.resource.map(str::to_owned),
+        ));
+        fleet_application::authz::Decision::allow()
+    }
+}
+
 #[derive(Debug)]
 struct DenyMise;
 impl fleet_application::authz::Authorizer for DenyMise {
@@ -443,6 +460,56 @@ async fn an_install_pin_travels_as_data() {
     let payload: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
     assert_eq!(payload["tool"], "node");
     assert_eq!(payload["version"], "20.11.0");
+}
+
+#[tokio::test]
+async fn the_authorization_names_the_machine_and_the_right_action() {
+    let authorizer = Arc::new(Recording::default());
+    let (state, _) = state_for(authorizer.clone(), None);
+    for (action, tool, version) in [
+        ("status", None, None),
+        ("install", Some("node"), Some("20.11.0")),
+    ] {
+        let mut body = body_for(action);
+        if let Some(tool) = tool {
+            body["tool"] = serde_json::json!(tool);
+            body["version"] = serde_json::json!(version.unwrap());
+        }
+        let (status, value) = call(
+            state.clone(),
+            "POST",
+            "/machines/m-1/mise/operations",
+            Some(body.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{action}: {value}");
+    }
+    let resources = authorizer.resources.lock().unwrap();
+    let mise: Vec<_> = resources
+        .iter()
+        .filter(|(action, _)| action.starts_with("mise.") || action.starts_with("tools."))
+        .cloned()
+        .collect();
+    // Each action is authorized twice by design: once at the endpoint and
+    // once inside the operation use case. The status pair is tools.read;
+    // the install pair is mise.operate. Every one names the machine.
+    assert_eq!(mise.len(), 4);
+    for (index, (action, resource)) in mise.iter().enumerate() {
+        let expected = if index < 2 {
+            "tools.read"
+        } else {
+            "mise.operate"
+        };
+        assert_eq!(
+            action, expected,
+            "operation {index} authorizes the right action"
+        );
+        assert_eq!(
+            resource.as_deref(),
+            Some("m-1"),
+            "{action} is machine-scoped"
+        );
+    }
 }
 
 #[tokio::test]
