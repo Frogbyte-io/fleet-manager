@@ -12,7 +12,14 @@ use std::time::Duration;
 /// across the separate test binaries CI runs concurrently. A cross-process
 /// file lock on a fixed path serializes startup everywhere; the suites'
 /// SSH work still runs concurrently.
-pub static STARTUP_LOCK_FILE: &str = "/tmp/fleet-test-sshd-startup.lock";
+/// The lock file is scoped to the uid: an unrelated user's leftover lock
+/// on a shared machine must not break this suite, and the file's mode is
+/// 0600 so no other user can hold or tamper with it.
+fn startup_lock_path() -> std::path::PathBuf {
+    let user = std::env::var("USER")
+        .unwrap_or_else(|_| std::env::var("LOGNAME").unwrap_or_else(|_| "unknown".to_owned()));
+    std::env::temp_dir().join(format!("fleet-test-sshd-startup-{user}.lock"))
+}
 
 fn acquire_startup_lock() -> std::fs::File {
     let file = std::fs::OpenOptions::new()
@@ -20,8 +27,13 @@ fn acquire_startup_lock() -> std::fs::File {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(STARTUP_LOCK_FILE)
+        .open(startup_lock_path())
         .expect("the startup lock file must open");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600)).ok();
+    }
     file.lock().expect("the startup lock must acquire");
     file
 }
