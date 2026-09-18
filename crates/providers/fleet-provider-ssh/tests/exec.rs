@@ -10,6 +10,11 @@ use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::Duration;
 
+/// The port-allocation lock: tests within one binary run in parallel
+/// threads, and the free-port window between allocation and sshd's bind
+/// is racy across them.
+static STARTUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// One running sshd bound to an ephemeral port with its own host key.
 struct TestSshd {
     child: Child,
@@ -33,6 +38,9 @@ fn free_port() -> u16 {
 }
 
 fn start_sshd() -> TestSshd {
+    let _guard = STARTUP_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
     let user_key = dir.path().join("user_ed25519");
