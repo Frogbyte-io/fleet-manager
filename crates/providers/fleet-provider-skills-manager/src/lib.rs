@@ -423,7 +423,11 @@ fn redact_schemeless_credentials(text: &str) -> String {
             .split_once(':')
             .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
         if has_password {
-            result.push_str(&text[search..token_start]);
+            // The flush clamps to the current search position: a token
+            // already consumed by an earlier redaction must not be sliced
+            // backwards.
+            let flush_start = search.min(token_start);
+            result.push_str(&text[flush_start..token_start]);
             result.push_str("***@");
             search = at + 1;
         } else {

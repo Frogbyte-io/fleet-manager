@@ -143,6 +143,9 @@ fn hostile_output_is_redacted_and_control_noise_flattened() {
     let scp = redact("cannot reach user:secret@host:repo for skills");
     assert!(!scp.contains("secret"), "{scp}");
     assert!(scp.contains("***@host:repo"), "{scp}");
+    // Two '@' in one token: the redactor must terminate, not panic.
+    let double = redact("user:secret@host@x and more");
+    assert!(!double.contains("secret"), "{double}");
 }
 
 #[test]

@@ -670,6 +670,11 @@ fn root_environment(root: Option<&str>) -> Vec<(String, String)> {
 
 /// Parses the documented `--version` shapes: the provider's JSON
 /// document, the `skills-manager-cli <version>` line, or a bare semver.
+#[must_use]
+pub fn parse_version_text_for_test(text: &str) -> Option<String> {
+    parse_version_text(text)
+}
+
 fn parse_version_text(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
@@ -679,16 +684,17 @@ fn parse_version_text(text: &str) -> Option<String> {
         return Some(version.to_owned());
     }
     let first = trimmed.lines().next().unwrap_or_default().trim();
-    if let Some(version) = first.strip_prefix("skills-manager-cli ") {
-        return Some(version.to_owned());
-    }
-    let parts: Vec<&str> = first.split('.').collect();
+    let bare = first.strip_prefix("skills-manager-cli ").unwrap_or(first);
+    // Both documented forms normalize through the same semver check, so a
+    // prefixed line cannot carry trailing garbage a bare line could not.
+    let parts: Vec<&str> = bare.split('.').collect();
     if (2..=3).contains(&parts.len())
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        && parts.iter().all(|part| {
+            let numeric = part.split(['-', '+']).next().unwrap_or(part);
+            !numeric.is_empty() && numeric.chars().all(|c| c.is_ascii_digit())
+        })
     {
-        return Some(first.to_owned());
+        return Some(bare.to_owned());
     }
     None
 }
