@@ -670,11 +670,6 @@ fn root_environment(root: Option<&str>) -> Vec<(String, String)> {
 
 /// Parses the documented `--version` shapes: the provider's JSON
 /// document, the `skills-manager-cli <version>` line, or a bare semver.
-#[must_use]
-pub fn parse_version_text_for_test(text: &str) -> Option<String> {
-    parse_version_text(text)
-}
-
 fn parse_version_text(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
@@ -898,5 +893,24 @@ impl OperationExecutor for SkillsDispatch {
             }
             _ => self.fallback.execute(operations, operation).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version_text;
+
+    #[test]
+    fn both_documented_version_shapes_normalize_identically() {
+        assert_eq!(
+            parse_version_text("skills-manager-cli 1.34.2"),
+            parse_version_text("1.34.2")
+        );
+        assert_eq!(
+            parse_version_text("skills-manager-cli 1.2.3-beta"),
+            parse_version_text("1.2.3-beta")
+        );
+        assert_eq!(parse_version_text("skills-manager-cli 1.34.2 junk"), None);
+        assert_eq!(parse_version_text(""), None);
     }
 }
