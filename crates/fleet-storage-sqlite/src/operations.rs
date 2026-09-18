@@ -339,6 +339,35 @@ impl OperationPort for OperationRepository {
         Ok(Some(self.get(&id).await?))
     }
 
+    async fn claim_pending_by_id(
+        &self,
+        id: &str,
+        worker_id: &str,
+        now: i64,
+    ) -> Result<Option<Operation>, PortFailure> {
+        // The addressed compare-and-set: only the writer whose UPDATE
+        // lands while the row is still pending owns the claim, and a
+        // deadline-expired operation is refused exactly like the queue
+        // path — a targeted claim cannot bypass timeout handling.
+        let updated = sqlx::query(
+            "UPDATE operations SET state = 'running', worker_id = ?2, claimed_at = ?3, updated_at = ?3 \
+             WHERE id = ?1 AND state = 'pending' \
+             AND (deadline_at IS NULL OR deadline_at > ?3)",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| PortFailure::Backend {
+            detail: format!("claim update failed: {error}"),
+        })?;
+        if updated.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.get(id).await?))
+    }
+
     async fn expired_claims(&self, now: i64, lease_ms: i64) -> Result<Vec<Operation>, PortFailure> {
         let rows = sqlx::query(
             "SELECT * FROM operations WHERE state IN ('running', 'cancelling') \

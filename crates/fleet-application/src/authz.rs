@@ -115,6 +115,11 @@ pub enum Permission {
     /// mutation: it changes the machine's tool versions or executes a
     /// project command.
     MiseOperate,
+    /// Plan and execute the ready-project workflow on a machine: clone,
+    /// install prerequisites, configure the environment, deploy skills,
+    /// and verify. A mutation: it composes every mutation the workflow
+    /// may run.
+    ProjectsReady,
 }
 
 impl Permission {
@@ -154,6 +159,7 @@ impl Permission {
         Permission::FrogenvOperate,
         Permission::ToolsRead,
         Permission::MiseOperate,
+        Permission::ProjectsReady,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -192,6 +198,7 @@ impl Permission {
             Permission::FrogenvOperate => "frogenv.operate",
             Permission::ToolsRead => "tools.read",
             Permission::MiseOperate => "mise.operate",
+            Permission::ProjectsReady => "projects.ready",
         }
     }
 
@@ -232,7 +239,8 @@ impl Permission {
             | Permission::FrogenvRead
             | Permission::FrogenvOperate
             | Permission::ToolsRead
-            | Permission::MiseOperate => true,
+            | Permission::MiseOperate
+            | Permission::ProjectsReady => true,
         }
     }
 
@@ -273,7 +281,8 @@ impl Permission {
             | Permission::FrogenvRead
             | Permission::FrogenvOperate
             | Permission::ToolsRead
-            | Permission::MiseOperate => true,
+            | Permission::MiseOperate
+            | Permission::ProjectsReady => true,
         }
     }
 }

@@ -154,6 +154,14 @@ impl fleet_application::operation::OperationPort for FakeOperations {
     ) -> Result<Option<fleet_application::operation::Operation>, PortFailure> {
         unimplemented!()
     }
+    async fn claim_pending_by_id(
+        &self,
+        _id: &str,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<Option<fleet_application::operation::Operation>, PortFailure> {
+        unimplemented!()
+    }
     async fn expired_claims(
         &self,
         _now: i64,

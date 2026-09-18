@@ -1156,6 +1156,54 @@ export interface ProjectDto {
 }
 
 /**
+ * How the workflow's endpoint authenticates.
+ */
+export type ReadyAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
+ * One step in the dry run's plan response.
+ */
+export interface ReadyPlanStepDto {
+  /** The step's kind. */
+  kind: string;
+  /** The condition under which the step runs (it is skipped otherwise). */
+  when: string;
+}
+
+/**
+ * The dry run's plan response: the step vocabulary and the conditions
+ * under which each step runs.
+ */
+export interface ReadyPlanDto {
+  /** The machine the plan targets. */
+  machineId: string;
+  /** How the executed plan relates to this description. */
+  note: string;
+  /** The project the plan targets. */
+  projectId: string;
+  /** The checkout root the plan targets. */
+  root: string;
+  /** The steps, in execution order. */
+  steps: ReadyPlanStepDto[];
+}
+
+/**
+ * A pinned tool request the workflow installs through mise.
+ */
+export interface ReadyToolDto {
+  /** The tool name. */
+  tool: string;
+  /** The pinned version. */
+  version: string;
+}
+
+/**
  * The body of the record-checkouts request: the discovery result to ingest
  * as observed facts, matched to this project by its normalized remote.
  */
@@ -1562,6 +1610,37 @@ export interface ResourceProjectDto {
 }
 
 /**
+ * The dry run's plan response: the step vocabulary and the conditions
+ * under which each step runs.
+ */
+export type ResourceReadyPlanDtoData = {
+  /** The machine the plan targets. */
+  machineId: string;
+  /** How the executed plan relates to this description. */
+  note: string;
+  /** The project the plan targets. */
+  projectId: string;
+  /** The checkout root the plan targets. */
+  root: string;
+  /** The steps, in execution order. */
+  steps: ReadyPlanStepDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceReadyPlanDto {
+  /**
+     * The dry run's plan response: the step vocabulary and the conditions
+     * under which each step runs.
+     */
+  data: ResourceReadyPlanDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -1698,6 +1777,36 @@ export interface StartMiseOperationRequest {
      * @nullable
      */
   version?: string | null;
+}
+
+/**
+ * The body of the start-ready-workflow request.
+ */
+export interface StartReadyRequest {
+  /** The agents the skill deploys to. */
+  agents?: string[];
+  /** How the endpoint authenticates. */
+  auth: ReadyAuthDto;
+  /** Compute and return the plan without executing it. */
+  dryRun?: boolean;
+  /** The SSH endpoint id to act through. */
+  endpointId: string;
+  /** The machine to make ready (must match the path's machine). */
+  machineId: string;
+  /** The checkout root the workflow targets. */
+  root: string;
+  /**
+     * The skill to deploy, when the project declares one.
+     * @nullable
+     */
+  skillId?: string | null;
+  /**
+     * The deadline, in seconds, for the whole workflow.
+     * @minimum 0
+     */
+  timeoutSeconds?: number;
+  /** The tools the project declares, as pinned requests. */
+  tools?: ReadyToolDto[];
 }
 
 /**
@@ -3742,6 +3851,81 @@ const res = await fetch(getStartProjectDiscoveryUrl(projectId),
 
   const data: startProjectDiscoveryResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startProjectDiscoveryResponse
+}
+
+
+
+export type startReadyWorkflowResponse200 = {
+  data: ResourceReadyPlanDto
+  status: 200
+}
+
+export type startReadyWorkflowResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startReadyWorkflowResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startReadyWorkflowResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startReadyWorkflowResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startReadyWorkflowResponseSuccess = (startReadyWorkflowResponse200 | startReadyWorkflowResponse202) & {
+  headers: Headers;
+};
+export type startReadyWorkflowResponseError = (startReadyWorkflowResponse400 | startReadyWorkflowResponse403 | startReadyWorkflowResponse404) & {
+  headers: Headers;
+};
+
+export type startReadyWorkflowResponse = (startReadyWorkflowResponseSuccess | startReadyWorkflowResponseError)
+
+export const getStartReadyWorkflowUrl = (projectId: string,) => {
+
+
+
+
+  return `/api/v1/projects/${projectId}/ready`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Starts the ready-project workflow, or answers the plan on a dry run.
+ */
+export const startReadyWorkflow = async (projectId: string,
+    startReadyRequest: StartReadyRequest, options?: RequestInit): Promise<startReadyWorkflowResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartReadyWorkflowUrl(projectId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startReadyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startReadyWorkflowResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startReadyWorkflowResponse
 }
 
 

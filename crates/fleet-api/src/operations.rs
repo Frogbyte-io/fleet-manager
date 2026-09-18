@@ -139,6 +139,16 @@ impl fleet_application::operation::OperationPort for UnavailableBackend {
             detail: "no backend is wired".to_owned(),
         })
     }
+    async fn claim_pending_by_id(
+        &self,
+        _id: &str,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<Option<Operation>, PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "no backend is wired".to_owned(),
+        })
+    }
     async fn expired_claims(
         &self,
         _now: i64,

@@ -316,6 +316,14 @@ impl OperationPort for FakePort {
     ) -> Result<Option<Operation>, PortFailure> {
         Ok(None)
     }
+    async fn claim_pending_by_id(
+        &self,
+        _id: &str,
+        _worker_id: &str,
+        _now: i64,
+    ) -> Result<Option<Operation>, PortFailure> {
+        unimplemented!()
+    }
 
     async fn expired_claims(
         &self,

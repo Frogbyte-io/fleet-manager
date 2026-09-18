@@ -10,6 +10,58 @@ use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::Duration;
 
+/// The port-allocation lock: the free-port window between allocation and
+/// sshd's bind is racy both across threads and across concurrently run
+/// test binaries. A cross-process file lock serializes startup
+/// everywhere.
+/// The lock file is scoped to the uid: an unrelated user's leftover lock
+/// on a shared machine must not break this suite, and the file's mode is
+/// 0600 so no other user can hold or tamper with it.
+fn startup_lock_path() -> std::path::PathBuf {
+    let user = std::env::var("USER")
+        .unwrap_or_else(|_| std::env::var("LOGNAME").unwrap_or_else(|_| "unknown".to_owned()));
+    std::env::temp_dir().join(format!("fleet-test-sshd-startup-{user}.lock"))
+}
+
+fn acquire_startup_lock() -> std::fs::File {
+    // The mode is set atomically at creation (OpenOptionsExt::mode applies
+    // to newly created files), so no window exists where another user
+    // could open the lock. A stale pre-existing file from an older run is
+    // covered by the backstop set_permissions below; a file we cannot
+    // chmod is one we cannot lock safely, so that failure surfaces.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(startup_lock_path());
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => panic!("the startup lock file must open: {error}"),
+        };
+        std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600))
+            .expect("the startup lock file must be ours to chmod");
+        file.lock().expect("the startup lock must acquire");
+        file
+    }
+    #[cfg(not(unix))]
+    {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(startup_lock_path())
+            .expect("the startup lock file must open");
+        file.lock().expect("the startup lock must acquire");
+        file
+    }
+}
+
 /// One running sshd bound to an ephemeral port with its own host key.
 struct TestSshd {
     child: Child,
@@ -33,6 +85,7 @@ fn free_port() -> u16 {
 }
 
 fn start_sshd() -> TestSshd {
+    let _guard = acquire_startup_lock();
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
     let user_key = dir.path().join("user_ed25519");

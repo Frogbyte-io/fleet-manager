@@ -1755,6 +1755,89 @@
         }
       }
     },
+    "/api/v1/projects/{projectId}/ready": {
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Starts the ready-project workflow, or answers the plan on a dry run.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "startReadyWorkflow",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "description": "The project's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartReadyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The dry run's plan description.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ReadyPlanDto"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The workflow was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not run the workflow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The project or machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system": {
       "get": {
         "tags": [
@@ -4152,6 +4235,118 @@
           }
         }
       },
+      "ReadyAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's agent supplies the key.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A specific identity file.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How the workflow's endpoint authenticates."
+      },
+      "ReadyPlanDto": {
+        "type": "object",
+        "description": "The dry run's plan response: the step vocabulary and the conditions\nunder which each step runs.",
+        "required": [
+          "projectId",
+          "machineId",
+          "root",
+          "steps",
+          "note"
+        ],
+        "properties": {
+          "machineId": {
+            "type": "string",
+            "description": "The machine the plan targets."
+          },
+          "note": {
+            "type": "string",
+            "description": "How the executed plan relates to this description."
+          },
+          "projectId": {
+            "type": "string",
+            "description": "The project the plan targets."
+          },
+          "root": {
+            "type": "string",
+            "description": "The checkout root the plan targets."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadyPlanStepDto"
+            },
+            "description": "The steps, in execution order."
+          }
+        }
+      },
+      "ReadyPlanStepDto": {
+        "type": "object",
+        "description": "One step in the dry run's plan response.",
+        "required": [
+          "kind",
+          "when"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The step's kind."
+          },
+          "when": {
+            "type": "string",
+            "description": "The condition under which the step runs (it is skipped otherwise)."
+          }
+        }
+      },
+      "ReadyToolDto": {
+        "type": "object",
+        "description": "A pinned tool request the workflow installs through mise.",
+        "required": [
+          "tool",
+          "version"
+        ],
+        "properties": {
+          "tool": {
+            "type": "string",
+            "description": "The tool name."
+          },
+          "version": {
+            "type": "string",
+            "description": "The pinned version."
+          }
+        }
+      },
       "RecordCheckoutsRequest": {
         "type": "object",
         "description": "The body of the record-checkouts request: the discovery result to ingest\nas observed facts, matched to this project by its normalized remote.",
@@ -4835,6 +5030,51 @@
           }
         }
       },
+      "Resource_ReadyPlanDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The dry run's plan response: the step vocabulary and the conditions\nunder which each step runs.",
+            "required": [
+              "projectId",
+              "machineId",
+              "root",
+              "steps",
+              "note"
+            ],
+            "properties": {
+              "machineId": {
+                "type": "string",
+                "description": "The machine the plan targets."
+              },
+              "note": {
+                "type": "string",
+                "description": "How the executed plan relates to this description."
+              },
+              "projectId": {
+                "type": "string",
+                "description": "The project the plan targets."
+              },
+              "root": {
+                "type": "string",
+                "description": "The checkout root the plan targets."
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ReadyPlanStepDto"
+                },
+                "description": "The steps, in execution order."
+              }
+            }
+          }
+        }
+      },
       "Resource_TailnetStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -5065,6 +5305,65 @@
               "null"
             ],
             "description": "The pinned version to install, for the install action."
+          }
+        }
+      },
+      "StartReadyRequest": {
+        "type": "object",
+        "description": "The body of the start-ready-workflow request.",
+        "required": [
+          "machineId",
+          "endpointId",
+          "auth",
+          "root"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The agents the skill deploys to."
+          },
+          "auth": {
+            "$ref": "#/components/schemas/ReadyAuthDto",
+            "description": "How the endpoint authenticates."
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "Compute and return the plan without executing it."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint id to act through."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine to make ready (must match the path's machine)."
+          },
+          "root": {
+            "type": "string",
+            "description": "The checkout root the workflow targets."
+          },
+          "skillId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The skill to deploy, when the project declares one."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds, for the whole workflow.",
+            "minimum": 0
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadyToolDto"
+            },
+            "description": "The tools the project declares, as pinned requests."
           }
         }
       },

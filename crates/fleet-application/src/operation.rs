@@ -38,8 +38,9 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// checkout directory) and `command` with its argument array (FM-303);
 /// the mise kinds carry the same shape, with `mise.install` adding a
 /// pinned `tool@version` and `mise.exec` adding `root` and `command`
-/// (FM-304).
-pub const CREATABLE_KINDS: [&str; 27] = [
+/// (FM-304); the ready workflow carries the machine-scoped shape plus
+/// `projectId` and `dryRun` (FM-305).
+pub const CREATABLE_KINDS: [&str; 28] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -67,6 +68,7 @@ pub const CREATABLE_KINDS: [&str; 27] = [
     "mise.status",
     "mise.install",
     "mise.exec",
+    "ready.workflow",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -102,6 +104,7 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
         | "frogenv.env-run" => Some(Permission::FrogenvOperate),
         "tools.inventory" | "mise.status" => Some(Permission::ToolsRead),
         "mise.install" | "mise.exec" => Some(Permission::MiseOperate),
+        "ready.workflow" => Some(Permission::ProjectsReady),
         _ => None,
     }
 }
@@ -297,6 +300,20 @@ pub trait OperationPort: fmt::Debug + Send + Sync {
     /// Fails on backend errors.
     async fn claim_pending(
         &self,
+        worker_id: &str,
+        now: i64,
+    ) -> Result<Option<Operation>, PortFailure>;
+    /// Atomically claims one specific operation by id for `worker_id`:
+    /// pending to running with the claim recorded, or `None` when the
+    /// operation is not pending. The addressed claim the ready workflow's
+    /// steps use.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn claim_pending_by_id(
+        &self,
+        id: &str,
         worker_id: &str,
         now: i64,
     ) -> Result<Option<Operation>, PortFailure>;
@@ -510,6 +527,93 @@ impl Operations {
                 detail,
             })?;
         Ok(operation)
+    }
+
+    /// Claims one specific operation for `worker_id` if it is still
+    /// pending, executes it through `executor`, and records the terminal
+    /// state — the same shape a queue tick produces, but addressed. The
+    /// ready workflow's steps run through this so each inner operation is
+    /// durable and audited without re-entering the queue.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the claim or execution fails; the operation records its
+    /// own terminal state either way.
+    pub async fn claim_only_execute(
+        &self,
+        executor: &dyn crate::worker::OperationExecutor,
+        id: &str,
+        worker_id: &str,
+    ) -> Result<(), String> {
+        let now = fleet_core::SystemClock::now_unix_millis();
+        // Only a successfully claimed operation executes: an already
+        // claimed, cancelled, or completed operation returns None, and
+        // running it anyway would duplicate or contradict its state.
+        let Some(operation) = self
+            .port
+            .claim_pending_by_id(id, worker_id, now)
+            .await
+            .map_err(|failure| failure.to_string())?
+        else {
+            return Err(format!("the operation {id} could not be claimed"));
+        };
+        // The claim is renewed while the step runs, so a long SSH step
+        // cannot be marked failed by maintenance mid-flight.
+        let renewal = {
+            let port = self.port.clone();
+            let id = id.to_owned();
+            let worker_id = worker_id.to_owned();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    if port
+                        .renew_lease(
+                            &id,
+                            &worker_id,
+                            fleet_core::SystemClock::now_unix_millis(),
+                            60_000,
+                        )
+                        .await
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    break;
+                }
+            })
+        };
+        let outcome = executor.execute(self, &operation).await;
+        renewal.abort();
+        if let Err(detail) = outcome {
+            // The failure goes through the use case so the audit outcome
+            // is recorded exactly like the queue execution path.
+            self.complete(
+                id,
+                "failed",
+                None,
+                Some(
+                    &serde_json::json!({
+                        "reason": "step_failed",
+                        "detail": detail,
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Reads one operation's current state id, when it exists. The
+    /// workflow executor polls this between steps.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    pub async fn get_state(&self, id: &str) -> Result<String, PortFailure> {
+        let operation = self.port.get(id).await?;
+        Ok(operation.state)
     }
 
     /// Reads one operation.
