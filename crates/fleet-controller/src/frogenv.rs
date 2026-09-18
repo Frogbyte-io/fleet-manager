@@ -211,11 +211,14 @@ impl FrogenvExecutor {
                 .await
             }
             (Some(result), _) if result.exit_code == Some(0) => {
-                let parsed: Option<serde_json::Value> = result
-                    .stdout
-                    .lines()
-                    .find_map(|line| serde_json::from_str(line).ok());
-                let Some(parsed) = parsed else {
+                // Parse the documented shape and serialize only its
+                // approved fields: an unexpected JSON object must never
+                // publish arbitrary fields, which could carry
+                // value-shaped material.
+                let parsed = result.stdout.lines().find_map(|line| {
+                    serde_json::from_str::<fleet_provider_frogenv::StatusDocument>(line).ok()
+                });
+                let Some(document) = parsed else {
                     return complete_failure(
                         operations,
                         &operation.id,
@@ -224,7 +227,15 @@ impl FrogenvExecutor {
                     )
                     .await;
                 };
-                let result_json = serde_json::json!({ "status": parsed }).to_string();
+                let result_json = serde_json::json!({
+                    "status": {
+                        "configured": document.configured,
+                        "machineState": document.machine_state,
+                        "machineId": document.machine_id,
+                        "gitRemote": document.git_remote,
+                    },
+                })
+                .to_string();
                 operations
                     .complete(&operation.id, "succeeded", Some(&result_json), None)
                     .await
@@ -295,19 +306,22 @@ impl FrogenvExecutor {
             }
             (Some(result), _) => {
                 let stderr = result.stderr.to_owned();
-                // The CLI's own contract: a ceremony that reports it needs
-                // a human is blocked, not broken.
-                if stderr.contains("approval required")
-                    || stderr.contains("interactive")
-                    || stderr.contains("manual")
-                {
+                // The marker contract this executor owns: a ceremony that
+                // prints `FLEET_BLOCKED: <reason>` on any stream reports
+                // that it needs a human. Everything else is a failure.
+                let blocked = result
+                    .stdout
+                    .lines()
+                    .chain(result.stderr.lines())
+                    .find_map(|line| line.strip_prefix("FLEET_BLOCKED: "));
+                if let Some(reason) = blocked {
                     return complete_failure(
                         operations,
                         &operation.id,
                         "blocked_manual_approval",
                         &format!(
                             "the {ceremony} ceremony requires manual approval: {}",
-                            redact_output(&stderr)
+                            redact_output(reason)
                         ),
                     )
                     .await;
@@ -372,16 +386,20 @@ impl FrogenvExecutor {
             .await
             .map_err(|error| error.to_string())?;
         let deadline = deadline(payload.timeout_seconds);
-        // The command rides the metadata argument array; the fixed script
-        // passes each argument to `frogenv env run --` verbatim. No shell
-        // interpolation of environment data, ever.
+        // The root and the command ride the metadata argument array; the
+        // fixed script consumes the root as a quoted positional parameter
+        // and passes each command argument to `frogenv env run --`
+        // verbatim. Nothing the caller controls is interpolated into the
+        // script source, so `$()` or backticks in a root cannot execute.
+        let mut arguments = vec![payload.root];
+        arguments.extend(payload.command);
         let metadata = ScriptMetadata {
             working_directory: String::new(),
             environment: Vec::new(),
-            arguments: payload.command,
+            arguments,
         };
         let (result, detail) = self
-            .run(&spec, &env_run_script(&payload.root), &metadata, deadline)
+            .run(&spec, &env_run_script(), &metadata, deadline)
             .await;
         finish_cli(operations, &operation.id, result, detail, "env run").await
     }
@@ -428,19 +446,20 @@ done
     .to_owned()
 }
 
-/// The fixed `env run` script: the checkout root is a validated caller
-/// argument, the command arrives as positional parameters and is passed
-/// to `frogenv env run --` verbatim.
-fn env_run_script(root: &str) -> String {
-    format!(
-        r#"for fleet_candidate in "$HOME/.local/bin/frogenv" "$(command -v frogenv 2>/dev/null)"; do
+/// The fixed `env run` script: `$1` is the checkout root (consumed as a
+/// quoted positional parameter), `$2` onwards is the command passed to
+/// `frogenv env run --` verbatim.
+fn env_run_script() -> String {
+    r#"for fleet_candidate in "$HOME/.local/bin/frogenv" "$(command -v frogenv 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
-[ -n "${{fleet_cli:-}}" ] || {{ echo "frogenv is not installed" >&2; exit 3; }}
-cd {root:?} || {{ echo "the checkout root is not a directory" >&2; exit 4; }}
+[ -n "${fleet_cli:-}" ] || { echo "frogenv is not installed" >&2; exit 3; }
+fleet_root=$1
+shift
+cd "$fleet_root" || { echo "the checkout root is not a directory" >&2; exit 4; }
 "$fleet_cli" env run -- "$@"
 "#
-    )
+    .to_owned()
 }
 
 /// Validates an absolute checkout root: absolute-shaped, bounded, no `..`

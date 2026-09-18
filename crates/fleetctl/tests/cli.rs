@@ -1500,6 +1500,54 @@ fn parsing_accepts_the_frogenv_grammar() {
         fleetctl::parse(&args).unwrap_or_else(|error| panic!("{expected} must parse: {error}"));
     }
 
+    for (args, expected_action) in [
+        (
+            vec![
+                "frogenv",
+                "status",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--wait",
+                "--timeout",
+                "30",
+            ],
+            "status",
+        ),
+        (
+            vec![
+                "frogenv",
+                "setup",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "setup",
+        ),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let invocation = fleetctl::parse(&args)
+            .unwrap_or_else(|error| panic!("{expected_action} must parse: {error}"));
+        let fleetctl::Command::FrogenvOperation {
+            action,
+            wait,
+            timeout,
+            ..
+        } = &invocation.command
+        else {
+            panic!("the frogenv grammar parses into a FrogenvOperation");
+        };
+        assert_eq!(action, expected_action);
+        if expected_action == "status" {
+            assert!(*wait, "the status case carries --wait");
+            assert_eq!(*timeout, Some(30));
+        }
+    }
+
     let args: Vec<String> = [
         "frogenv",
         "run",

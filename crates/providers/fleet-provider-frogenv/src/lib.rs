@@ -53,9 +53,9 @@ impl CliCommand {
         }
     }
 
-    /// The full argument array; `--json` is appended only for the commands
-    /// that document it, so human-text commands are never pretended to be
-    /// machine-readable.
+    /// The full argument array: the fixed binary name plus the
+    /// subcommand words, verbatim. Fleet never adds flags the CLI has not
+    /// documented for a command.
     #[must_use]
     pub fn argv(&self) -> Vec<String> {
         let mut argv = vec![CLI_NAME.to_owned()];
@@ -122,8 +122,8 @@ pub struct StatusDocument {
     #[serde(default, alias = "machineId")]
     pub machine_id: Option<String>,
     /// The configured Git transport remote, when the document carries
-    /// one. Never a secret.
-    #[serde(default, alias = "remote")]
+    /// one. Redacted before it is exposed: a remote can carry credentials.
+    #[serde(default, alias = "remote", alias = "gitRemote")]
     pub git_remote: Option<String>,
 }
 
@@ -219,6 +219,15 @@ pub async fn status(
         return Err("the status document exceeds its bound".to_owned());
     }
     serde_json::from_str::<StatusDocument>(outcome.stdout.trim())
+        .map(|mut document| {
+            // Every decoded string field is sanitized before it is
+            // exposed: a remote can carry credentials, and an id could
+            // quote value-shaped material.
+            document.machine_state = document.machine_state.take().map(|state| redact(&state));
+            document.machine_id = document.machine_id.take().map(|id| redact(&id));
+            document.git_remote = document.git_remote.take().map(|remote| redact(&remote));
+            document
+        })
         .map_err(|_| {
             "the status output is not in the documented shape; the CLI version is untested (code: unsupported_version)"
                 .to_owned()
@@ -246,7 +255,39 @@ pub fn redact(text: &str) -> String {
         .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect();
     let with_urls = redact_url_credentials(&cleaned);
-    redact_value_shaped(&with_urls)
+    let with_schemeless = redact_schemeless_credentials(&with_urls);
+    redact_value_shaped(&with_schemeless)
+}
+
+/// Redacts `user:password@` patterns anywhere in the text — scp-style
+/// remotes and error text the URL pass cannot see. The `'@'` is consumed
+/// with the userinfo so the loop always advances.
+fn redact_schemeless_credentials(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut search = 0;
+    while let Some(offset) = text[search..].find('@') {
+        let at = search + offset;
+        let token_start = text[..at]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"' || *c == '\'')
+            .map_or(0, |(index, c)| index + c.len_utf8());
+        let token = &text[token_start..at];
+        let has_password = token
+            .split_once(':')
+            .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
+        if has_password {
+            let flush_start = search.min(token_start);
+            result.push_str(&text[flush_start..token_start]);
+            result.push_str("***@");
+            search = at + 1;
+        } else {
+            result.push_str(&text[search..=at]);
+            search = at + 1;
+        }
+    }
+    result.push_str(&text[search..]);
+    result
 }
 
 /// Replaces `user:password@` userinfo in URLs with a marker.

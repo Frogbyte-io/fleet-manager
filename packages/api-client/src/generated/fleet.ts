@@ -1612,8 +1612,9 @@ export interface StartDiscoveryRequest {
  */
 export interface StartFrogenvOperationRequest {
   /**
-     * The ceremony to run: `status`, `setup`, `login`, `request`, or
-     * `sync`. A closed enum: anything else is malformed.
+     * The action to run: `status`, `setup`, `login`, `request`, `sync`,
+     * or `envRun` (a command executed under a checkout's environment). A
+     * closed enum: anything else is malformed.
      */
   action: FrogenvActionDto;
   /** How the endpoint authenticates. */

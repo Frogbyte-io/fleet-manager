@@ -3,7 +3,7 @@
 //! redaction of value-shaped material.
 
 use fleet_provider_frogenv::{
-    CliCommand, CliOutcome, Probe, failure_detail, parse_version, redact,
+    CliCommand, CliOutcome, Probe, StatusDocument, failure_detail, parse_version, redact,
 };
 
 fn ok(stdout: &str) -> CliOutcome {
@@ -17,18 +17,35 @@ fn ok(stdout: &str) -> CliOutcome {
 
 #[test]
 fn the_status_document_parses() {
-    let document: serde_json::Value =
-        serde_json::from_str(r#"{"configured":true,"machineState":"approved","machineId":"host-abc123","gitRemote":"git@github.com:example/fleet-secrets.git"}"#).unwrap();
-    assert_eq!(document["configured"], true);
-    assert_eq!(document["machineState"], "approved");
-    assert_eq!(document["machineId"], "host-abc123");
+    let document: StatusDocument = serde_json::from_str(
+        r#"{"configured":true,"machineState":"approved","machineId":"host-abc123","gitRemote":"git@github.com:example/fleet-secrets.git"}"#,
+    )
+    .unwrap();
+    assert!(document.configured);
+    assert_eq!(document.machine_state.as_deref(), Some("approved"));
+    assert_eq!(document.machine_id.as_deref(), Some("host-abc123"));
+    assert_eq!(
+        document.git_remote.as_deref(),
+        Some("git@github.com:example/fleet-secrets.git")
+    );
 }
 
 #[test]
 fn the_status_document_survives_missing_optional_fields() {
-    let document: serde_json::Value = serde_json::from_str(r#"{"configured":false}"#).unwrap();
-    assert_eq!(document["configured"], false);
-    assert_eq!(document["machineState"], serde_json::Value::Null);
+    let document: StatusDocument = serde_json::from_str(r#"{"configured":false}"#).unwrap();
+    assert!(!document.configured);
+    assert_eq!(document.machine_state, None);
+    assert_eq!(document.machine_id, None);
+    assert_eq!(document.git_remote, None);
+}
+
+#[test]
+fn the_status_document_accepts_the_camel_case_aliases() {
+    let document: StatusDocument = serde_json::from_str(
+        r#"{"configured":true,"machineState":"pending","machineId":"x","gitRemote":"r"}"#,
+    )
+    .unwrap();
+    assert_eq!(document.machine_state.as_deref(), Some("pending"));
 }
 
 #[test]
@@ -96,6 +113,10 @@ fn credential_shaped_urls_are_scrubbed() {
     let redacted = redact("remote https://user:secret@host.invalid/repo.git");
     assert!(!redacted.contains("secret"), "{redacted}");
     assert!(redacted.contains("***@host.invalid"), "{redacted}");
+    // The schemeless scp-style form the URL pass cannot see.
+    let scp = redact("cannot reach user:secret@host:repo for sync");
+    assert!(!scp.contains("secret"), "{scp}");
+    assert!(scp.contains("***@host:repo"), "{scp}");
 }
 
 #[test]

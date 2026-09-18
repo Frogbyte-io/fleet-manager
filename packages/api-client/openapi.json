@@ -621,7 +621,7 @@
         },
         "responses": {
           "202": {
-            "description": "The Frogenv operation was accepted.",
+            "description": "The Frogenv operation was accepted. Requires machine.read for the machine in addition to the action's frogenv permission.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4846,7 +4846,7 @@
         "properties": {
           "action": {
             "$ref": "#/components/schemas/FrogenvActionDto",
-            "description": "The ceremony to run: `status`, `setup`, `login`, `request`, or\n`sync`. A closed enum: anything else is malformed."
+            "description": "The action to run: `status`, `setup`, `login`, `request`, `sync`,\nor `envRun` (a command executed under a checkout's environment). A\nclosed enum: anything else is malformed."
           },
           "auth": {
             "$ref": "#/components/schemas/FrogenvAuthDto",

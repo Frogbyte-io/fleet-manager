@@ -233,7 +233,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         ));
                     executor
                 }
-                None => with_frogenv.clone(),
+                None => with_skills.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

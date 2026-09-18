@@ -63,8 +63,17 @@ impl fleet_application::authz::Authorizer for DenyFrogenv {
     }
 }
 
-#[derive(Debug)]
-struct FakeOperations;
+#[derive(Debug, Default)]
+struct FakeOperations {
+    payloads: Mutex<Vec<String>>,
+}
+
+impl FakeOperations {
+    fn payloads(&self) -> Vec<String> {
+        self.payloads.lock().unwrap().clone()
+    }
+}
+
 #[async_trait::async_trait]
 impl fleet_application::operation::OperationPort for FakeOperations {
     async fn create(
@@ -75,6 +84,10 @@ impl fleet_application::operation::OperationPort for FakeOperations {
         correlation_id: Option<&str>,
         payload_json: Option<&str>,
     ) -> Result<fleet_application::operation::Operation, PortFailure> {
+        self.payloads
+            .lock()
+            .unwrap()
+            .push(payload_json.unwrap_or_default().to_owned());
         Ok(fleet_application::operation::Operation {
             id: "op-1".to_owned(),
             kind: kind.to_owned(),
@@ -310,7 +323,7 @@ impl fleet_api::system::SystemInfoSource for FakeSystemInfo {
 fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<ApiState> {
     Arc::new(ApiState {
         operations: Arc::new(Operations::new(
-            Arc::new(FakeOperations),
+            Arc::new(FakeOperations::default()),
             Arc::new(FakeAudit),
         )),
         authorizer,
@@ -393,7 +406,20 @@ async fn each_action_starts_its_own_kind() {
 
 #[tokio::test]
 async fn an_env_run_carries_its_root_and_command() {
-    let state = state_for(Arc::new(PermitAll));
+    let port = Arc::new(FakeOperations::default());
+    let state = Arc::new(ApiState {
+        operations: Arc::new(Operations::new(port.clone(), Arc::new(FakeAudit))),
+        authorizer: Arc::new(PermitAll),
+        system: Arc::new(FakeSystemInfo),
+        nodes: None,
+        machines: Some(Arc::new(fleet_application::machine::Machines::new(
+            Arc::new(FakeMachines),
+            Arc::new(FakeAudit),
+        ))),
+        onboarding: None,
+        tailnet: None,
+        projects: None,
+    });
     let mut body = body_for("envRun");
     body["root"] = serde_json::json!("/srv/repo");
     body["command"] = serde_json::json!(["pytest", "-q"]);
@@ -406,6 +432,11 @@ async fn an_env_run_carries_its_root_and_command() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     assert_eq!(value["data"]["kind"], "frogenv.env-run");
+    let payloads = port.payloads();
+    assert_eq!(payloads.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+    assert_eq!(payload["root"], "/srv/repo");
+    assert_eq!(payload["command"], serde_json::json!(["pytest", "-q"]));
 }
 
 #[tokio::test]
@@ -413,6 +444,37 @@ async fn an_env_run_without_its_root_is_malformed() {
     let state = state_for(Arc::new(PermitAll));
     let mut body = body_for("envRun");
     body["command"] = serde_json::json!(["pytest"]);
+    let (status, value) = call(
+        state,
+        "POST",
+        "/machines/m-1/frogenv/operations",
+        Some(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+}
+
+#[tokio::test]
+async fn an_env_run_without_a_command_is_malformed() {
+    let state = state_for(Arc::new(PermitAll));
+    let mut body = body_for("envRun");
+    body["root"] = serde_json::json!("/srv/repo");
+    let (status, value) = call(
+        state,
+        "POST",
+        "/machines/m-1/frogenv/operations",
+        Some(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+}
+
+#[tokio::test]
+async fn an_env_run_with_a_hostile_root_is_malformed() {
+    let state = state_for(Arc::new(PermitAll));
+    let mut body = body_for("envRun");
+    body["root"] = serde_json::json!("/tmp/../../etc");
+    body["command"] = serde_json::json!(["ls"]);
     let (status, value) = call(
         state,
         "POST",
@@ -502,12 +564,24 @@ async fn an_unknown_machine_is_a_404() {
 
 #[tokio::test]
 async fn the_generic_operations_surface_enforces_the_frogenv_catalog() {
-    let state = state_for(Arc::new(DenyFrogenv));
+    let authorizer = Arc::new(Recording::default());
+    let state = state_for(authorizer.clone());
     let body = serde_json::json!({
         "kind": "frogenv.status",
         "payloadJson": r#"{"machineId":"m-1","endpointId":"e-1","auth":{"type":"agent"},"timeoutSeconds":30}"#,
     })
     .to_string();
     let (status, value) = call(state, "POST", "/operations", Some(body)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    // The generic surface authorized frogenv.read with the machine as its
+    // resource, exactly like the dedicated endpoint.
+    let resources = authorizer.resources.lock().unwrap();
+    let frogenv: Vec<_> = resources
+        .iter()
+        .filter(|(action, _)| action.starts_with("frogenv."))
+        .cloned()
+        .collect();
+    assert_eq!(frogenv.len(), 1);
+    assert_eq!(frogenv[0].0, "frogenv.read");
+    assert_eq!(frogenv[0].1.as_deref(), Some("m-1"));
 }

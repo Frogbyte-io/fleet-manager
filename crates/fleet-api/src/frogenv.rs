@@ -39,8 +39,9 @@ pub struct StartFrogenvOperationRequest {
     pub endpoint_id: String,
     /// How the endpoint authenticates.
     pub auth: FrogenvAuthDto,
-    /// The ceremony to run: `status`, `setup`, `login`, `request`, or
-    /// `sync`. A closed enum: anything else is malformed.
+    /// The action to run: `status`, `setup`, `login`, `request`, `sync`,
+    /// or `envRun` (a command executed under a checkout's environment). A
+    /// closed enum: anything else is malformed.
     pub action: FrogenvActionDto,
     /// The checkout root whose environment binds an `env run` command.
     pub root: Option<String>,
@@ -111,7 +112,7 @@ impl FrogenvActionDto {
     responses(
         (
             status = 202,
-            description = "The Frogenv operation was accepted.",
+            description = "The Frogenv operation was accepted. Requires machine.read for the machine in addition to the action's frogenv permission.",
             body = Resource<crate::operations::OperationDto>
         ),
         (
@@ -131,6 +132,7 @@ impl FrogenvActionDto {
         ),
     )
 )]
+#[allow(clippy::too_many_lines)]
 pub async fn start_frogenv_operation(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
@@ -149,7 +151,10 @@ pub async fn start_frogenv_operation(
             correlation_id,
         ));
     }
-    // The machine must exist before the authorization names it.
+    // The machine must exist before the authorization names it. The
+    // machine-read check is part of the contract: a caller who cannot see
+    // machines cannot discover which ids exist to act on. The Frogenv
+    // permission is required in addition, not instead.
     let _machine = machines
         .get(
             state.authorizer.as_ref(),
@@ -190,6 +195,40 @@ pub async fn start_frogenv_operation(
                 "an env run requires a command",
                 correlation_id,
             ));
+        }
+        // The executor's constraints are checked here too, so a malformed
+        // root or argument is a 400, never a queued operation.
+        if !root.starts_with('/') || root.len() > 400 {
+            return Err(crate::machines::invalid_request(
+                "the checkout root must be an absolute path of at most 400 characters",
+                correlation_id,
+            ));
+        }
+        if root.split('/').any(|segment| segment == "..") {
+            return Err(crate::machines::invalid_request(
+                "the checkout root must not contain a `..` segment",
+                correlation_id,
+            ));
+        }
+        if root.chars().any(char::is_control) {
+            return Err(crate::machines::invalid_request(
+                "the checkout root must not contain control characters",
+                correlation_id,
+            ));
+        }
+        for argument in &request.command {
+            if argument.is_empty() || argument.len() > 1024 {
+                return Err(crate::machines::invalid_request(
+                    "every command argument must be 1..=1024 characters",
+                    correlation_id,
+                ));
+            }
+            if argument.chars().any(char::is_control) {
+                return Err(crate::machines::invalid_request(
+                    "command arguments must not contain control characters",
+                    correlation_id,
+                ));
+            }
         }
         payload["root"] = serde_json::json!(root);
         payload["command"] = serde_json::json!(request.command);

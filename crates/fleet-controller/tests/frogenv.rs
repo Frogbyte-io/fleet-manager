@@ -229,7 +229,7 @@ impl Fixture {
 }
 
 /// The stub CLI: answers the documented shapes and logs its arguments.
-/// The `FLEET_STUB_MODE` file selects a scenario.
+/// The `mode` parameter selects the scenario the stub answers with.
 fn install_stub_cli(home: &str, mode: &str) -> String {
     let bin_dir = format!("{home}/.local/bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -249,21 +249,21 @@ case "$1" in
     ;;
   setup)
     if [ "$mode" = "blocked" ]; then
-      echo "approval required: run this yourself" >&2
+      echo "FLEET_BLOCKED: run this yourself" >&2
       exit 2
     fi
     echo "configured"
     ;;
   login)
     if [ "$mode" = "blocked" ]; then
-      echo "approval required: run this yourself" >&2
+      echo "FLEET_BLOCKED: run this yourself" >&2
       exit 2
     fi
     echo "logged in"
     ;;
   machine)
     if [ "$mode" = "blocked" ]; then
-      echo "approval required: run this yourself" >&2
+      echo "FLEET_BLOCKED: run this yourself" >&2
       exit 2
     fi
     echo "requested"
@@ -501,4 +501,36 @@ async fn an_absent_cli_fails_honestly() {
     assert_eq!(state, "failed");
     let error = error.expect("the absence names its reason");
     assert!(error.contains("not installed"), "{error}");
+}
+
+#[tokio::test]
+async fn a_hostile_root_is_data_not_script() {
+    let _guard = CLI_LOCK.lock().await;
+    let sshd = start_sshd();
+    let fixture = compose(&sshd).await;
+    let home = std::env::var("HOME").unwrap();
+    let _path = install_stub_cli(&home, "willing");
+    std::fs::remove_file("/tmp/fleet-frogenv-stub.log").ok();
+
+    // A root carrying shell metacharacters is a path argument, never
+    // script text: the script consumes it as a quoted positional, so the
+    // metacharacters cannot execute — the run fails as a missing
+    // directory instead.
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "root": format!("/tmp/$(touch /tmp/fleet-pwned-{})", std::process::id()),
+        "command": ["ls"],
+        "timeoutSeconds": 30,
+    });
+    let (state, _result, error) = fixture.run_kind("frogenv.env-run", payload).await;
+    assert_eq!(state, "failed");
+    let error = error.expect("the hostile root fails as a path");
+    assert!(error.contains("not a directory"), "{error}");
+    assert!(
+        !std::path::Path::new(&format!("/tmp/fleet-pwned-{}", std::process::id())).exists(),
+        "the metacharacters must never execute"
+    );
+    remove_stub_cli(&home);
 }
