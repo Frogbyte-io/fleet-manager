@@ -436,8 +436,11 @@ fn a_refused_request_reports_the_envelope_code() {
 // ---------------------------------------------------------------------------
 
 fn status_args(extra: &[&str]) -> Vec<String> {
-    let mut args = vec!["--output", "json", "status"];
+    // The documented grammar puts the global options before the command
+    // word; after it, everything belongs to the subcommand.
+    let mut args = vec!["--output", "json"];
     args.extend_from_slice(extra);
+    args.push("status");
     args.iter().map(ToString::to_string).collect()
 }
 
@@ -1636,6 +1639,179 @@ fn parsing_refuses_the_undocumented_frogenv_forms() {
                 || error.message.contains("is required")
                 || error.message.contains("apply to env run only")
                 || error.message.contains("applies to"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parsing_accepts_the_mise_grammar() {
+    for (args, expected_action) in [
+        (
+            vec![
+                "mise",
+                "inventory",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--wait",
+                "--timeout",
+                "30",
+            ],
+            "inventory",
+        ),
+        (
+            vec![
+                "mise",
+                "status",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "status",
+        ),
+        (
+            vec![
+                "mise",
+                "install",
+                "m1",
+                "--tool",
+                "node",
+                "--version",
+                "20.11.0",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+            ],
+            "install",
+        ),
+        (
+            vec![
+                "mise",
+                "exec",
+                "m1",
+                "--root",
+                "/srv/repo",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--",
+                "npm",
+                "test",
+            ],
+            "exec",
+        ),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let invocation = fleetctl::parse(&args)
+            .unwrap_or_else(|error| panic!("{expected_action} must parse: {error}"));
+        let fleetctl::Command::MiseOperation { action, .. } = &invocation.command else {
+            panic!("the mise grammar parses into a MiseOperation");
+        };
+        assert_eq!(action, expected_action);
+    }
+
+    // The exec command array survives the separator verbatim, including
+    // flags that look like the CLI's own options.
+    let args: Vec<String> = [
+        "mise",
+        "exec",
+        "m1",
+        "--root",
+        "/srv/repo",
+        "--endpoint",
+        "e1",
+        "--auth",
+        "agent",
+        "--",
+        "npm",
+        "--output",
+        "json",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MiseOperation {
+            machine: "m1".to_owned(),
+            endpoint: "e1".to_owned(),
+            auth: fleetctl::OnboardAuthArg::Agent,
+            action: "exec".to_owned(),
+            tool: None,
+            version: None,
+            root: Some("/srv/repo".to_owned()),
+            command: vec!["npm".to_owned(), "--output".to_owned(), "json".to_owned()],
+            wait: false,
+            timeout: None,
+        }
+    );
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_mise_forms() {
+    for args in [
+        vec!["mise", "status", "m1"],
+        vec!["mise", "status", "m1", "--auth", "agent"],
+        vec![
+            "mise",
+            "install",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+        vec![
+            "mise",
+            "install",
+            "m1",
+            "--tool",
+            "node",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+        vec!["mise", "exec", "m1", "--endpoint", "e1", "--auth", "agent"],
+        vec![
+            "mise",
+            "status",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--tool",
+            "node",
+        ],
+        vec![
+            "mise",
+            "demolish",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
+                || error.message.contains("unknown flag")
+                || error.message.contains("is required")
+                || error.message.contains("are required")
+                || error.message.contains("apply to"),
             "{error}"
         );
     }

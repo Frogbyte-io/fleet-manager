@@ -35,8 +35,11 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// `skills.deploy`/`skills.undeploy` adding `skillId`, `agents`, and
 /// `dryRun` (FM-301, FM-302); the frogenv kinds carry the same
 /// machine-scoped shape, with `frogenv.env-run` adding `root` (the
-/// checkout directory) and `command` with its argument array (FM-303).
-pub const CREATABLE_KINDS: [&str; 23] = [
+/// checkout directory) and `command` with its argument array (FM-303);
+/// the mise kinds carry the same shape, with `mise.install` adding a
+/// pinned `tool@version` and `mise.exec` adding `root` and `command`
+/// (FM-304).
+pub const CREATABLE_KINDS: [&str; 27] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -60,6 +63,10 @@ pub const CREATABLE_KINDS: [&str; 23] = [
     "frogenv.request",
     "frogenv.sync",
     "frogenv.env-run",
+    "tools.inventory",
+    "mise.status",
+    "mise.install",
+    "mise.exec",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -93,6 +100,8 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
         "frogenv.status" => Some(Permission::FrogenvRead),
         "frogenv.setup" | "frogenv.login" | "frogenv.request" | "frogenv.sync"
         | "frogenv.env-run" => Some(Permission::FrogenvOperate),
+        "tools.inventory" | "mise.status" => Some(Permission::ToolsRead),
+        "mise.install" | "mise.exec" => Some(Permission::MiseOperate),
         _ => None,
     }
 }

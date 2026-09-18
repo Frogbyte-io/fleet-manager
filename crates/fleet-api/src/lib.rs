@@ -17,6 +17,7 @@ mod error;
 pub mod frogenv;
 pub mod machines;
 mod meta;
+pub mod mise;
 pub mod node;
 pub mod onboarding;
 pub mod operations;
@@ -87,6 +88,9 @@ pub const API_BASE_PATH: &str = "/api/v1";
         frogenv::FrogenvActionDto,
         frogenv::FrogenvAuthDto,
         frogenv::StartFrogenvOperationRequest,
+        mise::MiseActionDto,
+        mise::MiseAuthDto,
+        mise::StartMiseOperationRequest,
         projects::CreateProjectRequest,
         projects::ProjectDto,
         projects::UpdateProjectRequest,
@@ -170,6 +174,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(projects::record_checkouts))
                 .routes(routes!(skills::start_skills_operation))
                 .routes(routes!(frogenv::start_frogenv_operation))
+                .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts

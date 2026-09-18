@@ -530,6 +530,30 @@ export interface Meta {
 }
 
 /**
+ * The mise action a request names.
+ */
+export type MiseActionDto = typeof MiseActionDto[keyof typeof MiseActionDto];
+
+
+export const MiseActionDto = {
+  inventory: 'inventory',
+  status: 'status',
+  install: 'install',
+  exec: 'exec',
+} as const;
+
+/**
+ * How a mise operation's endpoint authenticates.
+ */
+export type MiseAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
  * A node credential record. The signed token is never stored or returned.
  */
 export interface NodeCredentialDto {
@@ -1641,6 +1665,42 @@ export interface StartFrogenvOperationRequest {
 }
 
 /**
+ * The body of the start-mise-operation request.
+ */
+export interface StartMiseOperationRequest {
+  /** The action to run. A closed enum: anything else is malformed. */
+  action: MiseActionDto;
+  /** How the endpoint authenticates. */
+  auth: MiseAuthDto;
+  /** The command to run, as an argument array. Never a shell string. */
+  command?: string[];
+  /** The SSH endpoint id to act through. */
+  endpointId: string;
+  /** The machine to act on (must match the path's machine). */
+  machineId: string;
+  /**
+     * The checkout root whose mise configuration binds an exec command.
+     * @nullable
+     */
+  root?: string | null;
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /**
+     * The tool to install, for the install action.
+     * @nullable
+     */
+  tool?: string | null;
+  /**
+     * The pinned version to install, for the install action.
+     * @nullable
+     */
+  version?: string | null;
+}
+
+/**
  * The body of the start-skills-operation request.
  */
 export interface StartSkillsOperationRequest {
@@ -2493,6 +2553,76 @@ const res = await fetch(getStartFrogenvOperationUrl(machineId),
 
   const data: startFrogenvOperationResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startFrogenvOperationResponse
+}
+
+
+
+export type startMiseOperationResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startMiseOperationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startMiseOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startMiseOperationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startMiseOperationResponseSuccess = (startMiseOperationResponse202) & {
+  headers: Headers;
+};
+export type startMiseOperationResponseError = (startMiseOperationResponse400 | startMiseOperationResponse403 | startMiseOperationResponse404) & {
+  headers: Headers;
+};
+
+export type startMiseOperationResponse = (startMiseOperationResponseSuccess | startMiseOperationResponseError)
+
+export const getStartMiseOperationUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/mise/operations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Starts a mise operation.
+ */
+export const startMiseOperation = async (machineId: string,
+    startMiseOperationRequest: StartMiseOperationRequest, options?: RequestInit): Promise<startMiseOperationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartMiseOperationUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startMiseOperationRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startMiseOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startMiseOperationResponse
 }
 
 

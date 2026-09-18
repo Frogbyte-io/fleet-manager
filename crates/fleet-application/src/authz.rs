@@ -108,6 +108,13 @@ pub enum Permission {
     /// the machine's secrets infrastructure or executes with decrypted
     /// environment values in a child process.
     FrogenvOperate,
+    /// Probe and read the tool/coding-agent inventory on a machine. A
+    /// read, but a toolchain-topology-revealing one.
+    ToolsRead,
+    /// Install tools or run project tasks through the mise CLI. A
+    /// mutation: it changes the machine's tool versions or executes a
+    /// project command.
+    MiseOperate,
 }
 
 impl Permission {
@@ -145,6 +152,8 @@ impl Permission {
         Permission::SkillsDeploy,
         Permission::FrogenvRead,
         Permission::FrogenvOperate,
+        Permission::ToolsRead,
+        Permission::MiseOperate,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -181,6 +190,8 @@ impl Permission {
             Permission::SkillsDeploy => "skills.deploy",
             Permission::FrogenvRead => "frogenv.read",
             Permission::FrogenvOperate => "frogenv.operate",
+            Permission::ToolsRead => "tools.read",
+            Permission::MiseOperate => "mise.operate",
         }
     }
 
@@ -219,7 +230,9 @@ impl Permission {
             | Permission::SkillsRead
             | Permission::SkillsDeploy
             | Permission::FrogenvRead
-            | Permission::FrogenvOperate => true,
+            | Permission::FrogenvOperate
+            | Permission::ToolsRead
+            | Permission::MiseOperate => true,
         }
     }
 
@@ -258,7 +271,9 @@ impl Permission {
             | Permission::SkillsRead
             | Permission::SkillsDeploy
             | Permission::FrogenvRead
-            | Permission::FrogenvOperate => true,
+            | Permission::FrogenvOperate
+            | Permission::ToolsRead
+            | Permission::MiseOperate => true,
         }
     }
 }
