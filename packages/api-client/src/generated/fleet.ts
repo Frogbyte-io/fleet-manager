@@ -1542,6 +1542,28 @@ export interface ResourceTailnetStatusDto {
 }
 
 /**
+ * How a skills operation's endpoint authenticates.
+ */
+export type SkillsAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
+ * The direction a skills operation takes.
+ */
+export type SkillsDirectionDto = typeof SkillsDirectionDto[keyof typeof SkillsDirectionDto];
+
+
+export const SkillsDirectionDto = {
+  deploy: 'deploy',
+  undeploy: 'undeploy',
+} as const;
+
+/**
  * The body of the start-discovery request: which machine and endpoint to
  * scan, and how the endpoint authenticates.
  */
@@ -1552,6 +1574,48 @@ export interface StartDiscoveryRequest {
   endpointId: string;
   /** The machine whose standard roots to scan. */
   machineId: string;
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+}
+
+/**
+ * The body of the start-skills-operation request.
+ */
+export interface StartSkillsOperationRequest {
+  /** The agents to deploy to or undeploy from, as documented ids. */
+  agents?: string[];
+  /**
+     * The pinned release's expected sha256.
+     * @nullable
+     */
+  artifactSha256?: string | null;
+  /**
+     * An optional pinned release for the probe's install: the URL.
+     * @nullable
+     */
+  artifactUrl?: string | null;
+  /** How the endpoint authenticates. */
+  auth: SkillsAuthDto;
+  direction?: null | SkillsDirectionDto;
+  /** Preserve a dry run: never upgraded to a real mutation. */
+  dryRun?: boolean;
+  /** The SSH endpoint id to act through. */
+  endpointId: string;
+  /** The machine to act on (must match the path's machine). */
+  machineId: string;
+  /**
+     * The skill to deploy or undeploy; absent for a probe.
+     * @nullable
+     */
+  skillId?: string | null;
+  /**
+     * An external skills root, when the operation targets one.
+     * @nullable
+     */
+  skillsRoot?: string | null;
   /**
      * The deadline, in seconds. Bounded by the executor.
      * @minimum 0
@@ -2545,6 +2609,77 @@ export const revokeNode = async (machineId: string, options?: RequestInit): Prom
 
   const data: revokeNodeResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as revokeNodeResponse
+}
+
+
+
+export type startSkillsOperationResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startSkillsOperationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startSkillsOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startSkillsOperationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startSkillsOperationResponseSuccess = (startSkillsOperationResponse202) & {
+  headers: Headers;
+};
+export type startSkillsOperationResponseError = (startSkillsOperationResponse400 | startSkillsOperationResponse403 | startSkillsOperationResponse404) & {
+  headers: Headers;
+};
+
+export type startSkillsOperationResponse = (startSkillsOperationResponseSuccess | startSkillsOperationResponseError)
+
+export const getStartSkillsOperationUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/skills/operations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Starts a skills operation: `probe` reads the CLI's state (and may
+install a pinned release); `deploy` and `undeploy` change agent state.
+ */
+export const startSkillsOperation = async (machineId: string,
+    startSkillsOperationRequest: StartSkillsOperationRequest, options?: RequestInit): Promise<startSkillsOperationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartSkillsOperationUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startSkillsOperationRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startSkillsOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startSkillsOperationResponse
 }
 
 

@@ -29,7 +29,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the machine use cases from the API state, or answers with the
 /// standard envelope when the controller was composed without a database.
-fn machines_or_error(
+pub(crate) fn machines_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<Machines>, ApiErrorResponse> {
@@ -47,7 +47,7 @@ fn machines_or_error(
 /// Maps a machine use-case outcome onto the public error envelope, once.
 /// Backend details stay out of the response; every other detail is
 /// caller-safe by construction in the use cases.
-fn map_machine_error(
+pub(crate) fn map_machine_error(
     error: &MachineUseCaseError,
     correlation_id: CorrelationId,
 ) -> ApiErrorResponse {
@@ -270,9 +270,21 @@ fn parse_status(
     )
 }
 
-/// A 400 response with a caller-safe message. Kept as a helper so the
-/// pinned literal error code lives in one place.
-fn invalid_request(message: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
+/// A 403 response carrying the denial's stable reason. Kept as a helper
+/// so the pinned literal error code lives in one place.
+pub(crate) fn denied_error(
+    decision: fleet_application::authz::Decision,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
+    let public = PublicError::new(
+        ErrorCode::from_str("denied").expect("the literal is valid error code syntax"),
+        format!("denied: {decision}"),
+        RetryClass::Never,
+    );
+    ApiError::new(&public, correlation_id).with_status(StatusCode::FORBIDDEN)
+}
+
+pub(crate) fn invalid_request(message: &str, correlation_id: CorrelationId) -> ApiErrorResponse {
     let public = PublicError::new(
         ErrorCode::from_str("invalid_request").expect("the literal is valid error code syntax"),
         message.to_owned(),

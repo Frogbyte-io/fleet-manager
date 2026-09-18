@@ -17,6 +17,7 @@ pub mod gateway;
 pub mod install;
 pub mod node_crypto;
 pub mod onboard;
+pub mod skills;
 pub mod tailnet_store;
 pub mod worker;
 

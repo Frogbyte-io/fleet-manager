@@ -1237,3 +1237,174 @@ fn parsing_refuses_the_undocumented_checkout_forms() {
         );
     }
 }
+
+#[test]
+fn parsing_accepts_the_skills_grammar() {
+    for (args, expected) in [
+        (
+            vec![
+                "skills",
+                "probe",
+                "m1",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--wait",
+                "--timeout",
+                "30",
+            ],
+            "probe",
+        ),
+        (
+            vec![
+                "skills",
+                "deploy",
+                "m1",
+                "--skill",
+                "db",
+                "--agent",
+                "claude_code",
+                "--agent",
+                "codex",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "agent",
+                "--dry-run",
+            ],
+            "deploy",
+        ),
+        (
+            vec![
+                "skills",
+                "undeploy",
+                "m1",
+                "--skill",
+                "db",
+                "--agent",
+                "claude_code",
+                "--endpoint",
+                "e1",
+                "--auth",
+                "identity-file",
+                "--identity",
+                "/keys/id",
+            ],
+            "undeploy",
+        ),
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).unwrap_or_else(|error| panic!("{expected} must parse: {error}"));
+    }
+
+    let args: Vec<String> = [
+        "skills",
+        "deploy",
+        "m1",
+        "--skill",
+        "db",
+        "--agent",
+        "claude_code",
+        "--endpoint",
+        "e1",
+        "--auth",
+        "agent",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::SkillsDeploy {
+            machine: "m1".to_owned(),
+            endpoint: "e1".to_owned(),
+            auth: fleetctl::OnboardAuthArg::Agent,
+            skill: "db".to_owned(),
+            agents: vec!["claude_code".to_owned()],
+            skills_root: None,
+            dry_run: false,
+            wait: false,
+            timeout: None,
+        }
+    );
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_skills_forms() {
+    for args in [
+        vec!["skills", "probe", "m1"],
+        vec!["skills", "probe", "m1", "--auth", "agent"],
+        vec![
+            "skills",
+            "deploy",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+        vec![
+            "skills",
+            "deploy",
+            "m1",
+            "--skill",
+            "db",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+        ],
+        vec![
+            "skills",
+            "deploy",
+            "m1",
+            "--skill",
+            "db",
+            "--agent",
+            "claude_code",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--artifact-url",
+            "https://x",
+        ],
+        vec![
+            "skills",
+            "probe",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--skill",
+            "db",
+        ],
+        vec![
+            "skills",
+            "probe",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--artifact-url",
+            "https://x",
+        ],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
+                || error.message.contains("unknown flag")
+                || error.message.contains("is required")
+                || error.message.contains("apply to probe only")
+                || error.message.contains("apply to deploy")
+                || error.message.contains("must be supplied together"),
+            "{error}"
+        );
+    }
+}

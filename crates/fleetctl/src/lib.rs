@@ -322,6 +322,68 @@ pub enum Command {
         /// How long to wait, in seconds.
         timeout: Option<u64>,
     },
+    /// Probe the Skills Manager CLI on a machine (and optionally install a
+    /// pinned release).
+    SkillsProbe {
+        /// The machine to probe.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// An external skills root, when one is named.
+        skills_root: Option<String>,
+        /// The pinned release's URL, when installing.
+        artifact_url: Option<String>,
+        /// The pinned release's expected sha256.
+        artifact_sha256: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Deploy a skill to agents through the Skills Manager CLI.
+    SkillsDeploy {
+        /// The machine to act on.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The skill to deploy.
+        skill: String,
+        /// The agents to deploy to.
+        agents: Vec<String>,
+        /// An external skills root, when one is named.
+        skills_root: Option<String>,
+        /// Keep the operation a dry run.
+        dry_run: bool,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Undeploy a skill from agents through the Skills Manager CLI.
+    SkillsUndeploy {
+        /// The machine to act on.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The skill to undeploy.
+        skill: String,
+        /// The agents to undeploy from.
+        agents: Vec<String>,
+        /// An external skills root, when one is named.
+        skills_root: Option<String>,
+        /// Keep the operation a dry run.
+        dry_run: bool,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Show the Tailscale integration's status (configured or not).
     TailnetStatus,
     /// Configure the Tailscale OAuth client. The secret is read from
@@ -462,6 +524,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             id: (*id).to_owned(),
         },
         ["machines", "onboard", verb, rest @ ..] => parse_onboard_command(verb, rest)?,
+        ["skills", verb, machine_id, rest @ ..] => parse_skills_command(verb, machine_id, rest)?,
         ["machines", "install-node", machine_id, rest @ ..] => {
             parse_install_node(machine_id, rest, &url)?
         }
@@ -867,7 +930,7 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -1284,7 +1347,10 @@ fn follow_checkout_wait(
         | Command::ProjectsClone { wait, timeout, .. }
         | Command::ProjectsPull { wait, timeout, .. }
         | Command::ProjectsStatus { wait, timeout, .. }
-        | Command::ProjectsWriteConfig { wait, timeout, .. } => (*wait, *timeout),
+        | Command::ProjectsWriteConfig { wait, timeout, .. }
+        | Command::SkillsProbe { wait, timeout, .. }
+        | Command::SkillsDeploy { wait, timeout, .. }
+        | Command::SkillsUndeploy { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -1568,6 +1634,83 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Some(checkout_write_config_body(
                 machine, endpoint, auth, root, file_name,
             )?),
+        ),
+        Command::SkillsProbe {
+            machine,
+            endpoint,
+            auth,
+            skills_root,
+            artifact_url,
+            artifact_sha256,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/{machine}/skills/operations"),
+            Vec::new(),
+            Some(skills_request_body(
+                machine,
+                endpoint,
+                auth,
+                None,
+                &[],
+                skills_root.as_ref(),
+                false,
+                None,
+                artifact_url.as_ref(),
+                artifact_sha256.as_ref(),
+            )),
+        ),
+        Command::SkillsDeploy {
+            machine,
+            endpoint,
+            auth,
+            skill,
+            agents,
+            skills_root,
+            dry_run,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/{machine}/skills/operations"),
+            Vec::new(),
+            Some(skills_request_body(
+                machine,
+                endpoint,
+                auth,
+                Some(skill.as_str()),
+                agents,
+                skills_root.as_ref(),
+                *dry_run,
+                Some("deploy"),
+                None,
+                None,
+            )),
+        ),
+        Command::SkillsUndeploy {
+            machine,
+            endpoint,
+            auth,
+            skill,
+            agents,
+            skills_root,
+            dry_run,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/{machine}/skills/operations"),
+            Vec::new(),
+            Some(skills_request_body(
+                machine,
+                endpoint,
+                auth,
+                Some(skill.as_str()),
+                agents,
+                skills_root.as_ref(),
+                *dry_run,
+                Some("undeploy"),
+                None,
+                None,
+            )),
         ),
         Command::TailnetStatus => (
             reqwest::Method::GET,
@@ -2539,4 +2682,181 @@ fn checkout_write_config_body(
             "timeoutSeconds": 120,
         },
     }))
+}
+
+/// Parses one `fleetctl skills` subcommand.
+#[allow(clippy::too_many_lines)]
+fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<Command, CliError> {
+    let mut endpoint: Option<String> = None;
+    let mut auth: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut skills_root: Option<String> = None;
+    let mut artifact_url: Option<String> = None;
+    let mut artifact_sha256: Option<String> = None;
+    let mut skill: Option<String> = None;
+    let mut agents: Vec<String> = Vec::new();
+    let mut dry_run = false;
+    let mut wait = false;
+    let mut timeout: Option<u64> = None;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--endpoint" => endpoint = Some(value("endpoint")?.to_owned()),
+            "--auth" => auth = Some(value("auth")?.to_owned()),
+            "--identity" => identity = Some(value("identity")?.to_owned()),
+            "--skills-root" => skills_root = Some(value("skills-root")?.to_owned()),
+            "--artifact-url" => artifact_url = Some(value("artifact-url")?.to_owned()),
+            "--artifact-sha256" => artifact_sha256 = Some(value("artifact-sha256")?.to_owned()),
+            "--skill" => skill = Some(value("skill")?.to_owned()),
+            "--agent" => agents.push(value("agent")?.to_owned()),
+            "--dry-run" => dry_run = true,
+            "--wait" => wait = true,
+            "--timeout" => {
+                let parsed = value("timeout")?;
+                timeout = Some(parsed.parse().map_err(|_| CliError {
+                    message: format!("--timeout must be a number, not {parsed:?}"),
+                })?);
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    let auth_arg = match (auth.as_deref(), identity) {
+        (Some("agent"), _) => OnboardAuthArg::Agent,
+        (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
+        (Some("identity-file"), None) => {
+            return Err(CliError {
+                message: "--auth identity-file requires --identity <path>".to_owned(),
+            });
+        }
+        (Some(other), _) => {
+            return Err(CliError {
+                message: format!("--auth must be agent or identity-file, not {other:?}"),
+            });
+        }
+        (None, _) => {
+            return Err(CliError {
+                message: "--auth is required: agent or identity-file".to_owned(),
+            });
+        }
+    };
+    let endpoint = endpoint.ok_or_else(|| CliError {
+        message: "--endpoint <endpoint-id> is required".to_owned(),
+    })?;
+    if verb == "probe" {
+        // Probe-only flags on a mutation, or mutation-only flags on a
+        // probe, are typos the caller must see, not silently dropped.
+        if !agents.is_empty() || skill.is_some() || dry_run {
+            return Err(CliError {
+                message: "--skill/--agent/--dry-run apply to deploy and undeploy only".to_owned(),
+            });
+        }
+        if artifact_url.is_some() != artifact_sha256.is_some() {
+            return Err(CliError {
+                message: "--artifact-url and --artifact-sha256 must be supplied together"
+                    .to_owned(),
+            });
+        }
+        return Ok(Command::SkillsProbe {
+            machine: machine_id.to_owned(),
+            endpoint,
+            auth: auth_arg,
+            skills_root,
+            artifact_url,
+            artifact_sha256,
+            wait,
+            timeout,
+        });
+    }
+    match verb {
+        "deploy" | "undeploy" => {
+            let skill = skill.ok_or_else(|| CliError {
+                message: "--skill <id> is required".to_owned(),
+            })?;
+            if agents.is_empty() {
+                return Err(CliError {
+                    message: "--agent <id> is required at least once".to_owned(),
+                });
+            }
+            if artifact_url.is_some() || artifact_sha256.is_some() {
+                return Err(CliError {
+                    message: "--artifact-url/--artifact-sha256 apply to probe only".to_owned(),
+                });
+            }
+            if verb == "deploy" {
+                Ok(Command::SkillsDeploy {
+                    machine: machine_id.to_owned(),
+                    endpoint,
+                    auth: auth_arg,
+                    skill,
+                    agents,
+                    skills_root,
+                    dry_run,
+                    wait,
+                    timeout,
+                })
+            } else {
+                Ok(Command::SkillsUndeploy {
+                    machine: machine_id.to_owned(),
+                    endpoint,
+                    auth: auth_arg,
+                    skill,
+                    agents,
+                    skills_root,
+                    dry_run,
+                    wait,
+                    timeout,
+                })
+            }
+        }
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
+/// The start-skills-operation request body.
+#[allow(clippy::too_many_arguments)]
+fn skills_request_body(
+    machine: &str,
+    endpoint: &str,
+    auth: &OnboardAuthArg,
+    skill: Option<&str>,
+    agents: &[String],
+    skills_root: Option<&String>,
+    dry_run: bool,
+    direction: Option<&str>,
+    artifact_url: Option<&String>,
+    artifact_sha256: Option<&String>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "machineId": machine,
+        "endpointId": endpoint,
+        "auth": checkout_auth_value(auth),
+        "agents": agents,
+        "dryRun": dry_run,
+        "timeoutSeconds": 300,
+    });
+    if let Some(skill) = skill {
+        body["skillId"] = serde_json::json!(skill);
+    }
+    if let Some(root) = skills_root {
+        body["skillsRoot"] = serde_json::json!(root);
+    }
+    if let Some(direction) = direction {
+        body["direction"] = serde_json::json!(direction);
+    }
+    if let Some(url) = artifact_url {
+        body["artifactUrl"] = serde_json::json!(url);
+    }
+    if let Some(sha256) = artifact_sha256 {
+        body["artifactSha256"] = serde_json::json!(sha256);
+    }
+    body
 }
