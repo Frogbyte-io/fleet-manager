@@ -226,63 +226,7 @@ pub fn failure_detail(outcome: &CliOutcome) -> String {
 /// from CLI output before it becomes an observation or audit detail.
 #[must_use]
 pub fn redact(text: &str) -> String {
-    let cleaned: String = text
-        .chars()
-        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
-        .collect();
-    let with_urls = redact_url_credentials(&cleaned);
-    redact_schemeless_credentials(&with_urls)
-}
-
-/// Redacts `user:password@` patterns anywhere in the text — scp-style
-/// remotes and error text the URL pass cannot see. The `'@'` is consumed
-/// with the userinfo so the loop always advances.
-fn redact_schemeless_credentials(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut search = 0;
-    while let Some(offset) = text[search..].find('@') {
-        let at = search + offset;
-        let token_start = text[..at]
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"' || *c == '\'')
-            .map_or(0, |(index, c)| index + c.len_utf8());
-        let token = &text[token_start..at];
-        let has_password = token
-            .split_once(':')
-            .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
-        if has_password {
-            let flush_start = search.min(token_start);
-            result.push_str(&text[flush_start..token_start]);
-            result.push_str("***@");
-            search = at + 1;
-        } else {
-            result.push_str(&text[search..=at]);
-            search = at + 1;
-        }
-    }
-    result.push_str(&text[search..]);
-    result
-}
-
-fn redact_url_credentials(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(position) = rest.find("://") {
-        let (before, after) = rest.split_at(position + 3);
-        result.push_str(before);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        let authority = &after[..authority_end];
-        let tail = &after[authority_end..];
-        match authority.split_once('@') {
-            Some((_userinfo, host)) => {
-                result.push_str("***@");
-                result.push_str(host);
-            }
-            None => result.push_str(authority),
-        }
-        rest = tail;
-    }
-    result.push_str(rest);
-    result
+    let cleaned = fleet_core::flatten_control_characters(text);
+    let with_urls = fleet_core::redact_url_credentials(&cleaned);
+    fleet_core::redact_schemeless_credentials(&with_urls)
 }

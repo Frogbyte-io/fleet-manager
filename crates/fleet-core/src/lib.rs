@@ -11,6 +11,7 @@ mod id;
 mod machine;
 mod operation;
 mod project;
+mod redact;
 mod sensitive;
 mod time;
 mod value;
@@ -22,6 +23,9 @@ pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
 };
 pub use project::{CheckoutFact, NormalizedRemote, Project, ProjectView};
+pub use redact::{
+    flatten_control_characters, redact_schemeless_credentials, redact_url_credentials,
+};
 pub use sensitive::{SecretReference, SensitiveString};
 pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};
 pub use value::{ParseSlugError, Revision, Slug};
