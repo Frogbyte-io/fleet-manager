@@ -546,28 +546,61 @@ impl Operations {
         worker_id: &str,
     ) -> Result<(), String> {
         let now = fleet_core::SystemClock::now_unix_millis();
-        self.port
+        // Only a successfully claimed operation executes: an already
+        // claimed, cancelled, or completed operation returns None, and
+        // running it anyway would duplicate or contradict its state.
+        let Some(operation) = self
+            .port
             .claim_pending_by_id(id, worker_id, now)
             .await
-            .map_err(|failure| failure.to_string())?;
-        let operation = self
-            .port
-            .get(id)
-            .await
-            .map_err(|failure| failure.to_string())?;
-        if operation.state == "pending" {
+            .map_err(|failure| failure.to_string())?
+        else {
             return Err(format!("the operation {id} could not be claimed"));
-        }
-        if let Err(detail) = executor.execute(self, &operation).await {
-            let error_json = serde_json::json!({
-                "reason": "step_failed",
-                "detail": detail,
+        };
+        // The claim is renewed while the step runs, so a long SSH step
+        // cannot be marked failed by maintenance mid-flight.
+        let renewal = {
+            let port = self.port.clone();
+            let id = id.to_owned();
+            let worker_id = worker_id.to_owned();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    if port
+                        .renew_lease(
+                            &id,
+                            &worker_id,
+                            fleet_core::SystemClock::now_unix_millis(),
+                            60_000,
+                        )
+                        .await
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    break;
+                }
             })
-            .to_string();
-            self.port
-                .complete(id, "failed", None, Some(&error_json))
-                .await
-                .map_err(|failure| failure.to_string())?;
+        };
+        let outcome = executor.execute(self, &operation).await;
+        renewal.abort();
+        if let Err(detail) = outcome {
+            // The failure goes through the use case so the audit outcome
+            // is recorded exactly like the queue execution path.
+            self.complete(
+                id,
+                "failed",
+                None,
+                Some(
+                    &serde_json::json!({
+                        "reason": "step_failed",
+                        "detail": detail,
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         }
         Ok(())
     }

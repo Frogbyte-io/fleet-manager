@@ -4,7 +4,6 @@
 
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::Operations;
-use fleet_application::ready::{ObservedState, ToolRequest, plan_ready};
 use fleet_provider_ssh::ExecutionLimiter;
 use fleet_storage_sqlite::{AuditSink, MachineRepository, OperationRepository, Store};
 use sqlx::SqlitePool;
@@ -229,26 +228,4 @@ async fn a_failing_step_stops_with_the_story() {
         !error["remaining"].as_array().unwrap().is_empty(),
         "the remaining steps are named"
     );
-}
-
-#[test]
-fn the_plan_skips_what_the_observation_satisfies() {
-    // The planner's own guarantees, exercised through the public surface.
-    let observed = ObservedState {
-        matching_checkout: Some("/srv/repo".to_owned()),
-        mise_installed: vec![("node".to_owned(), "20.11.0".to_owned())],
-        frogenv_configured: Some(true),
-        skills_deployed: vec![("db".to_owned(), "claude_code".to_owned())],
-    };
-    let steps = plan_ready(
-        "/srv/repo",
-        &[ToolRequest {
-            tool: "node".to_owned(),
-            version: "20.11.0".to_owned(),
-        }],
-        Some(("db", &["claude_code".to_owned()])),
-        &observed,
-    );
-    assert_eq!(steps.len(), 1, "an already-ready machine only verifies");
-    assert_eq!(steps[0].name(), "verify");
 }

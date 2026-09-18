@@ -346,10 +346,13 @@ impl OperationPort for OperationRepository {
         now: i64,
     ) -> Result<Option<Operation>, PortFailure> {
         // The addressed compare-and-set: only the writer whose UPDATE
-        // lands while the row is still pending owns the claim.
+        // lands while the row is still pending owns the claim, and a
+        // deadline-expired operation is refused exactly like the queue
+        // path — a targeted claim cannot bypass timeout handling.
         let updated = sqlx::query(
             "UPDATE operations SET state = 'running', worker_id = ?2, claimed_at = ?3, updated_at = ?3 \
-             WHERE id = ?1 AND state = 'pending'",
+             WHERE id = ?1 AND state = 'pending' \
+             AND (deadline_at IS NULL OR deadline_at > ?3)",
         )
         .bind(id)
         .bind(worker_id)
