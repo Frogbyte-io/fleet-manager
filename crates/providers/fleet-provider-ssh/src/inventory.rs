@@ -43,11 +43,15 @@ fleet_emit() {
   # namespace name value64 status
   printf '{"namespace":"%s","name":"%s","value64":"%s","status":"%s","at":%s}\n' "$1" "$2" "$3" "$4" "$fleet_t"
 }
-fleet_value64() { printf '%s' "$("$1" 2>/dev/null | head -n 1)" | base64 -w0; }
+fleet_value64() { printf '%s' "$("$@" 2>/dev/null | head -n 1)" | base64 -w0; }
+# The tool's presence and its version, as separate facts: a tool that is
+# present but does not answer --version reports known with an absent
+# version rather than a guess (FM-304). The version rides its own
+# namespace because fact names admit only [a-z0-9_-].
 fleet_tool() {
-  # name: present-and-versioned, or the honest gap
   if command -v "$1" >/dev/null 2>&1; then
-    fleet_emit tool "$1" "$(fleet_value64 "$1")" known
+    fleet_emit tool "$1" "" known
+    fleet_emit tool-version "$1" "$(fleet_value64 "$1" --version)" known
   else
     fleet_emit tool "$1" "" unavailable
   fi

@@ -404,6 +404,30 @@ pub enum Command {
         /// How long to wait, in seconds.
         timeout: Option<u64>,
     },
+    /// Run a mise action on a machine: inventory, status, install, or a
+    /// project command through `mise exec`.
+    MiseOperation {
+        /// The machine to act on.
+        machine: String,
+        /// The SSH endpoint id to act through.
+        endpoint: String,
+        /// How the endpoint authenticates.
+        auth: OnboardAuthArg,
+        /// The action to run.
+        action: String,
+        /// The tool to install, for install.
+        tool: Option<String>,
+        /// The pinned version, for install.
+        version: Option<String>,
+        /// The checkout root, for exec.
+        root: Option<String>,
+        /// The command arguments, for exec.
+        command: Vec<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Show the Tailscale integration's status (configured or not).
     TailnetStatus,
     /// Configure the Tailscale OAuth client. The secret is read from
@@ -482,7 +506,18 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     let mut output = Output::Text;
     let mut rest = Vec::new();
     let mut index = 0;
+    // `--version`/`--help` are parsed only before the command word: after
+    // the first positional, everything belongs to the subcommand, so a
+    // subcommand's own `--version` (mise install) is never mistaken for
+    // the CLI's own. The connection/output globals must precede the
+    // command word, matching the documented grammar.
+    let mut command_started = false;
     while index < args.len() {
+        if command_started {
+            rest.push(args[index].clone());
+            index += 1;
+            continue;
+        }
         match args[index].as_str() {
             "--help" | "-h" | "--version" | "-V" => {
                 // Handled by the binary before parsing; treat as usage here.
@@ -518,7 +553,10 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
                     }
                 };
             }
-            _ => rest.push(args[index].clone()),
+            _ => {
+                command_started = true;
+                rest.push(args[index].clone());
+            }
         }
         index += 1;
     }
@@ -548,6 +586,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["frogenv", action, machine_id, rest @ ..] => {
             parse_frogenv_command(action, machine_id, rest)?
         }
+        ["mise", action, machine_id, rest @ ..] => parse_mise_command(action, machine_id, rest)?,
         ["machines", "install-node", machine_id, rest @ ..] => {
             parse_install_node(machine_id, rest, &url)?
         }
@@ -935,7 +974,7 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -1356,7 +1395,8 @@ fn follow_checkout_wait(
         | Command::SkillsProbe { wait, timeout, .. }
         | Command::SkillsDeploy { wait, timeout, .. }
         | Command::SkillsUndeploy { wait, timeout, .. }
-        | Command::FrogenvOperation { wait, timeout, .. } => (*wait, *timeout),
+        | Command::FrogenvOperation { wait, timeout, .. }
+        | Command::MiseOperation { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -1735,6 +1775,31 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 endpoint,
                 auth,
                 action,
+                root.as_ref(),
+                command,
+            )),
+        ),
+        Command::MiseOperation {
+            machine,
+            endpoint,
+            auth,
+            action,
+            tool,
+            version,
+            root,
+            command,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/machines/{machine}/mise/operations"),
+            Vec::new(),
+            Some(mise_request_body(
+                machine,
+                endpoint,
+                auth,
+                action,
+                tool.as_ref(),
+                version.as_ref(),
                 root.as_ref(),
                 command,
             )),
@@ -3023,6 +3088,137 @@ fn frogenv_request_body(
         "action": action,
         "timeoutSeconds": 300,
     });
+    if let Some(root) = root {
+        body["root"] = serde_json::json!(root);
+    }
+    if !command.is_empty() {
+        body["command"] = serde_json::json!(command);
+    }
+    body
+}
+
+/// Parses one `fleetctl mise` subcommand.
+fn parse_mise_command(action: &str, machine_id: &str, rest: &[&str]) -> Result<Command, CliError> {
+    let valid_action = matches!(action, "inventory" | "status" | "install" | "exec");
+    if !valid_action {
+        return Err(CliError { message: usage() });
+    }
+    let mut endpoint: Option<String> = None;
+    let mut auth: Option<String> = None;
+    let mut identity: Option<String> = None;
+    let mut tool: Option<String> = None;
+    let mut version: Option<String> = None;
+    let mut root: Option<String> = None;
+    let mut command: Vec<String> = Vec::new();
+    let mut wait = false;
+    let mut timeout: Option<u64> = None;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--endpoint" => endpoint = Some(value("endpoint")?.to_owned()),
+            "--auth" => auth = Some(value("auth")?.to_owned()),
+            "--identity" => identity = Some(value("identity")?.to_owned()),
+            "--tool" => tool = Some(value("tool")?.to_owned()),
+            "--version" => version = Some(value("version")?.to_owned()),
+            "--root" => root = Some(value("root")?.to_owned()),
+            "--" => {
+                // Everything after `--` is the exec command array.
+                command = flags.by_ref().map(std::borrow::ToOwned::to_owned).collect();
+                break;
+            }
+            "--wait" => wait = true,
+            "--timeout" => {
+                let parsed = value("timeout")?;
+                timeout = Some(parsed.parse().map_err(|_| CliError {
+                    message: format!("--timeout must be a number, not {parsed:?}"),
+                })?);
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    let auth_arg = resolve_auth_argument(auth.as_deref(), identity)?;
+    let endpoint = endpoint.ok_or_else(|| CliError {
+        message: "--endpoint <endpoint-id> is required".to_owned(),
+    })?;
+    // Action-specific requirements: install needs tool+version, exec
+    // needs root+command, and the read-only actions take neither.
+    if action == "install" {
+        if tool.is_none() || version.is_none() {
+            return Err(CliError {
+                message: "--tool <name> and --version <pin> are required for install".to_owned(),
+            });
+        }
+    } else if action == "exec" {
+        if root.is_none() {
+            return Err(CliError {
+                message: "--root <path> is required for exec".to_owned(),
+            });
+        }
+        if command.is_empty() {
+            return Err(CliError {
+                message: "a command must follow `--` for exec".to_owned(),
+            });
+        }
+    } else if tool.is_some() || version.is_some() || root.is_some() || !command.is_empty() {
+        return Err(CliError {
+            message: "--tool/--version apply to install and --root/-- apply to exec only"
+                .to_owned(),
+        });
+    }
+    Ok(Command::MiseOperation {
+        machine: machine_id.to_owned(),
+        endpoint,
+        auth: auth_arg,
+        action: action.to_owned(),
+        tool,
+        version,
+        root,
+        command,
+        wait,
+        timeout,
+    })
+}
+
+/// The start-mise-operation request body.
+#[allow(clippy::too_many_arguments)]
+fn mise_request_body(
+    machine: &str,
+    endpoint: &str,
+    auth: &OnboardAuthArg,
+    action: &str,
+    tool: Option<&String>,
+    version: Option<&String>,
+    root: Option<&String>,
+    command: &[String],
+) -> serde_json::Value {
+    let action = match action {
+        "inventory" => "inventory",
+        "status" => "status",
+        "install" => "install",
+        _ => "exec",
+    };
+    let mut body = serde_json::json!({
+        "machineId": machine,
+        "endpointId": endpoint,
+        "auth": checkout_auth_value(auth),
+        "action": action,
+        "timeoutSeconds": 300,
+    });
+    if let Some(tool) = tool {
+        body["tool"] = serde_json::json!(tool);
+    }
+    if let Some(version) = version {
+        body["version"] = serde_json::json!(version);
+    }
     if let Some(root) = root {
         body["root"] = serde_json::json!(root);
     }

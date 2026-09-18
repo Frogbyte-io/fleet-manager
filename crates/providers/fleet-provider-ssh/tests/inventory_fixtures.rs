@@ -145,3 +145,46 @@ fn malformed_namespaces_fail_validation_not_parsing() {
     let facts = parse_probe_output(&stdout, now);
     assert_eq!(facts.len(), 1, "the malformed namespace fails validation");
 }
+
+#[test]
+fn a_tool_reports_its_version_as_a_separate_fact() {
+    // FM-304: presence and version are separate facts; a present tool
+    // that does not answer --version stays known with an absent version.
+    let stdout = [
+        line("tool", "git", "", "known", 1_000),
+        line("tool-version", "git", "git version 2.47.1", "known", 1_000),
+        line("tool", "docker", "", "unavailable", 1_000),
+        line("tool", "mysterious-agent", "", "known", 1_000),
+    ]
+    .join("\n");
+
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    let facts = parse_probe_output(&stdout, now);
+    let git = facts.iter().find(|fact| fact.name == "git").unwrap();
+    assert_eq!(git.status, fleet_core::CapabilityStatus::Known);
+    let git_version = facts
+        .iter()
+        .find(|fact| fact.namespace == "tool-version" && fact.name == "git")
+        .unwrap();
+    assert_eq!(git_version.value.as_deref(), Some("git version 2.47.1"));
+    let mysterious = facts
+        .iter()
+        .find(|fact| fact.name == "mysterious-agent")
+        .unwrap();
+    assert_eq!(mysterious.status, fleet_core::CapabilityStatus::Known);
+    assert_eq!(mysterious.value, None, "no version is an honest gap");
+    // The version surface is the separate namespace: a tool whose version
+    // probe failed has no version fact at all.
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| { fact.namespace == "tool-version" && fact.name == "mysterious-agent" }),
+        "a version-less tool has no version fact"
+    );
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| fact.namespace == "tool-version" && fact.name == "docker"),
+        "an unavailable tool has no version fact"
+    );
+}

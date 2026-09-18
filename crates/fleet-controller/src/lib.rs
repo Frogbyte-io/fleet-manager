@@ -16,6 +16,7 @@ pub mod exec;
 pub mod frogenv;
 pub mod gateway;
 pub mod install;
+pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
 pub mod skills;

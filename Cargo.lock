@@ -620,6 +620,7 @@ dependencies = [
  "fleet-core",
  "fleet-protocol",
  "fleet-provider-frogenv",
+ "fleet-provider-mise",
  "fleet-provider-skills-manager",
  "fleet-provider-ssh",
  "fleet-provider-tailscale",
@@ -696,8 +697,12 @@ dependencies = [
 name = "fleet-provider-mise"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fleet-application",
  "fleet-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
