@@ -912,5 +912,11 @@ mod tests {
         );
         assert_eq!(parse_version_text("skills-manager-cli 1.34.2 junk"), None);
         assert_eq!(parse_version_text(""), None);
+        // The provider's JSON document shape is the third documented form.
+        assert_eq!(
+            parse_version_text(r#"{"version":"1.34.2"}"#),
+            Some("1.34.2".to_owned())
+        );
+        assert_eq!(parse_version_text(r#"{"foo":"bar"}"#), None);
     }
 }
