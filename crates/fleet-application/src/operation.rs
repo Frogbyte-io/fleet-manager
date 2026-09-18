@@ -33,8 +33,10 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// record, never a machine (FM-210); the checkout and skills kinds carry a
 /// machine-scoped `{"machineId", "endpointId", "auth", …}` payload, with
 /// `skills.deploy`/`skills.undeploy` adding `skillId`, `agents`, and
-/// `dryRun` (FM-301, FM-302).
-pub const CREATABLE_KINDS: [&str; 17] = [
+/// `dryRun` (FM-301, FM-302); the frogenv kinds carry the same
+/// machine-scoped shape, with `frogenv.env-run` adding `root` (the
+/// checkout directory) and `command` with its argument array (FM-303).
+pub const CREATABLE_KINDS: [&str; 23] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -52,6 +54,12 @@ pub const CREATABLE_KINDS: [&str; 17] = [
     "skills.probe",
     "skills.deploy",
     "skills.undeploy",
+    "frogenv.status",
+    "frogenv.setup",
+    "frogenv.login",
+    "frogenv.request",
+    "frogenv.sync",
+    "frogenv.env-run",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -82,6 +90,9 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
             }
         }
         "skills.deploy" | "skills.undeploy" => Some(Permission::SkillsDeploy),
+        "frogenv.status" => Some(Permission::FrogenvRead),
+        "frogenv.setup" | "frogenv.login" | "frogenv.request" | "frogenv.sync"
+        | "frogenv.env-run" => Some(Permission::FrogenvOperate),
         _ => None,
     }
 }
@@ -571,6 +582,7 @@ impl Operations {
             || existing.state == "failed"
             || existing.state == "cancelled"
             || existing.state == "timed_out"
+            || existing.state == "blocked_manual_approval"
         {
             return Err(OperationUseCaseError::NotFound {
                 what: format!("live operation {id}"),
@@ -622,6 +634,7 @@ impl Operations {
         let outcome = match state {
             "succeeded" => AuditOutcome::Succeeded,
             "cancelled" => AuditOutcome::Cancelled,
+            "blocked_manual_approval" => AuditOutcome::BlockedManualApproval,
             _ => AuditOutcome::Failed,
         };
         self.audit

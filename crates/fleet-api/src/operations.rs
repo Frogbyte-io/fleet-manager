@@ -256,7 +256,7 @@ pub struct OperationDto {
     #[schema(example = "noop")]
     pub kind: String,
     /// The current state: `pending`, `running`, `cancelling`, `succeeded`,
-    /// `failed`, `cancelled`, or `timed_out`.
+    /// `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
     #[schema(example = "pending")]
     pub state: String,
     /// The caller's idempotency key, when one was supplied.

@@ -480,6 +480,32 @@ export interface EnrollmentTokenListDto {
 }
 
 /**
+ * The Frogenv action a request names.
+ */
+export type FrogenvActionDto = typeof FrogenvActionDto[keyof typeof FrogenvActionDto];
+
+
+export const FrogenvActionDto = {
+  status: 'status',
+  setup: 'setup',
+  login: 'login',
+  request: 'request',
+  sync: 'sync',
+  envRun: 'envRun',
+} as const;
+
+/**
+ * How a Frogenv operation's endpoint authenticates.
+ */
+export type FrogenvAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
  * The import request: the SSH login user and port for the draft.
  */
 export interface ImportTailnetDeviceRequest {
@@ -795,7 +821,7 @@ export interface OperationDto {
   resultJson?: string | null;
   /**
      * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, or `timed_out`.
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
      */
   state: string;
   /** Last update, in epoch milliseconds. */
@@ -1032,7 +1058,7 @@ export type PageOperationDtoItemsItem = {
   resultJson?: string | null;
   /**
      * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, or `timed_out`.
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
      */
   state: string;
   /** Last update, in epoch milliseconds. */
@@ -1458,7 +1484,7 @@ export type ResourceOperationDtoData = {
   resultJson?: string | null;
   /**
      * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, or `timed_out`.
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
      */
   state: string;
   /** Last update, in epoch milliseconds. */
@@ -1574,6 +1600,39 @@ export interface StartDiscoveryRequest {
   endpointId: string;
   /** The machine whose standard roots to scan. */
   machineId: string;
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+}
+
+/**
+ * The body of the start-frogenv-operation request.
+ */
+export interface StartFrogenvOperationRequest {
+  /**
+     * The action to run: `status`, `setup`, `login`, `request`, `sync`,
+     * or `envRun` (a command executed under a checkout's environment). A
+     * closed enum: anything else is malformed.
+     */
+  action: FrogenvActionDto;
+  /** How the endpoint authenticates. */
+  auth: FrogenvAuthDto;
+  /**
+     * The command to run under `env run`, as an argument array. Never a
+     * shell string.
+     */
+  command?: string[];
+  /** The SSH endpoint id to act through. */
+  endpointId: string;
+  /** The machine to act on (must match the path's machine). */
+  machineId: string;
+  /**
+     * The checkout root whose environment binds an `env run` command.
+     * @nullable
+     */
+  root?: string | null;
   /**
      * The deadline, in seconds. Bounded by the executor.
      * @minimum 0
@@ -2364,6 +2423,76 @@ export const getMachine = async (machineId: string, options?: RequestInit): Prom
 
   const data: getMachineResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getMachineResponse
+}
+
+
+
+export type startFrogenvOperationResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startFrogenvOperationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startFrogenvOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startFrogenvOperationResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startFrogenvOperationResponseSuccess = (startFrogenvOperationResponse202) & {
+  headers: Headers;
+};
+export type startFrogenvOperationResponseError = (startFrogenvOperationResponse400 | startFrogenvOperationResponse403 | startFrogenvOperationResponse404) & {
+  headers: Headers;
+};
+
+export type startFrogenvOperationResponse = (startFrogenvOperationResponseSuccess | startFrogenvOperationResponseError)
+
+export const getStartFrogenvOperationUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/frogenv/operations`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Starts a Frogenv operation.
+ */
+export const startFrogenvOperation = async (machineId: string,
+    startFrogenvOperationRequest: StartFrogenvOperationRequest, options?: RequestInit): Promise<startFrogenvOperationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartFrogenvOperationUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startFrogenvOperationRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startFrogenvOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startFrogenvOperationResponse
 }
 
 

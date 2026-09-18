@@ -100,6 +100,14 @@ pub enum Permission {
     /// Deploy or undeploy skills through the Skills Manager CLI. A
     /// mutation: it changes agent state on a managed machine.
     SkillsDeploy,
+    /// Probe and read the Frogenv CLI's status on a machine. A read, but
+    /// a secrets-infrastructure-revealing one.
+    FrogenvRead,
+    /// Run Frogenv ceremonies and environment-bound commands: setup,
+    /// login, machine request, sync, and env run. A mutation: it changes
+    /// the machine's secrets infrastructure or executes with decrypted
+    /// environment values in a child process.
+    FrogenvOperate,
 }
 
 impl Permission {
@@ -135,6 +143,8 @@ impl Permission {
         Permission::ProjectsFileWrite,
         Permission::SkillsRead,
         Permission::SkillsDeploy,
+        Permission::FrogenvRead,
+        Permission::FrogenvOperate,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -169,6 +179,8 @@ impl Permission {
             Permission::ProjectsFileWrite => "projects.file.write",
             Permission::SkillsRead => "skills.read",
             Permission::SkillsDeploy => "skills.deploy",
+            Permission::FrogenvRead => "frogenv.read",
+            Permission::FrogenvOperate => "frogenv.operate",
         }
     }
 
@@ -205,7 +217,9 @@ impl Permission {
             | Permission::ProjectsGitWrite
             | Permission::ProjectsFileWrite
             | Permission::SkillsRead
-            | Permission::SkillsDeploy => true,
+            | Permission::SkillsDeploy
+            | Permission::FrogenvRead
+            | Permission::FrogenvOperate => true,
         }
     }
 
@@ -242,7 +256,9 @@ impl Permission {
             | Permission::ProjectsGitWrite
             | Permission::ProjectsFileWrite
             | Permission::SkillsRead
-            | Permission::SkillsDeploy => true,
+            | Permission::SkillsDeploy
+            | Permission::FrogenvRead
+            | Permission::FrogenvOperate => true,
         }
     }
 }

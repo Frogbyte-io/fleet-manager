@@ -43,6 +43,10 @@ pub enum OperationState {
     Cancelled,
     /// Stopped because its deadline passed.
     TimedOut,
+    /// Completed by reporting that a human must act: a security-sensitive
+    /// ceremony Fleet cannot perform itself. A first-class terminal state,
+    /// not a failure wearing a label (FM-303).
+    BlockedManualApproval,
 }
 
 impl OperationState {
@@ -51,7 +55,11 @@ impl OperationState {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Cancelled | Self::TimedOut
+            Self::Succeeded
+                | Self::Failed
+                | Self::Cancelled
+                | Self::TimedOut
+                | Self::BlockedManualApproval
         )
     }
 
@@ -66,6 +74,7 @@ impl OperationState {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
+            Self::BlockedManualApproval => "blocked_manual_approval",
         }
     }
 
@@ -83,6 +92,7 @@ impl OperationState {
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
             "timed_out" => Self::TimedOut,
+            "blocked_manual_approval" => Self::BlockedManualApproval,
             _ => {
                 return Err(InvalidTransitionError {
                     from: "<unknown>".to_owned(),
@@ -108,15 +118,17 @@ pub struct InvalidTransitionError {
 /// transitions rather than silently allowing none or all.
 #[must_use]
 pub fn can_transition(from: OperationState, to: OperationState) -> bool {
-    use OperationState::{Cancelled, Cancelling, Failed, Pending, Running, Succeeded, TimedOut};
+    use OperationState::{
+        BlockedManualApproval, Cancelled, Cancelling, Failed, Pending, Running, Succeeded, TimedOut,
+    };
     match (from, to) {
         (Pending, Running | Cancelled | TimedOut)
-        | (Running, Succeeded | Failed | Cancelling | TimedOut)
-        | (Cancelling, Cancelled | Succeeded | Failed) => true,
-        (Pending, Pending | Succeeded | Failed | Cancelling)
+        | (Running, Succeeded | Failed | Cancelling | TimedOut | BlockedManualApproval)
+        | (Cancelling, Cancelled | Succeeded | Failed | BlockedManualApproval) => true,
+        (Pending, Pending | Succeeded | Failed | Cancelling | BlockedManualApproval)
         | (Running, Pending | Running | Cancelled)
         | (Cancelling, Pending | Running | Cancelling | TimedOut)
-        | (Succeeded | Failed | Cancelled | TimedOut, _) => false,
+        | (Succeeded | Failed | Cancelled | TimedOut | BlockedManualApproval, _) => false,
     }
 }
 
@@ -159,7 +171,7 @@ pub fn deadline_passed(state: OperationState, deadline: Option<Timestamp>, now: 
 mod tests {
     use super::*;
 
-    const STATES: [OperationState; 7] = [
+    const STATES: [OperationState; 8] = [
         OperationState::Pending,
         OperationState::Running,
         OperationState::Cancelling,
@@ -167,6 +179,7 @@ mod tests {
         OperationState::Failed,
         OperationState::Cancelled,
         OperationState::TimedOut,
+        OperationState::BlockedManualApproval,
     ];
 
     #[test]
@@ -176,6 +189,7 @@ mod tests {
             OperationState::Failed,
             OperationState::Cancelled,
             OperationState::TimedOut,
+            OperationState::BlockedManualApproval,
         ] {
             for to in STATES {
                 assert!(!can_transition(terminal, to), "{terminal:?} -> {to:?}");

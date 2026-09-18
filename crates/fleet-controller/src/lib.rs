@@ -13,6 +13,7 @@ pub mod artifacts;
 pub mod browser;
 pub mod checkout;
 pub mod exec;
+pub mod frogenv;
 pub mod gateway;
 pub mod install;
 pub mod node_crypto;

@@ -183,6 +183,26 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             let with_checkout = std::sync::Arc::new(
                 fleet_controller::checkout::CheckoutDispatch::new(with_install, with_checkout),
             );
+            // The frogenv executor handles the FM-303 kinds over the same
+            // SSH work directory and limiter.
+            let with_frogenv_inner: std::sync::Arc<
+                dyn fleet_application::worker::OperationExecutor,
+            > = {
+                let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(fleet_controller::frogenv::FrogenvExecutor::new(
+                    machines,
+                    config.data_dir.join("ssh"),
+                    limiter.clone(),
+                ))
+            };
+            let with_frogenv =
+                std::sync::Arc::new(fleet_controller::frogenv::FrogenvDispatch::new(
+                    with_checkout.clone(),
+                    with_frogenv_inner,
+                ));
             // The skills executor handles the FM-302 kinds over the same
             // SSH work directory and limiter.
             let with_skills: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
@@ -191,7 +211,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         store.pool().clone(),
                     ));
                 std::sync::Arc::new(fleet_controller::skills::SkillsDispatch::new(
-                    with_checkout.clone(),
+                    with_frogenv.clone(),
                     std::sync::Arc::new(fleet_controller::skills::SkillsExecutor::new(
                         machines,
                         config.data_dir.join("ssh"),

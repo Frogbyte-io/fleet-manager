@@ -235,7 +235,7 @@ pub async fn stream_operation_events(
 
             let terminal = matches!(
                 operation.state.as_str(),
-                "succeeded" | "failed" | "cancelled" | "timed_out"
+                "succeeded" | "failed" | "cancelled" | "timed_out" | "blocked_manual_approval"
             );
             state.previous = Some(operation.clone());
             if terminal {
