@@ -24,20 +24,42 @@ fn startup_lock_path() -> std::path::PathBuf {
 }
 
 fn acquire_startup_lock() -> std::fs::File {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(startup_lock_path())
-        .expect("the startup lock file must open");
+    // The mode is set atomically at creation (OpenOptionsExt::mode applies
+    // to newly created files), so no window exists where another user
+    // could open the lock. A stale pre-existing file from an older run is
+    // covered by the backstop set_permissions below; a file we cannot
+    // chmod is one we cannot lock safely, so that failure surfaces.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600)).ok();
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(startup_lock_path());
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => panic!("the startup lock file must open: {error}"),
+        };
+        std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600))
+            .expect("the startup lock file must be ours to chmod");
+        file.lock().expect("the startup lock must acquire");
+        return file;
     }
-    file.lock().expect("the startup lock must acquire");
-    file
+    #[cfg(not(unix))]
+    {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(startup_lock_path())
+            .expect("the startup lock file must open");
+        file.lock().expect("the startup lock must acquire");
+        file
+    }
 }
 
 /// One running sshd bound to an ephemeral port with its own host key.
