@@ -597,3 +597,47 @@ async fn the_generic_operations_surface_enforces_the_frogenv_catalog() {
     assert_eq!(frogenv[0].0, "frogenv.read");
     assert_eq!(frogenv[0].1.as_deref(), Some("m-1"));
 }
+
+#[tokio::test]
+async fn a_body_machine_that_disagrees_with_the_path_is_malformed() {
+    let state = state_for(Arc::new(PermitAll));
+    let (status, _value) = call(
+        state,
+        "POST",
+        "/machines/m-1/frogenv/operations",
+        Some(body_for("status").to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let state = state_for(Arc::new(PermitAll));
+    let mut body = body_for("status");
+    body["machineId"] = serde_json::json!("other");
+    let (status, value) = call(
+        state,
+        "POST",
+        "/machines/m-1/frogenv/operations",
+        Some(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+}
+
+#[tokio::test]
+async fn an_unknown_action_is_refused_by_the_closed_enum() {
+    let state = state_for(Arc::new(PermitAll));
+    let mut body = body_for("status");
+    body["action"] = serde_json::json!("demolish");
+    let (status, _value) = call(
+        state,
+        "POST",
+        "/machines/m-1/frogenv/operations",
+        Some(body.to_string()),
+    )
+    .await;
+    // The closed enum refuses the value at deserialization: axum's
+    // rejection is 422, the same refusal a malformed body earns.
+    assert!(
+        status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+        "{status}"
+    );
+}

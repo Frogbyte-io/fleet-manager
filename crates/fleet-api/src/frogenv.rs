@@ -198,7 +198,7 @@ pub async fn start_frogenv_operation(
         }
         // The executor's constraints are checked here too, so a malformed
         // root or argument is a 400, never a queued operation.
-        if !root.starts_with('/') || root.len() > 400 {
+        if !root.starts_with('/') || root.chars().count() > 400 {
             return Err(crate::machines::invalid_request(
                 "the checkout root must be an absolute path of at most 400 characters",
                 correlation_id,

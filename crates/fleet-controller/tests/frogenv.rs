@@ -7,116 +7,15 @@ use fleet_application::operation::Operations;
 use fleet_provider_ssh::ExecutionLimiter;
 use fleet_storage_sqlite::{AuditSink, MachineRepository, OperationRepository, Store};
 use sqlx::SqlitePool;
-use std::net::TcpListener;
-use std::process::{Child, Command};
 use std::time::Duration;
+
+mod common;
+use common::{TestSshd, start_sshd, whoami};
 use tokio::sync::Mutex;
 
 /// The stub CLI and its install location are shared machine state; the
 /// tests serialize their installation and removal.
 static CLI_LOCK: Mutex<()> = Mutex::const_new(());
-
-/// One running sshd bound to an ephemeral port with its own host key.
-struct TestSshd {
-    child: Child,
-    port: u16,
-    keys_dir: tempfile::TempDir,
-}
-
-impl Drop for TestSshd {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn start_sshd() -> TestSshd {
-    let dir = tempfile::tempdir().unwrap();
-    let host_key = dir.path().join("host_ed25519");
-    let user_key = dir.path().join("user_ed25519");
-    for key in [&host_key, &user_key] {
-        let generated = Command::new("ssh-keygen")
-            .arg("-t")
-            .arg("ed25519")
-            .arg("-N")
-            .arg("")
-            .arg("-q")
-            .arg("-f")
-            .arg(key)
-            .output()
-            .unwrap();
-        assert!(
-            generated.status.success(),
-            "ssh-keygen failed: {:?}",
-            generated.stderr
-        );
-    }
-    let public = std::fs::read_to_string(format!("{}.pub", user_key.display())).unwrap();
-    let authz = dir.path().join("authorized_keys");
-    std::fs::write(&authz, public).unwrap();
-
-    let port = free_port();
-    let sshd_config = dir.path().join("sshd_config");
-    let host_key_display = host_key.display().to_string();
-    let authz_display = authz.display().to_string();
-    let dir_display = dir.path().display().to_string();
-    std::fs::write(
-        &sshd_config,
-        format!(
-            "Port {port}\n\
-             ListenAddress 127.0.0.1\n\
-             HostKey {host_key_display}\n\
-             AuthorizedKeysFile {authz_display}\n\
-             PasswordAuthentication no\n\
-             KbdInteractiveAuthentication no\n\
-             UsePAM no\n\
-             StrictModes no\n\
-             PidFile {dir_display}/sshd.pid\n\
-             Subsystem sftp internal-sftp\n"
-        ),
-    )
-    .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&host_key, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::create_dir_all("/run/sshd").ok();
-    }
-
-    let child = Command::new("/usr/sbin/sshd")
-        .arg("-D")
-        .arg("-e")
-        .arg("-f")
-        .arg(&sshd_config)
-        .spawn()
-        .expect("sshd must start");
-    for _ in 0..50 {
-        if TcpListener::bind(("127.0.0.1", port)).is_err() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    TestSshd {
-        child,
-        port,
-        keys_dir: dir,
-    }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn whoami() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "nobody".to_owned())
-}
 
 /// The composed fixture: store, operations, frogenv executor, and a
 /// verified endpoint.
@@ -366,9 +265,9 @@ async fn a_blocked_ceremony_is_a_first_class_state_not_a_hang() {
             "timeoutSeconds": 10,
         });
         let (state, _result, error) = fixture.run_kind(kind, payload).await;
-        assert_eq!(state, "failed", "{kind}");
+        // Blocked is a first-class terminal state, not a failure.
+        assert_eq!(state, "blocked_manual_approval", "{kind}");
         let error = error.expect("the block names its reason");
-        assert!(error.contains("blocked_manual_approval"), "{kind}: {error}");
         assert!(
             error.contains("manual approval") || error.contains("run it on the machine"),
             "{kind}: {error}"

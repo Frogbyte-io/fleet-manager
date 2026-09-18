@@ -1,0 +1,51 @@
+-- FM-303: blocked_manual_approval is a first-class terminal operation
+-- state, not a failure wearing a label. The operations table's state CHECK
+-- is rebuilt to admit it; existing rows are unaffected (none can carry the
+-- new state yet).
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE operations_new (
+    id               TEXT PRIMARY KEY,
+    kind             TEXT NOT NULL,
+    state            TEXT NOT NULL CHECK (state IN
+                         ('pending', 'running', 'cancelling',
+                          'succeeded', 'failed', 'cancelled', 'timed_out',
+                          'blocked_manual_approval')),
+    idempotency_key  TEXT UNIQUE,
+    progress_current INTEGER,
+    progress_total   INTEGER,
+    progress_message TEXT,
+    deadline_at      INTEGER,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    result_json      TEXT,
+    error_json       TEXT,
+    correlation_id   TEXT,
+    payload_json     TEXT,
+    claimed_at       INTEGER,
+    worker_id        TEXT,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
+) STRICT;
+
+INSERT INTO operations_new
+    (id, kind, state, idempotency_key, progress_current, progress_total,
+     progress_message, deadline_at, cancel_requested, result_json,
+     error_json, correlation_id, payload_json, claimed_at, worker_id,
+     attempts, created_at, updated_at)
+SELECT
+    id, kind, state, idempotency_key, progress_current, progress_total,
+    progress_message, deadline_at, cancel_requested, result_json,
+    error_json, correlation_id, payload_json, claimed_at, worker_id,
+    attempts, created_at, updated_at
+FROM operations;
+DROP TABLE operations;
+ALTER TABLE operations_new RENAME TO operations;
+
+CREATE INDEX operations_state ON operations (state);
+CREATE INDEX operations_correlation ON operations (correlation_id);
+CREATE INDEX operations_deadline ON operations (deadline_at) WHERE deadline_at IS NOT NULL;
+CREATE INDEX operations_claimed ON operations (claimed_at) WHERE claimed_at IS NOT NULL;
+
+PRAGMA foreign_key_check;
+PRAGMA foreign_keys = ON;

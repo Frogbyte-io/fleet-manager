@@ -292,10 +292,9 @@ impl FrogenvExecutor {
         let (result, detail) = self.run(&spec, &script, &metadata, deadline).await;
         match (result, detail) {
             (Some(result), _) if result.killed_by_deadline => {
-                complete_failure(
+                complete_blocked(
                     operations,
                     &operation.id,
-                    "blocked_manual_approval",
                     &format!(
                         "the {ceremony} ceremony did not complete within its deadline; it requires interactive steps Fleet cannot perform — run it on the machine yourself"
                     ),
@@ -303,6 +302,24 @@ impl FrogenvExecutor {
                 .await
             }
             (Some(result), _) if result.exit_code == Some(0) => {
+                // The marker contract spans both streams: a ceremony that
+                // reports a block is blocked even when it exits 0.
+                let blocked = result
+                    .stdout
+                    .lines()
+                    .chain(result.stderr.lines())
+                    .find_map(|line| line.strip_prefix("FLEET_BLOCKED: "));
+                if let Some(reason) = blocked {
+                    return complete_blocked(
+                        operations,
+                        &operation.id,
+                        &format!(
+                            "the {ceremony} ceremony requires manual approval: {}",
+                            redact_output(reason)
+                        ),
+                    )
+                    .await;
+                }
                 let outcome = serde_json::json!({ "ceremony": ceremony }).to_string();
                 operations
                     .complete(&operation.id, "succeeded", Some(&outcome), None)
@@ -321,10 +338,9 @@ impl FrogenvExecutor {
                     .chain(result.stderr.lines())
                     .find_map(|line| line.strip_prefix("FLEET_BLOCKED: "));
                 if let Some(reason) = blocked {
-                    return complete_failure(
+                    return complete_blocked(
                         operations,
                         &operation.id,
-                        "blocked_manual_approval",
                         &format!(
                             "the {ceremony} ceremony requires manual approval: {}",
                             redact_output(reason)
@@ -471,7 +487,7 @@ cd "$fleet_root" || { echo "the checkout root is not a directory" >&2; exit 4; }
 /// Validates an absolute checkout root: absolute-shaped, bounded, no `..`
 /// segment, no control characters.
 fn validate_root(root: &str) -> Result<(), String> {
-    if !root.starts_with('/') || root.len() > 400 {
+    if !root.starts_with('/') || root.chars().count() > 400 {
         return Err(
             "the checkout root must be an absolute path of at most 400 characters".to_owned(),
         );
@@ -499,6 +515,30 @@ fn payload<T: serde::de::DeserializeOwned>(operation: &Operation) -> Result<T, S
             .ok_or("the operation carries no payload")?,
     )
     .map_err(|error| format!("the payload is not a valid frogenv record: {error}"))
+}
+
+/// Completes a ceremony as `blocked_manual_approval`: a first-class
+/// terminal state, not a failure wearing a label.
+async fn complete_blocked(
+    operations: &Operations,
+    operation_id: &str,
+    detail: &str,
+) -> Result<(), String> {
+    let error_json = serde_json::json!({
+        "reason": "blocked_manual_approval",
+        "detail": detail,
+    })
+    .to_string();
+    operations
+        .complete(
+            operation_id,
+            "blocked_manual_approval",
+            None,
+            Some(&error_json),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Completes an operation as a failure with a redacted detail.

@@ -854,30 +854,7 @@ fn parse_checkout_flags(
             }
         }
     }
-    let auth_arg = match (auth.as_deref(), identity.clone()) {
-        (Some("agent"), None) => OnboardAuthArg::Agent,
-        (Some("agent"), Some(_)) => {
-            return Err(CliError {
-                message: "--identity applies to --auth identity-file only".to_owned(),
-            });
-        }
-        (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
-        (Some("identity-file"), None) => {
-            return Err(CliError {
-                message: "--auth identity-file requires --identity <path>".to_owned(),
-            });
-        }
-        (Some(other), _) => {
-            return Err(CliError {
-                message: format!("--auth must be agent or identity-file, not {other:?}"),
-            });
-        }
-        (None, _) => {
-            return Err(CliError {
-                message: "--auth is required: agent or identity-file".to_owned(),
-            });
-        }
-    };
+    let auth_arg = resolve_auth_argument(auth.as_deref(), identity.clone())?;
     Ok((
         CheckoutEndpointFlags {
             endpoint: endpoint.ok_or_else(|| CliError {
@@ -2911,6 +2888,31 @@ fn skills_request_body(
     body
 }
 
+/// Resolves the `--auth`/`--identity` pair into the shared auth argument.
+/// The same input errors the same way in every command family: a silent
+/// discard would make a caller believe an identity file was honored.
+fn resolve_auth_argument(
+    auth: Option<&str>,
+    identity: Option<String>,
+) -> Result<OnboardAuthArg, CliError> {
+    match (auth, identity) {
+        (Some("agent"), None) => Ok(OnboardAuthArg::Agent),
+        (Some("agent"), Some(_)) => Err(CliError {
+            message: "--identity applies to --auth identity-file only".to_owned(),
+        }),
+        (Some("identity-file"), Some(path)) => Ok(OnboardAuthArg::IdentityFile(path)),
+        (Some("identity-file"), None) => Err(CliError {
+            message: "--auth identity-file requires --identity <path>".to_owned(),
+        }),
+        (Some(other), _) => Err(CliError {
+            message: format!("--auth must be agent or identity-file, not {other:?}"),
+        }),
+        (None, _) => Err(CliError {
+            message: "--auth is required: agent or identity-file".to_owned(),
+        }),
+    }
+}
+
 /// Parses one `fleetctl frogenv` subcommand.
 fn parse_frogenv_command(
     action: &str,
@@ -2962,34 +2964,13 @@ fn parse_frogenv_command(
             }
         }
     }
-    let auth_arg = match (auth.as_deref(), identity) {
-        (Some("agent"), None) => OnboardAuthArg::Agent,
-        (Some("agent"), Some(_)) => {
-            return Err(CliError {
-                message: "--identity applies to --auth identity-file only".to_owned(),
-            });
-        }
-        (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
-        (Some("identity-file"), None) => {
-            return Err(CliError {
-                message: "--auth identity-file requires --identity <path>".to_owned(),
-            });
-        }
-        (Some(other), _) => {
-            return Err(CliError {
-                message: format!("--auth must be agent or identity-file, not {other:?}"),
-            });
-        }
-        (None, _) => {
-            return Err(CliError {
-                message: "--auth is required: agent or identity-file".to_owned(),
-            });
-        }
-    };
+    let auth_arg = resolve_auth_argument(auth.as_deref(), identity)?;
     let endpoint = endpoint.ok_or_else(|| CliError {
         message: "--endpoint <endpoint-id> is required".to_owned(),
     })?;
-    // `run` requires a root and a command; the other actions take neither.
+    // `run` requires a root and a command; the other actions take
+    // neither, and the separator itself is run-only: a bare `--` on a
+    // non-run action is a malformed form, not an empty command.
     if action == "run" {
         if root.is_none() {
             return Err(CliError {

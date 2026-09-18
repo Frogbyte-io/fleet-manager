@@ -156,7 +156,9 @@ pub async fn probe(transport: &dyn CliTransport, deadline: Duration) -> Result<P
         return Err("the version probe was killed at its deadline".to_owned());
     }
     if !outcome.succeeded() {
-        return Ok(Probe::Absent);
+        // A nonzero `--version` is an execution failure or an untested
+        // CLI, not absence: absence is the transport's own error.
+        return Ok(Probe::Unsupported);
     }
     Ok(parse_version(&outcome.stdout))
 }
@@ -337,11 +339,13 @@ fn redact_line(line: &str) -> String {
     if is_age_secret || is_sops_payload || is_key_assignment {
         return "[redacted value-shaped material]".to_owned();
     }
-    // A key marker anywhere in the line (an error message quoting it) is
-    // scrubbed with the material that follows it.
-    if let Some(position) = line.find("AGE-SECRET-KEY-") {
-        let (before, _after) = line.split_at(position);
-        return format!("{before}[redacted value-shaped material]");
+    // Key markers anywhere in the line (an error message quoting them)
+    // are scrubbed with the material that follows them.
+    for marker in ["AGE-SECRET-KEY-", "SSH_KEY=", "SOPS_AGE_KEY"] {
+        if let Some(position) = line.find(marker) {
+            let (before, _after) = line.split_at(position);
+            return format!("{before}[redacted value-shaped material]");
+        }
     }
     // A long unbroken base64/hex run inside the line is key material
     // shaped enough to scrub; the surrounding text survives.
