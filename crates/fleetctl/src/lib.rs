@@ -1648,6 +1648,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             format!("/api/v1/machines/{machine}/skills/operations"),
             Vec::new(),
             Some(skills_request_body(
+                machine,
                 endpoint,
                 auth,
                 None,
@@ -1673,6 +1674,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             format!("/api/v1/machines/{machine}/skills/operations"),
             Vec::new(),
             Some(skills_request_body(
+                machine,
                 endpoint,
                 auth,
                 Some(skill.as_str()),
@@ -1698,6 +1700,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             format!("/api/v1/machines/{machine}/skills/operations"),
             Vec::new(),
             Some(skills_request_body(
+                machine,
                 endpoint,
                 auth,
                 Some(skill.as_str()),
@@ -2748,8 +2751,21 @@ fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<C
     let endpoint = endpoint.ok_or_else(|| CliError {
         message: "--endpoint <endpoint-id> is required".to_owned(),
     })?;
-    match verb {
-        "probe" => Ok(Command::SkillsProbe {
+    if verb == "probe" {
+        // Probe-only flags on a mutation, or mutation-only flags on a
+        // probe, are typos the caller must see, not silently dropped.
+        if !agents.is_empty() || skill.is_some() || dry_run {
+            return Err(CliError {
+                message: "--skill/--agent/--dry-run apply to deploy and undeploy only".to_owned(),
+            });
+        }
+        if artifact_url.is_some() != artifact_sha256.is_some() {
+            return Err(CliError {
+                message: "--artifact-url and --artifact-sha256 must be supplied together"
+                    .to_owned(),
+            });
+        }
+        return Ok(Command::SkillsProbe {
             machine: machine_id.to_owned(),
             endpoint,
             auth: auth_arg,
@@ -2758,7 +2774,9 @@ fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<C
             artifact_sha256,
             wait,
             timeout,
-        }),
+        });
+    }
+    match verb {
         "deploy" | "undeploy" => {
             let skill = skill.ok_or_else(|| CliError {
                 message: "--skill <id> is required".to_owned(),
@@ -2806,6 +2824,7 @@ fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<C
 /// The start-skills-operation request body.
 #[allow(clippy::too_many_arguments)]
 fn skills_request_body(
+    machine: &str,
     endpoint: &str,
     auth: &OnboardAuthArg,
     skill: Option<&str>,
@@ -2817,6 +2836,7 @@ fn skills_request_body(
     artifact_sha256: Option<&String>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
+        "machineId": machine,
         "endpointId": endpoint,
         "auth": checkout_auth_value(auth),
         "agents": agents,

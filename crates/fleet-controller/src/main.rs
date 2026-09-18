@@ -209,7 +209,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_checkout.clone(),
+                            with_skills.clone(),
                         ));
                     executor
                 }

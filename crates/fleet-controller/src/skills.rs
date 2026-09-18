@@ -215,6 +215,11 @@ impl SkillsExecutor {
         let deadline = deadline(payload.timeout_seconds);
         // A pinned release installs when the CLI is absent; the fixed
         // script verifies the digest before placing the binary.
+        // A partial pin is refused before anything runs: a silent unpinned
+        // probe would pretend the caller's intent was honored.
+        if payload.artifact_url.is_some() != payload.artifact_sha256.is_some() {
+            return Err("the pinned release requires both an artifact URL and a sha256".to_owned());
+        }
         let pinned = payload
             .artifact_url
             .as_deref()
@@ -224,6 +229,11 @@ impl SkillsExecutor {
                 return Err(
                     "the pinned release requires both an artifact URL and a sha256".to_owned(),
                 );
+            }
+            // The URL rides the metadata's NUL-framed environment; control
+            // characters cannot break the framing but would smuggle fields.
+            if url.chars().any(char::is_control) {
+                return Err("the artifact URL must not contain control characters".to_owned());
             }
             if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err("the artifact sha256 must be 64 hex characters".to_owned());
@@ -264,6 +274,17 @@ impl SkillsExecutor {
                     .stdout
                     .lines()
                     .find_map(|line| serde_json::from_str(line).ok());
+                // An empty or non-conforming answer is an unsupported CLI,
+                // not a success with a null probe.
+                let Some(parsed) = parsed else {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "unsupported_version",
+                        "the CLI's probe did not answer in the documented shape",
+                    )
+                    .await;
+                };
                 let result_json = serde_json::json!({ "probe": parsed }).to_string();
                 operations
                     .complete(&operation.id, "succeeded", Some(&result_json), None)
@@ -299,6 +320,15 @@ impl SkillsExecutor {
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
+        // The version gate runs before every mutation: an untested CLI
+        // degrades explicitly instead of guessing.
+        if let Some(detail) = self
+            .version_gate(&spec, deadline(payload.timeout_seconds))
+            .await
+        {
+            return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+                .await;
+        }
         operations
             .record_progress(
                 &operation.id,
@@ -314,16 +344,19 @@ impl SkillsExecutor {
             .await
             .map_err(|error| error.to_string())?;
         let deadline = deadline(payload.timeout_seconds);
-        let mut arguments = vec![payload.skill_id];
+        // The CLI is resolved off-PATH by the fixed script; the skill id
+        // and every agent id stay separate positional parameters, and the
+        // skills root rides the environment.
+        let mut arguments = vec![payload.skill_id.clone()];
         arguments.extend(payload.agents.iter().cloned());
         let script = if payload.dry_run {
-            deploy_script("--dry-run")
+            mutation_script("deploy", true)
         } else {
-            deploy_script("")
+            mutation_script("deploy", false)
         };
         let metadata = ScriptMetadata {
             working_directory: String::new(),
-            environment: Vec::new(),
+            environment: root_environment(payload.skills_root.as_deref()),
             arguments,
         };
         let (result, detail) = self.run(&spec, &script, &metadata, deadline).await;
@@ -342,6 +375,14 @@ impl SkillsExecutor {
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
+        // The version gate runs before every mutation.
+        if let Some(detail) = self
+            .version_gate(&spec, deadline(payload.timeout_seconds))
+            .await
+        {
+            return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+                .await;
+        }
         operations
             .record_progress(
                 &operation.id,
@@ -357,20 +398,79 @@ impl SkillsExecutor {
             .await
             .map_err(|error| error.to_string())?;
         let deadline = deadline(payload.timeout_seconds);
-        let mut arguments = vec![payload.skill_id];
+        let mut arguments = vec![payload.skill_id.clone()];
         arguments.extend(payload.agents.iter().cloned());
-        let script = if payload.dry_run {
-            undeploy_script("--dry-run")
-        } else {
-            undeploy_script("")
-        };
+        let script = mutation_script("undeploy", payload.dry_run);
         let metadata = ScriptMetadata {
             working_directory: String::new(),
-            environment: Vec::new(),
+            environment: root_environment(payload.skills_root.as_deref()),
             arguments,
         };
         let (result, detail) = self.run(&spec, &script, &metadata, deadline).await;
         finish_cli(operations, &operation.id, result, detail, "undeploy").await
+    }
+
+    /// The version gate shared by every kind: the CLI must identify
+    /// itself in a documented shape with a version at or below the tested
+    /// one. A failure names the reason; `None` means the gate passed.
+    async fn version_gate(&self, spec: &SshConnectionSpec, deadline: Duration) -> Option<String> {
+        let metadata = ScriptMetadata {
+            working_directory: String::new(),
+            environment: Vec::new(),
+            arguments: Vec::new(),
+        };
+        let script = r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
+  [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
+done
+if [ -z "${fleet_cli:-}" ]; then
+  echo '{"present":false,"reason64":"'$(printf '%s' "skills-manager-cli is not installed" | base64 -w0)'"}'
+  exit 0
+fi
+fleet_version=$("$fleet_cli" --version 2>/dev/null | head -n 1)
+printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
+"#
+        .to_owned();
+        let (result, detail) = self.run(spec, &script, &metadata, deadline).await;
+        let Some(result) = result else {
+            return Some(detail.unwrap_or_else(|| "the gate produced no result".to_owned()));
+        };
+        if result.killed_by_deadline {
+            return Some("the version gate was killed at its deadline".to_owned());
+        }
+        if result.exit_code != Some(0) {
+            return Some(redact_output(&result.stderr));
+        }
+        // Parse the gate's answer; a malformed answer is an unsupported
+        // CLI, not a pass.
+        let parsed: Option<serde_json::Value> = result
+            .stdout
+            .lines()
+            .find_map(|line| serde_json::from_str(line).ok());
+        let Some(parsed) = parsed else {
+            return Some(
+                "the CLI's version gate did not answer in the documented shape".to_owned(),
+            );
+        };
+        if parsed["present"].as_bool() == Some(false) {
+            return Some("skills-manager-cli is not installed".to_owned());
+        }
+        let version = decoded_field(&parsed, "version64");
+        let Some(version) = version else {
+            return Some("the CLI did not report a version in the documented shape".to_owned());
+        };
+        // The `--version` line may carry the binary name before the
+        // version; the version is the last token.
+        let version = version
+            .split_whitespace()
+            .next_back()
+            .unwrap_or(&version)
+            .to_owned();
+        if !version_acceptable(&version) {
+            return Some(format!(
+                "the CLI reports {version}, which is outside the tested range (up to {TESTED_CLI_VERSION})"
+            ));
+        }
+        None
     }
 }
 
@@ -393,9 +493,13 @@ if [ -n "$fleet_cli" ]; then
     exit 0
   fi
   if [ -n "$fleet_root" ]; then
-    fleet_agents=$("$fleet_cli" --skills-root "$fleet_root" --json agents list 2>/dev/null | head -c 65536)
+    fleet_agents=$("$fleet_cli" --skills-root "$fleet_root" --json agents list 2>/dev/null | head -c 65536) || {{ fleet_agents=""; fleet_agents_failed=1; }}
   else
-    fleet_agents=$("$fleet_cli" --json agents list 2>/dev/null | head -c 65536)
+    fleet_agents=$("$fleet_cli" --json agents list 2>/dev/null | head -c 65536) || {{ fleet_agents=""; fleet_agents_failed=1; }}
+  fi
+  if [ "${fleet_agents_failed:-0}" = "1" ]; then
+    printf '{"present":true,"version64":"%s","agentsFailed":true}\n' "$(fleet_b64 "$fleet_version")"
+    exit 0
   fi
   printf '{"present":true,"version64":"%s","agents64":"%s"}\n' \
     "$(fleet_b64 "$fleet_version")" "$(fleet_b64 "$fleet_agents")"
@@ -421,43 +525,114 @@ fi
     .to_owned()
 }
 
-/// The fixed deploy script: `$1` is the skill id, `$2` onwards the agent
-/// ids. `$FLEET_DRY_RUN` carries the flag so argument arrays stay
-/// id-shaped.
-fn deploy_script(dry_run_flag: &str) -> String {
+/// The fixed mutation script: `$1` is the skill id, `$2` onwards the
+/// agent ids, each kept as a separate positional parameter so an id with
+/// spaces or glob characters stays one argument. `FLEET_SKILLS_ROOT`
+/// carries an external root when one is named. `--json` is always passed:
+/// the completion path parses the CLI's own contract.
+#[must_use]
+pub fn mutation_script_for_test(verb: &str, dry_run: bool) -> String {
+    mutation_script(verb, dry_run)
+}
+
+fn mutation_script(verb: &str, dry_run: bool) -> String {
+    let dry_run_line = if dry_run {
+        "fleet_dry=--dry-run\n"
+    } else {
+        "fleet_dry=\n"
+    };
     format!(
         r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
-[ -n "$fleet_cli" ] || {{ echo "skills-manager-cli is not installed" >&2; exit 3; }}
-fleet_skill=$1; shift
-fleet_agents=""
+[ -n "${{fleet_cli:-}}" ] || {{ echo "skills-manager-cli is not installed" >&2; exit 3; }}
+{dry_run_line}fleet_root_arg=""
+if [ -n "${{FLEET_SKILLS_ROOT:-}}" ]; then
+  fleet_root_arg="--skills-root"
+fi
+# Each agent becomes its own `--agent <id>` pair. The positional
+# parameters are rebuilt in place: $1 (the skill id) is saved, then every
+# agent is re-set as `--agent <id>` pairs, so each id stays a single
+# argument and nothing expands unquoted.
+fleet_skill=$1
+shift
+set -- "$@"
+fleet_agent_args=()
 for fleet_agent in "$@"; do
-  fleet_agents="$fleet_agents --agent $fleet_agent"
+  fleet_agent_args+=("--agent" "$fleet_agent")
 done
-# shellcheck disable=SC2086
-"$fleet_cli" skills deploy "$fleet_skill" $fleet_agents {dry_run_flag}
+fleet_verb={verb:?}
+case "$fleet_verb" in
+  deploy)
+    if [ -n "$fleet_root_arg" ]; then
+      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills deploy "$fleet_skill" "${{fleet_agent_args[@]}}" "$fleet_dry"
+    else
+      "$fleet_cli" --json skills deploy "$fleet_skill" "${{fleet_agent_args[@]}}" "$fleet_dry"
+    fi
+    ;;
+  undeploy)
+    if [ -n "$fleet_root_arg" ]; then
+      "$fleet_cli" --skills-root "$FLEET_SKILLS_ROOT" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "$fleet_dry"
+    else
+      "$fleet_cli" --json skills undeploy "$fleet_skill" "${{fleet_agent_args[@]}}" --yes "$fleet_dry"
+    fi
+    ;;
+esac
 "#
     )
 }
 
-/// The fixed undeploy script: the mirror of deploy with `--yes`, which the
-/// CLI requires for removal.
-fn undeploy_script(dry_run_flag: &str) -> String {
-    format!(
-        r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
-  [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
-done
-[ -n "$fleet_cli" ] || {{ echo "skills-manager-cli is not installed" >&2; exit 3; }}
-fleet_skill=$1; shift
-fleet_agents=""
-for fleet_agent in "$@"; do
-  fleet_agents="$fleet_agents --agent $fleet_agent"
-done
-# shellcheck disable=SC2086
-"$fleet_cli" skills undeploy "$fleet_skill" $fleet_agents --yes {dry_run_flag}
-"#
-    )
+/// The skills-root environment: empty means the default library.
+fn root_environment(root: Option<&str>) -> Vec<(String, String)> {
+    match root {
+        Some(root) => vec![("FLEET_SKILLS_ROOT".to_owned(), root.to_owned())],
+        None => Vec::new(),
+    }
+}
+
+/// Whether the CLI's reported version is within the tested range: same
+/// major and a minor at or below the tested minor, or an older one.
+fn version_acceptable(version: &str) -> bool {
+    let (tested_major, tested_minor) =
+        TESTED_CLI_VERSION
+            .split_once('.')
+            .map_or((1, 34), |(major, minor)| {
+                (
+                    major.parse::<u64>().unwrap_or(0),
+                    minor
+                        .split('.')
+                        .next()
+                        .and_then(|minor| minor.parse::<u64>().ok())
+                        .unwrap_or(0),
+                )
+            });
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let Ok(major) = parts[0].parse::<u64>() else {
+        return false;
+    };
+    let Ok(minor) = parts[1]
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(parts[1])
+        .parse::<u64>()
+    else {
+        return false;
+    };
+    major < tested_major || (major == tested_major && minor <= tested_minor)
+}
+
+/// Decodes one base64 field from a probe JSON line.
+fn decoded_field(line: &serde_json::Value, key: &str) -> Option<String> {
+    use base64::Engine as _;
+    let raw = line[key].as_str()?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(raw.as_bytes())
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
+    Some(decoded).filter(|decoded| !decoded.is_empty())
 }
 
 /// Validates an identifier: bounded, no control characters, no leading

@@ -9,29 +9,21 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
+use fleet_core::CorrelationId;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr as _;
 use utoipa::ToSchema;
 
 use crate::envelope::Resource;
-use crate::error::{ApiError, ApiErrorResponse};
+use crate::error::ApiErrorResponse;
 
-/// Extracts the machine use cases from the API state, or answers with the
-/// standard envelope when the controller was composed without a database.
-fn machines_or_error(
-    state: &crate::operations::ApiState,
-    correlation_id: CorrelationId,
-) -> Result<Arc<fleet_application::machine::Machines>, ApiErrorResponse> {
-    state.machines.clone().ok_or_else(|| {
-        let public = PublicError::new(
-            ErrorCode::from_str("machine_unavailable")
-                .expect("the literal is valid error code syntax"),
-            "the machine surface is not wired; the controller needs its database",
-            RetryClass::Backoff,
-        );
-        ApiError::new(&public, correlation_id).with_status(StatusCode::SERVICE_UNAVAILABLE)
-    })
+/// The direction a skills operation takes.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillsDirectionDto {
+    /// Deploy the skill to the named agents.
+    Deploy,
+    /// Undeploy the skill from the named agents.
+    Undeploy,
 }
 
 /// How a skills operation's endpoint authenticates.
@@ -72,8 +64,8 @@ pub struct StartSkillsOperationRequest {
     /// The pinned release's expected sha256.
     pub artifact_sha256: Option<String>,
     /// The operation's direction: `deploy` (the default when a skill is
-    /// named) or `undeploy`.
-    pub direction: Option<String>,
+    /// named) or `undeploy`. A closed enum: anything else is malformed.
+    pub direction: Option<SkillsDirectionDto>,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
 }
@@ -121,10 +113,11 @@ pub async fn start_skills_operation(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Path(machine_id): Path<String>,
     Json(request): Json<StartSkillsOperationRequest>,
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
-    let machines = machines_or_error(&state, correlation_id)?;
+    let machines = crate::machines::machines_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     // The body's machine must agree with the path's: two names for one
     // machine is a malformed request, not a fallback.
@@ -146,9 +139,11 @@ pub async fn start_skills_operation(
         .map_err(|error| crate::machines::map_machine_error(&error, correlation_id))?;
     // Probe is a risky read; deploy and undeploy are mutations. Both name
     // the machine as their resource.
-    let permission = match request.skill_id {
-        None => fleet_application::authz::Permission::SkillsRead,
-        Some(_) => fleet_application::authz::Permission::SkillsDeploy,
+    // A pin downloads and installs a binary: that is a mutation, never a
+    // read, so a pinned probe requires the deploy permission.
+    let permission = match (&request.skill_id, &request.artifact_url) {
+        (None, None) => fleet_application::authz::Permission::SkillsRead,
+        _ => fleet_application::authz::Permission::SkillsDeploy,
     };
     if let Err(decision) = fleet_application::authz::authorize(
         state.authorizer.as_ref(),
@@ -160,11 +155,18 @@ pub async fn start_skills_operation(
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
     }
-    let kind = match request.skill_id {
-        None => "skills.probe",
-        Some(_) if request_undeploy(&request) => "skills.undeploy",
-        Some(_) => "skills.deploy",
+    let kind = match (&request.skill_id, &request.direction) {
+        (None, _) => "skills.probe",
+        (Some(_), Some(SkillsDirectionDto::Undeploy)) => "skills.undeploy",
+        (Some(_), _) => "skills.deploy",
     };
+    // A partial pin is refused here, before the executor would drop it.
+    if request.artifact_url.is_some() != request.artifact_sha256.is_some() {
+        return Err(crate::machines::invalid_request(
+            "the pinned release requires both an artifact URL and a sha256",
+            correlation_id,
+        ));
+    }
     let mut payload = serde_json::json!({
         "machineId": machine_id,
         "endpointId": request.endpoint_id,
@@ -186,6 +188,12 @@ pub async fn start_skills_operation(
     if let Some(sha256) = &request.artifact_sha256 {
         payload["artifactSha256"] = serde_json::json!(sha256);
     }
+    // A caller-scoped idempotency key makes a retried POST return the
+    // original operation instead of a second one.
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:{key}", principal.id));
     let operation = state
         .operations
         .create(
@@ -193,7 +201,7 @@ pub async fn start_skills_operation(
             &principal.id,
             &fleet_application::operation::NewOperation {
                 kind: kind.to_owned(),
-                idempotency_key: None,
+                idempotency_key,
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(payload.to_string()),
@@ -207,13 +215,4 @@ pub async fn start_skills_operation(
             operation,
         ))),
     ))
-}
-
-/// Whether the request carries the undeploy marker. The body names the
-/// direction explicitly so the adapter never guesses from context.
-fn request_undeploy(request: &StartSkillsOperationRequest) -> bool {
-    request
-        .direction
-        .as_deref()
-        .is_some_and(|direction| direction == "undeploy")
 }

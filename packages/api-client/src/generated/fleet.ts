@@ -1553,6 +1553,17 @@ export type SkillsAuthDto = {
 };
 
 /**
+ * The direction a skills operation takes.
+ */
+export type SkillsDirectionDto = typeof SkillsDirectionDto[keyof typeof SkillsDirectionDto];
+
+
+export const SkillsDirectionDto = {
+  deploy: 'deploy',
+  undeploy: 'undeploy',
+} as const;
+
+/**
  * The body of the start-discovery request: which machine and endpoint to
  * scan, and how the endpoint authenticates.
  */
@@ -1588,12 +1599,7 @@ export interface StartSkillsOperationRequest {
   artifactUrl?: string | null;
   /** How the endpoint authenticates. */
   auth: SkillsAuthDto;
-  /**
-     * The operation's direction: `deploy` (the default when a skill is
-     * named) or `undeploy`.
-     * @nullable
-     */
-  direction?: string | null;
+  direction?: null | SkillsDirectionDto;
   /** Preserve a dry run: never upgraded to a real mutation. */
   dryRun?: boolean;
   /** The SSH endpoint id to act through. */

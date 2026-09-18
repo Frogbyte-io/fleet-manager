@@ -236,12 +236,22 @@ fn install_stub_cli(home: &str, sha_of_stub: Option<&str>) -> String {
     let path = format!("{bin_dir}/skills-manager-cli");
     let stub = r#"#!/usr/bin/env bash
 echo "$@" >> /tmp/fleet-stub-cli.log
+[ "$1" = "--json" ] && shift
 case "$1" in
   --version) echo "skills-manager-cli 1.34.2" ;;
   skills)
     shift
     case "$1" in
-      deploy) echo "{\"skillId\":\"$2\",\"deployedTo\":$(shift 2; printf '["%s"]' "$(echo "$@" | tr ' ' ',' | sed 's/,$//')")}" ;;
+      deploy)
+        skill=$2; shift 2
+        agents=""
+        for agent in "$@"; do
+          [ -z "$agent" ] && continue
+          agents="$agents\"$agent\","
+        done
+        agents="${agents%,}"
+        echo "{\"skillId\":\"$skill\",\"deployedTo\":[$agents]}"
+        ;;
       undeploy) echo "{\"skillId\":\"$2\",\"deployedTo\":[]}" ;;
     esac
     ;;
@@ -475,7 +485,7 @@ async fn credential_shaped_cli_output_is_redacted() {
     let path = format!("{bin_dir}/skills-manager-cli");
     std::fs::write(
         &path,
-        "#!/usr/bin/env bash\necho '{\"ok\":false,\"code\":\"TARGET_CONFLICT\",\"message\":\"refused https://user:secret@host.invalid/x\"}' >&2\nexit 2\n",
+        "#!/usr/bin/env bash\ncase \"$1\" in\n  --version) echo \"skills-manager-cli 1.34.2\"; exit 0 ;;\nesac\necho '{\"ok\":false,\"code\":\"TARGET_CONFLICT\",\"message\":\"refused https://user:secret@host.invalid/x\"}' >&2\nexit 2\n",
     )
     .unwrap();
     #[cfg(unix)]

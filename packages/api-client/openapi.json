@@ -4670,6 +4670,14 @@
         ],
         "description": "How a skills operation's endpoint authenticates."
       },
+      "SkillsDirectionDto": {
+        "type": "string",
+        "description": "The direction a skills operation takes.",
+        "enum": [
+          "deploy",
+          "undeploy"
+        ]
+      },
       "StartDiscoveryRequest": {
         "type": "object",
         "description": "The body of the start-discovery request: which machine and endpoint to\nscan, and how the endpoint authenticates.",
@@ -4736,11 +4744,15 @@
             "description": "How the endpoint authenticates."
           },
           "direction": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The operation's direction: `deploy` (the default when a skill is\nnamed) or `undeploy`."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SkillsDirectionDto",
+                "description": "The operation's direction: `deploy` (the default when a skill is\nnamed) or `undeploy`. A closed enum: anything else is malformed."
+              }
+            ]
           },
           "dryRun": {
             "type": "boolean",

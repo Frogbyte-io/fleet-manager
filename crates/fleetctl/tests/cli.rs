@@ -1371,6 +1371,28 @@ fn parsing_refuses_the_undocumented_skills_forms() {
             "--artifact-url",
             "https://x",
         ],
+        vec![
+            "skills",
+            "probe",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--skill",
+            "db",
+        ],
+        vec![
+            "skills",
+            "probe",
+            "m1",
+            "--endpoint",
+            "e1",
+            "--auth",
+            "agent",
+            "--artifact-url",
+            "https://x",
+        ],
     ] {
         let args: Vec<String> = args.iter().map(ToString::to_string).collect();
         let error = fleetctl::parse(&args).unwrap_err();
@@ -1379,7 +1401,9 @@ fn parsing_refuses_the_undocumented_skills_forms() {
                 || error.message.contains("requires a value")
                 || error.message.contains("unknown flag")
                 || error.message.contains("is required")
-                || error.message.contains("apply to probe only"),
+                || error.message.contains("apply to probe only")
+                || error.message.contains("apply to deploy")
+                || error.message.contains("must be supplied together"),
             "{error}"
         );
     }

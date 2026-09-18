@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use fleet_api::{API_BASE_PATH, CORRELATION_ID_HEADER, operations::ApiState, router};
 use fleet_application::operation::Operations;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt as _;
 
 #[derive(Debug)]
@@ -16,6 +16,23 @@ impl fleet_application::authz::Authorizer for PermitAll {
         &self,
         _request: fleet_application::authz::AccessRequest<'_>,
     ) -> fleet_application::authz::Decision {
+        fleet_application::authz::Decision::allow()
+    }
+}
+
+#[derive(Debug, Default)]
+struct Recording {
+    resources: Mutex<Vec<(String, Option<String>)>>,
+}
+impl fleet_application::authz::Authorizer for Recording {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        self.resources.lock().unwrap().push((
+            request.action.id().to_owned(),
+            request.resource.map(str::to_owned),
+        ));
         fleet_application::authz::Decision::allow()
     }
 }
@@ -395,6 +412,50 @@ async fn an_undeploy_starts_the_undeploy_kind() {
 }
 
 #[tokio::test]
+async fn the_authorization_names_the_machine_as_its_resource() {
+    let authorizer = Arc::new(Recording::default());
+    let state = state_for(authorizer.clone());
+    for direction in ["probe", "deploy", "undeploy"] {
+        let mut body = serde_json::json!({
+            "machineId": "m-1",
+            "endpointId": "e-1",
+            "auth": {"type": "agent"},
+            "timeoutSeconds": 30,
+        });
+        if direction != "probe" {
+            body["skillId"] = serde_json::json!("db");
+            body["agents"] = serde_json::json!(["claude_code"]);
+            body["direction"] = serde_json::json!(direction);
+        }
+        let (status, value) = call(
+            state.clone(),
+            "POST",
+            "/machines/m-1/skills/operations",
+            Some(body.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    }
+    let resources = authorizer.resources.lock().unwrap();
+    let skills: Vec<_> = resources
+        .iter()
+        .filter(|(action, _)| action.starts_with("skills."))
+        .collect();
+    // The skills action is authorized twice by design: once at the
+    // endpoint and once inside the operation use case (the generic
+    // /operations surface enforces the same catalog entry). Every one of
+    // them names the machine as its resource.
+    assert!(skills.len() >= 3);
+    for (action, resource) in skills {
+        assert_eq!(
+            resource.as_deref(),
+            Some("m-1"),
+            "{action} is machine-scoped"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_skills_denial_is_a_machine_scoped_403() {
     let state = state_for(Arc::new(DenySkills));
     let body = serde_json::json!({
@@ -407,6 +468,23 @@ async fn a_skills_denial_is_a_machine_scoped_403() {
     let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
     assert_eq!(value["code"], "denied");
+}
+
+#[tokio::test]
+async fn a_deploy_denial_is_also_a_403() {
+    let state = state_for(Arc::new(DenySkills));
+    let body = serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "skillId": "db",
+        "agents": ["claude_code"],
+        "direction": "deploy",
+        "timeoutSeconds": 30,
+    })
+    .to_string();
+    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
 }
 
 #[tokio::test]
@@ -427,4 +505,18 @@ async fn an_unknown_machine_is_a_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+}
+
+#[tokio::test]
+async fn the_generic_operations_surface_enforces_the_skills_catalog() {
+    // A caller with operation.create but without skills permissions cannot
+    // route around the skills endpoint through the generic surface.
+    let state = state_for(Arc::new(DenySkills));
+    let body = serde_json::json!({
+        "kind": "skills.probe",
+        "payloadJson": r#"{"machineId":"m-1","endpointId":"e-1","auth":{"type":"agent"},"timeoutSeconds":30}"#,
+    })
+    .to_string();
+    let (status, value) = call(state, "POST", "/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
 }

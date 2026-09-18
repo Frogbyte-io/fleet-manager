@@ -171,8 +171,9 @@ pub struct DeploymentStatus {
     /// The skill the status describes.
     #[serde(alias = "skillId", alias = "id")]
     pub skill_id: String,
-    /// The agents the skill is deployed to, as documented ids.
-    #[serde(default, alias = "deployedTo", alias = "agents")]
+    /// The agents the skill is deployed to, as documented ids. Required:
+    /// an omitted field is a shape change, not an empty deployment.
+    #[serde(alias = "deployedTo", alias = "agents")]
     pub deployed_to: Vec<String>,
 }
 
@@ -289,6 +290,18 @@ pub async fn skill_status(
     skill_id: &str,
     deadline: Duration,
 ) -> Result<DeploymentStatus, String> {
+    // A leading dash or control character would be an option or smuggle a
+    // field, never an identifier.
+    if skill_id.is_empty()
+        || skill_id.len() > 255
+        || skill_id.starts_with('-')
+        || skill_id.chars().any(char::is_control)
+    {
+        return Err(
+            "the skill id must be 1..=255 characters with no leading dash or control characters"
+                .to_owned(),
+        );
+    }
     let command = CliCommand::new(&["skills", "status", skill_id]);
     let outcome = transport.run(&command, deadline).await?;
     if outcome.killed_by_deadline {
@@ -300,14 +313,18 @@ pub async fn skill_status(
             redact(&failure_detail(&outcome))
         ));
     }
-    parse_document::<DeploymentStatus>(&outcome.stdout)
-        .map(|mut status| {
-            skill_id.clone_into(&mut status.skill_id);
-            status
-        })
-        .map_err(|()| {
-            "the skills status output is not in the documented shape; the CLI version is untested (code: unsupported_version)".to_owned()
-        })
+    let status = parse_document::<DeploymentStatus>(&outcome.stdout).map_err(|()| {
+        "the skills status output is not in the documented shape; the CLI version is untested (code: unsupported_version)".to_owned()
+    })?;
+    // The CLI must answer for the requested skill: relabeling a response
+    // for a different skill would expose the wrong deployment state.
+    if status.skill_id != skill_id {
+        return Err(format!(
+            "the CLI answered a status for {} when {} was requested (code: unsupported_version)",
+            status.skill_id, skill_id
+        ));
+    }
+    Ok(status)
 }
 
 fn parse_list<T: for<'de> Deserialize<'de>>(
@@ -385,5 +402,34 @@ fn redact_credentials(text: &str) -> String {
         rest = tail;
     }
     result.push_str(rest);
+    redact_schemeless_credentials(&result)
+}
+
+/// Redacts `user:password@` patterns anywhere in the text — scp-style
+/// remotes and error text the URL pass cannot see.
+fn redact_schemeless_credentials(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut search = 0;
+    while let Some(offset) = text[search..].find('@') {
+        let at = search + offset;
+        let token_start = text[..at]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"' || *c == '\'')
+            .map_or(0, |(index, c)| index + c.len_utf8());
+        let token = &text[token_start..at];
+        let has_password = token
+            .split_once(':')
+            .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
+        if has_password {
+            result.push_str(&text[search..token_start]);
+            result.push_str("***");
+            search = at;
+        } else {
+            result.push_str(&text[search..=at]);
+            search = at + 1;
+        }
+    }
+    result.push_str(&text[search..]);
     result
 }

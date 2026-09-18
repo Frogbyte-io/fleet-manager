@@ -29,7 +29,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the machine use cases from the API state, or answers with the
 /// standard envelope when the controller was composed without a database.
-fn machines_or_error(
+pub(crate) fn machines_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<Machines>, ApiErrorResponse> {
@@ -270,8 +270,8 @@ fn parse_status(
     )
 }
 
-/// A 400 response with a caller-safe message. Kept as a helper so the
-/// pinned literal error code lives in one place.
+/// A 403 response carrying the denial's stable reason. Kept as a helper
+/// so the pinned literal error code lives in one place.
 pub(crate) fn denied_error(
     decision: fleet_application::authz::Decision,
     correlation_id: CorrelationId,

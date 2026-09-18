@@ -30,7 +30,10 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// `ssh.exec` carries its bounded script payload in `payload_json`; the node
 /// kinds dispatch through the gateway with a `{"machineId": …}` payload; the
 /// onboarding kinds carry a `{"draftId": …}` payload and touch the draft
-/// record, never a machine (FM-210).
+/// record, never a machine (FM-210); the checkout and skills kinds carry a
+/// machine-scoped `{"machineId", "endpointId", "auth", …}` payload, with
+/// `skills.deploy`/`skills.undeploy` adding `skillId`, `agents`, and
+/// `dryRun` (FM-301, FM-302).
 pub const CREATABLE_KINDS: [&str; 17] = [
     "noop",
     "ssh.exec",
@@ -50,6 +53,23 @@ pub const CREATABLE_KINDS: [&str; 17] = [
     "skills.deploy",
     "skills.undeploy",
 ];
+
+/// The machine-scoped permission a kind's creation requires, when any.
+/// The checkout and skills kinds act on machines through SSH; creating
+/// their operations is itself the risky act, so the same catalog entry
+/// governs both the dedicated endpoint and the generic one.
+#[must_use]
+fn machine_scoped_kind_permission(kind: &str) -> Option<Permission> {
+    match kind {
+        "projects.discover" => Some(Permission::ProjectsDiscover),
+        "projects.clone" | "projects.pull" | "projects.status" | "projects.write-config" => {
+            Some(Permission::ProjectsGitWrite)
+        }
+        "skills.probe" => Some(Permission::SkillsRead),
+        "skills.deploy" | "skills.undeploy" => Some(Permission::SkillsDeploy),
+        _ => None,
+    }
+}
 
 /// The payload bound for provider inputs.
 pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
@@ -387,6 +407,36 @@ impl Operations {
             return Err(OperationUseCaseError::Invalid {
                 detail: format!("the payload exceeds {MAX_PAYLOAD_JSON} bytes"),
             });
+        }
+
+        // The checkout and skills kinds act on a machine through SSH, so
+        // their creation carries the machine-scoped authorization the
+        // dedicated endpoints enforce: a caller with operation.create but
+        // without the kind's permission cannot route around it through
+        // the generic surface. The machine id is read from the payload
+        // without deserializing the whole record.
+        if let Some(permission) = machine_scoped_kind_permission(&new.kind) {
+            let machine_id = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|payload| {
+                    payload["machineId"]
+                        .as_str()
+                        .map(std::borrow::ToOwned::to_owned)
+                })
+                .ok_or(OperationUseCaseError::Invalid {
+                    detail: format!("the {} payload must carry a machineId", new.kind),
+                })?;
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: permission,
+                    resource: Some(&machine_id),
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
         }
         let operation = self
             .port
