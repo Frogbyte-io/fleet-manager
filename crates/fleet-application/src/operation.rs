@@ -582,6 +582,7 @@ impl Operations {
             || existing.state == "failed"
             || existing.state == "cancelled"
             || existing.state == "timed_out"
+            || existing.state == "blocked_manual_approval"
         {
             return Err(OperationUseCaseError::NotFound {
                 what: format!("live operation {id}"),
@@ -633,6 +634,7 @@ impl Operations {
         let outcome = match state {
             "succeeded" => AuditOutcome::Succeeded,
             "cancelled" => AuditOutcome::Cancelled,
+            "blocked_manual_approval" => AuditOutcome::BlockedManualApproval,
             _ => AuditOutcome::Failed,
         };
         self.audit

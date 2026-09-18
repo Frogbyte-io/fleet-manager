@@ -2,6 +2,13 @@
 -- state, not a failure wearing a label. The operations table's state CHECK
 -- is rebuilt to admit it; existing rows are unaffected (none can carry the
 -- new state yet).
+--
+-- The rebuild is the only way SQLite can change a CHECK constraint. It
+-- runs inside the controller's startup migration transaction, before the
+-- HTTP surface or the worker accepts work, so no operation processing can
+-- contend with it: the single-controller deployment has no concurrent
+-- writers at migration time. The table is bounded by Fleet's own
+-- retention, not unbounded in practice.
 PRAGMA foreign_keys = OFF;
 
 CREATE TABLE operations_new (

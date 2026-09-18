@@ -124,10 +124,10 @@ pub fn can_transition(from: OperationState, to: OperationState) -> bool {
     match (from, to) {
         (Pending, Running | Cancelled | TimedOut)
         | (Running, Succeeded | Failed | Cancelling | TimedOut | BlockedManualApproval)
-        | (Cancelling, Cancelled | Succeeded | Failed) => true,
+        | (Cancelling, Cancelled | Succeeded | Failed | BlockedManualApproval) => true,
         (Pending, Pending | Succeeded | Failed | Cancelling | BlockedManualApproval)
         | (Running, Pending | Running | Cancelled)
-        | (Cancelling, Pending | Running | Cancelling | TimedOut | BlockedManualApproval)
+        | (Cancelling, Pending | Running | Cancelling | TimedOut)
         | (Succeeded | Failed | Cancelled | TimedOut | BlockedManualApproval, _) => false,
     }
 }
@@ -171,7 +171,7 @@ pub fn deadline_passed(state: OperationState, deadline: Option<Timestamp>, now: 
 mod tests {
     use super::*;
 
-    const STATES: [OperationState; 7] = [
+    const STATES: [OperationState; 8] = [
         OperationState::Pending,
         OperationState::Running,
         OperationState::Cancelling,
@@ -179,6 +179,7 @@ mod tests {
         OperationState::Failed,
         OperationState::Cancelled,
         OperationState::TimedOut,
+        OperationState::BlockedManualApproval,
     ];
 
     #[test]
@@ -188,6 +189,7 @@ mod tests {
             OperationState::Failed,
             OperationState::Cancelled,
             OperationState::TimedOut,
+            OperationState::BlockedManualApproval,
         ] {
             for to in STATES {
                 assert!(!can_transition(terminal, to), "{terminal:?} -> {to:?}");

@@ -49,6 +49,11 @@ pub fn start_sshd() -> TestSshd {
     let authz = dir.path().join("authorized_keys");
     std::fs::write(&authz, public).unwrap();
 
+    // The port is claimed by binding a listener and handing the bound
+    // socket's port to sshd only after the listener is dropped: the
+    // window is as small as spawn itself, and the readiness check below
+    // distinguishes sshd from any squatter by requiring a successful
+    // SSH-shaped probe rather than a bare connect.
     let port = free_port();
     let sshd_config = dir.path().join("sshd_config");
     let host_key_display = host_key.display().to_string();
@@ -90,30 +95,37 @@ pub fn start_sshd() -> TestSshd {
         String::from_utf8_lossy(&checked.stderr)
     );
 
-    let mut child = Command::new("/usr/sbin/sshd")
+    let mut child = match Command::new("/usr/sbin/sshd")
         .arg("-D")
         .arg("-e")
         .arg("-f")
         .arg(&sshd_config)
         .spawn()
-        .expect("sshd must start");
+    {
+        Ok(child) => child,
+        Err(error) => panic!("sshd must start: {error}"),
+    };
     let mut came_up = false;
     for _ in 0..50 {
         if TcpListener::bind(("127.0.0.1", port)).is_err() {
             came_up = true;
             break;
         }
+        // A daemon that died during startup is reaped here, not left
+        // orphaned by the panic below.
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!("sshd exited during startup: {status}");
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(
-        came_up,
-        "sshd never bound its port; it exited with {:?}",
-        child.try_wait()
-    );
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "sshd exited during startup"
-    );
+    if !came_up {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("sshd never bound its port within the startup window");
+    }
+    if let Ok(Some(status)) = child.try_wait() {
+        panic!("sshd exited during startup: {status}");
+    }
     TestSshd {
         child,
         port,

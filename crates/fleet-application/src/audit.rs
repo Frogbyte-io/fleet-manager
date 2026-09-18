@@ -165,6 +165,9 @@ pub enum AuditOutcome {
     Failed,
     /// The action was cancelled before completing.
     Cancelled,
+    /// The action ended by reporting that a human must act: the audit
+    /// trail preserves the first-class state instead of a failure.
+    BlockedManualApproval,
 }
 
 impl AuditOutcome {
@@ -175,6 +178,7 @@ impl AuditOutcome {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::BlockedManualApproval => "blocked_manual_approval",
         }
     }
 }
