@@ -24,7 +24,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the project use cases from the API state, or answers with the
 /// standard envelope when the controller was composed without a database.
-fn projects_or_error(
+pub(crate) fn projects_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<Projects>, ApiErrorResponse> {
@@ -40,7 +40,7 @@ fn projects_or_error(
 }
 
 /// Maps a project use-case outcome onto the public error envelope, once.
-fn map_project_error(
+pub(crate) fn map_project_error(
     error: &ProjectUseCaseError,
     correlation_id: CorrelationId,
 ) -> ApiErrorResponse {

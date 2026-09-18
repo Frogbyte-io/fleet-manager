@@ -4,8 +4,10 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   createProject,
   deleteProject,
+  getOperation,
   getProject,
   listProjects,
+  startReadyWorkflow,
   type PageProjectDtoItemsItem,
   type ResourceProjectDtoData,
 } from '@frogbyte-io/fleet-api-client'
@@ -19,6 +21,10 @@ const failure = ref('')
 const selected = ref<ProjectDetail | null>(null)
 const form = ref({ remote: '', name: '', description: '' })
 const busy = ref(false)
+// The ready workflow's inputs and its live progress.
+const readyForm = ref({ machineId: '', endpointId: '', root: '', dryRun: false })
+const readyPlan = ref<string | null>(null)
+const readyProgress = ref<string | null>(null)
 
 async function load() {
   try {
@@ -69,6 +75,60 @@ async function create() {
         (response.data as { message?: string })?.message ??
         `the controller answered ${response.status}`
     }
+  } finally {
+    busy.value = false
+  }
+}
+
+// Asks Fleet to make the selected project ready on a machine. A dry run
+// shows the plan first; a real run reports progress until it reaches a
+// terminal state, and a blocked Frogenv approval is a state, not an
+// error.
+async function makeReady() {
+  if (!selected.value) return
+  busy.value = true
+  readyPlan.value = null
+  readyProgress.value = null
+  try {
+    const response = await startReadyWorkflow(selected.value.id, {
+      machineId: readyForm.value.machineId,
+      endpointId: readyForm.value.endpointId,
+      auth: { type: 'agent' },
+      root: readyForm.value.root,
+      dryRun: readyForm.value.dryRun,
+    })
+    if (response.status === 200) {
+      readyPlan.value = JSON.stringify(response.data.data, null, 2)
+    } else if (response.status === 202) {
+      const operation = (
+        response.data as { data?: { id?: string; state?: string } }
+      ).data
+      readyProgress.value = `workflow ${operation?.id ?? ''} accepted`
+      // Poll until terminal; the operation record carries the story.
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        const detail = await getOperation(operation?.id ?? '')
+        if (detail.status === 200) {
+          const state = (detail.data as { data?: { state?: string } }).data
+            ?.state
+          readyProgress.value = `workflow state: ${state ?? 'unknown'}`
+          if (
+            state &&
+            !['pending', 'running', 'cancelling'].includes(state)
+          ) {
+            break
+          }
+        }
+      }
+    } else {
+      failed.value = true
+      failure.value =
+        (response.data as { message?: string })?.message ??
+        `the controller answered ${response.status}`
+    }
+  } catch (error) {
+    failed.value = true
+    failure.value = error instanceof Error ? error.message : String(error)
   } finally {
     busy.value = false
   }
@@ -225,6 +285,57 @@ onMounted(() => {
       >
         Remove project
       </button>
+
+      <!-- The ready workflow: inspect the plan with a dry run, then
+           execute and follow the operation's progress. -->
+      <div class="mt-4 border-t border-slate-800 pt-4">
+        <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          Make ready
+        </h4>
+        <div class="mt-2 grid grid-cols-3 gap-2 text-xs">
+          <input
+            v-model="readyForm.machineId"
+            placeholder="machine id"
+            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+          >
+          <input
+            v-model="readyForm.endpointId"
+            placeholder="endpoint id"
+            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+          >
+          <input
+            v-model="readyForm.root"
+            placeholder="checkout root"
+            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+          >
+        </div>
+        <div class="mt-2 flex items-center gap-2">
+          <button
+            class="rounded border border-cyan-500/40 px-3 py-1 text-xs text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50"
+            :disabled="busy || readyForm.machineId === '' || readyForm.root === ''"
+            @click="readyForm.dryRun = true; makeReady()"
+          >
+            Plan (dry run)
+          </button>
+          <button
+            class="rounded border border-emerald-500/40 px-3 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
+            :disabled="busy || readyForm.machineId === '' || readyForm.root === ''"
+            @click="readyForm.dryRun = false; makeReady()"
+          >
+            Execute
+          </button>
+        </div>
+        <pre
+          v-if="readyPlan"
+          class="mt-2 overflow-x-auto rounded bg-slate-900 p-2 text-xs text-slate-300"
+        >{{ readyPlan }}</pre>
+        <p
+          v-if="readyProgress"
+          class="mt-2 text-xs text-slate-400"
+        >
+          {{ readyProgress }}
+        </p>
+      </div>
     </div>
   </section>
 </template>

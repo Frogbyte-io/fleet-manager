@@ -38,8 +38,9 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// checkout directory) and `command` with its argument array (FM-303);
 /// the mise kinds carry the same shape, with `mise.install` adding a
 /// pinned `tool@version` and `mise.exec` adding `root` and `command`
-/// (FM-304).
-pub const CREATABLE_KINDS: [&str; 27] = [
+/// (FM-304); the ready workflow carries the machine-scoped shape plus
+/// `projectId` and `dryRun` (FM-305).
+pub const CREATABLE_KINDS: [&str; 28] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -67,6 +68,7 @@ pub const CREATABLE_KINDS: [&str; 27] = [
     "mise.status",
     "mise.install",
     "mise.exec",
+    "ready.workflow",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -102,6 +104,7 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
         | "frogenv.env-run" => Some(Permission::FrogenvOperate),
         "tools.inventory" | "mise.status" => Some(Permission::ToolsRead),
         "mise.install" | "mise.exec" => Some(Permission::MiseOperate),
+        "ready.workflow" => Some(Permission::ProjectsReady),
         _ => None,
     }
 }
@@ -510,6 +513,17 @@ impl Operations {
                 detail,
             })?;
         Ok(operation)
+    }
+
+    /// Reads one operation's current state id, when it exists. The
+    /// workflow executor polls this between steps.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    pub async fn get_state(&self, id: &str) -> Result<String, PortFailure> {
+        let operation = self.port.get(id).await?;
+        Ok(operation.state)
     }
 
     /// Reads one operation.
