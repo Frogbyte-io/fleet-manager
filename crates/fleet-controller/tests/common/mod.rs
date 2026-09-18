@@ -7,11 +7,24 @@ use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-/// The port-allocation lock: tests within one binary run in parallel
-/// threads, and the free-port window between allocation and sshd's bind
-/// is racy across them. Serializing startup removes the race; the suites
-/// still run their SSH work concurrently.
-pub static STARTUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The port-allocation lock: the free-port window between allocation and
+/// sshd's bind is racy both across the parallel threads of one binary and
+/// across the separate test binaries CI runs concurrently. A cross-process
+/// file lock on a fixed path serializes startup everywhere; the suites'
+/// SSH work still runs concurrently.
+pub static STARTUP_LOCK_FILE: &str = "/tmp/fleet-test-sshd-startup.lock";
+
+fn acquire_startup_lock() -> std::fs::File {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(STARTUP_LOCK_FILE)
+        .expect("the startup lock file must open");
+    file.lock().expect("the startup lock must acquire");
+    file
+}
 
 /// One running sshd bound to an ephemeral port with its own host key.
 pub struct TestSshd {
@@ -31,9 +44,7 @@ impl Drop for TestSshd {
 /// start surfaces immediately instead of failing every test later on the
 /// first SSH probe with a misleading error.
 pub fn start_sshd() -> TestSshd {
-    let _guard = STARTUP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = acquire_startup_lock();
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
     let user_key = dir.path().join("user_ed25519");

@@ -10,10 +10,23 @@ use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-/// The port-allocation lock: tests within one binary run in parallel
-/// threads, and the free-port window between allocation and sshd's bind
-/// is racy across them.
-static STARTUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The port-allocation lock: the free-port window between allocation and
+/// sshd's bind is racy both across threads and across concurrently run
+/// test binaries. A cross-process file lock serializes startup
+/// everywhere.
+const STARTUP_LOCK_FILE: &str = "/tmp/fleet-test-sshd-startup.lock";
+
+fn acquire_startup_lock() -> std::fs::File {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(STARTUP_LOCK_FILE)
+        .expect("the startup lock file must open");
+    file.lock().expect("the startup lock must acquire");
+    file
+}
 
 /// One running sshd bound to an ephemeral port with its own host key.
 struct TestSshd {
@@ -38,9 +51,7 @@ fn free_port() -> u16 {
 }
 
 fn start_sshd() -> TestSshd {
-    let _guard = STARTUP_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = acquire_startup_lock();
     let dir = tempfile::tempdir().unwrap();
     let host_key = dir.path().join("host_ed25519");
     let user_key = dir.path().join("user_ed25519");
