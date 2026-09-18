@@ -1634,7 +1634,8 @@ fn parsing_refuses_the_undocumented_frogenv_forms() {
                 || error.message.contains("requires a value")
                 || error.message.contains("unknown flag")
                 || error.message.contains("is required")
-                || error.message.contains("apply to env run only"),
+                || error.message.contains("apply to env run only")
+                || error.message.contains("applies to"),
             "{error}"
         );
     }

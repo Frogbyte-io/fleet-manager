@@ -227,12 +227,18 @@ impl FrogenvExecutor {
                     )
                     .await;
                 };
+                // Redact every string field again at the boundary: the
+                // provider sanitizes its own returns, but this result is
+                // a second exposure path and gitRemote can carry
+                // credentials.
+                let redact_field =
+                    |value: &Option<String>| value.as_deref().map(fleet_provider_frogenv::redact);
                 let result_json = serde_json::json!({
                     "status": {
                         "configured": document.configured,
-                        "machineState": document.machine_state,
-                        "machineId": document.machine_id,
-                        "gitRemote": document.git_remote,
+                        "machineState": redact_field(&document.machine_state),
+                        "machineId": redact_field(&document.machine_id),
+                        "gitRemote": redact_field(&document.git_remote),
                     },
                 })
                 .to_string();

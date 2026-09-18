@@ -855,7 +855,12 @@ fn parse_checkout_flags(
         }
     }
     let auth_arg = match (auth.as_deref(), identity.clone()) {
-        (Some("agent"), _) => OnboardAuthArg::Agent,
+        (Some("agent"), None) => OnboardAuthArg::Agent,
+        (Some("agent"), Some(_)) => {
+            return Err(CliError {
+                message: "--identity applies to --auth identity-file only".to_owned(),
+            });
+        }
         (Some("identity-file"), Some(path)) => OnboardAuthArg::IdentityFile(path),
         (Some("identity-file"), None) => {
             return Err(CliError {

@@ -563,6 +563,18 @@ async fn an_unknown_machine_is_a_404() {
 }
 
 #[tokio::test]
+async fn the_generic_operations_surface_denies_a_frogenv_denied_caller() {
+    let state = state_for(Arc::new(DenyFrogenv));
+    let body = serde_json::json!({
+        "kind": "frogenv.status",
+        "payloadJson": r#"{"machineId":"m-1","endpointId":"e-1","auth":{"type":"agent"},"timeoutSeconds":30}"#,
+    })
+    .to_string();
+    let (status, value) = call(state, "POST", "/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+}
+
+#[tokio::test]
 async fn the_generic_operations_surface_enforces_the_frogenv_catalog() {
     let authorizer = Arc::new(Recording::default());
     let state = state_for(authorizer.clone());
