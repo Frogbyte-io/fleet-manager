@@ -399,7 +399,7 @@ fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagno
             };
             if userinfo.contains(':') {
                 diagnostics.push(Diagnostic {
-                    code: "FM_SEMANTIC_CREDENTIAL_REFERENCE",
+                    code: "FM_SCHEMA_SEMANTIC_CREDENTIAL_REFERENCE",
                     location: format!("{base}/spec/endpoints/{index}/reference"),
                     message: "an endpoint reference must not carry credentials; reference the machine's secret records instead".to_owned(),
                 });
@@ -413,7 +413,7 @@ fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagno
         && let Err(detail) = fleet_core::NormalizedRemote::parse(remote)
     {
         diagnostics.push(Diagnostic {
-            code: "FM_SEMANTIC_INVALID_REMOTE",
+            code: "FM_SCHEMA_SEMANTIC_INVALID_REMOTE",
             location: format!("{base}/spec/remote"),
             message: format!("the project remote is not a normalizable remote: {detail}"),
         });
