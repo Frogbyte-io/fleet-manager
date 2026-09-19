@@ -116,25 +116,28 @@ impl FieldDifference {
         }
     }
 
-    /// An `unknown` field: the observation was unavailable.
+    /// An `unknown` field: the observation was unavailable. The desired
+    /// value is preserved so consumers can explain the target they could
+    /// not verify.
     #[must_use]
-    pub fn unknown(identity: &str, reason: &str) -> Self {
+    pub fn unknown(identity: &str, desired: Option<&str>, reason: &str) -> Self {
         Self {
             identity: identity.to_owned(),
             state: DifferenceState::Unknown,
-            desired: None,
+            desired: desired.map(str::to_owned),
             observed: None,
             reason: Some(reason.to_owned()),
         }
     }
 
     /// An `unsupported` field: no normalization path for this provider.
+    /// The desired value is preserved for the same reason.
     #[must_use]
-    pub fn unsupported(identity: &str, reason: &str) -> Self {
+    pub fn unsupported(identity: &str, desired: Option<&str>, reason: &str) -> Self {
         Self {
             identity: identity.to_owned(),
             state: DifferenceState::Unsupported,
-            desired: None,
+            desired: desired.map(str::to_owned),
             observed: None,
             reason: Some(reason.to_owned()),
         }
@@ -170,9 +173,20 @@ impl DifferenceSet {
     }
 
     /// Sorts the fields by identity and deduplicates: the canonical form
-    /// the planner and the dry-run rendering consume.
+    /// the planner and the dry-run rendering consume. When duplicate
+    /// identities carry different states, the honest terminal state wins —
+    /// an `unknown` discarded in favor of an actionable state would let a
+    /// planner act on a guess.
     pub fn canonicalize(&mut self) {
         self.fields.sort_by(|a, b| a.identity.cmp(&b.identity));
+        // Sort duplicates so the honest terminal state sorts FIRST within
+        // its identity group (descending precedence); dedup_by keeps the
+        // first element of a run.
+        self.fields.sort_by(|a, b| {
+            a.identity
+                .cmp(&b.identity)
+                .then_with(|| state_precedence(b.state).cmp(&state_precedence(a.state)))
+        });
         self.fields.dedup_by(|a, b| a.identity == b.identity);
     }
 
@@ -199,6 +213,18 @@ impl DifferenceSet {
             | DifferenceState::Extra
             | DifferenceState::Changed => !field.actionable(),
         })
+    }
+}
+
+/// The precedence that decides which duplicate identity survives
+/// canonicalization: the higher value wins. Honest terminal states
+/// outrank actionable ones — `unknown` (3) and `unsupported` (2) beat
+/// `missing`/`extra`/`changed` (1).
+fn state_precedence(state: DifferenceState) -> u8 {
+    match state {
+        DifferenceState::Unknown => 3,
+        DifferenceState::Unsupported => 2,
+        _ => 1,
     }
 }
 
@@ -264,8 +290,13 @@ mod tests {
 
     #[test]
     fn unknown_and_unsupported_are_never_actionable() {
-        let unknown = FieldDifference::unknown("tool:node", "the mise status did not answer");
-        let unsupported = FieldDifference::unsupported("tool:exotic", "no normalization path");
+        let unknown = FieldDifference::unknown(
+            "tool:node",
+            Some("20.11.0"),
+            "the mise status did not answer",
+        );
+        let unsupported =
+            FieldDifference::unsupported("tool:exotic", Some("1.0"), "no normalization path");
         assert!(!unknown.actionable());
         assert!(!unsupported.actionable());
         assert_eq!(unknown.state.to_string(), "unknown");
@@ -299,12 +330,20 @@ mod tests {
     #[test]
     fn convergence_requires_no_unknowns() {
         let mut set = DifferenceSet::new();
-        set.push(FieldDifference::unsupported("tool:exotic", "no path"));
+        set.push(FieldDifference::unsupported(
+            "tool:exotic",
+            Some("1.0"),
+            "no path",
+        ));
         assert!(
             set.converged(),
             "an unsupported field is reported, not blocking"
         );
-        set.push(FieldDifference::unknown("tool:mystery", "no answer"));
+        set.push(FieldDifference::unknown(
+            "tool:mystery",
+            Some("1.0"),
+            "no answer",
+        ));
         assert!(
             !set.converged(),
             "an unknown field blocks the readiness claim"
@@ -312,11 +351,36 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_keeps_the_honest_terminal_state_on_duplicates() {
+        // An actionable difference followed by an honest unknown: the
+        // unknown survives, because acting on the actionable one would be
+        // guessing.
+        let mut set = DifferenceSet::new();
+        set.push(FieldDifference::missing("tool:node", "20.11.0"));
+        set.push(FieldDifference::unknown(
+            "tool:node",
+            Some("20.11.0"),
+            "the inventory did not answer",
+        ));
+        set.canonicalize();
+        assert_eq!(set.fields.len(), 1);
+        assert_eq!(set.fields[0].state, DifferenceState::Unknown);
+    }
+
+    #[test]
     fn actionable_excludes_the_honest_states() {
         let mut set = DifferenceSet::new();
         set.push(FieldDifference::missing("tool:node", "20.11.0"));
-        set.push(FieldDifference::unknown("tool:mystery", "no answer"));
-        set.push(FieldDifference::unsupported("tool:exotic", "no path"));
+        set.push(FieldDifference::unknown(
+            "tool:mystery",
+            Some("1.0"),
+            "no answer",
+        ));
+        set.push(FieldDifference::unsupported(
+            "tool:exotic",
+            Some("1.0"),
+            "no path",
+        ));
         set.canonicalize();
         let actionable = set.actionable();
         assert_eq!(actionable.len(), 1);

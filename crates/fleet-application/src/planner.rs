@@ -9,8 +9,10 @@
 //! and `unsupported` differences are never planned: the planner refuses
 //! to act on what it does not know.
 //!
-//! The dry-run rendering is one serializer shared by the API, the web,
-//! and `fleetctl --output json`, so the three surfaces cannot drift.
+//! The dry-run rendering (`render_dry_run`) is one serializer intended
+//! to be shared by the API, the web, and `fleetctl --output json`; the
+//! apply engine (FM-402) wires the surfaces to it when the plan gains an
+//! execution path.
 #![warn(missing_docs)]
 
 use fleet_core::{DifferenceSet, DifferenceState, FieldDifference};
@@ -69,21 +71,35 @@ fn rank(kind: &str) -> u8 {
 }
 
 /// The operation kind that resolves one actionable difference, derived
-/// from the difference's identity.
+/// from the difference's identity AND its state: a missing tool installs,
+/// an extra skill undeploys. An identity outside the known vocabularies
+/// returns `None` and is classified as unsupported rather than dropped.
 #[must_use]
 fn resolving_kind(difference: &FieldDifference) -> Option<&'static str> {
     let identity = &difference.identity;
     if let Some(tool) = identity.strip_prefix("tool:") {
         let _ = tool;
-        return Some("mise.install");
+        return match difference.state {
+            // Removing an installed tool has no bounded path: report it.
+            DifferenceState::Missing | DifferenceState::Changed => Some("mise.install"),
+            _ => None,
+        };
     }
     if let Some(rest) = identity.strip_prefix("skill:") {
         let skill_id = rest.split('/').next()?;
         let _ = skill_id;
-        return Some("skills.deploy");
+        return match difference.state {
+            DifferenceState::Missing => Some("skills.deploy"),
+            DifferenceState::Extra => Some("skills.undeploy"),
+            _ => None,
+        };
     }
     if identity.starts_with("checkout:") {
-        return Some("projects.clone");
+        return match difference.state {
+            // Removing a checkout has no guarded path: report it.
+            DifferenceState::Missing | DifferenceState::Changed => Some("projects.clone"),
+            _ => None,
+        };
     }
     None
 }
@@ -127,6 +143,15 @@ pub fn plan(set: &DifferenceSet) -> Plan {
                         difference: difference.clone(),
                         reason: reason_for(kind).to_owned(),
                     });
+                } else {
+                    // An identity the planner cannot resolve (or an extra
+                    // tool/checkout with no guarded removal path) is
+                    // classified as unsupported, never silently dropped.
+                    unactionable.push(FieldDifference::unsupported(
+                        &difference.identity,
+                        difference.desired.as_deref(),
+                        "no bounded operation resolves this difference",
+                    ));
                 }
             }
         }
@@ -156,7 +181,8 @@ fn reason_for(kind: &str) -> &'static str {
 }
 
 /// The canonical dry-run rendering: one serializer shared by the API,
-/// the web, and `fleetctl --output json`, so the surfaces cannot drift.
+/// the web, and `fleetctl --output json` once the apply engine (FM-402)
+/// wires the surfaces to it.
 #[must_use]
 pub fn render_dry_run(plan: &Plan) -> serde_json::Value {
     serde_json::to_value(plan).unwrap_or_else(|_| {
@@ -170,7 +196,7 @@ pub fn render_dry_run(plan: &Plan) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{plan, render_dry_run};
-    use fleet_core::{DifferenceSet, FieldDifference};
+    use fleet_core::{DifferenceSet, DifferenceState, FieldDifference};
 
     fn set_with(fields: Vec<FieldDifference>) -> DifferenceSet {
         let mut set = DifferenceSet::new();
@@ -216,8 +242,8 @@ mod tests {
     #[test]
     fn unknown_and_unsupported_are_never_planned() {
         let set = set_with(vec![
-            FieldDifference::unknown("tool:node", "the inventory did not answer"),
-            FieldDifference::unsupported("tool:exotic", "no path"),
+            FieldDifference::unknown("tool:node", Some("20.11.0"), "the inventory did not answer"),
+            FieldDifference::unsupported("tool:exotic", Some("1.0"), "no path"),
             FieldDifference::missing("tool:git", "2.43.0"),
         ]);
         let plan = plan(&set);
@@ -268,12 +294,16 @@ mod tests {
     }
 
     #[test]
-    fn an_extra_checkout_plans_a_clone() {
+    fn an_extra_checkout_is_reported_not_planned() {
+        // Removing a checkout has no guarded path: the planner classifies
+        // it as unsupported instead of planning a destructive action.
         let set = set_with(vec![FieldDifference::extra(
             "checkout:github.com/x/y",
             "/elsewhere",
         )]);
         let plan = plan(&set);
-        assert_eq!(plan.actions[0].kind, "projects.clone");
+        assert!(plan.actions.is_empty());
+        assert_eq!(plan.unactionable.len(), 1);
+        assert_eq!(plan.unactionable[0].state, DifferenceState::Unsupported);
     }
 }
