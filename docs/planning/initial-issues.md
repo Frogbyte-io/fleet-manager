@@ -308,6 +308,46 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 
 **Status: In progress (as of 2026-09-17).** Created as epic #76 with issues #77–#82. Resolved: FM-300 (#77, PR #83 — project identity keyed by the normalized Git remote with a documented grammar that refuses credential-bearing remotes, per-machine checkout facts as observed state in a STRICT migration with machine FK cascade and stale-observation guards, the /api/v1/projects surface, `fleetctl projects` commands, the web ProjectsPanel, four new permission entries projects.read/create/update/delete (19 → 23), idempotency-key replay on create, and cursor pagination; two cubic review rounds (31 findings) addressed in-PR). Resolved: FM-301 (#78, PR #84 — checkout discovery over the SSH probe pattern with base64 JSON lines and honest unavailable states, clone/pull/status/write-config executor kinds over the bounded transport with hooks disabled and redacted output, guarded agent-config writes with path containment and atomic rename, the authz catalog grown to 26 entries with machine-scoped discovery authorization, and the /projects/{projectId}/discoveries + /checkouts surface; one cubic review round addressed in-PR). Resolved: FM-302 (#79, PR #85 — the Skills Manager provider over its documented `skills-manager-cli --json` contract with honest degradation, probe/deploy/undeploy executor kinds behind a version gate with checksum-verified pinned installs, the authz catalog grown to 28 entries enforced on both the dedicated and generic operation surfaces, and the /machines/{machineId}/skills/operations endpoint; five cubic review rounds addressed in-PR). Resolved: FM-303 (#80, PR #86 — the Frogenv provider over its documented CLI with honest degradation, six executor kinds with blocked_manual_approval as a first-class terminal state across the domain state machine, audit ledger, operation stream, and cancel guard; env run as the only environment-bound execution path with verbatim argument arrays; structural redaction of value-shaped material; the authz catalog grown to 30 entries; four cubic review rounds addressed, with the rebuild-migration finding resolved as a documented deliberate decision). Resolved: FM-304 (#81, PR #87 — tool presence and versions as separate capability facts with honest gaps, the mise provider over its documented CLI with idempotent pinned installs and verbatim exec arrays, project files kept authoritative, the authz catalog grown to 32 entries, and a pre-existing CLI pre-scan flaw fixed; two cubic review rounds addressed, with credential redaction extracted into a shared fleet-core module). Resolved: FM-305 (#82, PR #88 — the ready-project workflow as a plan-then-execute state machine over durable operations, with a pure-function planner, in-process step execution through the composed chain, blocked/manual approval as a first-class terminal state, deadline enforcement, dry run, projects.ready in the authz catalog (33 entries), the API endpoint, fleetctl projects ready, and the web Make-ready panel; four cubic review rounds addressed, including two structural P0s caught before merge). M3 is code-complete; the integration-VM end-to-end run remains on the acceptance checklist for the maintainer's live environment. The wave order is: FM-300 (#77 project identity/storage) → FM-301 (#78 checkout discovery + guarded actions) → FM-302 (#79 Skills Manager provider) and FM-303 (#80 Frogenv provider) in parallel → FM-304 (#81 tool inventory + mise) → FM-305 (#82 ready-project workflow, the exit gate). FM-215 (responsive worker) is a prerequisite for the long clone/pull/setup operations.
 
+## M4 — Profiles, desired state, and GitOps
+
+**Status: Planned (as of 2026-09-18).** Created as epics #5–#8 with issues #83–#88 reserved for M3; the M4 implementation issues are #89–#92. The wave order is: FM-400 (#89 desired resource schema and composition) → FM-401 (#90 observed state, difference model, and planner) → FM-402 (#91 apply engine) → FM-403 (#92 Git source and GitHub bootstrap). M4 is not on the critical path to the first Lab release; it can proceed independently now that M3 is code-complete.
+
+### FM-400 — Add the desired resource schema and deterministic composition
+
+**Context:** The generic `apiVersion`/`kind`/metadata/spec envelope (FM-005) exists with only `FleetConfig` registered; M4 fills the registry with the real resource kinds and the composition semantics `docs/architecture/desired-state.md` defines.
+**Goal:** Versioned resource definitions for machine, profile, project, tool requirement, skill preset, recipe/action, Lab template, and policy binding; deterministic profile composition with provenance; published JSON Schemas generated and checked in CI; legacy role/pack fixtures migrated as test fixtures without preserving accidental schema constraints.
+**Dependencies:** FM-005, FM-004, the M2 machine model.
+**Acceptance criteria:** every kind validates against its published schema; composition is deterministic and explainable (resolved fields record source resource/path); cycles and unresolved references fail semantic validation with stable diagnostics; conflicting scalar requirements are rejected, never last-write-wins; secret fields carry secret-reference IDs only; no observed/status/secret values in Git resources.
+**Non-goals:** reconciliation, drift, or apply behavior; a generic configuration-management language.
+**Tests:** fixture-driven validation (valid/invalid per kind), composition determinism and provenance, cycle/conflict diagnostics, schema generation checked in CI.
+
+### FM-401 — Add observed-state normalization, the difference model, and the planner
+
+**Context:** Desired resources need an observed counterpart and a stable drift vocabulary before anything can be applied.
+**Goal:** Normalize observations (machine facts, checkouts, tool versions, skill deployments) into the desired resource's terms; the difference model (`missing`, `extra`, `changed`, `unknown`, `unsupported`); a planner producing dependency-ordered actions from a difference set with a dry-run shape usable from API, web, and `fleetctl --output json`.
+**Dependencies:** FM-400, the M2 inventory/observation model.
+**Acceptance criteria:** `unknown` and `unsupported` are reported honestly rather than coerced into `changed`; the planner's ordering is deterministic; dry-run output is identical across the three surfaces; no plan executes anything.
+**Non-goals:** executing the plan (FM-402); auto-resolving semantic conflicts.
+**Tests:** normalization round-trips, difference-model fixtures per state, planner ordering, dry-run parity across surfaces.
+
+### FM-402 — Add the apply engine
+
+**Context:** A plan needs authorized, durable, compensating execution.
+**Goal:** An authorized plan converges a machine safely: dependency-ordered execution through the durable operation kernel, dry run, explicit approvals for risky steps, compensation records, and post-apply verification that re-observes and reports truthfully.
+**Dependencies:** FM-401, FM-108/FM-109 (durable operations and worker).
+**Acceptance criteria:** an unauthorized plan never executes; a failed step leaves the operation record with completed/remaining steps and compensation status; restart/resume preserves truth and audit history; post-apply verification re-observes rather than assuming.
+**Non-goals:** auto-resolving semantic conflicts; a generic configuration-management language.
+**Tests:** failure injection at each step, restart/resume, authorization denials, compensation records, post-apply verification honesty.
+
+### FM-403 — Add the Git source adapter and GitHub bootstrap
+
+**Context:** Git becomes the canonical source of desired resources only when validation gates activation.
+**Goal:** An isolated clone/worktree adapter (fetching a commit creates an immutable candidate by SHA + content digest; validation completes before activation; the last valid revision stays active on failure; activation is serialized and audited), conflict reporting with manual rollback, and the GitHub App web flow for one-click private repository creation with least permissions and expiring tokens.
+**Dependencies:** FM-400, FM-102 (encrypted secret records).
+**Acceptance criteria:** an invalid revision cannot become active; hooks from the desired repository never run; no secrets enter the desired repository or its logs; the GitHub flow requests least permissions and stores expiring tokens only.
+**Non-goals:** auto-resolving Git conflicts; UI editing that mutates only the imported SQLite copy.
+**Tests:** candidate immutability, activation serialization and audit, failure-stays-active, conflict reporting, GitHub flow contract tests with least-permission assertions.
+
 ### FM-300 — Add project identity, checkout model, and storage
 
 **Context:** Projects need stable identity that survives moves between machines; the normalized Git remote is the identity, checkouts are facts.  
