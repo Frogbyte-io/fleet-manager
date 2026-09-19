@@ -686,11 +686,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-provider-git"
+version = "0.1.0"
+dependencies = [
+ "fleet-core",
+ "serde",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "fleet-provider-github"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fleet-application",
  "fleet-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
