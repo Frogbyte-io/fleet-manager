@@ -123,6 +123,117 @@ impl ApplyExecutor {
                 reason: String::new(),
             })
             .collect();
+        // Payload validation is the last line of defense: the generic
+        // /operations surface authorizes machine-scoped creation but does
+        // not run the apply plan's boundary checks, so the executor
+        // refuses anything the dedicated endpoint would have rejected —
+        // unknown kinds, non-actionable states, kind/state/identity
+        // mismatches, and non-increasing orders.
+        const SUPPORTED_KINDS: [&str; 4] = [
+            "mise.install",
+            "skills.deploy",
+            "skills.undeploy",
+            "projects.clone",
+        ];
+        let mut previous_order: Option<u32> = None;
+        for action in &planned {
+            if !SUPPORTED_KINDS.contains(&action.kind.as_str()) {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    &fleet_application::planner::PlannedAction {
+                        order: 0,
+                        kind: "apply.workflow".to_owned(),
+                        difference: fleet_core::FieldDifference::unknown(
+                            "apply.workflow",
+                            None,
+                            &format!("the action kind {:?} is not executable", action.kind),
+                        ),
+                        reason: String::new(),
+                    },
+                    &format!("the action kind {:?} is not executable", action.kind),
+                    &[],
+                    &[],
+                    &[],
+                )
+                .await;
+            }
+            if !action.difference.state.actionable() {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    &fleet_application::planner::PlannedAction {
+                        order: 0,
+                        kind: "apply.workflow".to_owned(),
+                        difference: fleet_core::FieldDifference::unknown(
+                            "apply.workflow",
+                            None,
+                            "an apply action must carry an actionable difference state",
+                        ),
+                        reason: String::new(),
+                    },
+                    "an apply action must carry an actionable difference state",
+                    &[],
+                    &[],
+                    &[],
+                )
+                .await;
+            }
+            let expected_prefix = match action.kind.as_str() {
+                "mise.install" => "tool:",
+                "skills.deploy" | "skills.undeploy" => "skill:",
+                _ => "checkout:",
+            };
+            if !action.difference.identity.starts_with(expected_prefix) {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    &fleet_application::planner::PlannedAction {
+                        order: 0,
+                        kind: "apply.workflow".to_owned(),
+                        difference: fleet_core::FieldDifference::unknown(
+                            "apply.workflow",
+                            None,
+                            &format!(
+                                "the action kind {:?} requires an {:?} identity",
+                                action.kind, expected_prefix
+                            ),
+                        ),
+                        reason: String::new(),
+                    },
+                    &format!(
+                        "the action kind {:?} requires an {:?} identity",
+                        action.kind, expected_prefix
+                    ),
+                    &[],
+                    &[],
+                    &[],
+                )
+                .await;
+            }
+            if previous_order.is_some_and(|previous| action.order <= previous) {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    &fleet_application::planner::PlannedAction {
+                        order: 0,
+                        kind: "apply.workflow".to_owned(),
+                        difference: fleet_core::FieldDifference::unknown(
+                            "apply.workflow",
+                            None,
+                            "the action orders must be unique and strictly increasing",
+                        ),
+                        reason: String::new(),
+                    },
+                    "the action orders must be unique and strictly increasing",
+                    &[],
+                    &[],
+                    &[],
+                )
+                .await;
+            }
+            previous_order = Some(action.order);
+        }
         // An empty plan has nothing to execute and no action to attribute
         // a verification failure to: it is refused here, never queued into
         // a panic.

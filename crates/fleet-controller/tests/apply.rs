@@ -194,6 +194,79 @@ async fn an_unapproved_plan_completes_blocked_naming_the_steps() {
 }
 
 #[tokio::test]
+async fn a_kind_state_mismatched_payload_fails_honestly() {
+    // The generic /operations surface authorizes machine-scoped creation
+    // but does not run the plan's boundary checks; the executor is the
+    // last line of defense and refuses a kind/state/identity mismatch.
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let pool = store.pool().clone();
+    std::mem::forget(store);
+    let operations = Arc::new(Operations::new(
+        Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+    ));
+    let executor = fleet_controller::apply::ApplyExecutor::new(
+        operations.clone(),
+        Arc::new(StubInner {
+            states: std::sync::Mutex::new(vec![]),
+        }),
+    );
+    let payload = serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "planId": "plan-1",
+        "actions": [
+            {"order": 1, "kind": "mise.install",
+             "difference": {"identity": "skill:db/claude_code", "state": "missing",
+                            "desired": "deployed", "observed": null, "reason": null}},
+        ],
+        "approvals": [],
+        "timeoutSeconds": 600,
+    });
+    let operation = operations
+        .create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "apply.workflow".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: Some(payload.to_string()),
+            },
+        )
+        .await
+        .unwrap();
+    operations
+        .tick(
+            &executor,
+            "worker-a",
+            fleet_core::SystemClock::now_unix_millis(),
+            60_000,
+        )
+        .await
+        .unwrap();
+    let finished = operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &operation.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(finished.state, "failed");
+    let error: serde_json::Value = serde_json::from_str(&finished.error_json.unwrap()).unwrap();
+    assert!(
+        error["detail"].as_str().unwrap().contains("identity"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn an_approved_plan_executes_every_action_and_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
