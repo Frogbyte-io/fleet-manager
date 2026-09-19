@@ -35,6 +35,34 @@ fn minimal_fixture_validates_on_the_rust_library_path() {
 }
 
 #[test]
+fn every_valid_fixture_validates() {
+    let fixtures = repository_root().join("schemas/fixtures/valid");
+    let mut yaml_paths = fs::read_dir(fixtures)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "yaml")
+        })
+        .collect::<Vec<_>>();
+    yaml_paths.sort();
+
+    for yaml_path in yaml_paths {
+        let relative = yaml_path.strip_prefix(repository_root()).unwrap();
+        let diagnostics = validate_sources(&[SourceDocument {
+            path: relative.to_path_buf(),
+            yaml: fs::read_to_string(&yaml_path).unwrap(),
+        }]);
+        assert_eq!(
+            diagnostics,
+            [],
+            "{} must validate: {diagnostics:?}",
+            relative.display()
+        );
+    }
+}
+
+#[test]
 fn invalid_fixtures_match_cli_diagnostic_goldens() {
     let fixtures = repository_root().join("schemas/fixtures/invalid");
     let mut yaml_paths = fs::read_dir(fixtures)
