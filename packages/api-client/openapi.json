@@ -590,6 +590,79 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/apply": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Starts the apply workflow.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "startApplyWorkflow",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine to apply on.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The apply workflow was accepted. Requires machine.read for the machine in addition to apply.execute.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not execute apply plans.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/frogenv/operations": {
       "post": {
         "tags": [
@@ -2202,6 +2275,96 @@
           }
         }
       },
+      "ApplyActionDto": {
+        "type": "object",
+        "description": "One planned action the caller submits.",
+        "required": [
+          "order",
+          "kind",
+          "difference"
+        ],
+        "properties": {
+          "difference": {
+            "$ref": "#/components/schemas/FieldDifferenceDto",
+            "description": "The difference the action resolves."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The operation kind."
+          },
+          "order": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The execution order.",
+            "minimum": 0
+          }
+        }
+      },
+      "ApplyApprovalDto": {
+        "type": "object",
+        "description": "One approval the caller supplies.",
+        "required": [
+          "planId",
+          "actionOrder",
+          "kind"
+        ],
+        "properties": {
+          "actionOrder": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The action's order the approval covers.",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "The action's operation kind the approval covers."
+          },
+          "planId": {
+            "type": "string",
+            "description": "The plan's identity the approval is bound to."
+          }
+        }
+      },
+      "ApplyAuthDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The controller's agent supplies the key.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A specific identity file.",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "The identity file's path."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "identityFile"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How the apply workflow's endpoint authenticates."
+      },
       "CapabilityFactDto": {
         "type": "object",
         "description": "One capability fact as the read model displays it: the recorded status\nwith the staleness rule applied at the read time.",
@@ -2818,6 +2981,45 @@
               "$ref": "#/components/schemas/EnrollmentTokenDto"
             },
             "description": "The machine's tokens, newest first."
+          }
+        }
+      },
+      "FieldDifferenceDto": {
+        "type": "object",
+        "description": "One field difference, as the planner produced it.",
+        "required": [
+          "identity",
+          "state"
+        ],
+        "properties": {
+          "desired": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The desired value, when the field is desired."
+          },
+          "identity": {
+            "type": "string",
+            "description": "The field's stable identity."
+          },
+          "observed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The observed value, when one was observed."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the state is `unknown` or `unsupported`, when it is."
+          },
+          "state": {
+            "type": "string",
+            "description": "The drift state."
           }
         }
       },
@@ -5165,6 +5367,55 @@
           "deploy",
           "undeploy"
         ]
+      },
+      "StartApplyRequest": {
+        "type": "object",
+        "description": "The body of the start-apply-workflow request.",
+        "required": [
+          "machineId",
+          "endpointId",
+          "auth",
+          "planId",
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApplyActionDto"
+            },
+            "description": "The planned actions, in order."
+          },
+          "approvals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApplyApprovalDto"
+            },
+            "description": "The approvals supplied with the plan."
+          },
+          "auth": {
+            "$ref": "#/components/schemas/ApplyAuthDto",
+            "description": "How the endpoint authenticates."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "The SSH endpoint id to act through."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine to apply on (must match the path's machine)."
+          },
+          "planId": {
+            "type": "string",
+            "description": "The plan's identity, which every approval is bound to."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds, for the whole workflow.",
+            "minimum": 0
+          }
+        }
       },
       "StartDiscoveryRequest": {
         "type": "object",

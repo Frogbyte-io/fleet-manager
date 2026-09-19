@@ -11,6 +11,7 @@
 
 #![warn(missing_docs)]
 
+pub mod apply;
 mod correlation;
 mod envelope;
 mod error;
@@ -95,6 +96,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         ready::ReadyAuthDto,
         ready::ReadyToolDto,
         ready::StartReadyRequest,
+        apply::ApplyActionDto,
+        apply::ApplyApprovalDto,
+        apply::ApplyAuthDto,
+        apply::FieldDifferenceDto,
+        apply::StartApplyRequest,
         projects::CreateProjectRequest,
         projects::ProjectDto,
         projects::UpdateProjectRequest,
@@ -180,6 +186,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(frogenv::start_frogenv_operation))
                 .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(ready::start_ready_workflow))
+                .routes(routes!(apply::start_apply_workflow))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts

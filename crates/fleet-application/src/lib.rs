@@ -4,6 +4,7 @@
 
 #![warn(missing_docs)]
 
+pub mod apply;
 pub mod audit;
 pub mod authz;
 pub mod composition;
