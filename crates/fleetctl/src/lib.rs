@@ -1895,24 +1895,35 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             auth,
             plan_id,
             ..
-        } => (
-            reqwest::Method::POST,
-            format!("/api/v1/machines/{machine}/apply"),
-            Vec::new(),
-            Some(serde_json::json!({
-                "machineId": machine,
-                "endpointId": endpoint,
-                "auth": checkout_auth_value(auth),
-                "planId": plan_id,
-                "actions": serde_json::from_str::<serde_json::Value>(
-                    read_stdin_line("the plan JSON")?.trim(),
-                )
-                .map_err(|error| CliError {
-                    message: format!("the plan JSON is not valid: {error}"),
-                })?,
-                "timeoutSeconds": 1800,
-            })),
-        ),
+        } => {
+            // The plan document may span multiple lines: read stdin to
+            // EOF, then split it into its actions and approvals so both
+            // request fields are populated.
+            let document: serde_json::Value =
+                serde_json::from_str(&read_stdin_to_end("the plan JSON")?).map_err(|error| {
+                    CliError {
+                        message: format!("the plan JSON is not valid: {error}"),
+                    }
+                })?;
+            let actions = document.get("actions").cloned().ok_or_else(|| CliError {
+                message: "the plan document must carry an actions array".to_owned(),
+            })?;
+            let approvals = document.get("approvals").cloned().unwrap_or_default();
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/machines/{machine}/apply"),
+                Vec::new(),
+                Some(serde_json::json!({
+                    "machineId": machine,
+                    "endpointId": endpoint,
+                    "auth": checkout_auth_value(auth),
+                    "planId": plan_id,
+                    "actions": actions,
+                    "approvals": approvals,
+                    "timeoutSeconds": 1800,
+                })),
+            )
+        }
         Command::TailnetStatus => (
             reqwest::Method::GET,
             "/api/v1/tailnet/status".to_owned(),
@@ -2015,6 +2026,25 @@ fn install_node_request(command: &Command) -> RequestShape {
 }
 
 /// Reads one line from standard input, for write-only secrets.
+/// Reads standard input to EOF: multi-line documents (an apply plan)
+/// arrive whole.
+fn read_stdin_to_end(what: &str) -> Result<String, CliError> {
+    use std::io::Read as _;
+    let mut document = String::new();
+    std::io::stdin()
+        .read_to_string(&mut document)
+        .map_err(|error| CliError {
+            message: format!("cannot read {what} from stdin: {error}"),
+        })?;
+    let document = document.trim().to_owned();
+    if document.is_empty() {
+        return Err(CliError {
+            message: format!("{what} must not be empty"),
+        });
+    }
+    Ok(document)
+}
+
 fn read_stdin_line(what: &str) -> Result<String, CliError> {
     let mut line = String::new();
     std::io::stdin()

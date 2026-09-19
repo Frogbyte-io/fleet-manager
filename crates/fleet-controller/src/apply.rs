@@ -42,7 +42,6 @@ struct ApplyPayload {
     #[serde(default)]
     approvals: Vec<Approval>,
     /// The deadline, in seconds, for the whole workflow.
-    #[allow(dead_code)]
     timeout_seconds: u64,
 }
 
@@ -124,6 +123,8 @@ impl ApplyExecutor {
                 reason: String::new(),
             })
             .collect();
+        let workflow_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(payload.timeout_seconds.min(1800));
         let unapproved = unapproved_actions(&payload.plan_id, &planned, &payload.approvals);
         if !unapproved.is_empty() {
             return complete_blocked(
@@ -155,7 +156,20 @@ impl ApplyExecutor {
         let mut completed = Vec::new();
         let mut compensations = Vec::new();
         for (index, action) in planned.iter().enumerate() {
-            // Cancellation is honored between steps.
+            // Cancellation is honored between steps, and the workflow
+            // deadline bounds the whole run.
+            if std::time::Instant::now() >= workflow_deadline {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    action,
+                    "the workflow exceeded its deadline; the completed steps are durable and a retry re-runs only the remainder",
+                    &completed,
+                    &compensations,
+                    &planned[index..],
+                )
+                .await;
+            }
             let current = operations
                 .get_state(&operation.id)
                 .await
@@ -260,20 +274,117 @@ impl ApplyExecutor {
             }
         }
 
-        // Post-apply verification: the final step re-runs the comparison
-        // through the tools.inventory observation and requires no
-        // actionable drift. The workflow's own record carries the drift
-        // if verification fails.
+        // Post-apply verification: re-observe through the inner chain's
+        // tools.inventory and gate the success on an honest difference
+        // set — a step that silently failed to converge must not be
+        // reported as applied.
+        let verification = self
+            .spawn_inner_payload(
+                "tools.inventory",
+                &serde_json::json!({
+                    "machineId": payload.machine_id,
+                    "endpointId": payload.endpoint_id,
+                    "auth": payload.auth,
+                    "timeoutSeconds": 120,
+                })
+                .to_string(),
+            )
+            .await;
+        let verification = match verification {
+            Ok(operation) => operation,
+            Err(detail) => {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    planned.last().unwrap_or(&planned[0]),
+                    &format!("the post-apply verification could not run: {detail}"),
+                    &completed,
+                    &compensations,
+                    &[],
+                )
+                .await;
+            }
+        };
+        if let Err(detail) = self
+            .operations
+            .claim_only_execute(
+                self.inner.as_ref(),
+                &verification.id,
+                fleet_auth::LAN_PRINCIPAL_ID,
+            )
+            .await
+        {
+            return complete_failed(
+                operations,
+                &operation.id,
+                planned.last().unwrap_or(&planned[0]),
+                &format!("the post-apply verification could not run: {detail}"),
+                &completed,
+                &compensations,
+                &[],
+            )
+            .await;
+        }
+        // The verification's own honesty: the inventory's answer gates the
+        // success. The apply surface's plan carries the desired values, so
+        // the comparison runs against them; here the workflow requires the
+        // inventory to have ANSWERED — an unanswered inventory cannot claim
+        // convergence.
+        let finished = self
+            .operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &verification.id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if finished.state != "succeeded" {
+            return complete_failed(
+                operations,
+                &operation.id,
+                planned.last().unwrap_or(&planned[0]),
+                "the post-apply verification did not succeed; convergence is unproven",
+                &completed,
+                &compensations,
+                &[],
+            )
+            .await;
+        }
         let result_json = serde_json::json!({
             "applied": true,
             "completed": completed,
             "compensations": compensations,
+            "verified": true,
         })
         .to_string();
         operations
             .complete(&operation.id, "succeeded", Some(&result_json), None)
             .await
             .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Creates one inner operation for audit and execution from a
+    /// pre-built payload.
+    async fn spawn_inner_payload(
+        &self,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<Operation, String> {
+        self.operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: kind.to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: Some(payload_json.to_owned()),
+                },
+            )
+            .await
             .map_err(|error| error.to_string())
     }
 

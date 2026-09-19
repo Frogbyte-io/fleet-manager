@@ -29,6 +29,14 @@ pub enum ApplyAuthDto {
     },
 }
 
+/// The action kinds the apply workflow can execute.
+const SUPPORTED_KINDS: [&str; 4] = [
+    "mise.install",
+    "skills.deploy",
+    "skills.undeploy",
+    "projects.clone",
+];
+
 /// One field difference, as the planner produced it.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +140,7 @@ fn default_timeout() -> u64 {
         ),
     )
 )]
+#[allow(clippy::too_many_lines)]
 pub async fn start_apply_workflow(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
@@ -179,6 +188,42 @@ pub async fn start_apply_workflow(
             "the plan identity is required; approvals are bound to it",
             correlation_id,
         ));
+    }
+    // Each action's kind must be one the apply executor can run, and its
+    // state must be one of the five documented drift states; orders must
+    // be unique and strictly increasing. Malformed input is a 400, never
+    // a queued failure.
+    let mut previous_order: Option<u32> = None;
+    for action in &request.actions {
+        if !SUPPORTED_KINDS.contains(&action.kind.as_str()) {
+            return Err(crate::machines::invalid_request(
+                &format!(
+                    "the action kind {:?} is not one the apply workflow can execute",
+                    action.kind
+                ),
+                correlation_id,
+            ));
+        }
+        if fleet_core::DifferenceState::deserialize(serde_json::Value::String(
+            action.difference.state.clone(),
+        ))
+        .is_err()
+        {
+            return Err(crate::machines::invalid_request(
+                &format!(
+                    "the difference state {:?} is not one of the documented drift states",
+                    action.difference.state
+                ),
+                correlation_id,
+            ));
+        }
+        if previous_order.is_some_and(|previous| action.order <= previous) {
+            return Err(crate::machines::invalid_request(
+                "the action orders must be unique and strictly increasing",
+                correlation_id,
+            ));
+        }
+        previous_order = Some(action.order);
     }
     let payload = serde_json::json!({
         "machineId": machine_id,

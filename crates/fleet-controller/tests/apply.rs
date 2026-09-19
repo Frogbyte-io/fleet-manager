@@ -2,11 +2,9 @@
 //! restart-truth through the composed chain.
 
 use fleet_application::apply::{Approval, Compensation, unapproved_actions};
-use fleet_application::machine::MachinePort;
 use fleet_application::operation::Operations;
 use fleet_application::planner::PlannedAction;
 use fleet_core::{DifferenceState, FieldDifference};
-use fleet_storage_sqlite::MachineRepository;
 use std::sync::Arc;
 
 /// A stub inner executor: answers with a scripted state per kind.
@@ -135,7 +133,6 @@ async fn an_unapproved_plan_completes_blocked_naming_the_steps() {
         .unwrap();
     let pool = store.pool().clone();
     std::mem::forget(store);
-    let machines: Arc<dyn MachinePort> = Arc::new(MachineRepository::new(pool.clone()));
     let operations = Arc::new(Operations::new(
         Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
         Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
@@ -194,7 +191,6 @@ async fn an_unapproved_plan_completes_blocked_naming_the_steps() {
     let error = finished.error_json.unwrap();
     assert!(error.contains("approval"), "{error}");
     assert!(error.contains("mise.install"), "{error}");
-    let _ = machines;
 }
 
 #[tokio::test]
@@ -205,7 +201,6 @@ async fn an_approved_plan_executes_every_action_and_succeeds() {
         .unwrap();
     let pool = store.pool().clone();
     std::mem::forget(store);
-    let machines: Arc<dyn MachinePort> = Arc::new(MachineRepository::new(pool.clone()));
     let operations = Arc::new(Operations::new(
         Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
         Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
@@ -270,7 +265,6 @@ async fn an_approved_plan_executes_every_action_and_succeeds() {
         result["compensations"],
         serde_json::json!([{"kind": "idempotent"}])
     );
-    let _ = machines;
 }
 
 #[tokio::test]
@@ -281,7 +275,6 @@ async fn a_failing_step_stops_with_compensations_and_remainder() {
         .unwrap();
     let pool = store.pool().clone();
     std::mem::forget(store);
-    let machines: Arc<dyn MachinePort> = Arc::new(MachineRepository::new(pool.clone()));
     let operations = Arc::new(Operations::new(
         Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
         Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
@@ -349,5 +342,4 @@ async fn a_failing_step_stops_with_compensations_and_remainder() {
         !error["remaining"].as_array().unwrap().is_empty(),
         "the remaining steps are named"
     );
-    let _ = machines;
 }

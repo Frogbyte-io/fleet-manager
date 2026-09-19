@@ -39,12 +39,26 @@ pub struct Approval {
     pub kind: String,
 }
 
-/// Whether one planned action requires an approval before execution: the
-/// risky kinds the authz catalog flags. Install and undeploy are
-/// mutations of machine state; a clone into a fresh root is not.
+/// The operation kinds the apply approval gate covers, derived from the
+/// authz catalog's risk classification for the kind's own permission:
+/// a step whose permission is risky in the catalog requires an approval
+/// here too, so the gate cannot drift from the catalog.
 #[must_use]
 pub fn requires_approval(kind: &str) -> bool {
-    matches!(kind, "mise.install" | "skills.deploy" | "skills.undeploy")
+    let permission = fleet_application_kind_permission(kind);
+    permission.is_some_and(super::authz::Permission::is_risky)
+}
+
+/// The authz permission each apply-plan kind maps to. Single source of
+/// truth for the approval gate, derived from the same mapping
+/// `Operations::create` enforces.
+fn fleet_application_kind_permission(kind: &str) -> Option<crate::authz::Permission> {
+    match kind {
+        "mise.install" => Some(crate::authz::Permission::MiseOperate),
+        "skills.deploy" | "skills.undeploy" => Some(crate::authz::Permission::SkillsDeploy),
+        "projects.clone" => Some(crate::authz::Permission::ProjectsGitWrite),
+        _ => None,
+    }
 }
 
 /// The compensation an executed step records.
@@ -115,14 +129,17 @@ pub fn unapproved_actions(
 /// actionable fields. An `unsupported` field is reported without
 /// blocking; an `unknown` blocks — the machine's state is not knowable
 /// enough to claim convergence.
-/// Verifies post-apply truth.
-///
 /// # Errors
 ///
 /// Returns the blocking fields when the re-observed difference set still
 /// carries actionable or unknown fields.
 pub fn verified(set: &DifferenceSet) -> Result<(), String> {
-    let blockers: Vec<&fleet_core::FieldDifference> = set
+    // A canonicalized clone preserves terminal-state precedence on
+    // duplicate identities, so an honest unknown cannot be shadowed by an
+    // actionable duplicate.
+    let mut canonical = set.clone();
+    canonical.canonicalize();
+    let blockers: Vec<&fleet_core::FieldDifference> = canonical
         .fields
         .iter()
         .filter(|field| field.state == DifferenceState::Unknown || field.actionable())
@@ -158,7 +175,9 @@ mod tests {
         assert!(super::requires_approval("mise.install"));
         assert!(super::requires_approval("skills.deploy"));
         assert!(super::requires_approval("skills.undeploy"));
-        assert!(!super::requires_approval("projects.clone"));
+        // The clone's catalog permission (projects.git.write) is risky, so
+        // the gate covers it too — derived from the catalog, not hardcoded.
+        assert!(super::requires_approval("projects.clone"));
     }
 
     #[test]
