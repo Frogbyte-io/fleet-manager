@@ -123,6 +123,30 @@ impl ApplyExecutor {
                 reason: String::new(),
             })
             .collect();
+        // An empty plan has nothing to execute and no action to attribute
+        // a verification failure to: it is refused here, never queued into
+        // a panic.
+        if planned.is_empty() {
+            return complete_failed(
+                operations,
+                &operation.id,
+                &fleet_application::planner::PlannedAction {
+                    order: 0,
+                    kind: "apply.workflow".to_owned(),
+                    difference: fleet_core::FieldDifference::unknown(
+                        "apply.workflow",
+                        None,
+                        "the plan carries no actions",
+                    ),
+                    reason: String::new(),
+                },
+                "the plan carries no actions",
+                &[],
+                &[],
+                &[],
+            )
+            .await;
+        }
         let workflow_deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(payload.timeout_seconds.min(1800));
         let unapproved = unapproved_actions(&payload.plan_id, &planned, &payload.approvals);

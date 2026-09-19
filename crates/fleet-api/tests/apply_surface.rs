@@ -40,6 +40,41 @@ impl fleet_application::authz::Authorizer for DenyApply {
     }
 }
 
+/// Allows `ApplyExecute` for exactly one machine: the authorizer that
+/// proves machine scoping, since an unconditional denial cannot
+/// distinguish a machine-aware check from a resource-blind one.
+#[derive(Debug)]
+struct MachineScoped {
+    allowed_machine: String,
+}
+impl fleet_application::authz::Authorizer for MachineScoped {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        if request.action == fleet_application::authz::Permission::OperationCreate {
+            // A catalog-level action: no resource, no machine scoping to
+            // prove here.
+            fleet_application::authz::Decision::allow()
+        } else if request
+            .resource
+            .is_some_and(|resource| resource == self.allowed_machine)
+            && matches!(
+                request.action,
+                fleet_application::authz::Permission::ApplyExecute
+                    | fleet_application::authz::Permission::MachineRead
+                    | fleet_application::authz::Permission::MachineReadSensitive
+            )
+        {
+            fleet_application::authz::Decision::allow()
+        } else {
+            fleet_application::authz::Decision::deny(
+                fleet_application::authz::ReasonId::UnknownPrincipal,
+            )
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct FakeOperations {
     payloads: Mutex<Vec<String>>,
@@ -451,6 +486,34 @@ async fn an_apply_denial_is_a_machine_scoped_403() {
         "POST",
         "/machines/m-1/apply",
         Some(body_for("m-1").to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+}
+
+#[tokio::test]
+async fn the_apply_permission_is_machine_scoped() {
+    // The authorizer allows apply only on m-1: a request against m-2 is
+    // denied, proving the endpoint names the machine as its resource.
+    let state = state_for(Arc::new(MachineScoped {
+        allowed_machine: "m-1".to_owned(),
+    }));
+    let (status, _) = call(
+        state.clone(),
+        "POST",
+        "/machines/m-1/apply",
+        Some(body_for("m-1").to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let state = state_for(Arc::new(MachineScoped {
+        allowed_machine: "m-1".to_owned(),
+    }));
+    let (status, value) = call(
+        state,
+        "POST",
+        "/machines/m-2/apply",
+        Some(body_for("m-2").to_string()),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
