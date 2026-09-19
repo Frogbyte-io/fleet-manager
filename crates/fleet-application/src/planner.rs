@@ -299,8 +299,7 @@ mod tests {
     #[test]
     fn an_extra_checkout_is_reported_not_planned() {
         // Removing a checkout has no guarded path: the planner classifies
-        // it as unsupported instead of planning a destructive action. The
-        // PR description's original wording is amended on the PR.
+        // it as unsupported instead of planning a destructive action.
         let set = set_with(vec![FieldDifference::extra(
             "checkout:github.com/x/y",
             "/elsewhere",
