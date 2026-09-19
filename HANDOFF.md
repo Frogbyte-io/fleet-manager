@@ -4,8 +4,7 @@
 
 ## Where things stand (2026-09-18)
 
-- **M0–M3 complete.** All issues closed, epics #50–#53 and #76 closed.
-- **M4 in progress.** Epics #5–#8; implementation issues #89 (FM-400, DONE via PR #93), #90 (FM-401 next), #91 (FM-402), #92 (FM-403). The approach comments on each issue describe the planned implementation.
+- **M0–M4 complete.** All issues closed, epics #50–#53, #76, and #5–#8 closed. The authz catalog is at 36 entries. The exit gate for M4: an invalid revision cannot become active; a reviewed plan converges a test machine; restart/resume and partial-failure tests preserve truth and audit history — the unit/contract portions are covered; a live end-to-end run remains for the maintainer's environment.
 - **Repo is PUBLIC** since 2026-09-17 — no secrets in history (verified), private infra redacted.
 
 ## Workflow (established over M2–M3)
