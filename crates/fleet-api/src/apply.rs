@@ -236,11 +236,20 @@ pub async fn start_apply_workflow(
                 fleet_core::DifferenceState::Changed
             ) | ("skills.undeploy", fleet_core::DifferenceState::Extra)
         );
-        if !state_matches_kind {
+        // The identity prefix must match the kind too: the executor
+        // derives its payload by stripping the kind's expected prefix, so
+        // a mismatched identity would execute a side effect the plan
+        // never declared.
+        let expected_prefix = match action.kind.as_str() {
+            "mise.install" => "tool:",
+            "skills.deploy" | "skills.undeploy" => "skill:",
+            _ => "checkout:",
+        };
+        if !state_matches_kind || !action.difference.identity.starts_with(expected_prefix) {
             return Err(crate::machines::invalid_request(
                 &format!(
-                    "the action kind {:?} does not resolve a {:?} difference",
-                    action.kind, state
+                    "the action kind {:?} does not resolve a {:?} difference with an {:?} identity",
+                    action.kind, state, expected_prefix
                 ),
                 correlation_id,
             ));
