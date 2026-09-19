@@ -256,6 +256,17 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     )),
                 ))
             };
+            // The apply executor composes the FM-402 workflow over the
+            // same operation queue and chain.
+            let with_apply: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                std::sync::Arc::new(fleet_controller::apply::ApplyDispatch::new(
+                    with_ready.clone(),
+                    std::sync::Arc::new(fleet_controller::apply::ApplyExecutor::new(
+                        worker_operations.clone(),
+                        with_ready.clone(),
+                    )),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -266,11 +277,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_ready.clone(),
+                            with_apply.clone(),
                         ));
                     executor
                 }
-                None => with_ready.clone(),
+                None => with_apply.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

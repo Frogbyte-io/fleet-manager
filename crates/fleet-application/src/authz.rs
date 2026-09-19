@@ -120,6 +120,9 @@ pub enum Permission {
     /// and verify. A mutation: it composes every mutation the workflow
     /// may run.
     ProjectsReady,
+    /// Execute an authorized apply plan on a machine. A mutation: it
+    /// composes every mutation the plan may run.
+    ApplyExecute,
 }
 
 impl Permission {
@@ -160,6 +163,7 @@ impl Permission {
         Permission::ToolsRead,
         Permission::MiseOperate,
         Permission::ProjectsReady,
+        Permission::ApplyExecute,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -199,6 +203,7 @@ impl Permission {
             Permission::ToolsRead => "tools.read",
             Permission::MiseOperate => "mise.operate",
             Permission::ProjectsReady => "projects.ready",
+            Permission::ApplyExecute => "apply.execute",
         }
     }
 
@@ -240,7 +245,8 @@ impl Permission {
             | Permission::FrogenvOperate
             | Permission::ToolsRead
             | Permission::MiseOperate
-            | Permission::ProjectsReady => true,
+            | Permission::ProjectsReady
+            | Permission::ApplyExecute => true,
         }
     }
 
@@ -282,7 +288,8 @@ impl Permission {
             | Permission::FrogenvOperate
             | Permission::ToolsRead
             | Permission::MiseOperate
-            | Permission::ProjectsReady => true,
+            | Permission::ProjectsReady
+            | Permission::ApplyExecute => true,
         }
     }
 }

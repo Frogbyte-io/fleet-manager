@@ -9,6 +9,7 @@
 //! prints the effective (redacted) configuration before readiness.
 #![warn(missing_docs)]
 
+pub mod apply;
 pub mod artifacts;
 pub mod browser;
 pub mod checkout;

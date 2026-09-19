@@ -1816,3 +1816,53 @@ fn parsing_refuses_the_undocumented_mise_forms() {
         );
     }
 }
+
+#[test]
+fn parsing_accepts_the_apply_grammar() {
+    let args: Vec<String> = [
+        "apply",
+        "m1",
+        "--plan-id",
+        "plan-1",
+        "--endpoint",
+        "e1",
+        "--auth",
+        "agent",
+        "--wait",
+        "--timeout",
+        "60",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::ApplyWorkflow {
+            machine: "m1".to_owned(),
+            endpoint: "e1".to_owned(),
+            auth: fleetctl::OnboardAuthArg::Agent,
+            plan_id: "plan-1".to_owned(),
+            wait: true,
+            timeout: Some(60),
+        }
+    );
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_apply_forms() {
+    for args in [
+        vec!["apply", "m1"],
+        vec!["apply", "m1", "--auth", "agent"],
+        vec!["apply", "m1", "--endpoint", "e1", "--auth", "agent"],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage")
+                || error.message.contains("requires a value")
+                || error.message.contains("is required"),
+            "{error}"
+        );
+    }
+}

@@ -172,6 +172,72 @@ export interface ApiError {
 }
 
 /**
+ * One field difference, as the planner produced it.
+ */
+export interface FieldDifferenceDto {
+  /**
+     * The desired value, when the field is desired.
+     * @nullable
+     */
+  desired?: string | null;
+  /** The field's stable identity. */
+  identity: string;
+  /**
+     * The observed value, when one was observed.
+     * @nullable
+     */
+  observed?: string | null;
+  /**
+     * Why the state is `unknown` or `unsupported`, when it is.
+     * @nullable
+     */
+  reason?: string | null;
+  /** The drift state. */
+  state: string;
+}
+
+/**
+ * One planned action the caller submits.
+ */
+export interface ApplyActionDto {
+  /** The difference the action resolves. */
+  difference: FieldDifferenceDto;
+  /** The operation kind. */
+  kind: string;
+  /**
+     * The execution order.
+     * @minimum 0
+     */
+  order: number;
+}
+
+/**
+ * One approval the caller supplies.
+ */
+export interface ApplyApprovalDto {
+  /**
+     * The action's order the approval covers.
+     * @minimum 0
+     */
+  actionOrder: number;
+  /** The action's operation kind the approval covers. */
+  kind: string;
+  /** The plan's identity the approval is bound to. */
+  planId: string;
+}
+
+/**
+ * How the apply workflow's endpoint authenticates.
+ */
+export type ApplyAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
  * How a checkout action's endpoint authenticates.
  */
 export type CheckoutAuthDto = {
@@ -1693,6 +1759,29 @@ export const SkillsDirectionDto = {
 } as const;
 
 /**
+ * The body of the start-apply-workflow request.
+ */
+export interface StartApplyRequest {
+  /** The planned actions, in order. */
+  actions: ApplyActionDto[];
+  /** The approvals supplied with the plan. */
+  approvals?: ApplyApprovalDto[];
+  /** How the endpoint authenticates. */
+  auth: ApplyAuthDto;
+  /** The SSH endpoint id to act through. */
+  endpointId: string;
+  /** The machine to apply on (must match the path's machine). */
+  machineId: string;
+  /** The plan's identity, which every approval is bound to. */
+  planId: string;
+  /**
+     * The deadline, in seconds, for the whole workflow.
+     * @minimum 0
+     */
+  timeoutSeconds?: number;
+}
+
+/**
  * The body of the start-discovery request: which machine and endpoint to
  * scan, and how the endpoint authenticates.
  */
@@ -2592,6 +2681,76 @@ export const getMachine = async (machineId: string, options?: RequestInit): Prom
 
   const data: getMachineResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getMachineResponse
+}
+
+
+
+export type startApplyWorkflowResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startApplyWorkflowResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startApplyWorkflowResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startApplyWorkflowResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startApplyWorkflowResponseSuccess = (startApplyWorkflowResponse202) & {
+  headers: Headers;
+};
+export type startApplyWorkflowResponseError = (startApplyWorkflowResponse400 | startApplyWorkflowResponse403 | startApplyWorkflowResponse404) & {
+  headers: Headers;
+};
+
+export type startApplyWorkflowResponse = (startApplyWorkflowResponseSuccess | startApplyWorkflowResponseError)
+
+export const getStartApplyWorkflowUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/apply`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Starts the apply workflow.
+ */
+export const startApplyWorkflow = async (machineId: string,
+    startApplyRequest: StartApplyRequest, options?: RequestInit): Promise<startApplyWorkflowResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartApplyWorkflowUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startApplyRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startApplyWorkflowResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startApplyWorkflowResponse
 }
 
 
