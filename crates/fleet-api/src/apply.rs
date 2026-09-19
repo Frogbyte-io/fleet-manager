@@ -204,15 +204,43 @@ pub async fn start_apply_workflow(
                 correlation_id,
             ));
         }
-        if fleet_core::DifferenceState::deserialize(serde_json::Value::String(
+        let state = fleet_core::DifferenceState::deserialize(serde_json::Value::String(
             action.difference.state.clone(),
         ))
-        .is_err()
-        {
-            return Err(crate::machines::invalid_request(
+        .map_err(|_| {
+            crate::machines::invalid_request(
                 &format!(
                     "the difference state {:?} is not one of the documented drift states",
                     action.difference.state
+                ),
+                correlation_id,
+            )
+        })?;
+        // The state must be actionable AND pair with the kind the way the
+        // planner maps them: an unknown/unsupported state has no bounded
+        // action, and a kind/state mismatch (skills.deploy with extra)
+        // would perform a side effect the plan never declared.
+        if !state.actionable() {
+            return Err(crate::machines::invalid_request(
+                "an apply action must carry an actionable difference state",
+                correlation_id,
+            ));
+        }
+        let state_matches_kind = matches!(
+            (action.kind.as_str(), state),
+            (
+                "mise.install" | "skills.deploy" | "projects.clone",
+                fleet_core::DifferenceState::Missing
+            ) | (
+                "mise.install" | "projects.clone",
+                fleet_core::DifferenceState::Changed
+            ) | ("skills.undeploy", fleet_core::DifferenceState::Extra)
+        );
+        if !state_matches_kind {
+            return Err(crate::machines::invalid_request(
+                &format!(
+                    "the action kind {:?} does not resolve a {:?} difference",
+                    action.kind, state
                 ),
                 correlation_id,
             ));

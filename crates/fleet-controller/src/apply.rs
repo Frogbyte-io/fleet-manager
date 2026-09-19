@@ -298,6 +298,16 @@ impl ApplyExecutor {
             }
         }
 
+        // Cancellation is honored before verification: a cancel requested
+        // during the final action must not be overtaken by a success.
+        let current = operations
+            .get_state(&operation.id)
+            .await
+            .unwrap_or_else(|_| "running".to_owned());
+        if current == "cancelling" {
+            return complete_cancelled(operations, &operation.id, &completed).await;
+        }
+
         // Post-apply verification: re-observe through the inner chain's
         // tools.inventory and gate the success on an honest difference
         // set — a step that silently failed to converge must not be
