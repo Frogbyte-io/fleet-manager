@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+mod difference;
 mod error;
 mod id;
 mod machine;
@@ -16,6 +17,7 @@ mod sensitive;
 mod time;
 mod value;
 
+pub use difference::{DifferenceSet, DifferenceState, FieldDifference, compare_field};
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
 pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
