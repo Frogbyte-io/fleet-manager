@@ -14,6 +14,7 @@ mod operation;
 mod project;
 mod redact;
 mod sensitive;
+mod source;
 mod time;
 mod value;
 
@@ -29,5 +30,6 @@ pub use redact::{
     flatten_control_characters, redact_schemeless_credentials, redact_url_credentials,
 };
 pub use sensitive::{SecretReference, SensitiveString};
+pub use source::CandidateDigest;
 pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};
 pub use value::{ParseSlugError, Revision, Slug};

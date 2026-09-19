@@ -41,8 +41,9 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// (FM-304); the ready workflow carries the machine-scoped shape plus
 /// `projectId` and `dryRun` (FM-305); the apply workflow carries the
 /// machine-scoped shape plus the plan and its approval identities
-/// (FM-402).
-pub const CREATABLE_KINDS: [&str; 29] = [
+/// (FM-402); the source kinds carry the remote/commit payloads and are
+/// catalog-level (FM-403).
+pub const CREATABLE_KINDS: [&str; 31] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -72,6 +73,8 @@ pub const CREATABLE_KINDS: [&str; 29] = [
     "mise.exec",
     "ready.workflow",
     "apply.workflow",
+    "source.fetch",
+    "source.activate",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -109,6 +112,8 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
         "mise.install" | "mise.exec" => Some(Permission::MiseOperate),
         "ready.workflow" => Some(Permission::ProjectsReady),
         "apply.workflow" => Some(Permission::ApplyExecute),
+        "source.fetch" => Some(Permission::SourceFetch),
+        "source.activate" => Some(Permission::SourceActivate),
         _ => None,
     }
 }

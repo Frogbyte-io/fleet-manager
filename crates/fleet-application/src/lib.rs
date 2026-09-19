@@ -16,5 +16,6 @@ pub mod operation;
 pub mod planner;
 pub mod project;
 pub mod ready;
+pub mod source;
 pub mod tailnet;
 pub mod worker;

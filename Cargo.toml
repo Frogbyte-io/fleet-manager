@@ -19,6 +19,7 @@ members = [
     "crates/providers/fleet-provider-tailscale",
     "crates/providers/fleet-provider-docker",
     "crates/providers/fleet-provider-proxmox",
+    "crates/providers/fleet-provider-git",
     "crates/providers/fleet-provider-github",
     "crates/providers/fleet-provider-skills-manager",
     "crates/providers/fleet-provider-frogenv",

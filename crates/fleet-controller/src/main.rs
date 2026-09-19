@@ -267,6 +267,24 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     )),
                 ))
             };
+            // The source executor handles the FM-403 kinds over the git
+            // work root and the desired-source use cases.
+            let with_source: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                std::sync::Arc::new(fleet_controller::source::SourceDispatch::new(
+                    with_apply.clone(),
+                    std::sync::Arc::new(fleet_controller::source::SourceExecutor::new(
+                        config.data_dir.join("git-source"),
+                        std::sync::Arc::new(fleet_application::source::DesiredSource::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                store.pool().clone(),
+                            )),
+                        )),
+                    )),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -277,11 +295,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_apply.clone(),
+                            with_source.clone(),
                         ));
                     executor
                 }
-                None => with_apply.clone(),
+                None => with_source.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

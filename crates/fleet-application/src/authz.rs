@@ -123,6 +123,12 @@ pub enum Permission {
     /// Execute an authorized apply plan on a machine. A mutation: it
     /// composes every mutation the plan may run.
     ApplyExecute,
+    /// Fetch and inspect candidates from the desired-state Git source. A
+    /// read, but a topology-revealing one.
+    SourceFetch,
+    /// Activate a validated candidate as the desired revision. A
+    /// mutation: it changes what Fleet converges machines toward.
+    SourceActivate,
 }
 
 impl Permission {
@@ -164,6 +170,8 @@ impl Permission {
         Permission::MiseOperate,
         Permission::ProjectsReady,
         Permission::ApplyExecute,
+        Permission::SourceFetch,
+        Permission::SourceActivate,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -204,6 +212,8 @@ impl Permission {
             Permission::MiseOperate => "mise.operate",
             Permission::ProjectsReady => "projects.ready",
             Permission::ApplyExecute => "apply.execute",
+            Permission::SourceFetch => "source.fetch",
+            Permission::SourceActivate => "source.activate",
         }
     }
 
@@ -246,7 +256,9 @@ impl Permission {
             | Permission::ToolsRead
             | Permission::MiseOperate
             | Permission::ProjectsReady
-            | Permission::ApplyExecute => true,
+            | Permission::ApplyExecute
+            | Permission::SourceFetch
+            | Permission::SourceActivate => true,
         }
     }
 
@@ -267,7 +279,9 @@ impl Permission {
             | Permission::TailnetRead
             | Permission::TailnetConfig
             | Permission::ProjectsRead
-            | Permission::ProjectsCreate => false,
+            | Permission::ProjectsCreate
+            | Permission::SourceFetch
+            | Permission::SourceActivate => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
