@@ -28,7 +28,11 @@ pub struct ComposedRequirement {
 
 /// The resolved value of one requirement, keyed for identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum RequirementValue {
     /// A pinned tool version.
     Tool {
@@ -41,7 +45,8 @@ pub enum RequirementValue {
     Skill {
         /// The skill's identifier.
         skill_id: String,
-        /// The agents the skill deploys to, after deny subtraction.
+        /// The agents the skill deploys to. Deny operates at the whole-
+        /// requirement level: a denied skill is removed entirely.
         deploy_to: Vec<String>,
     },
     /// A capability requirement.
@@ -53,6 +58,15 @@ pub enum RequirementValue {
     },
 }
 
+/// Percent-encodes the identity delimiters so a component containing
+/// `:` or `/` cannot collide with another requirement's key.
+fn escape_identity(component: &str) -> String {
+    component
+        .replace('%', "%25")
+        .replace(':', "%3A")
+        .replace('/', "%2F")
+}
+
 impl RequirementValue {
     /// The requirement's stable identity key: the same key from two
     /// resources is the same requirement, and a conflict is a rejection —
@@ -60,9 +74,15 @@ impl RequirementValue {
     #[must_use]
     pub fn identity(&self) -> String {
         match self {
-            Self::Tool { tool, .. } => format!("tool:{tool}"),
-            Self::Skill { skill_id, .. } => format!("skill:{skill_id}"),
-            Self::Capability { namespace, name } => format!("capability:{namespace}/{name}"),
+            Self::Tool { tool, .. } => format!("tool:{}", escape_identity(tool)),
+            Self::Skill { skill_id, .. } => {
+                format!("skill:{}", escape_identity(skill_id))
+            }
+            Self::Capability { namespace, name } => format!(
+                "capability:{}%2F{}",
+                escape_identity(namespace),
+                escape_identity(name)
+            ),
         }
     }
 }
@@ -107,8 +127,9 @@ pub enum CompositionError {
     UnknownProfile {
         /// The name that does not resolve.
         name: String,
-        /// The profile that referenced it.
-        referenced_by: String,
+        /// The profile that referenced it, when the reference did not
+        /// come from the composition root.
+        referenced_by: Option<String>,
     },
     /// Two profiles require different values for the same identity.
     Conflict {
@@ -130,10 +151,13 @@ impl std::fmt::Display for CompositionError {
             Self::UnknownProfile {
                 name,
                 referenced_by,
-            } => write!(
-                formatter,
-                "unknown profile {name:?} referenced by {referenced_by:?}"
-            ),
+            } => match referenced_by {
+                Some(referenced_by) => write!(
+                    formatter,
+                    "unknown profile {name:?} referenced by {referenced_by:?}"
+                ),
+                None => write!(formatter, "unknown profile {name:?}"),
+            },
             Self::Conflict {
                 identity,
                 first,
@@ -169,7 +193,8 @@ pub fn compose_profile(
 ) -> Result<ComposedProfile, CompositionError> {
     let mut composed = ComposedProfile::default();
     let mut visiting = Vec::new();
-    compose_into(name, profiles, &mut composed, &mut visiting)?;
+    let mut denied = std::collections::BTreeSet::new();
+    compose_into(name, profiles, &mut composed, &mut visiting, &mut denied)?;
     Ok(composed)
 }
 
@@ -178,6 +203,7 @@ fn compose_into(
     profiles: &BTreeMap<String, ProfileResource>,
     composed: &mut ComposedProfile,
     visiting: &mut Vec<String>,
+    denied: &mut std::collections::BTreeSet<String>,
 ) -> Result<(), CompositionError> {
     if visiting.contains(&name.to_owned()) {
         let mut chain = visiting.clone();
@@ -192,10 +218,9 @@ fn compose_into(
         });
     }
     let Some(profile) = profiles.get(name) else {
-        let referenced_by = visiting.last().cloned().unwrap_or_default();
         return Err(CompositionError::UnknownProfile {
             name: name.to_owned(),
-            referenced_by,
+            referenced_by: visiting.last().cloned(),
         });
     };
     visiting.push(name.to_owned());
@@ -203,20 +228,31 @@ fn compose_into(
     // Extends resolve depth-first: the parents' requirements compose
     // before this profile's own.
     for parent in &profile.extends {
-        compose_into(parent, profiles, composed, visiting)?;
+        compose_into(parent, profiles, composed, visiting, denied)?;
     }
 
-    // Deny wins over include: denied identities are removed regardless of
-    // who contributed them, including this profile's own requirements.
-    let denied: std::collections::BTreeSet<String> = profile.deny.iter().cloned().collect();
+    // Deny is carried through the whole traversal: a denied identity
+    // stays denied no matter which later profile re-includes it, making
+    // the result independent of branch order.
+    for identity in &profile.deny {
+        denied.insert(identity.clone());
+    }
 
     for (index, requirement) in profile.requirements.iter().enumerate() {
+        let mut requirement = requirement.clone();
+        if let RequirementValue::Skill { deploy_to, .. } = &mut requirement {
+            // The agent set is canonicalized: two skill requirements with
+            // the same agents in a different order are the same
+            // requirement, not a conflict.
+            deploy_to.sort();
+            deploy_to.dedup();
+        }
         let identity = requirement.identity();
         if denied.contains(&identity) {
             continue;
         }
         match composed.requirements.get(&identity) {
-            Some(existing) if existing.requirement != *requirement => {
+            Some(existing) if existing.requirement != requirement => {
                 return Err(CompositionError::Conflict {
                     identity,
                     first: existing.provenance.resource_name.clone(),
@@ -228,7 +264,7 @@ fn compose_into(
                 composed.requirements.insert(
                     identity,
                     ComposedRequirement {
-                        requirement: requirement.clone(),
+                        requirement,
                         provenance: ProvenanceRecord {
                             resource_id: profile.id.clone(),
                             resource_name: profile.name.clone(),
@@ -240,9 +276,11 @@ fn compose_into(
         }
     }
 
-    for identity in &profile.deny {
-        composed.requirements.remove(identity);
-    }
+    // The accumulated deny set filters the composed result after ALL
+    // includes, so a later include cannot reintroduce a denied identity.
+    composed
+        .requirements
+        .retain(|identity, _| !denied.contains(identity));
 
     visiting.pop();
     Ok(())
@@ -352,7 +390,7 @@ mod tests {
         let error = compose_profile("a", &profiles).unwrap_err();
         assert!(
             matches!(error, CompositionError::UnknownProfile { ref name, ref referenced_by }
-                if name == "ghost" && referenced_by == "a"),
+                if name == "ghost" && referenced_by.as_deref() == Some("a")),
             "{error}"
         );
     }
@@ -396,6 +434,55 @@ mod tests {
     }
 
     #[test]
+    fn a_later_include_cannot_reintroduce_a_denied_identity() {
+        // Deny is carried through the whole traversal: the result is
+        // independent of branch order.
+        let profiles = registry(vec![
+            profile("denier", &[], vec![], &["tool:node"]),
+            profile("includer", &[], vec![tool("node", "20.11.0")], &[]),
+            profile("combined", &["includer", "denier"], vec![], &[]),
+        ]);
+        let composed = compose_profile("combined", &profiles).unwrap();
+        assert!(
+            !composed.requirements.contains_key("tool:node"),
+            "deny survives a later include"
+        );
+        // The mirror order composes identically.
+        let mirrored = registry(vec![
+            profile("denier", &[], vec![], &["tool:node"]),
+            profile("includer", &[], vec![tool("node", "20.11.0")], &[]),
+            profile("combined", &["denier", "includer"], vec![], &[]),
+        ]);
+        let composed_mirrored = compose_profile("combined", &mirrored).unwrap();
+        assert_eq!(composed, composed_mirrored);
+    }
+
+    #[test]
+    fn skill_requirements_compare_as_sets() {
+        let profiles = registry(vec![
+            profile(
+                "base",
+                &[],
+                vec![skill("db", &["claude_code", "codex"])],
+                &[],
+            ),
+            profile(
+                "other",
+                &[],
+                vec![skill("db", &["codex", "claude_code"])],
+                &[],
+            ),
+            profile("combined", &["base", "other"], vec![], &[]),
+        ]);
+        let composed = compose_profile("combined", &profiles).unwrap();
+        assert_eq!(
+            composed.requirements.len(),
+            1,
+            "the same agent set in a different order is one requirement"
+        );
+    }
+
+    #[test]
     fn a_profile_cannot_deny_its_own_requirement_into_existence() {
         // Denying an identity the same profile also contributes removes
         // it: deny is unconditional.
@@ -418,7 +505,7 @@ mod tests {
             &[],
         )]);
         let composed = compose_profile("observing", &profiles).unwrap();
-        assert!(composed.requirements.contains_key("capability:tool/git"));
+        assert!(composed.requirements.contains_key("capability:tool%2Fgit"));
     }
 
     #[test]
@@ -426,11 +513,15 @@ mod tests {
         let profiles = registry(vec![profile(
             "rust-dev",
             &[],
-            vec![tool("node", "20.11.0")],
+            vec![skill("db", &["claude_code"])],
             &[],
         )]);
         let composed = compose_profile("rust-dev", &profiles).unwrap();
         let json = serde_json::to_string(&composed).unwrap();
+        assert!(
+            json.contains("skillId") && json.contains("deployTo"),
+            "the composed payload matches the published camelCase contract: {json}"
+        );
         let back: ComposedProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(composed, back);
     }

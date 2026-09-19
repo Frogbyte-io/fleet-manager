@@ -100,7 +100,7 @@
         "type": "string"
       },
       "reference": {
-        "description": "The user@host:port reference or node id. Never carries a secret.",
+        "description": "The user@host:port reference or node id. Never carries a secret:\nsemantic validation refuses credential-bearing userinfo before\nactivation.",
         "maxLength": 255,
         "minLength": 1,
         "type": "string"
@@ -179,15 +179,17 @@
         "description": "A capability requirement selecting compatible machines.",
         "properties": {
           "name": {
-            "description": "The capability's name.",
+            "description": "The capability's name. The identity delimiters `:` and `/` are\nrefused so distinct requirements cannot collide.",
             "maxLength": 63,
             "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
             "type": "string"
           },
           "namespace": {
-            "description": "The capability's namespace.",
+            "description": "The capability's namespace. The identity delimiters `:` and `/`\nare refused so distinct requirements cannot collide.",
             "maxLength": 63,
             "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
             "type": "string"
           },
           "type": {
@@ -263,6 +265,7 @@
     ],
     "type": "object"
   },
+  "$id": "https://schemas.frogbyte.io/fleet/desired-resource-v1alpha1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "allOf": [
@@ -354,7 +357,7 @@
         "properties": {
           "spec": {
             "additionalProperties": false,
-            "description": "The `Profile` spec: the composition unit. Profiles apply in the order\nthey are listed in `applies`; resolved fields record which profile\ncontributed them.",
+            "description": "The `Profile` spec: the composition unit. `extends` chains resolve\ndepth-first with cycle refusal; resolved fields record which profile\ncontributed them.",
             "properties": {
               "deny": {
                 "default": [],
@@ -405,13 +408,10 @@
             "description": "The `Project` spec: declared tools and skill requirements for a\nproject. The normalized remote is the project's identity in Fleet's\nruntime; desired resources reference it by name.",
             "properties": {
               "remote": {
-                "default": null,
-                "description": "The normalized Git remote the project is keyed by at runtime.",
+                "description": "The normalized Git remote the project is keyed by at runtime.\nRequired: the remote is the project's runtime identity.",
                 "maxLength": 255,
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "minLength": 1,
+                "type": "string"
               },
               "root": {
                 "default": null,
@@ -441,6 +441,9 @@
                 "type": "array"
               }
             },
+            "required": [
+              "remote"
+            ],
             "title": "ProjectSpec",
             "type": "object"
           }

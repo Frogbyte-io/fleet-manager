@@ -19,7 +19,8 @@ use serde_saphyr::options::{DuplicateKeyPolicy, MergeKeyPolicy};
 
 /// Current desired-resource API version.
 pub const API_VERSION: &str = "fleet.frogbyte.io/v1alpha1";
-/// Only resource kind registered by the generic-envelope milestone.
+/// The generic-envelope milestone's resource kind, retained for the
+/// envelope's own diagnostics.
 pub const FLEET_CONFIG_KIND: &str = "FleetConfig";
 /// Repository-relative location of the generated schema.
 pub const GENERATED_SCHEMA_PATH: &str = "schemas/generated/desired-resource.schema.json";
@@ -220,6 +221,12 @@ pub fn generate_schema() -> Value {
             "then": { "properties": { "spec": spec_schema } },
         }));
     }
+    root_object.insert(
+        "$id".to_owned(),
+        Value::String(
+            "https://schemas.frogbyte.io/fleet/desired-resource-v1alpha1.json".to_owned(),
+        ),
+    );
     root_object.insert("allOf".to_owned(), Value::Array(all_of));
     root
 }
@@ -317,6 +324,7 @@ pub fn validate_sources(sources: &[SourceDocument]) -> Vec<Diagnostic> {
             }
 
             validate_core_values(document, &base, &mut diagnostics);
+            validate_semantics(document, &base, &mut diagnostics);
         }
     }
 
@@ -364,6 +372,50 @@ fn validate_discriminator(document: &Value, base: &str, diagnostics: &mut Vec<Di
             code: "FM_SCHEMA_UNKNOWN_KIND",
             location: format!("{base}/kind"),
             message: format!("unsupported kind {kind:?}"),
+        });
+    }
+}
+
+/// Semantic validation beyond the schema: credential-bearing references
+/// and remotes are refused before activation, because a schema-valid
+/// document can still carry secrets in its string fields.
+fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let kind = document
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Machine endpoints: credential-bearing userinfo is refused.
+    if kind == "Machine"
+        && let Some(endpoints) = document
+            .pointer("/spec/endpoints")
+            .and_then(Value::as_array)
+    {
+        for (index, endpoint) in endpoints.iter().enumerate() {
+            let Some(reference) = endpoint.get("reference").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some((userinfo, _authority)) = reference.split_once('@') else {
+                continue;
+            };
+            if userinfo.contains(':') {
+                diagnostics.push(Diagnostic {
+                    code: "FM_SEMANTIC_CREDENTIAL_REFERENCE",
+                    location: format!("{base}/spec/endpoints/{index}/reference"),
+                    message: "an endpoint reference must not carry credentials; reference the machine's secret records instead".to_owned(),
+                });
+            }
+        }
+    }
+    // Project remotes: the normalized-remote grammar refuses
+    // credential-bearing remotes before activation.
+    if kind == "Project"
+        && let Some(remote) = document.pointer("/spec/remote").and_then(Value::as_str)
+        && let Err(detail) = fleet_core::NormalizedRemote::parse(remote)
+    {
+        diagnostics.push(Diagnostic {
+            code: "FM_SEMANTIC_INVALID_REMOTE",
+            location: format!("{base}/spec/remote"),
+            message: format!("the project remote is not a normalizable remote: {detail}"),
         });
     }
 }

@@ -62,7 +62,9 @@ pub struct DesiredEndpoint {
     /// The endpoint kind's stable id (e.g. `ssh`, `node`).
     #[schemars(length(min = 1, max = 16))]
     pub kind: String,
-    /// The user@host:port reference or node id. Never carries a secret.
+    /// The user@host:port reference or node id. Never carries a secret:
+    /// semantic validation refuses credential-bearing userinfo before
+    /// activation.
     #[schemars(length(min = 1, max = 255))]
     pub reference: String,
 }
@@ -98,9 +100,9 @@ pub struct MachineSpec {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProjectSpec {
     /// The normalized Git remote the project is keyed by at runtime.
-    #[serde(default)]
-    #[schemars(length(max = 255))]
-    pub remote: Option<String>,
+    /// Required: the remote is the project's runtime identity.
+    #[schemars(length(min = 1, max = 255))]
+    pub remote: String,
     /// The checkout root the ready workflow targets.
     #[serde(default)]
     #[schemars(length(max = 400))]
@@ -210,17 +212,19 @@ pub enum ProfileRequirement {
     },
     /// A capability requirement selecting compatible machines.
     Capability {
-        /// The capability's namespace.
-        #[schemars(length(min = 1, max = 63))]
+        /// The capability's namespace. The identity delimiters `:` and `/`
+        /// are refused so distinct requirements cannot collide.
+        #[schemars(length(min = 1, max = 63), regex(pattern = r"^[a-z0-9_-]+$"))]
         namespace: String,
-        /// The capability's name.
-        #[schemars(length(min = 1, max = 63))]
+        /// The capability's name. The identity delimiters `:` and `/` are
+        /// refused so distinct requirements cannot collide.
+        #[schemars(length(min = 1, max = 63), regex(pattern = r"^[a-z0-9_-]+$"))]
         name: String,
     },
 }
 
-/// The `Profile` spec: the composition unit. Profiles apply in the order
-/// they are listed in `applies`; resolved fields record which profile
+/// The `Profile` spec: the composition unit. `extends` chains resolve
+/// depth-first with cycle refusal; resolved fields record which profile
 /// contributed them.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
