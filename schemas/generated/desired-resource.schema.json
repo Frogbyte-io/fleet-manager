@@ -10,11 +10,6 @@
         }
       ]
     },
-    "FleetConfigSpec": {
-      "additionalProperties": false,
-      "description": "Minimal controller-neutral settings spec reserved for later extension.",
-      "type": "object"
-    },
     "Metadata": {
       "additionalProperties": false,
       "description": "Generic desired-resource metadata.",
@@ -45,14 +40,686 @@
           "const": "FleetConfig",
           "description": "Controller-neutral repository settings.",
           "type": "string"
+        },
+        {
+          "const": "Machine",
+          "description": "Desired machine identity facts.",
+          "type": "string"
+        },
+        {
+          "const": "Profile",
+          "description": "The composition unit.",
+          "type": "string"
+        },
+        {
+          "const": "Project",
+          "description": "Declared project tools and skills.",
+          "type": "string"
+        },
+        {
+          "const": "ToolRequirement",
+          "description": "A pinned tool requirement.",
+          "type": "string"
+        },
+        {
+          "const": "SkillPreset",
+          "description": "A skill preset deployment.",
+          "type": "string"
+        },
+        {
+          "const": "Recipe",
+          "description": "A bounded, reviewed command contract.",
+          "type": "string"
+        },
+        {
+          "const": "Action",
+          "description": "A named, parametrized recipe invocation.",
+          "type": "string"
+        },
+        {
+          "const": "LabTemplate",
+          "description": "M7's minimal versioned Lab contract.",
+          "type": "string"
+        },
+        {
+          "const": "PolicyBinding",
+          "description": "A non-secret policy binding.",
+          "type": "string"
         }
       ]
     }
   },
+  "$defs:DesiredEndpoint": {
+    "additionalProperties": false,
+    "description": "An endpoint a machine exposes, as desired identity. Observed\nconnectivity lives in capability facts, never here.",
+    "properties": {
+      "kind": {
+        "description": "The endpoint kind's stable id (e.g. `ssh`, `node`).",
+        "maxLength": 16,
+        "minLength": 1,
+        "type": "string"
+      },
+      "reference": {
+        "description": "The user@host:port reference or node id. Never carries a secret:\nsemantic validation refuses credential-bearing userinfo before\nactivation.",
+        "maxLength": 255,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "reference"
+    ],
+    "type": "object"
+  },
+  "$defs:ProfileRequirement": {
+    "description": "One profile requirement: a tool, skill, or capability the profile\nasks machines to satisfy. Set-valued with explicit deny semantics.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "A tool version requirement.",
+        "properties": {
+          "tool": {
+            "description": "The tool's name.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "tool",
+            "type": "string"
+          },
+          "version": {
+            "description": "The pinned version.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "tool",
+          "version"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A skill deployment requirement.",
+        "properties": {
+          "deployTo": {
+            "description": "The agents the skill deploys to.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "skillId": {
+            "description": "The skill's identifier.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": {
+            "const": "skill",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "skillId",
+          "deployTo"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "A capability requirement selecting compatible machines.",
+        "properties": {
+          "name": {
+            "description": "The capability's name. The identity delimiters `:` and `/` are\nrefused so distinct requirements cannot collide.",
+            "maxLength": 63,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The capability's namespace. The identity delimiters `:` and `/`\nare refused so distinct requirements cannot collide.",
+            "maxLength": 63,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
+            "type": "string"
+          },
+          "type": {
+            "const": "capability",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "namespace",
+          "name"
+        ],
+        "type": "object"
+      }
+    ]
+  },
+  "$defs:SkillRequirementSpec": {
+    "additionalProperties": false,
+    "description": "One skill to deploy to named agents, with explicit removal semantics.",
+    "properties": {
+      "denyAgents": {
+        "default": [],
+        "description": "Explicitly undeploy from these agents even if an earlier profile\nincluded the skill for them: deny wins over include.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "deployTo": {
+        "description": "The agents the skill deploys to.",
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 16,
+        "minItems": 1,
+        "type": "array"
+      },
+      "skillId": {
+        "description": "The skill's identifier in the Skills Manager library.",
+        "maxLength": 63,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "skillId",
+      "deployTo"
+    ],
+    "type": "object"
+  },
+  "$defs:ToolRequirementSpec": {
+    "additionalProperties": false,
+    "description": "A tool requirement: a tool name and its pinned version.",
+    "properties": {
+      "tool": {
+        "description": "The tool's name as the provider's CLI names it.",
+        "maxLength": 63,
+        "minLength": 1,
+        "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$",
+        "type": "string"
+      },
+      "version": {
+        "description": "The pinned version, exactly as mise or the tool's own CLI reports it.",
+        "maxLength": 63,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "tool",
+      "version"
+    ],
+    "type": "object"
+  },
   "$id": "https://schemas.frogbyte.io/fleet/desired-resource-v1alpha1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "The closed generic envelope for a desired resource.",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "FleetConfig"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "Minimal controller-neutral settings spec reserved for later extension.",
+            "title": "FleetConfigSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "Machine"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `Machine` spec: desired identity facts for one machine.",
+            "properties": {
+              "endpoints": {
+                "default": [],
+                "description": "The endpoints the machine is reached through.",
+                "items": {
+                  "$ref": "#/$defs:DesiredEndpoint"
+                },
+                "maxItems": 8,
+                "type": "array"
+              },
+              "groups": {
+                "default": [],
+                "description": "Groups for filtering.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              "pinnedHostKey": {
+                "default": null,
+                "description": "Desired SSH trust posture: the fingerprint the machine's host key\nmust match, when pinning is declared. Observed fingerprints live\nin the trust workflow.",
+                "maxLength": 128,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "default": [],
+                "description": "Tags for filtering.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              }
+            },
+            "title": "MachineSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "Profile"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `Profile` spec: the composition unit. `extends` chains resolve\ndepth-first with cycle refusal; resolved fields record which profile\ncontributed them.",
+            "properties": {
+              "deny": {
+                "default": [],
+                "description": "Requirements explicitly removed, overriding any extended profile's\ncontribution: deny wins over include.",
+                "items": {
+                  "$ref": "#/$defs:ProfileRequirement"
+                },
+                "maxItems": 64,
+                "type": "array"
+              },
+              "extends": {
+                "default": [],
+                "description": "The other profiles this profile extends, in application order.\nCycles fail semantic validation.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              "requirements": {
+                "default": [],
+                "description": "The requirements this profile contributes.",
+                "items": {
+                  "$ref": "#/$defs:ProfileRequirement"
+                },
+                "maxItems": 64,
+                "type": "array"
+              }
+            },
+            "title": "ProfileSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "Project"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `Project` spec: declared tools and skill requirements for a\nproject. The normalized remote is the project's identity in Fleet's\nruntime; desired resources reference it by name.",
+            "properties": {
+              "remote": {
+                "description": "The normalized Git remote the project is keyed by at runtime.\nRequired: the remote is the project's runtime identity.",
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "root": {
+                "default": null,
+                "description": "The checkout root the ready workflow targets.",
+                "maxLength": 400,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "skills": {
+                "default": [],
+                "description": "Skills the project deploys.",
+                "items": {
+                  "$ref": "#/$defs:SkillRequirementSpec"
+                },
+                "maxItems": 32,
+                "type": "array"
+              },
+              "tools": {
+                "default": [],
+                "description": "Tool versions the project declares.",
+                "items": {
+                  "$ref": "#/$defs:ToolRequirementSpec"
+                },
+                "maxItems": 32,
+                "type": "array"
+              }
+            },
+            "required": [
+              "remote"
+            ],
+            "title": "ProjectSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "ToolRequirement"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "A tool requirement: a tool name and its pinned version.",
+            "properties": {
+              "tool": {
+                "description": "The tool's name as the provider's CLI names it.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$",
+                "type": "string"
+              },
+              "version": {
+                "description": "The pinned version, exactly as mise or the tool's own CLI reports it.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "tool",
+              "version"
+            ],
+            "title": "ToolRequirementSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "SkillPreset"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "One skill to deploy to named agents, with explicit removal semantics.",
+            "properties": {
+              "denyAgents": {
+                "default": [],
+                "description": "Explicitly undeploy from these agents even if an earlier profile\nincluded the skill for them: deny wins over include.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              "deployTo": {
+                "description": "The agents the skill deploys to.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array"
+              },
+              "skillId": {
+                "description": "The skill's identifier in the Skills Manager library.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "skillId",
+              "deployTo"
+            ],
+            "title": "SkillRequirementSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "Recipe"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `Recipe` spec: a bounded, reviewed command contract executed\nthrough the same durable operation kernel as every other action.",
+            "properties": {
+              "command": {
+                "description": "The command executed through the bounded transport, as an argument\narray. Never a shell string.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 32,
+                "minItems": 1,
+                "type": "array"
+              },
+              "timeoutSeconds": {
+                "description": "The deadline, in seconds.",
+                "format": "uint64",
+                "maximum": 3600,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "workingDirectory": {
+                "default": null,
+                "description": "The working directory the command runs in, when one is required.",
+                "maxLength": 400,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "command",
+              "timeoutSeconds"
+            ],
+            "title": "RecipeSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "Action"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `Action` spec: a named, parametrized recipe invocation.",
+            "properties": {
+              "arguments": {
+                "default": [],
+                "description": "The positional arguments passed to the recipe's command.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              "recipe": {
+                "description": "The recipe this action invokes.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "recipe"
+            ],
+            "title": "ActionSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "LabTemplate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `LabTemplate` spec: M7's minimal versioned contract — the image\nand shape a Lab instance clones. Detailed semantics arrive with M7;\nthe schema reserves the shape now.",
+            "properties": {
+              "cores": {
+                "default": null,
+                "description": "The number of vCPUs.",
+                "format": "uint32",
+                "maximum": 128,
+                "minimum": 1,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "imageVersion": {
+                "default": null,
+                "description": "The promoted image version the template pins.",
+                "maxLength": 63,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "memoryMib": {
+                "default": null,
+                "description": "The memory, in MiB.",
+                "format": "uint32",
+                "maximum": 1048576,
+                "minimum": 128,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "title": "LabTemplateSpec",
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "PolicyBinding"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "spec": {
+            "additionalProperties": false,
+            "description": "The `PolicyBinding` spec: non-secret bindings between principals and\npermission sets. The policy engine's semantics live in fleet-auth;\nthis carries only the declared binding.",
+            "properties": {
+              "permissions": {
+                "description": "The permission ids granted, from the authz catalog.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 64,
+                "minItems": 1,
+                "type": "array"
+              },
+              "principal": {
+                "description": "The principal the binding names.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "principal",
+              "permissions"
+            ],
+            "title": "PolicyBindingSpec",
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "description": "The closed generic envelope for a desired resource. The spec stays a\nraw object at the envelope level; per-kind validation selects the\nspec's schema by the document's `kind`, so each kind's contract is\nexact and the envelope never guesses.",
   "properties": {
     "apiVersion": {
       "$ref": "#/$defs/ApiVersion",
@@ -67,8 +734,9 @@
       "description": "Stable identity and mutable label."
     },
     "spec": {
-      "$ref": "#/$defs/FleetConfigSpec",
-      "description": "Kind-specific non-secret desired configuration."
+      "additionalProperties": true,
+      "description": "Kind-specific non-secret desired configuration.",
+      "type": "object"
     }
   },
   "required": [

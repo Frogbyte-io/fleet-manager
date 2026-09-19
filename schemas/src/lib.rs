@@ -12,12 +12,15 @@ use std::{
 use fleet_core::{ResourceId, Slug};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
+pub mod kinds;
+
 use serde_json::Value;
 use serde_saphyr::options::{DuplicateKeyPolicy, MergeKeyPolicy};
 
 /// Current desired-resource API version.
 pub const API_VERSION: &str = "fleet.frogbyte.io/v1alpha1";
-/// Only resource kind registered by the generic-envelope milestone.
+/// The generic-envelope milestone's resource kind, retained for the
+/// envelope's own diagnostics.
 pub const FLEET_CONFIG_KIND: &str = "FleetConfig";
 /// Repository-relative location of the generated schema.
 pub const GENERATED_SCHEMA_PATH: &str = "schemas/generated/desired-resource.schema.json";
@@ -39,6 +42,43 @@ pub enum ApiVersion {
 pub enum ResourceKind {
     /// Controller-neutral repository settings.
     FleetConfig,
+    /// Desired machine identity facts.
+    Machine,
+    /// The composition unit.
+    Profile,
+    /// Declared project tools and skills.
+    Project,
+    /// A pinned tool requirement.
+    ToolRequirement,
+    /// A skill preset deployment.
+    SkillPreset,
+    /// A bounded, reviewed command contract.
+    Recipe,
+    /// A named, parametrized recipe invocation.
+    Action,
+    /// M7's minimal versioned Lab contract.
+    LabTemplate,
+    /// A non-secret policy binding.
+    PolicyBinding,
+}
+
+impl ResourceKind {
+    /// The kind's stable string id.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::FleetConfig => "FleetConfig",
+            Self::Machine => "Machine",
+            Self::Profile => "Profile",
+            Self::Project => "Project",
+            Self::ToolRequirement => "ToolRequirement",
+            Self::SkillPreset => "SkillPreset",
+            Self::Recipe => "Recipe",
+            Self::Action => "Action",
+            Self::LabTemplate => "LabTemplate",
+            Self::PolicyBinding => "PolicyBinding",
+        }
+    }
 }
 
 /// Generic desired-resource metadata.
@@ -58,7 +98,10 @@ pub struct Metadata {
 #[serde(deny_unknown_fields)]
 pub struct FleetConfigSpec {}
 
-/// The closed generic envelope for a desired resource.
+/// The closed generic envelope for a desired resource. The spec stays a
+/// raw object at the envelope level; per-kind validation selects the
+/// spec's schema by the document's `kind`, so each kind's contract is
+/// exact and the envelope never guesses.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DesiredResource {
@@ -69,7 +112,7 @@ pub struct DesiredResource {
     /// Stable identity and mutable label.
     metadata: Metadata,
     /// Kind-specific non-secret desired configuration.
-    spec: FleetConfigSpec,
+    spec: serde_json::Map<String, Value>,
 }
 
 /// One stable, caller-facing schema validation diagnostic.
@@ -102,25 +145,90 @@ pub struct SourceDocument {
     pub yaml: String,
 }
 
-/// Generates the canonical Draft 2020-12 desired-resource schema.
+/// Generates the canonical Draft 2020-12 desired-resource schema: the
+/// envelope plus an `allOf` of per-kind `if/then` pairs, so a document's
+/// `kind` selects exactly one spec contract. One document means one
+/// `$defs`, so every `$ref` resolves unambiguously.
 ///
 /// # Panics
 ///
 /// Panics only if Schemars emits a root schema that cannot be represented as a JSON object.
 #[must_use]
 pub fn generate_schema() -> Value {
-    let mut schema = serde_json::to_value(schema_for!(DesiredResource))
+    let envelope = serde_json::to_value(schema_for!(DesiredResource))
         .expect("Schemars output must serialize as JSON");
-    let root = schema
+    let mut root = envelope;
+    let root_object = root
         .as_object_mut()
         .expect("Schemars root schema must be an object");
-    root.insert(
+    let mut all_of = Vec::new();
+    for kind in [
+        ResourceKind::FleetConfig,
+        ResourceKind::Machine,
+        ResourceKind::Profile,
+        ResourceKind::Project,
+        ResourceKind::ToolRequirement,
+        ResourceKind::SkillPreset,
+        ResourceKind::Recipe,
+        ResourceKind::Action,
+        ResourceKind::LabTemplate,
+        ResourceKind::PolicyBinding,
+    ] {
+        let spec_schema = match kind {
+            ResourceKind::FleetConfig => serde_json::to_value(schema_for!(FleetConfigSpec)),
+            ResourceKind::Machine => serde_json::to_value(schema_for!(crate::kinds::MachineSpec)),
+            ResourceKind::Profile => serde_json::to_value(schema_for!(crate::kinds::ProfileSpec)),
+            ResourceKind::Project => serde_json::to_value(schema_for!(crate::kinds::ProjectSpec)),
+            ResourceKind::ToolRequirement => {
+                serde_json::to_value(schema_for!(crate::kinds::ToolRequirementSpec))
+            }
+            ResourceKind::SkillPreset => {
+                serde_json::to_value(schema_for!(crate::kinds::SkillRequirementSpec))
+            }
+            ResourceKind::Recipe => serde_json::to_value(schema_for!(crate::kinds::RecipeSpec)),
+            ResourceKind::Action => serde_json::to_value(schema_for!(crate::kinds::ActionSpec)),
+            ResourceKind::LabTemplate => {
+                serde_json::to_value(schema_for!(crate::kinds::LabTemplateSpec))
+            }
+            ResourceKind::PolicyBinding => {
+                serde_json::to_value(schema_for!(crate::kinds::PolicyBindingSpec))
+            }
+        }
+        .expect("Schemars output must serialize as JSON");
+        // A spec schema carries its own $defs (nested types) and $schema;
+        // both are hoisted/stripped so the spec's internal $refs resolve
+        // against the ROOT document's $defs — the only $defs a JSON
+        // Schema document can have.
+        let mut spec_schema = spec_schema;
+        if let Some(spec_object) = spec_schema.as_object_mut() {
+            if let Some(defs) = spec_object.remove("$defs")
+                && let Some(defs_object) = defs.as_object()
+            {
+                for (name, definition) in defs_object {
+                    root_object.insert(format!("$defs:{name}"), definition.clone());
+                }
+            }
+            spec_object.remove("$schema");
+        }
+        // Rewrite the spec schema's internal refs to the hoisted names.
+        let rewritten =
+            serde_json::to_string(&spec_schema).expect("the spec schema must serialize");
+        let rewritten = rewritten.replace("#/$defs/", "#/$defs:");
+        let spec_schema: Value =
+            serde_json::from_str(&rewritten).expect("the rewritten spec schema must parse");
+        all_of.push(serde_json::json!({
+            "if": { "properties": { "kind": { "const": kind.id() } } },
+            "then": { "properties": { "spec": spec_schema } },
+        }));
+    }
+    root_object.insert(
         "$id".to_owned(),
         Value::String(
             "https://schemas.frogbyte.io/fleet/desired-resource-v1alpha1.json".to_owned(),
         ),
     );
-    schema
+    root_object.insert("allOf".to_owned(), Value::Array(all_of));
+    root
 }
 
 /// Returns the canonical pretty-printed checked-in schema text.
@@ -216,6 +324,7 @@ pub fn validate_sources(sources: &[SourceDocument]) -> Vec<Diagnostic> {
             }
 
             validate_core_values(document, &base, &mut diagnostics);
+            validate_semantics(document, &base, &mut diagnostics);
         }
     }
 
@@ -233,7 +342,7 @@ fn has_specific_diagnostic(document: &Value, pointer: &str) -> bool {
         "/kind" => document
             .get("kind")
             .and_then(Value::as_str)
-            .is_some_and(|kind| kind != FLEET_CONFIG_KIND),
+            .is_some_and(|kind| ResourceKind::deserialize(Value::String(kind.to_owned())).is_err()),
         "/metadata/id" => document
             .pointer(pointer)
             .and_then(Value::as_str)
@@ -257,12 +366,56 @@ fn validate_discriminator(document: &Value, base: &str, diagnostics: &mut Vec<Di
         });
     }
     if let Some(kind) = document.get("kind").and_then(Value::as_str)
-        && kind != FLEET_CONFIG_KIND
+        && ResourceKind::deserialize(Value::String(kind.to_owned())).is_err()
     {
         diagnostics.push(Diagnostic {
             code: "FM_SCHEMA_UNKNOWN_KIND",
             location: format!("{base}/kind"),
             message: format!("unsupported kind {kind:?}"),
+        });
+    }
+}
+
+/// Semantic validation beyond the schema: credential-bearing references
+/// and remotes are refused before activation, because a schema-valid
+/// document can still carry secrets in its string fields.
+fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let kind = document
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Machine endpoints: credential-bearing userinfo is refused.
+    if kind == "Machine"
+        && let Some(endpoints) = document
+            .pointer("/spec/endpoints")
+            .and_then(Value::as_array)
+    {
+        for (index, endpoint) in endpoints.iter().enumerate() {
+            let Some(reference) = endpoint.get("reference").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some((userinfo, _authority)) = reference.split_once('@') else {
+                continue;
+            };
+            if userinfo.contains(':') {
+                diagnostics.push(Diagnostic {
+                    code: "FM_SCHEMA_SEMANTIC_CREDENTIAL_REFERENCE",
+                    location: format!("{base}/spec/endpoints/{index}/reference"),
+                    message: "an endpoint reference must not carry credentials; reference the machine's secret records instead".to_owned(),
+                });
+            }
+        }
+    }
+    // Project remotes: the normalized-remote grammar refuses
+    // credential-bearing remotes before activation.
+    if kind == "Project"
+        && let Some(remote) = document.pointer("/spec/remote").and_then(Value::as_str)
+        && let Err(detail) = fleet_core::NormalizedRemote::parse(remote)
+    {
+        diagnostics.push(Diagnostic {
+            code: "FM_SCHEMA_SEMANTIC_INVALID_REMOTE",
+            location: format!("{base}/spec/remote"),
+            message: format!("the project remote is not a normalizable remote: {detail}"),
         });
     }
 }

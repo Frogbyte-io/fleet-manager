@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod authz;
+pub mod composition;
 pub mod machine;
 pub mod node;
 pub mod onboarding;
