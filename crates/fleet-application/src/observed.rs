@@ -94,17 +94,6 @@ pub enum ToolAvailability {
     Unknown,
 }
 
-/// One observed tool with its availability.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObservedToolWithAvailability {
-    /// The tool's name.
-    pub tool: String,
-    /// The observed version, when the fact carried one.
-    pub version: Option<String>,
-    /// The fact's availability.
-    pub availability: ToolAvailability,
-}
-
 /// Normalizes capability facts into observed tools with their
 /// availability. A fact with `unknown` status preserves that honesty so
 /// comparison can emit an `unknown` instead of an actionable absence.
@@ -223,6 +212,31 @@ pub fn normalize_skills(skill_id: &str, deployed_to: &[&str]) -> Vec<ObservedSki
         .collect()
 }
 
+impl ObservedState {
+    /// Builds the observed state from its observations, setting every
+    /// answered flag from whether the corresponding observation actually
+    /// ran — the production composition path, so callers can never forget
+    /// the flags and leave the planner refusing to act.
+    #[must_use]
+    pub fn from_observations(
+        tools: Vec<ObservedTool>,
+        skills: Vec<ObservedSkill>,
+        checkouts: Vec<ObservedCheckout>,
+        mise_ran: bool,
+        skills_ran: bool,
+        checkouts_ran: bool,
+    ) -> Self {
+        Self {
+            tools,
+            skills,
+            checkouts,
+            mise_answered: Some(mise_ran),
+            skills_answered: Some(skills_ran),
+            checkouts_answered: Some(checkouts_ran),
+        }
+    }
+}
+
 /// Compares the desired state against the observed state into a
 /// difference set. Availability is honest end to end: an unanswered
 /// inventory makes every desired tool an `unknown`; an unavailable
@@ -253,6 +267,15 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
             .tools
             .iter()
             .find(|observed| &observed.tool == tool);
+        // Absent is handled before any version is read: an absent tool is
+        // missing regardless of what version string the fact carried.
+        if observed_tool.map(|observed| observed.availability) == Some(ToolAvailability::Absent) {
+            set.push(FieldDifference::missing(
+                &format!("tool:{}", fleet_core::redact_schemeless_credentials(tool)),
+                desired_version,
+            ));
+            continue;
+        }
         if observed_tool.map(|observed| observed.availability) == Some(ToolAvailability::Unknown) {
             set.push(FieldDifference::unknown(
                 &format!("tool:{}", fleet_core::redact_schemeless_credentials(tool)),

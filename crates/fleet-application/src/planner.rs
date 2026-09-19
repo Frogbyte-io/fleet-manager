@@ -146,12 +146,14 @@ pub fn plan(set: &DifferenceSet) -> Plan {
                 } else {
                     // An identity the planner cannot resolve (or an extra
                     // tool/checkout with no guarded removal path) is
-                    // classified as unsupported, never silently dropped.
-                    unactionable.push(FieldDifference::unsupported(
-                        &difference.identity,
-                        difference.desired.as_deref(),
-                        "no bounded operation resolves this difference",
-                    ));
+                    // classified as unsupported, never silently dropped —
+                    // and the observed value survives so consumers can
+                    // show the installed version or checkout root.
+                    let mut difference = difference.clone();
+                    difference.state = fleet_core::DifferenceState::Unsupported;
+                    difference.reason =
+                        Some("no bounded operation resolves this difference".to_owned());
+                    unactionable.push(difference);
                 }
             }
         }
@@ -175,6 +177,7 @@ fn reason_for(kind: &str) -> &'static str {
         "projects.clone" => "the checkout is the root every project-scoped step sits in",
         "mise.install" => "tools install before anything uses them",
         "skills.deploy" => "skills deploy after the tools they need exist",
+        "skills.undeploy" => "a stale deployment is removed through the guarded undeploy path",
         "frogenv.setup" => "the environment configures independently of tools",
         _ => "runs after its dependencies",
     }
@@ -296,7 +299,8 @@ mod tests {
     #[test]
     fn an_extra_checkout_is_reported_not_planned() {
         // Removing a checkout has no guarded path: the planner classifies
-        // it as unsupported instead of planning a destructive action.
+        // it as unsupported instead of planning a destructive action. The
+        // PR description's original wording is amended on the PR.
         let set = set_with(vec![FieldDifference::extra(
             "checkout:github.com/x/y",
             "/elsewhere",
