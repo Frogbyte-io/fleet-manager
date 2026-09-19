@@ -22,6 +22,7 @@ pub mod node_crypto;
 pub mod onboard;
 pub mod ready;
 pub mod skills;
+pub mod source;
 pub mod tailnet_store;
 pub mod worker;
 

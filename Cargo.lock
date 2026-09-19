@@ -620,10 +620,12 @@ dependencies = [
  "fleet-core",
  "fleet-protocol",
  "fleet-provider-frogenv",
+ "fleet-provider-git",
  "fleet-provider-mise",
  "fleet-provider-skills-manager",
  "fleet-provider-ssh",
  "fleet-provider-tailscale",
+ "fleet-schema",
  "fleet-secrets",
  "fleet-storage-sqlite",
  "fleetd",
@@ -686,11 +688,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-provider-git"
+version = "0.1.0"
+dependencies = [
+ "fleet-core",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "fleet-provider-github"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fleet-application",
  "fleet-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
