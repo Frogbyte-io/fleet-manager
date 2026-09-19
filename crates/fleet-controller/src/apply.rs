@@ -234,6 +234,30 @@ impl ApplyExecutor {
             }
             previous_order = Some(action.order);
         }
+        // An empty plan identity would let an approval whose planId is
+        // also empty authorize anything: the identity is required here,
+        // matching the dedicated endpoint's contract.
+        if payload.plan_id.is_empty() {
+            return complete_failed(
+                operations,
+                &operation.id,
+                &fleet_application::planner::PlannedAction {
+                    order: 0,
+                    kind: "apply.workflow".to_owned(),
+                    difference: fleet_core::FieldDifference::unknown(
+                        "apply.workflow",
+                        None,
+                        "the plan identity is required; approvals are bound to it",
+                    ),
+                    reason: String::new(),
+                },
+                "the plan identity is required; approvals are bound to it",
+                &[],
+                &[],
+                &[],
+            )
+            .await;
+        }
         // An empty plan has nothing to execute and no action to attribute
         // a verification failure to: it is refused here, never queued into
         // a panic.
