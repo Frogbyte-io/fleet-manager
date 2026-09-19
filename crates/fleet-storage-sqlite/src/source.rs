@@ -36,24 +36,6 @@ impl fleet_application::source::SourcePort for SourceRepository {
         }))
     }
 
-    async fn set_active_revision(&self, revision: &ActiveRevision) -> Result<(), String> {
-        sqlx::query(
-            "INSERT INTO source_active_revision (singleton, commit_sha, content_digest, activated_at) \
-             VALUES ('active', ?1, ?2, ?3) \
-             ON CONFLICT(singleton) DO UPDATE SET \
-             commit_sha = excluded.commit_sha, \
-             content_digest = excluded.content_digest, \
-             activated_at = excluded.activated_at",
-        )
-        .bind(&revision.commit_sha)
-        .bind(&revision.content_digest)
-        .bind(fleet_core::SystemClock::now_unix_millis())
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("the active revision write failed: {error}"))?;
-        Ok(())
-    }
-
     async fn prior_revisions(&self) -> Result<Vec<ActiveRevision>, String> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT commit_sha, content_digest FROM source_revision_history \

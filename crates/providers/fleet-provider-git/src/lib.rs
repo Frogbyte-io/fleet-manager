@@ -91,9 +91,16 @@ impl GitSource {
             ));
         }
         // The stdout is bounded: a large repository cannot consume
-        // unbounded controller memory.
+        // unbounded controller memory. A truncated listing would hash only
+        // part of the file set, so truncation is an error, not a
+        // truncation.
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.chars().take(1024 * 1024).collect())
+        if output.stdout.len() > 1024 * 1024 {
+            return Err(
+                "the tracked file listing exceeds its 1 MiB bound; the candidate is refused rather than partially hashed".to_owned(),
+            );
+        }
+        Ok(stdout.into_owned())
     }
 
     /// Fetches one candidate: clones the repository at the pinned commit

@@ -35,12 +35,6 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn active_revision(&self) -> Result<Option<ActiveRevision>, String>;
-    /// Records the active revision, replacing any prior one.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the backend errors.
-    async fn set_active_revision(&self, revision: &ActiveRevision) -> Result<(), String>;
     /// The digests of prior valid revisions, for manual rollback.
     ///
     /// # Errors
@@ -319,10 +313,6 @@ mod tests {
     impl SourcePort for FakePort {
         async fn active_revision(&self) -> Result<Option<ActiveRevision>, String> {
             Ok(self.active.lock().unwrap().clone())
-        }
-        async fn set_active_revision(&self, revision: &ActiveRevision) -> Result<(), String> {
-            *self.active.lock().unwrap() = Some(revision.clone());
-            Ok(())
         }
         async fn prior_revisions(&self) -> Result<Vec<ActiveRevision>, String> {
             Ok(self.valid.lock().unwrap().clone())

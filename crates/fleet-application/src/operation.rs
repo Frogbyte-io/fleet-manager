@@ -83,6 +83,16 @@ pub const CREATABLE_KINDS: [&str; 31] = [
 /// governs both the dedicated endpoint and the generic one.
 #[must_use]
 fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<Permission> {
+    // The source kinds are catalog-level: their permission is enforced
+    // here with `resource: None`, never a machine id.
+    match kind {
+        "source.fetch" => Some(Permission::SourceFetch),
+        "source.activate" => Some(Permission::SourceActivate),
+        _ => machine_scoped_kind_permission_inner(kind, payload),
+    }
+}
+
+fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Option<Permission> {
     match kind {
         "projects.discover" => Some(Permission::ProjectsDiscover),
         "projects.clone" | "projects.pull" | "projects.status" => {
