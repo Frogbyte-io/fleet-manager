@@ -38,9 +38,9 @@ impl fleet_application::source::SourcePort for SourceRepository {
 
     async fn set_active_revision(&self, revision: &ActiveRevision) -> Result<(), String> {
         sqlx::query(
-            "INSERT INTO source_active_revision (id, commit_sha, content_digest, activated_at) \
+            "INSERT INTO source_active_revision (singleton, commit_sha, content_digest, activated_at) \
              VALUES ('active', ?1, ?2, ?3) \
-             ON CONFLICT(id) DO UPDATE SET \
+             ON CONFLICT(singleton) DO UPDATE SET \
              commit_sha = excluded.commit_sha, \
              content_digest = excluded.content_digest, \
              activated_at = excluded.activated_at",
@@ -71,13 +71,48 @@ impl fleet_application::source::SourcePort for SourceRepository {
             .collect())
     }
 
+    async fn activate_serialized(
+        &self,
+        revision: &ActiveRevision,
+    ) -> Result<ActiveRevision, String> {
+        // The critical section is serialized by BEGIN IMMEDIATE: only one
+        // activation's check-and-set can run at a time, so a concurrent
+        // activation cannot race.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("the activation lock failed: {error}"))?;
+        sqlx::query(
+            "INSERT INTO source_active_revision (singleton, commit_sha, content_digest, activated_at) \
+             VALUES ('active', ?1, ?2, ?3) \
+             ON CONFLICT(singleton) DO UPDATE SET \
+             commit_sha = excluded.commit_sha, \
+             content_digest = excluded.content_digest, \
+             activated_at = excluded.activated_at",
+        )
+        .bind(&revision.commit_sha)
+        .bind(&revision.content_digest)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("the active revision write failed: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("the activation commit failed: {error}"))?;
+        Ok(revision.clone())
+    }
+
     async fn record_valid_revision(&self, revision: &ActiveRevision) -> Result<(), String> {
         sqlx::query(
             "INSERT OR IGNORE INTO source_revision_history \
              (id, commit_sha, content_digest, activated_at) \
              VALUES (?1, ?2, ?3, ?4)",
         )
-        .bind(format!("rev-{}", revision.content_digest))
+        .bind(format!(
+            "rev-{}-{}",
+            revision.commit_sha, revision.content_digest
+        ))
         .bind(&revision.commit_sha)
         .bind(&revision.content_digest)
         .bind(fleet_core::SystemClock::now_unix_millis())

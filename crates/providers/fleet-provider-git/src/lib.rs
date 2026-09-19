@@ -79,14 +79,21 @@ impl GitSource {
             .output()
             .map_err(|error| format!("git could not start: {error}"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            // The stderr is bounded and redacted: a credential-bearing
+            // remote can echo its URL in a failure message.
+            let stderr = fleet_core::redact_schemeless_credentials(
+                &fleet_core::redact_url_credentials(&String::from_utf8_lossy(&output.stderr)),
+            );
+            let bounded = stderr.trim().chars().take(500).collect::<String>();
             return Err(format!(
-                "git {} failed: {}",
-                arguments.first().unwrap_or(&""),
-                stderr.trim()
+                "git {} failed: {bounded}",
+                arguments.first().unwrap_or(&"")
             ));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        // The stdout is bounded: a large repository cannot consume
+        // unbounded controller memory.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.chars().take(1024 * 1024).collect())
     }
 
     /// Fetches one candidate: clones the repository at the pinned commit
@@ -103,33 +110,49 @@ impl GitSource {
         commit_sha: &str,
         validate: impl FnOnce(&[PathBuf]) -> Vec<String>,
     ) -> Result<Candidate, String> {
-        // The worktree directory is named by the SHA: the same commit
-        // materializes to the same isolated directory.
-        let worktree = self.work_root.join(format!("candidate-{commit_sha}"));
-        if !worktree.exists() {
-            self.git(&[
-                "clone",
-                "--quiet",
-                "--no-recurse-submodules",
-                remote,
-                worktree.to_str().unwrap_or_default(),
-            ])?;
-            self.git(&[
-                "-C",
-                worktree.to_str().unwrap_or_default(),
-                "checkout",
-                "--quiet",
-                "--detach",
-                commit_sha,
-            ])?;
+        // The SHA must be a full hexadecimal commit id: anything else
+        // could escape the isolated work root through the path.
+        if commit_sha.len() != 40
+            || !commit_sha
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_ascii_lowercase() || c.is_ascii_digit())
+        {
+            return Err("the commit SHA must be a full 40-character hexadecimal id".to_owned());
         }
+        // The worktree directory is named by the SHA: the same commit
+        // materializes to the same isolated directory. An existing
+        // directory is discarded and recreated — a stale or partial clone
+        // must never be validated under the requested SHA.
+        let worktree = self.work_root.join(format!("candidate-{commit_sha}"));
+        if worktree.exists() {
+            std::fs::remove_dir_all(&worktree)
+                .map_err(|error| format!("the stale candidate could not be removed: {error}"))?;
+        }
+        self.git(&[
+            "clone",
+            "--quiet",
+            "--no-recurse-submodules",
+            remote,
+            worktree.to_str().unwrap_or_default(),
+        ])?;
+        self.git(&[
+            "-C",
+            worktree.to_str().unwrap_or_default(),
+            "checkout",
+            "--quiet",
+            "--detach",
+            commit_sha,
+        ])?;
+        // Symlinks escape the isolated candidate: a repository carrying
+        // one is refused before any file is read.
+        reject_symlinks(&worktree)?;
         // The digest covers the tracked file set: paths + contents, so
         // two candidates are equal only when both the commit and the
         // content match.
         let content_digest = self.digest_worktree(&worktree)?;
         // Collect the YAML files for validation.
         let mut sources = Vec::new();
-        collect_yaml(&worktree, &worktree, &mut sources)?;
+        collect_yaml(&worktree, &mut sources)?;
         let diagnostics = validate(&sources);
         Ok(Candidate {
             digest: CandidateDigest {
@@ -143,7 +166,12 @@ impl GitSource {
 
     /// Computes the SHA-256 of the tracked file set: sorted paths plus
     /// contents, hashed as one stream.
-    fn digest_worktree(&self, worktree: &Path) -> Result<String, String> {
+    /// Computes the digest of the tracked file set.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a tracked file is unreadable.
+    pub fn digest_worktree(&self, worktree: &Path) -> Result<String, String> {
         use sha2::Digest as _;
         let files = self.git(&["-C", worktree.to_str().unwrap_or_default(), "ls-files"])?;
         let mut hasher = sha2::Sha256::new();
@@ -159,7 +187,7 @@ impl GitSource {
 }
 
 /// Collects YAML files under a root, as relative paths.
-fn collect_yaml(_root: &Path, base: &Path, sources: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_yaml(base: &Path, sources: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = std::fs::read_dir(base).map_err(|error| error.to_string())?;
     for entry in entries {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -169,12 +197,35 @@ fn collect_yaml(_root: &Path, base: &Path, sources: &mut Vec<PathBuf>) -> Result
             if path.file_name().is_some_and(|name| name == ".git") {
                 continue;
             }
-            collect_yaml(base, &path, sources)?;
+            collect_yaml(&path, sources)?;
         } else if path
             .extension()
             .is_some_and(|extension| extension == "yaml")
         {
             sources.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a repository carrying symlinks: a symlink escapes the isolated
+/// candidate and makes the digest dependent on controller filesystem
+/// contents.
+fn reject_symlinks(base: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(base).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("the candidate file is unreadable: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "the candidate carries a symlink at {}; symlinks are refused so the digest stays confined to the clone",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() && path.file_name().is_some_and(|name| name != ".git") {
+            reject_symlinks(&path)?;
         }
     }
     Ok(())

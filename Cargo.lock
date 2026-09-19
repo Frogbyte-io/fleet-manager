@@ -692,7 +692,6 @@ name = "fleet-provider-git"
 version = "0.1.0"
 dependencies = [
  "fleet-core",
- "serde",
  "sha2 0.10.9",
 ]
 

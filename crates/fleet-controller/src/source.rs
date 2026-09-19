@@ -182,6 +182,7 @@ impl SourceExecutor {
                 },
                 diagnostics.is_empty(),
                 candidate_known,
+                Some(&operation.id),
             )
             .await
             .map_err(|error| {

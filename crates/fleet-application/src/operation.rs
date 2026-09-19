@@ -112,8 +112,7 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
         "mise.install" | "mise.exec" => Some(Permission::MiseOperate),
         "ready.workflow" => Some(Permission::ProjectsReady),
         "apply.workflow" => Some(Permission::ApplyExecute),
-        "source.fetch" => Some(Permission::SourceFetch),
-        "source.activate" => Some(Permission::SourceActivate),
+
         _ => None,
     }
 }

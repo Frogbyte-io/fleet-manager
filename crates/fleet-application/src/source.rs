@@ -55,6 +55,18 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn record_valid_revision(&self, revision: &ActiveRevision) -> Result<(), String>;
+    /// Atomically activates a revision: the backend serializes the
+    /// check-and-set so concurrent activations cannot race — the method
+    /// returns the revision that is active AFTER the call, which is the
+    /// caller's requested revision only if the activation won.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn activate_serialized(
+        &self,
+        revision: &ActiveRevision,
+    ) -> Result<ActiveRevision, String>;
 }
 
 /// The outcome of one fetch: the candidate's digest and validation
@@ -157,6 +169,7 @@ impl DesiredSource {
         digest: &fleet_core::CandidateDigest,
         candidate_valid: bool,
         candidate_known: bool,
+        operation_id: Option<&str>,
     ) -> Result<ActiveRevision, crate::project::ProjectUseCaseError> {
         use crate::authz::{AccessRequest, Permission, authorize};
         authorize(
@@ -169,16 +182,29 @@ impl DesiredSource {
         )
         .map_err(crate::project::ProjectUseCaseError::Denied)?;
         // An invalid candidate can never become active, and an unknown
-        // digest was never fetched: both are refusals, not errors.
+        // digest was never fetched: both are refusals, not errors. The
+        // caller's claims are verified against the recorded candidate
+        // state: only a candidate the fetch path recorded as valid AND
+        // known may activate.
+        let recorded = self.port.prior_revisions().await.map_err(|detail| {
+            crate::project::ProjectUseCaseError::Backend {
+                context: "source_verify",
+                detail,
+            }
+        })?;
+        let known_and_valid = recorded
+            .iter()
+            .any(|revision| revision.commit_sha == digest.commit_sha);
         if !candidate_valid {
             return Err(crate::project::ProjectUseCaseError::Invalid {
                 detail: "the candidate carries validation diagnostics and cannot become active"
                     .to_owned(),
             });
         }
-        if !candidate_known {
+        if !candidate_known || !known_and_valid {
             return Err(crate::project::ProjectUseCaseError::Invalid {
-                detail: "the candidate was never fetched; fetch it before activating".to_owned(),
+                detail: "the candidate was never fetched as valid; fetch it before activating"
+                    .to_owned(),
             });
         }
         // The audit intent lands BEFORE the mutation: a failure to audit
@@ -204,7 +230,7 @@ impl DesiredSource {
                 resource: None,
                 decision: crate::authz::Decision::allow(),
                 correlation_id: None,
-                operation_id: None,
+                operation_id: operation_id.map(str::to_owned),
                 metadata,
             })
             .await
@@ -216,14 +242,15 @@ impl DesiredSource {
             commit_sha: digest.commit_sha.clone(),
             content_digest: digest.content_digest.clone(),
         };
+        // The backend serializes the check-and-set: a concurrent
+        // activation cannot race.
         self.port
-            .set_active_revision(&revision)
+            .activate_serialized(&revision)
             .await
             .map_err(|detail| crate::project::ProjectUseCaseError::Backend {
                 context: "source_activate",
                 detail,
-            })?;
-        Ok(revision)
+            })
     }
 
     /// The prior valid revisions available for manual rollback.
@@ -304,13 +331,23 @@ mod tests {
             self.valid.lock().unwrap().push(revision.clone());
             Ok(())
         }
+        async fn activate_serialized(
+            &self,
+            revision: &ActiveRevision,
+        ) -> Result<ActiveRevision, String> {
+            *self.active.lock().unwrap() = Some(revision.clone());
+            Ok(revision.clone())
+        }
     }
 
-    #[derive(Debug)]
-    struct FakeAudit;
+    #[derive(Debug, Default)]
+    struct FakeAudit {
+        intents: Mutex<Vec<crate::audit::AuditIntent>>,
+    }
     #[async_trait::async_trait]
     impl crate::operation::AuditPort for FakeAudit {
-        async fn record_intent(&self, _intent: &crate::audit::AuditIntent) -> Result<(), String> {
+        async fn record_intent(&self, intent: &crate::audit::AuditIntent) -> Result<(), String> {
+            self.intents.lock().unwrap().push(intent.clone());
             Ok(())
         }
         async fn record_outcome(
@@ -329,13 +366,15 @@ mod tests {
         }
     }
 
-    fn service() -> DesiredSource {
-        DesiredSource::new(Arc::new(FakePort::default()), Arc::new(FakeAudit))
+    fn service() -> (DesiredSource, Arc<FakeAudit>, Arc<FakePort>) {
+        let port = Arc::new(FakePort::default());
+        let audit = Arc::new(FakeAudit::default());
+        (DesiredSource::new(port.clone(), audit.clone()), audit, port)
     }
 
     #[tokio::test]
     async fn a_valid_candidate_is_recorded_for_rollback() {
-        let service = service();
+        let (service, _, port) = service();
         let outcome = FetchOutcome::Candidate {
             digest: digest("abc", "digest-1"),
             diagnostics: vec![],
@@ -348,12 +387,12 @@ mod tests {
             panic!("the candidate outcome is preserved");
         };
         assert!(diagnostics.is_empty());
-        assert_eq!(service.port.prior_revisions().await.unwrap().len(), 1);
+        assert_eq!(port.prior_revisions().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_candidate_with_diagnostics_is_reported_and_forgotten() {
-        let service = service();
+        let (service, _, port) = service();
         let outcome = FetchOutcome::Candidate {
             digest: digest("abc", "digest-bad"),
             diagnostics: vec!["the document does not match".to_owned()],
@@ -363,14 +402,14 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            service.port.prior_revisions().await.unwrap().is_empty(),
+            port.prior_revisions().await.unwrap().is_empty(),
             "an invalid candidate is never a rollback point"
         );
     }
 
     #[tokio::test]
     async fn activation_refuses_an_invalid_candidate() {
-        let service = service();
+        let (service, _, _) = service();
         let error = service
             .activate(
                 &AllowAll,
@@ -378,6 +417,7 @@ mod tests {
                 &digest("abc", "bad"),
                 false,
                 true,
+                None,
             )
             .await
             .unwrap_err();
@@ -390,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn activation_refuses_an_unknown_candidate() {
-        let service = service();
+        let (service, _, _) = service();
         let error = service
             .activate(
                 &AllowAll,
@@ -398,6 +438,7 @@ mod tests {
                 &digest("abc", "d"),
                 true,
                 false,
+                None,
             )
             .await
             .unwrap_err();
@@ -406,7 +447,20 @@ mod tests {
 
     #[tokio::test]
     async fn activation_is_audited_and_durable() {
-        let service = service();
+        let (service, audit, port) = service();
+        // The candidate must have been fetched as valid before activation:
+        // the fetch records it.
+        service
+            .handle_fetch(
+                &AllowAll,
+                "anonymous-lan-admin",
+                FetchOutcome::Candidate {
+                    digest: digest("abc", "digest-1"),
+                    diagnostics: vec![],
+                },
+            )
+            .await
+            .unwrap();
         let revision = service
             .activate(
                 &AllowAll,
@@ -414,12 +468,26 @@ mod tests {
                 &digest("abc", "digest-1"),
                 true,
                 true,
+                Some("op-1"),
             )
             .await
             .unwrap();
         assert_eq!(revision.commit_sha, "abc");
-        let active = service.port.active_revision().await.unwrap().unwrap();
+        let active = port.active_revision().await.unwrap().unwrap();
         assert_eq!(active.content_digest, "digest-1");
+        // The activation is audited: the intent names the action, carries
+        // the commit SHA, and is correlated with the operation.
+        let intents = audit.intents.lock().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].action, "source.activate");
+        assert!(
+            intents[0]
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "commitSha" && value == "abc"),
+            "the intent carries the commit SHA"
+        );
+        assert!(intents[0].operation_id.is_some());
     }
 
     #[tokio::test]
@@ -431,7 +499,7 @@ mod tests {
                 Decision::deny(crate::authz::ReasonId::UnknownPrincipal)
             }
         }
-        let service = service();
+        let (service, _, port) = service();
         let outcome = FetchOutcome::Candidate {
             digest: digest("abc", "d"),
             diagnostics: vec![],
@@ -439,11 +507,11 @@ mod tests {
         assert!(service.handle_fetch(&DenyAll, "x", outcome).await.is_err());
         assert!(
             service
-                .activate(&DenyAll, "x", &digest("abc", "d"), true, true)
+                .activate(&DenyAll, "x", &digest("abc", "d"), true, true, None)
                 .await
                 .is_err()
         );
-        assert!(service.port.active_revision().await.unwrap().is_none());
-        assert!(service.port.prior_revisions().await.unwrap().is_empty());
+        assert!(port.active_revision().await.unwrap().is_none());
+        assert!(port.prior_revisions().await.unwrap().is_empty());
     }
 }

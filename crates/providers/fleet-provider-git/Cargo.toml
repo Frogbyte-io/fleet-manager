@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 fleet-core = { path = "../../fleet-core" }
 sha2 = "0.10"
-serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

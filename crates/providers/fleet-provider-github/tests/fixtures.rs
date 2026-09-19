@@ -41,9 +41,10 @@ async fn the_token_request_carries_least_permissions() {
         body: r#"{"token":"ghs_example","expiresAt":"2026-09-19T00:00:00Z"}"#.to_owned(),
         seen: seen.clone(),
     };
-    let outcome = request_bootstrap_token(&transport, "12345", Duration::from_secs(30))
-        .await
-        .unwrap();
+    let outcome =
+        request_bootstrap_token(&transport, "12345", "example/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
     let BootstrapOutcome::Issued {
         token,
         expires_at,
@@ -53,8 +54,8 @@ async fn the_token_request_carries_least_permissions() {
         panic!("the token is issued");
     };
     assert_eq!(token, "ghs_example");
-    assert_eq!(expires_at.as_deref(), Some("2026-09-19T00:00:00Z"));
-    assert_eq!(permissions, ["contents:read_and_write"]);
+    assert_eq!(expires_at, "2026-09-19T00:00:00Z");
+    assert_eq!(permissions, ["contents:write"]);
     let (installation, body) = &seen.lock().unwrap()[0];
     assert_eq!(installation, "12345");
     assert!(
@@ -74,9 +75,10 @@ async fn a_refusal_is_an_honest_outcome_with_redacted_detail() {
         body: r#"{"message":"Not Found: https://user:secret@host.invalid"}"#.to_owned(),
         seen: Arc::new(Mutex::new(Vec::new())),
     };
-    let outcome = request_bootstrap_token(&transport, "12345", Duration::from_secs(30))
-        .await
-        .unwrap();
+    let outcome =
+        request_bootstrap_token(&transport, "12345", "example/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
     let BootstrapOutcome::Refused { detail } = outcome else {
         panic!("the refusal is an outcome");
     };
@@ -91,13 +93,48 @@ async fn a_document_without_a_token_is_refused() {
         body: r#"{"expiresAt":"2026-09-19T00:00:00Z"}"#.to_owned(),
         seen: Arc::new(Mutex::new(Vec::new())),
     };
-    let outcome = request_bootstrap_token(&transport, "12345", Duration::from_secs(30))
-        .await
-        .unwrap();
+    let outcome =
+        request_bootstrap_token(&transport, "12345", "example/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
     let BootstrapOutcome::Refused { detail } = outcome else {
         panic!("the refusal is an outcome");
     };
     assert!(detail.contains("no token"), "{detail}");
+}
+
+#[tokio::test]
+async fn a_document_without_an_expiry_is_refused() {
+    let transport = FakeTransport {
+        status: 201,
+        body: r#"{"token":"ghs_example"}"#.to_owned(),
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let outcome =
+        request_bootstrap_token(&transport, "12345", "example/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+    let BootstrapOutcome::Refused { detail } = outcome else {
+        panic!("the refusal is an outcome");
+    };
+    assert!(detail.contains("no expiry"), "{detail}");
+}
+
+#[tokio::test]
+async fn an_unparseable_document_is_a_refusal_not_a_transport_failure() {
+    let transport = FakeTransport {
+        status: 201,
+        body: "not json".to_owned(),
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let outcome =
+        request_bootstrap_token(&transport, "12345", "example/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+    let BootstrapOutcome::Refused { detail } = outcome else {
+        panic!("the refusal is an outcome");
+    };
+    assert!(detail.contains("documented shape"), "{detail}");
 }
 
 #[tokio::test]
@@ -107,9 +144,10 @@ async fn an_oversized_document_is_refused() {
         body: "x".repeat(128 * 1024),
         seen: Arc::new(Mutex::new(Vec::new())),
     };
-    let outcome = request_bootstrap_token(&transport, "12345", Duration::from_secs(30))
-        .await
-        .unwrap();
+    let outcome =
+        request_bootstrap_token(&transport, "12345", "example/repo", Duration::from_secs(30))
+            .await
+            .unwrap();
     let BootstrapOutcome::Refused { detail } = outcome else {
         panic!("the refusal is an outcome");
     };
