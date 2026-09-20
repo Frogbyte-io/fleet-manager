@@ -69,6 +69,10 @@ pub struct ProxmoxAccount {
     pub token_id: String,
     /// The pinned host-certificate fingerprint, once confirmed.
     pub fingerprint: Option<String>,
+    /// The fingerprint the trust probe last observed, not yet confirmed.
+    /// `confirm` must match this; a caller cannot pin a digest it never
+    /// observed through the probe.
+    pub observed_fingerprint: Option<String>,
     /// When the account was created (epoch millis).
     pub created_at: i64,
 }
@@ -268,6 +272,17 @@ pub trait ProxmoxAccountPort: fmt::Debug + Send + Sync {
         id: &str,
         fingerprint: Option<String>,
     ) -> Result<ProxmoxAccount, String>;
+    /// Records the fingerprint the trust probe observed, for the confirm
+    /// step to match against. `None` clears the observation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn set_observed_fingerprint(
+        &self,
+        id: &str,
+        fingerprint: Option<String>,
+    ) -> Result<ProxmoxAccount, String>;
     /// Removes the account.
     ///
     /// # Errors
@@ -382,11 +397,14 @@ pub trait ProxmoxDiscoverPort: fmt::Debug + Send + Sync {
 }
 
 /// The provider's own discovery shape, before application-layer enrichment.
+/// The resources' provenance fields (`account_id`, `pve_version`,
+/// `observed_at`) are placeholders here; [`ProxmoxAccounts::discover`]
+/// overwrites all three with authoritative values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawDiscovery {
     /// The PVE version seen.
     pub version: String,
-    /// The normalized resources, without provenance.
+    /// The normalized resources, provenance pending.
     pub resources: Vec<ProxmoxResource>,
     /// The per-resource normalization warnings.
     pub warnings: Vec<String>,
@@ -437,7 +455,10 @@ impl ProxmoxAccounts {
         }
     }
 
-    /// Lists the configured accounts with their trust states.
+    /// Lists the configured accounts with their trust states, bounded by
+    /// the page limit. The cursor is the last account id of the previous
+    /// page; the list is ordered newest first, so a following page really
+    /// advances.
     ///
     /// # Errors
     ///
@@ -446,6 +467,8 @@ impl ProxmoxAccounts {
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
+        limit: u32,
+        after_id: Option<&str>,
     ) -> Result<Vec<ProxmoxAccount>, ProxmoxUseCaseError> {
         authorize(
             authorizer,
@@ -456,20 +479,33 @@ impl ProxmoxAccounts {
             },
         )
         .map_err(ProxmoxUseCaseError::Denied)?;
-        self.accounts
-            .list()
-            .await
-            .map_err(|detail| ProxmoxUseCaseError::Backend {
-                context: "accounts",
-                detail,
-            })
+        let mut accounts =
+            self.accounts
+                .list()
+                .await
+                .map_err(|detail| ProxmoxUseCaseError::Backend {
+                    context: "accounts",
+                    detail,
+                })?;
+        if let Some(after_id) = after_id {
+            let Some(position) = accounts.iter().position(|account| account.id == after_id) else {
+                return Err(ProxmoxUseCaseError::Invalid {
+                    detail: "the cursor names no account in the list".to_owned(),
+                });
+            };
+            accounts.drain(..=position);
+        }
+        accounts.truncate(usize::try_from(limit).unwrap_or(accounts.len()));
+        Ok(accounts)
     }
 
     /// Registers an account and stores its token secret. The secret goes
     /// into the encrypted store and is never echoed, logged, or audited;
-    /// the audit event names the account and the token id only. The new
-    /// account starts `Unconfirmed`: discovery stays locked until the
-    /// fingerprint is confirmed.
+    /// the audit intent lands before any mutation, carrying the account
+    /// name as provenance (the token id contains "token", which the audit
+    /// guard structurally rejects — and should). The new account starts
+    /// `Unconfirmed`: discovery stays locked until the fingerprint is
+    /// confirmed.
     ///
     /// # Errors
     ///
@@ -494,11 +530,29 @@ impl ProxmoxAccounts {
         validate_name(&new.name)?;
         validate_host(&new.host)?;
         validate_token_id(&new.token_id)?;
+        if let Some(port) = new.port
+            && port == 0
+        {
+            return Err(ProxmoxUseCaseError::Invalid {
+                detail: "the port must be 1..=65535".to_owned(),
+            });
+        }
         if token_secret.is_empty() || token_secret.len() > 256 {
             return Err(ProxmoxUseCaseError::Invalid {
                 detail: "the token secret must be 1..=256 characters".to_owned(),
             });
         }
+        // The audit intent lands BEFORE any mutation: a failure to audit
+        // prevents the mutation, so durable state can never exist without
+        // its intent.
+        self.audit_event(
+            principal,
+            Permission::ProxmoxConfig,
+            None,
+            "proxmox_account_creating",
+            Some(("name", new.name.as_str())),
+        )
+        .await?;
         let account = self.accounts.create(&new).await.map_err(|detail| {
             if is_taken(&detail) {
                 ProxmoxUseCaseError::Conflict { detail }
@@ -510,10 +564,19 @@ impl ProxmoxAccounts {
             }
         })?;
         // A failed secret write must not leave an account that pretends to
-        // be usable: the account is removed again. A clear of a record that
-        // was never written succeeds.
+        // be usable: the account is removed again. If even the rollback
+        // fails, the orphan is named — the name stays unusable until an
+        // operator removes it, which is honest rather than silent.
         if let Err(error) = self.credentials.store(&account.id, token_secret).await {
-            let _ = self.accounts.delete(&account.id).await;
+            if let Err(rollback) = self.accounts.delete(&account.id).await {
+                return Err(ProxmoxUseCaseError::Backend {
+                    context: "credentials",
+                    detail: format!(
+                        "the secret write failed ({error}) and the rollback failed too: account {} lingers ({rollback})",
+                        account.id
+                    ),
+                });
+            }
             return Err(ProxmoxUseCaseError::Backend {
                 context: "credentials",
                 detail: error.to_string(),
@@ -554,6 +617,22 @@ impl ProxmoxAccounts {
         )
         .map_err(ProxmoxUseCaseError::Denied)?;
         let account = self.require_account(account_id).await?;
+        self.audit_event(
+            principal,
+            Permission::ProxmoxConfig,
+            Some(account_id),
+            "proxmox_account_deleting",
+            Some(("name", account.name.as_str())),
+        )
+        .await?;
+        // The secret is removed first: a delete that leaves the credential
+        // behind is a failure, not a success with a footnote. The account
+        // row is only removed once the credential is gone, so a retry is
+        // always safe and a half-deleted state cannot hold a secret.
+        self.credentials
+            .clear(account_id)
+            .await
+            .map_err(ProxmoxUseCaseError::Credentials)?;
         self.accounts
             .delete(account_id)
             .await
@@ -561,20 +640,6 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
-        // The secret's removal is best effort: the record is gone from the
-        // account surface either way, and a stuck store must not make the
-        // account undeletable. The detail is logged at the boundary.
-        if let Err(error) = self.credentials.clear(account_id).await {
-            let _ = error;
-        }
-        self.audit_event(
-            principal,
-            Permission::ProxmoxConfig,
-            Some(account_id),
-            "proxmox_account_deleted",
-            Some(("name", account.name.as_str())),
-        )
-        .await?;
         Ok(())
     }
 
@@ -602,10 +667,21 @@ impl ProxmoxAccounts {
         )
         .map_err(ProxmoxUseCaseError::Denied)?;
         let account = self.require_account(account_id).await?;
-        self.trust
+        let observed = self
+            .trust
             .observe(&account.host, account.port)
             .await
-            .map_err(ProxmoxUseCaseError::Source)
+            .map_err(ProxmoxUseCaseError::Source)?;
+        // The observation is persisted before it is reported, so `confirm`
+        // can only pin what this probe actually saw.
+        self.accounts
+            .set_observed_fingerprint(account_id, Some(observed.clone()))
+            .await
+            .map_err(|detail| ProxmoxUseCaseError::Backend {
+                context: "accounts",
+                detail,
+            })?;
+        Ok(observed)
     }
 
     /// Pins the confirmed fingerprint. Only a fingerprint this principal
@@ -631,13 +707,40 @@ impl ProxmoxAccounts {
             },
         )
         .map_err(ProxmoxUseCaseError::Denied)?;
-        self.require_account(account_id).await?;
+        let account = self.require_account(account_id).await?;
         let normalized = normalize_fingerprint(fingerprint);
         if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(ProxmoxUseCaseError::Invalid {
                 detail: "the fingerprint must be a SHA-256 digest (colons optional)".to_owned(),
             });
         }
+        // Only a fingerprint this probe observed may be pinned: a digest
+        // typed from memory or copied from elsewhere is refused, so trust
+        // always flows through the observe step.
+        let Some(observed) = account.observed_fingerprint.as_deref() else {
+            return Err(ProxmoxUseCaseError::Invalid {
+                detail:
+                    "observe the host's fingerprint first; confirm pins only what the probe saw"
+                        .to_owned(),
+            });
+        };
+        if normalize_fingerprint(observed) != normalized {
+            return Err(ProxmoxUseCaseError::Invalid {
+                detail:
+                    "the supplied fingerprint does not match the observed one; observe again if the host changed"
+                        .to_owned(),
+            });
+        }
+        // The audit intent lands BEFORE the mutation, per the two-phase
+        // audit rule.
+        self.audit_event(
+            principal,
+            Permission::ProxmoxConfig,
+            Some(account_id),
+            "proxmox_fingerprint_confirming",
+            Some(("fingerprint", normalized.as_str())),
+        )
+        .await?;
         let account = self
             .accounts
             .set_fingerprint(account_id, Some(normalized))
@@ -646,14 +749,6 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
-        self.audit_event(
-            principal,
-            Permission::ProxmoxConfig,
-            Some(account_id),
-            "proxmox_fingerprint_confirmed",
-            Some(("fingerprint", account.fingerprint.as_deref().unwrap_or(""))),
-        )
-        .await?;
         Ok(account)
     }
 
@@ -803,7 +898,7 @@ fn validate_host(host: &str) -> Result<(), ProxmoxUseCaseError> {
             detail: "the host must be 1..=253 characters".to_owned(),
         });
     }
-    if host.starts_with("http") {
+    if host.contains("://") {
         return Err(ProxmoxUseCaseError::Invalid {
             detail: "the host is a bare host or IP, not a URL".to_owned(),
         });

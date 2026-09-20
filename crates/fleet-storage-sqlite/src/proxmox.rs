@@ -35,6 +35,10 @@ impl ProxmoxAccountRepository {
             port: u16::try_from(row.get::<i64, _>("port")).unwrap_or(8006),
             token_id: row.get("token_id"),
             fingerprint: (!fingerprint.is_empty()).then_some(fingerprint),
+            observed_fingerprint: {
+                let observed: String = row.get("observed_fingerprint");
+                (!observed.is_empty()).then_some(observed)
+            },
             created_at: row.get("created_at"),
         }
     }
@@ -47,8 +51,8 @@ impl ProxmoxAccountPort for ProxmoxAccountRepository {
         let now = fleet_core::SystemClock::now_unix_millis();
         let port = account.port.unwrap_or(8006);
         let result = sqlx::query(
-            "INSERT INTO proxmox_accounts (id, name, host, port, token_id, fingerprint, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, '', ?6)",
+            "INSERT INTO proxmox_accounts (id, name, host, port, token_id, fingerprint, observed_fingerprint, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, '', '', ?6)",
         )
         .bind(&id)
         .bind(&account.name)
@@ -69,7 +73,7 @@ impl ProxmoxAccountPort for ProxmoxAccountRepository {
     }
 
     async fn get(&self, id: &str) -> Result<ProxmoxAccount, String> {
-        sqlx::query("SELECT id, name, host, port, token_id, fingerprint, created_at FROM proxmox_accounts WHERE id = ?1")
+        sqlx::query("SELECT id, name, host, port, token_id, fingerprint, observed_fingerprint, created_at FROM proxmox_accounts WHERE id = ?1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -79,7 +83,7 @@ impl ProxmoxAccountPort for ProxmoxAccountRepository {
     }
 
     async fn list(&self) -> Result<Vec<ProxmoxAccount>, String> {
-        let rows = sqlx::query("SELECT id, name, host, port, token_id, fingerprint, created_at FROM proxmox_accounts ORDER BY created_at DESC")
+        let rows = sqlx::query("SELECT id, name, host, port, token_id, fingerprint, observed_fingerprint, created_at FROM proxmox_accounts ORDER BY created_at DESC, id DESC")
             .fetch_all(&self.pool)
             .await
             .map_err(|error| format!("list failed: {error}"))?;
@@ -91,14 +95,22 @@ impl ProxmoxAccountPort for ProxmoxAccountRepository {
         id: &str,
         fingerprint: Option<String>,
     ) -> Result<ProxmoxAccount, String> {
-        let value = fingerprint.unwrap_or_default();
-        sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?2 WHERE id = ?1")
-            .bind(id)
-            .bind(&value)
-            .execute(&self.pool)
+        self.update_fingerprint_column(id, "fingerprint", fingerprint, "set_fingerprint")
             .await
-            .map_err(|error| format!("set_fingerprint failed: {error}"))?;
-        self.get(id).await
+    }
+
+    async fn set_observed_fingerprint(
+        &self,
+        id: &str,
+        fingerprint: Option<String>,
+    ) -> Result<ProxmoxAccount, String> {
+        self.update_fingerprint_column(
+            id,
+            "observed_fingerprint",
+            fingerprint,
+            "set_observed_fingerprint",
+        )
+        .await
     }
 
     async fn delete(&self, id: &str) -> Result<(), String> {
@@ -111,6 +123,61 @@ impl ProxmoxAccountPort for ProxmoxAccountRepository {
             return Err(format!("account {id} not found"));
         }
         Ok(())
+    }
+}
+
+impl ProxmoxAccountRepository {
+    /// Updates one fingerprint column and reads the row back inside one
+    /// `BEGIN IMMEDIATE` transaction, so a racing confirmation cannot
+    /// return (and audit) another caller's fingerprint.
+    async fn update_fingerprint_column(
+        &self,
+        id: &str,
+        column: &str,
+        fingerprint: Option<String>,
+        context: &str,
+    ) -> Result<ProxmoxAccount, String> {
+        // Two fixed queries rather than dynamic SQL: the column comes from
+        // the call site, and fixed strings keep the audit surface obvious.
+        let value = fingerprint.unwrap_or_default();
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("{context} failed: {error}"))?;
+        let updated = match column {
+            "fingerprint" => {
+                sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?2 WHERE id = ?1")
+                    .bind(id)
+                    .bind(&value)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| format!("{context} failed: {error}"))?
+            }
+            "observed_fingerprint" => {
+                sqlx::query("UPDATE proxmox_accounts SET observed_fingerprint = ?2 WHERE id = ?1")
+                    .bind(id)
+                    .bind(&value)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| format!("{context} failed: {error}"))?
+            }
+            other => return Err(format!("{context} failed: unknown column {other:?}")),
+        };
+        if updated.rows_affected() == 0 {
+            return Err(format!("account {id} not found"));
+        }
+        let row = sqlx::query("SELECT id, name, host, port, token_id, fingerprint, observed_fingerprint, created_at FROM proxmox_accounts WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| format!("{context} failed: {error}"))?;
+        let account = Self::row_to_account(&row);
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("{context} failed: {error}"))?;
+        Ok(account)
     }
 }
 

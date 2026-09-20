@@ -1919,6 +1919,28 @@
         "summary": "Lists the configured accounts.",
         "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
         "operationId": "listProxmoxAccounts",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of accounts to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor: the last account id of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The configured accounts, newest first.",

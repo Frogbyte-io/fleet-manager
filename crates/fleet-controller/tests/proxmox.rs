@@ -325,6 +325,14 @@ async fn a_mismatched_fingerprint_is_reported_with_both_values() {
         .await;
     assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
     let account_id = body["data"]["id"].as_str().unwrap().to_owned();
+    // Trust flows through observe: capture, then confirm what was seen.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/observe"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     harness
         .post(
             &format!("/api/v1/proxmox/accounts/{account_id}/confirm"),

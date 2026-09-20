@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use fleet_application::proxmox::{NewProxmoxAccount, ProxmoxAccount, ProxmoxUseCaseError};
@@ -208,6 +208,20 @@ pub struct ConfirmProxmoxFingerprintRequest {
     pub fingerprint: String,
 }
 
+/// The list-accounts query parameters.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListProxmoxAccountsParams {
+    /// The maximum number of accounts to return.
+    pub limit: Option<u32>,
+    /// The opaque cursor: the last account id of the previous page.
+    pub cursor: Option<String>,
+}
+
+/// The default and maximum page bounds, matching the machine read model.
+const DEFAULT_PAGE_LIMIT: u32 = 50;
+const MAX_PAGE_LIMIT: u32 = 200;
+
 /// Lists the configured accounts.
 ///
 /// # Errors
@@ -229,25 +243,50 @@ pub struct ConfirmProxmoxFingerprintRequest {
             description = "The caller may not read the Proxmox surface.",
             body = crate::error::ApiError
         ),
+    ),
+    params(
+        (
+            "limit" = Option<u32>,
+            Query,
+            description = "The maximum number of accounts to return."
+        ),
+        (
+            "cursor" = Option<String>,
+            Query,
+            description = "The opaque cursor: the last account id of the previous page."
+        ),
     )
 )]
 pub async fn list_proxmox_accounts(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    Query(params): Query<ListProxmoxAccountsParams>,
 ) -> Result<Json<Page<ProxmoxAccountDto>>, ApiErrorResponse> {
     let proxmox = proxmox_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // A zero or absent limit means the default; the page never advertises
+    // more than it returns.
+    let limit = params
+        .limit
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .min(MAX_PAGE_LIMIT);
     let accounts = proxmox
-        .list(state.authorizer.as_ref(), &principal)
+        .list(
+            state.authorizer.as_ref(),
+            &principal,
+            limit,
+            params.cursor.as_deref(),
+        )
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
+    let next_cursor = (accounts.len() == usize::try_from(limit).unwrap_or(0))
+        .then(|| accounts.last().map(|account| account.id.clone()))
+        .flatten();
     let items: Vec<ProxmoxAccountDto> = accounts.into_iter().map(Into::into).collect();
     Ok(Json(Page {
-        page: PageInfo {
-            next_cursor: None,
-            limit: items.len().try_into().unwrap_or(u32::MAX),
-        },
+        page: PageInfo { next_cursor, limit },
         items,
     }))
 }

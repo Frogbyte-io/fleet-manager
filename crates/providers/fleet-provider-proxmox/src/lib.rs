@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fleet_core::SensitiveString;
+use futures_util::StreamExt as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -161,26 +162,17 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
 pub struct ReqwestPveTransport;
 
 impl ReqwestPveTransport {
-    /// Builds the transport.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the HTTP client cannot be built.
-    pub fn new() -> Result<Self, String> {
-        // A throwaway client proves the TLS feature set resolves in this
-        // exact dependency graph; each call builds its own client over a
-        // fresh pinned verifier (the policy is per-call, not per-transport).
-        reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|error| format!("cannot build the HTTP client: {error}"))?;
-        Ok(Self)
+    /// Builds the transport. The pinned verifier is per-call (each call
+    /// carries its own policy), so there is no client state to keep.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl Default for ReqwestPveTransport {
     fn default() -> Self {
-        Self::new().expect("the PVE transport must build")
+        Self::new()
     }
 }
 
@@ -314,7 +306,7 @@ impl PveTransport for ReqwestPveTransport {
             captured: Arc::clone(&captured),
         });
         let mut config = rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13])
+            .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
             .map_err(|error| PveTransportError::Connect {
                 detail: error.to_string(),
             })?
@@ -331,7 +323,11 @@ impl PveTransport for ReqwestPveTransport {
             .map_err(|error| PveTransportError::Connect {
                 detail: format!("the TLS configuration was rejected: {error}"),
             })?;
-        let url = format!("https://{}:{}{}", request.host, request.port, request.path);
+        let authority = match request.host.parse::<std::net::Ipv6Addr>() {
+            Ok(_) => format!("[{}]", request.host),
+            Err(_) => request.host.clone(),
+        };
+        let url = format!("https://{authority}:{}{}", request.port, request.path);
         let response = client
             .get(&url)
             .header(
@@ -353,32 +349,40 @@ impl PveTransport for ReqwestPveTransport {
                     .expect("the capture lock is not poisoned")
                     .clone();
                 match (observed, request.pinned_fingerprint.as_deref()) {
-                    (Some(observed), Some(_)) => PveTransportError::FingerprintMismatch {
-                        observed,
-                        pinned: request.pinned_fingerprint.clone(),
-                    },
-                    (Some(observed), None) => PveTransportError::ObserveRefused { observed },
-                    (None, _) => PveTransportError::Connect {
+                    // A mismatch is only a mismatch when the fingerprints
+                    // differ: a later TLS failure with a matching pin is a
+                    // connection failure, not an instruction to re-confirm.
+                    (Some(observed), Some(pinned))
+                        if normalize_fingerprint(&observed) != normalize_fingerprint(pinned) =>
+                    {
+                        PveTransportError::FingerprintMismatch {
+                            observed,
+                            pinned: Some(pinned.to_owned()),
+                        }
+                    }
+                    (Some(_), Some(_)) | (None, _) => PveTransportError::Connect {
                         detail: error.to_string(),
                     },
+                    (Some(observed), None) => PveTransportError::ObserveRefused { observed },
                 }
             })?;
         let status = u16::from(response.status());
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| PveTransportError::Connect {
+        // The body bound is enforced while streaming: a hostile or broken
+        // host cannot make Fleet materialize an unbounded response.
+        let mut stream = response.bytes_stream();
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| PveTransportError::Connect {
                 detail: error.to_string(),
             })?;
-        if body.len() > MAX_BODY_BYTES {
-            return Err(PveTransportError::BodyTooLarge {
-                limit: MAX_BODY_BYTES,
-            });
+            if body.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err(PveTransportError::BodyTooLarge {
+                    limit: MAX_BODY_BYTES,
+                });
+            }
+            body.extend_from_slice(&chunk);
         }
-        Ok(PveHttpResponse {
-            status,
-            body: body.to_vec(),
-        })
+        Ok(PveHttpResponse { status, body })
     }
 }
 
@@ -611,25 +615,45 @@ fn type_name_of(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// The bound on a resource id.
+const MAX_ID_CHARS: usize = 128;
+/// The bound on a node or display name.
+const MAX_NAME_CHARS: usize = 256;
+/// The bound on a status string.
+const MAX_STATUS_CHARS: usize = 64;
+
+/// Reads a bounded string field, refusing overlong values rather than
+/// truncating them: a silently altered identity is worse than a warning.
+fn bounded_str(entry: &serde_json::Value, key: &str, max: usize) -> Result<Option<String>, String> {
+    match entry.get(key).and_then(serde_json::Value::as_str) {
+        Some(value) if value.chars().count() > max => Err(format!(
+            "the {key} field is {} characters, over the {max}-character bound",
+            value.chars().count()
+        )),
+        Some(value) => Ok(Some(value.to_owned())),
+        None => Ok(None),
+    }
+}
+
+/// Reads a number that PVE may deliver as a JSON number or a string.
+fn loose_number(entry: &serde_json::Value, key: &str) -> Option<u64> {
+    match entry.get(key) {
+        Some(serde_json::Value::Number(number)) => number.as_u64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 /// Normalizes one cluster-resources entry. `Ok(None)` skips a non-resource
 /// row without warning; `Err` warns.
 fn normalize_resource(entry: &serde_json::Value) -> Result<Option<PveResource>, String> {
-    let id = entry
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "the entry carries no id".to_owned())?
-        .chars()
-        .take(128)
-        .collect::<String>();
+    let id = bounded_str(entry, "id", MAX_ID_CHARS)?
+        .ok_or_else(|| "the entry carries no id".to_owned())?;
     let pve_type = entry
         .get("type")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("entry {id} carries no type"))?;
-    let is_template = entry
-        .get("template")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-        == 1;
+    let is_template = loose_number(entry, "template").unwrap_or(0) == 1;
     let kind = match (pve_type, is_template) {
         ("node", _) => "node",
         ("qemu", false) => "qemu",
@@ -643,23 +667,10 @@ fn normalize_resource(entry: &serde_json::Value) -> Result<Option<PveResource>, 
             ));
         }
     };
-    let node = entry
-        .get("node")
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.chars().take(128).collect());
-    let vmid = entry.get("vmid").and_then(|value| {
-        value
-            .as_u64()
-            .map(|value| u32::try_from(value).unwrap_or(0))
-    });
-    let name = entry
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.chars().take(256).collect());
-    let status = entry
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.chars().take(64).collect());
+    let node = bounded_str(entry, "node", MAX_NAME_CHARS)?;
+    let vmid = loose_number(entry, "vmid").and_then(|value| u32::try_from(value).ok());
+    let name = bounded_str(entry, "name", MAX_NAME_CHARS)?;
+    let status = bounded_str(entry, "status", MAX_STATUS_CHARS)?;
     Ok(Some(PveResource {
         kind: kind.to_owned(),
         id,

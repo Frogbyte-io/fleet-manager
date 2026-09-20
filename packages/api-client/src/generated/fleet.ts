@@ -2309,6 +2309,18 @@ cursor?: string;
 limit?: number;
 };
 
+export type ListProxmoxAccountsParams = {
+/**
+ * The maximum number of accounts to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last account id of the previous page.
+ */
+cursor?: string;
+};
+
 export type ListTailnetDevicesParams = {
 /**
  * The maximum number of devices to return.
@@ -4368,12 +4380,19 @@ export type listProxmoxAccountsResponseError = (listProxmoxAccountsResponse403) 
 
 export type listProxmoxAccountsResponse = (listProxmoxAccountsResponseSuccess | listProxmoxAccountsResponseError)
 
-export const getListProxmoxAccountsUrl = () => {
+export const getListProxmoxAccountsUrl = (params?: ListProxmoxAccountsParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/proxmox/accounts`
+  return stringifiedParams.length > 0 ? `/api/v1/proxmox/accounts?${stringifiedParams}` : `/api/v1/proxmox/accounts`
 }
 
 /**
@@ -4382,9 +4401,9 @@ export const getListProxmoxAccountsUrl = () => {
  * Returns the public error envelope on refusal or backend failure.
  * @summary Lists the configured accounts.
  */
-export const listProxmoxAccounts = async ( options?: RequestInit): Promise<listProxmoxAccountsResponse> => {
+export const listProxmoxAccounts = async (params?: ListProxmoxAccountsParams, options?: RequestInit): Promise<listProxmoxAccountsResponse> => {
 
-  const res = await fetch(getListProxmoxAccountsUrl(),
+  const res = await fetch(getListProxmoxAccountsUrl(params),
   {
     ...options,
     method: 'GET'

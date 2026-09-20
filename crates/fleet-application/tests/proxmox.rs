@@ -77,16 +77,18 @@ impl ProxmoxAccountPort for FakeAccounts {
         {
             return Err(format!("the account name {:?} is already taken", new.name));
         }
+        let mut accounts = self.accounts.lock().unwrap();
         let account = fleet_application::proxmox::ProxmoxAccount {
-            id: format!("acc-{}", self.accounts.lock().unwrap().len() + 1),
+            id: format!("acc-{}", accounts.len() + 1),
             name: new.name.clone(),
             host: new.host.clone(),
             port: new.port.unwrap_or(8006),
             token_id: new.token_id.clone(),
             fingerprint: None,
+            observed_fingerprint: None,
             created_at: NOW,
         };
-        self.accounts.lock().unwrap().push(account.clone());
+        accounts.push(account.clone());
         Ok(account)
     }
 
@@ -110,6 +112,20 @@ impl ProxmoxAccountPort for FakeAccounts {
             .find(|account| account.id == id)
             .ok_or_else(|| format!("account {id} not found"))?;
         account.fingerprint = fingerprint;
+        Ok(account.clone())
+    }
+
+    async fn set_observed_fingerprint(
+        &self,
+        id: &str,
+        fingerprint: Option<String>,
+    ) -> Result<fleet_application::proxmox::ProxmoxAccount, String> {
+        let mut accounts = self.accounts.lock().unwrap();
+        let account = accounts
+            .iter_mut()
+            .find(|account| account.id == id)
+            .ok_or_else(|| format!("account {id} not found"))?;
+        account.observed_fingerprint = fingerprint;
         Ok(account.clone())
     }
 
@@ -286,12 +302,21 @@ async fn create_account(proxmox: &ProxmoxAccounts) -> fleet_application::proxmox
         .expect("the account is well formed")
 }
 
+/// Observes and confirms the canned fingerprint, the honest trust flow.
+async fn observe_and_confirm(proxmox: &ProxmoxAccounts, account_id: &str) {
+    let observed = proxmox
+        .observe(&AllowAll, &principal(), account_id)
+        .await
+        .expect("the probe answers");
+    proxmox
+        .confirm(&AllowAll, &principal(), account_id, &observed)
+        .await
+        .expect("the observed fingerprint confirms");
+}
+
 #[tokio::test]
 async fn discovery_is_locked_until_the_fingerprint_is_confirmed() {
-    let (proxmox, _audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     let account = create_account(&proxmox).await;
     let error = proxmox
         .discover(&AllowAll, &principal(), &account.id, NOW)
@@ -346,7 +371,7 @@ async fn observe_confirm_then_discover_walks_the_trust_flow() {
             intent
                 .metadata
                 .entries()
-                .any(|(key, value)| key == "event" && value == "proxmox_fingerprint_confirmed")
+                .any(|(key, value)| key == "event" && value == "proxmox_fingerprint_confirming")
         }),
         "{intents:?}"
     );
@@ -362,10 +387,7 @@ async fn a_fingerprint_mismatch_is_reported_as_evidence_not_an_empty_list() {
         FakeProbe::with(FP),
     );
     let account = create_account(&proxmox).await;
-    proxmox
-        .confirm(&AllowAll, &principal(), &account.id, FP)
-        .await
-        .unwrap();
+    observe_and_confirm(&proxmox, &account.id).await;
     let error = proxmox
         .discover(&AllowAll, &principal(), &account.id, NOW)
         .await
@@ -393,15 +415,10 @@ async fn auth_and_privilege_failures_are_honest_states() {
             detail: "timeout".to_owned(),
         },
     ] {
-        let (proxmox, _audit) = service(
-            FakeDiscovery::with(Err(source_error)),
-            FakeProbe::with("AA:BB"),
-        );
+        let (proxmox, _audit) =
+            service(FakeDiscovery::with(Err(source_error)), FakeProbe::with(FP));
         let account = create_account(&proxmox).await;
-        proxmox
-            .confirm(&AllowAll, &principal(), &account.id, FP)
-            .await
-            .unwrap();
+        observe_and_confirm(&proxmox, &account.id).await;
         let error = proxmox
             .discover(&AllowAll, &principal(), &account.id, NOW)
             .await
@@ -412,15 +429,9 @@ async fn auth_and_privilege_failures_are_honest_states() {
 
 #[tokio::test]
 async fn the_token_secret_never_surfaces_in_audit_or_errors() {
-    let (proxmox, audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     let account = create_account(&proxmox).await;
-    proxmox
-        .confirm(&AllowAll, &principal(), &account.id, FP)
-        .await
-        .unwrap();
+    observe_and_confirm(&proxmox, &account.id).await;
     let _ = proxmox
         .discover(&AllowAll, &principal(), &account.id, NOW)
         .await
@@ -462,7 +473,7 @@ async fn a_failed_secret_write_removes_the_account() {
         Arc::new(FakeAccounts::default()),
         Arc::new(RefusingStore),
         FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
+        FakeProbe::with(FP),
         audit,
     );
     let error = proxmox
@@ -483,16 +494,16 @@ async fn a_failed_secret_write_removes_the_account() {
         matches!(error, ProxmoxUseCaseError::Backend { .. }),
         "{error}"
     );
-    let accounts = proxmox.list(&AllowAll, &principal()).await.unwrap();
+    let accounts = proxmox
+        .list(&AllowAll, &principal(), 50, None)
+        .await
+        .unwrap();
     assert!(accounts.is_empty(), "the half-made account is gone");
 }
 
 #[tokio::test]
 async fn deleting_an_account_clears_its_secret() {
-    let (proxmox, _audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     let account = create_account(&proxmox).await;
     proxmox
         .delete(&AllowAll, &principal(), &account.id)
@@ -500,7 +511,7 @@ async fn deleting_an_account_clears_its_secret() {
         .unwrap();
     assert!(
         proxmox
-            .list(&AllowAll, &principal())
+            .list(&AllowAll, &principal(), 50, None)
             .await
             .unwrap()
             .is_empty()
@@ -509,12 +520,12 @@ async fn deleting_an_account_clears_its_secret() {
 
 #[tokio::test]
 async fn a_denied_caller_never_reaches_the_ports() {
-    let (proxmox, _audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     let account = create_account(&proxmox).await;
-    let error = proxmox.list(&DenyAll, &principal()).await.unwrap_err();
+    let error = proxmox
+        .list(&DenyAll, &principal(), 50, None)
+        .await
+        .unwrap_err();
     assert!(matches!(error, ProxmoxUseCaseError::Denied(_)));
     let error = proxmox
         .discover(&DenyAll, &principal(), &account.id, NOW)
@@ -525,10 +536,7 @@ async fn a_denied_caller_never_reaches_the_ports() {
 
 #[tokio::test]
 async fn malformed_accounts_are_refused_before_any_write() {
-    let (proxmox, _audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     for new in [
         NewProxmoxAccount {
             name: String::new(),
@@ -560,7 +568,7 @@ async fn malformed_accounts_are_refused_before_any_write() {
     }
     assert!(
         proxmox
-            .list(&AllowAll, &principal())
+            .list(&AllowAll, &principal(), 50, None)
             .await
             .unwrap()
             .is_empty()
@@ -569,10 +577,7 @@ async fn malformed_accounts_are_refused_before_any_write() {
 
 #[tokio::test]
 async fn a_conflicting_account_name_is_a_conflict() {
-    let (proxmox, _audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     create_account(&proxmox).await;
     let error = proxmox
         .create(
@@ -596,10 +601,7 @@ async fn a_conflicting_account_name_is_a_conflict() {
 
 #[tokio::test]
 async fn confirm_refuses_a_malformed_fingerprint() {
-    let (proxmox, _audit) = service(
-        FakeDiscovery::with(Ok(discovery_ok())),
-        FakeProbe::with("AA:BB"),
-    );
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
     let account = create_account(&proxmox).await;
     for fingerprint in ["", "nothex", "A".repeat(63).as_str(), &"G".repeat(64)] {
         let error = proxmox

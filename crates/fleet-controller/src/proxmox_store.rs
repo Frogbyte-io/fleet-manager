@@ -252,6 +252,9 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
         match self.client.discover(request).await {
             Ok(discovery) => Ok(RawDiscovery {
                 version: discovery.version.clone(),
+                // The provenance fields are placeholders the application
+                // layer overwrites with authoritative values; the provider
+                // shape is shared so the DTO travels one boundary.
                 resources: discovery
                     .resources
                     .into_iter()
@@ -262,8 +265,8 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
                         vmid: resource.vmid,
                         name: resource.name,
                         status: resource.status,
-                        account_id: account.id.clone(),
-                        pve_version: discovery.version.clone(),
+                        account_id: String::new(),
+                        pve_version: String::new(),
                         observed_at: 0,
                     })
                     .collect(),
@@ -282,10 +285,19 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
             }
             Err(fleet_provider_proxmox::PveApiError::Transport(
                 fleet_provider_proxmox::PveTransportError::FingerprintMismatch { observed, pinned },
-            )) => Err(ProxmoxSourceError::FingerprintMismatch {
-                observed,
-                pinned: pinned.unwrap_or(pinned_placeholder()),
-            }),
+            )) => {
+                // The discovery request always pins; a mismatch without a
+                // pin is a transport invariant violation, reported as such
+                // rather than papered over with a fabricated value.
+                let Some(pinned) = pinned else {
+                    return Err(ProxmoxSourceError::Connect {
+                        detail: format!(
+                            "the transport reported a fingerprint mismatch without a pin (observed {observed})"
+                        ),
+                    });
+                };
+                Err(ProxmoxSourceError::FingerprintMismatch { observed, pinned })
+            }
             Err(fleet_provider_proxmox::PveApiError::Transport(other)) => {
                 Err(ProxmoxSourceError::Connect {
                     detail: other.to_string(),
@@ -293,12 +305,6 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
             }
         }
     }
-}
-
-fn pinned_placeholder() -> String {
-    // Unreachable in practice: the discovery request always pins. Kept for
-    // exhaustive matching without a panic path.
-    String::new()
 }
 
 /// Composes the Proxmox use cases over its ports.

@@ -354,10 +354,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(fleet_controller::proxmox_store::compose_proxmox(
                 store.pool().clone(),
                 secrets.clone(),
-                std::sync::Arc::new(
-                    fleet_provider_proxmox::ReqwestPveTransport::new()
-                        .expect("the PVE transport must build"),
-                ),
+                std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ))
         });
