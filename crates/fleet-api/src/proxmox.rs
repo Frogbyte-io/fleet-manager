@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr as _;
 use utoipa::ToSchema;
 
-use crate::envelope::{Page, PageInfo, Resource};
+use crate::envelope::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page, PageInfo, Resource};
 use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the Proxmox use cases from the API state, or answers with the
@@ -218,10 +218,6 @@ pub struct ListProxmoxAccountsParams {
     pub cursor: Option<String>,
 }
 
-/// The default and maximum page bounds, matching the machine read model.
-const DEFAULT_PAGE_LIMIT: u32 = 50;
-const MAX_PAGE_LIMIT: u32 = 200;
-
 /// Lists the configured accounts.
 ///
 /// # Errors
@@ -265,8 +261,8 @@ pub async fn list_proxmox_accounts(
 ) -> Result<Json<Page<ProxmoxAccountDto>>, ApiErrorResponse> {
     let proxmox = proxmox_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    // A zero or absent limit means the default; the page never advertises
-    // more than it returns.
+    // A zero or absent limit means the default; the reported limit is the
+    // clamp applied to the page, matching the sibling list endpoints.
     let limit = params
         .limit
         .filter(|limit| *limit > 0)

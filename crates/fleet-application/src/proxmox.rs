@@ -640,6 +640,14 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
+        self.audit_event(
+            principal,
+            Permission::ProxmoxConfig,
+            Some(account_id),
+            "proxmox_account_deleted",
+            Some(("name", account.name.as_str())),
+        )
+        .await?;
         Ok(())
     }
 
@@ -732,7 +740,8 @@ impl ProxmoxAccounts {
             });
         }
         // The audit intent lands BEFORE the mutation, per the two-phase
-        // audit rule.
+        // audit rule; the completion event follows success, so an intent
+        // without its completion is itself evidence of an aborted flow.
         self.audit_event(
             principal,
             Permission::ProxmoxConfig,
@@ -749,6 +758,14 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
+        self.audit_event(
+            principal,
+            Permission::ProxmoxConfig,
+            Some(account_id),
+            "proxmox_fingerprint_confirmed",
+            Some(("fingerprint", account.fingerprint.as_deref().unwrap_or(""))),
+        )
+        .await?;
         Ok(account)
     }
 

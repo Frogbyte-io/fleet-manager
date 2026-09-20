@@ -60,6 +60,7 @@ pub struct PveCredentials {
 pub struct PveHttpRequest {
     /// The host (IP or DNS name) without scheme or port.
     pub host: String,
+
     /// The port; [`DEFAULT_PORT`] in the common case.
     pub port: u16,
     /// The URL path under `/api2/json`, starting with `/`.
@@ -69,6 +70,17 @@ pub struct PveHttpRequest {
     pub pinned_fingerprint: Option<String>,
     /// The credentials for the call.
     pub credentials: Arc<PveCredentials>,
+}
+
+impl PveHttpRequest {
+    /// The URL authority: IPv6 literals bracketed, everything else bare.
+    #[must_use]
+    pub fn authority(&self) -> String {
+        match self.host.parse::<std::net::Ipv6Addr>() {
+            Ok(_) => format!("[{}]", self.host),
+            Err(_) => self.host.clone(),
+        }
+    }
 }
 
 /// A transport response: status and bounded body.
@@ -323,11 +335,12 @@ impl PveTransport for ReqwestPveTransport {
             .map_err(|error| PveTransportError::Connect {
                 detail: format!("the TLS configuration was rejected: {error}"),
             })?;
-        let authority = match request.host.parse::<std::net::Ipv6Addr>() {
-            Ok(_) => format!("[{}]", request.host),
-            Err(_) => request.host.clone(),
-        };
-        let url = format!("https://{authority}:{}{}", request.port, request.path);
+        let url = format!(
+            "https://{}:{}{}",
+            request.authority(),
+            request.port,
+            request.path
+        );
         let response = client
             .get(&url)
             .header(
@@ -375,12 +388,7 @@ impl PveTransport for ReqwestPveTransport {
             let chunk = chunk.map_err(|error| PveTransportError::Connect {
                 detail: error.to_string(),
             })?;
-            if body.len() + chunk.len() > MAX_BODY_BYTES {
-                return Err(PveTransportError::BodyTooLarge {
-                    limit: MAX_BODY_BYTES,
-                });
-            }
-            body.extend_from_slice(&chunk);
+            push_bounded(&mut body, &chunk)?;
         }
         Ok(PveHttpResponse { status, body })
     }
@@ -534,6 +542,18 @@ impl ProxmoxClient {
             }
         }
     }
+}
+
+/// Appends one streamed chunk under the body bound, refusing the response
+/// the moment it would exceed it.
+fn push_bounded(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), PveTransportError> {
+    if body.len() + chunk.len() > MAX_BODY_BYTES {
+        return Err(PveTransportError::BodyTooLarge {
+            limit: MAX_BODY_BYTES,
+        });
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 /// A bounded, credential-free body excerpt for error details.
@@ -725,6 +745,71 @@ mod tests {
         let mystery = serde_json::json!({"id": "weird/1", "type": "mystery"});
         let error = normalize_resource(&mystery).unwrap_err();
         assert!(error.contains("unrecognized type"), "{error}");
+    }
+
+    #[test]
+    fn authorities_bracket_ipv6_literals() {
+        let request = |host: &str| PveHttpRequest {
+            host: host.to_owned(),
+            port: 8006,
+            path: "/".to_owned(),
+            pinned_fingerprint: None,
+            credentials: Arc::new(PveCredentials {
+                token_id: "t".to_owned(),
+                token: SensitiveString::new("s"),
+            }),
+        };
+        assert_eq!(request("2001:db8::1").authority(), "[2001:db8::1]");
+        assert_eq!(request("192.168.68.223").authority(), "192.168.68.223");
+        assert_eq!(request("pve.localdomain").authority(), "pve.localdomain");
+    }
+
+    #[test]
+    fn the_body_bound_refuses_mid_stream() {
+        let mut body = Vec::new();
+        let chunk = vec![0u8; MAX_BODY_BYTES];
+        push_bounded(&mut body, &chunk).unwrap();
+        let error = push_bounded(&mut body, &[0u8; 1]).unwrap_err();
+        assert!(matches!(error, PveTransportError::BodyTooLarge { .. }));
+    }
+
+    #[test]
+    fn overlong_fields_are_rejected_not_truncated() {
+        let long_id = "x".repeat(MAX_ID_CHARS + 1);
+        let entry = serde_json::json!({"id": long_id, "type": "node"});
+        let error = normalize_resource(&entry).unwrap_err();
+        assert!(error.contains("over the"), "{error}");
+
+        let long_name = "y".repeat(MAX_NAME_CHARS + 1);
+        let entry = serde_json::json!({
+            "id": "qemu/1", "type": "qemu", "vmid": 1, "name": long_name
+        });
+        let error = normalize_resource(&entry).unwrap_err();
+        assert!(error.contains("over the"), "{error}");
+    }
+
+    #[test]
+    fn stringly_numbers_are_tolerated() {
+        let entry = serde_json::json!({
+            "id": "qemu/7", "type": "qemu", "vmid": "7", "template": "1"
+        });
+        let resource = normalize_resource(&entry).unwrap().unwrap();
+        assert_eq!(resource.kind, "qemu-template");
+        assert_eq!(resource.vmid, Some(7));
+
+        let entry = serde_json::json!({
+            "id": "qemu/8", "type": "qemu", "vmid": 8, "template": 0
+        });
+        let resource = normalize_resource(&entry).unwrap().unwrap();
+        assert_eq!(resource.kind, "qemu");
+        assert_eq!(resource.vmid, Some(8));
+
+        // An out-of-range vmid is absent, never coerced to zero.
+        let entry = serde_json::json!({
+            "id": "qemu/9", "type": "qemu", "vmid": 4_294_967_296_i64
+        });
+        let resource = normalize_resource(&entry).unwrap().unwrap();
+        assert_eq!(resource.vmid, None);
     }
 
     #[test]
