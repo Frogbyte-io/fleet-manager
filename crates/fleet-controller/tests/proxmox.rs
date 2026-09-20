@@ -11,7 +11,7 @@ use fleet_controller::build_router;
 use fleet_controller::proxmox_store::compose_proxmox;
 use fleet_provider_proxmox::{PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError};
 use fleet_secrets::SecretStore;
-use fleet_storage_sqlite::Store;
+use fleet_storage_sqlite::{MachineRepository, Store};
 use serde_json::{Value, json};
 use tokio::net::TcpListener as TokioListener;
 
@@ -21,10 +21,33 @@ const VERSION_BODY: &str =
 const RESOURCES_BODY: &str = r#"{"data":[
   {"id":"node/pve","type":"node","status":"online","maxcpu":16,"maxmem":67342831616},
   {"id":"qemu/100","type":"qemu","node":"pve","vmid":100,"name":"dev-01","status":"running","template":0},
-  {"id":"qemu/101","type":"qemu","node":"pve","vmid":101,"name":"fleet-test-01","status":"stopped","template":0},
+  {"id":"qemu/101","type":"qemu","node":"pve","vmid":101,"name":"fleet-test-01","status":"running","template":0},
   {"id":"qemu/900","type":"qemu","vmid":900,"template":1,"status":"stopped"},
   {"id":"sdn/zone1","type":"sdn"}
 ]}"#;
+
+const GUEST_CONFIG_BODY: &str = r#"{"data":{"name":"fleet-test-01","net0":"virtio=DE:AD:BE:EF:00:01,bridge=vmbr0","memory":2048}}"#;
+
+const AGENT_INFO_BODY: &str = r#"{"data":{"result":{"version":"7.2"}}}"#;
+
+const AGENT_NETWORK_BODY: &str = r#"{"data":{"result":[
+  {"name":"ens18","hardware-address":"DE:AD:BE:EF:00:01","ip-addresses":[
+    {"ip-address":"192.168.68.240","ip-address-type":"ipv4","prefix":24}]},
+  {"name":"lo","hardware-address":"00:00:00:00:00:00","ip-addresses":[
+    {"ip-address":"127.0.0.1","ip-address-type":"ipv4","prefix":8}]}
+]}}"#;
+
+const AGENT_OSINFO_BODY: &str = r#"{"data":{"result":{"pretty-name":"Ubuntu 24.04.4 LTS","kernel-release":"6.8.0-138-generic"}}}"#;
+
+/// Per-guest fixtures keyed by VMID: each guest carries its own MAC and
+/// IP, so an association can only come from that guest's own evidence.
+const GUEST_100_CONFIG_BODY: &str =
+    r#"{"data":{"name":"dev-01","net0":"virtio=DE:AD:BE:EF:00:09,bridge=vmbr0","memory":2048}}"#;
+
+const AGENT_100_NETWORK_BODY: &str = r#"{"data":{"result":[
+  {"name":"ens18","hardware-address":"DE:AD:BE:EF:00:09","ip-addresses":[
+    {"ip-address":"192.168.68.241","ip-address-type":"ipv4","prefix":24}]}
+]}}"#;
 
 /// The pinned fingerprint the fake transport accepts.
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
@@ -71,6 +94,21 @@ impl PveTransport for FixedTransport {
             (Some(_), Behavior::Normal) => {
                 let body = if request.path.contains("/version") {
                     VERSION_BODY
+                } else if request.path.contains("/qemu/100/config") {
+                    GUEST_100_CONFIG_BODY
+                } else if request.path.contains("/config") {
+                    GUEST_CONFIG_BODY
+                } else if request.path.contains("/agent/info") {
+                    AGENT_INFO_BODY
+                } else if request
+                    .path
+                    .contains("/qemu/100/agent/network-get-interfaces")
+                {
+                    AGENT_100_NETWORK_BODY
+                } else if request.path.contains("/agent/network-get-interfaces") {
+                    AGENT_NETWORK_BODY
+                } else if request.path.contains("/agent/get-osinfo") {
+                    AGENT_OSINFO_BODY
                 } else {
                     RESOURCES_BODY
                 };
@@ -87,6 +125,7 @@ struct Harness {
     _dist: tempfile::TempDir,
     _store_dir: tempfile::TempDir,
     _key_dir: tempfile::TempDir,
+    pool: sqlx::SqlitePool,
     address: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -150,6 +189,7 @@ async fn harness_with(transport: Arc<FixedTransport>) -> Harness {
         _dist: dist,
         _store_dir: store_dir,
         _key_dir: key_dir,
+        pool: store.pool().clone(),
         address,
         shutdown: Some(shutdown_tx),
     }
@@ -410,4 +450,115 @@ async fn an_unknown_account_refuses_with_not_found() {
     assert_eq!(body["code"], "not_found");
     let (status, _) = harness.delete("/api/v1/proxmox/accounts/acc-missing").await;
     assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_guest_surface_walks_list_and_observe() {
+    let harness = harness().await;
+
+    // A machine whose endpoint host is the guest-agent address.
+    let machines = MachineRepository::new(harness.pool.clone());
+    use fleet_application::machine::MachinePort as _;
+    let machine = machines
+        .register(&fleet_application::machine::RegisterMachine {
+            name: "fleet-test-01".to_owned(),
+            description: String::new(),
+            endpoints: vec![fleet_application::machine::NewEndpoint {
+                kind: fleet_core::EndpointKind::Ssh,
+                reference: "ops@192.168.68.240:22".to_owned(),
+            }],
+            tags: Vec::new(),
+            groups: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let (_, body) = harness
+        .post(
+            "/api/v1/proxmox/accounts",
+            json!({
+                "name": "pve-main",
+                "host": "192.168.68.223",
+                "tokenId": "root@pam!GLM-AGENT",
+                "tokenSecret": "the-token-secret-material"
+            }),
+        )
+        .await;
+    let account_id = body["data"]["id"].as_str().unwrap().to_owned();
+    harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/observe"),
+            json!({}),
+        )
+        .await;
+    harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/confirm"),
+            json!({"fingerprint": FP}),
+        )
+        .await;
+
+    // Guests list with the address-match candidate.
+    let (status, body) = harness
+        .get(&format!("/api/v1/proxmox/accounts/{account_id}/guests"))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    // Two guests: the template entry carries no node, so it is isolated
+    // into the warnings honestly rather than guessed.
+    let guests = body["items"].as_array().unwrap();
+    assert_eq!(guests.len(), 2, "{body}");
+    let guest = guests
+        .iter()
+        .find(|guest| guest["vmid"] == 101)
+        .expect("the test guest lists");
+    assert_eq!(guest["macs"][0], "de:ad:be:ef:00:01");
+    assert_eq!(guest["agent"]["online"], true);
+    assert_eq!(guest["agent"]["osName"], "Ubuntu 24.04.4 LTS");
+    assert_eq!(guest["candidates"][0]["machineId"], machine.id);
+    assert_eq!(guest["candidates"][0]["kind"], "address_match");
+    // The other guest carries distinct evidence and no candidate: the
+    // association provably comes from this guest's own facts.
+    let other = guests
+        .iter()
+        .find(|guest| guest["vmid"] == 100)
+        .expect("the other guest lists");
+    assert_eq!(other["macs"][0], "de:ad:be:ef:00:09");
+    assert_eq!(other["candidates"].as_array().unwrap().len(), 0);
+
+    // Observe records the guest facts onto the machine.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/observe"),
+            json!({"machineId": machine.id}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::NO_CONTENT, "{body}");
+
+    // The machine now carries the guest facts.
+    let (status, body) = harness
+        .get(&format!("/api/v1/machines/{}", machine.id))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let capabilities = body["data"]["capabilities"].as_array().unwrap();
+    let fact = |name: &str| {
+        capabilities
+            .iter()
+            .find(|fact| fact["name"] == name)
+            .map(|fact| fact["value"].clone())
+    };
+    assert_eq!(fact("guest"), Some(json!("qemu/101")));
+    assert_eq!(fact("vmid"), Some(json!("101")));
+    assert_eq!(fact("os"), Some(json!("Ubuntu 24.04.4 LTS")));
+    assert_eq!(fact("mac0"), Some(json!("de:ad:be:ef:00:01")));
+    assert_eq!(fact("agent"), Some(json!("7.2")));
+
+    // An unknown guest refuses with not-found.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/999/observe"),
+            json!({"machineId": machine.id}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "not_found");
 }

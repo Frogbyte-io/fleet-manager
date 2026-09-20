@@ -2207,6 +2207,216 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/guests": {
+      "get": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Lists the account's guests with their Fleet-machine association\ncandidates (evidence only).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unconfirmed account, or\na source failure.",
+        "operationId": "listProxmoxGuests",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of guests to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor: the last guest's cluster id of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The guests with their association candidates.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AssociatedGuestDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor names no guest in the snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed or the host fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API refused the token or failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}/guests/{vmid}/observe": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Records one guest's facts onto a confirmed Fleet machine. The machine\nfunnel authorizes and audits the capability write.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account,\nguest, or machine, or a source failure.",
+        "operationId": "observeProxmoxGuest",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObserveProxmoxGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The guest's facts were recorded on the machine."
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface or write the machine's facts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account, guest, or machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed or the host fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API refused the token or failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/proxmox/accounts/{accountId}/observe": {
       "post": {
         "tags": [
@@ -2723,6 +2933,133 @@
           }
         ],
         "description": "How the apply workflow's endpoint authenticates."
+      },
+      "AssociatedGuestDto": {
+        "type": "object",
+        "description": "One discovered guest with its Fleet-machine association candidates.",
+        "required": [
+          "kind",
+          "id",
+          "macs",
+          "warnings",
+          "pveVersion",
+          "observedAt",
+          "candidates"
+        ],
+        "properties": {
+          "agent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderAgentDto",
+                "description": "The guest-agent view, when the guest has one."
+              }
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssociationCandidateDto"
+            },
+            "description": "The Fleet machines this guest may be — evidence, never merged."
+          },
+          "id": {
+            "type": "string",
+            "description": "The cluster-visible id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The normalized kind: `qemu` or `lxc`."
+          },
+          "macs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The config's MAC addresses, normalized."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display name, when carried."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The hosting node."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the observation was taken."
+          },
+          "pveVersion": {
+            "type": "string",
+            "description": "The PVE version the observation came from."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PVE status string, when carried."
+          },
+          "vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The VMID.",
+            "minimum": 0
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The bounded per-surface warnings."
+          }
+        }
+      },
+      "AssociationCandidateDto": {
+        "type": "object",
+        "description": "One Fleet machine a guest may be, with the evidence.",
+        "required": [
+          "machineId",
+          "machineName",
+          "machineStatus",
+          "kind",
+          "evidence"
+        ],
+        "properties": {
+          "evidence": {
+            "type": "string",
+            "description": "The evidence value that matched."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Why: `mac_match`, `address_match`, or `name_match`."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The existing machine's identity."
+          },
+          "machineName": {
+            "type": "string",
+            "description": "The existing machine's name."
+          },
+          "machineStatus": {
+            "type": "string",
+            "description": "The machine's derived connectivity state."
+          }
+        }
       },
       "CapabilityFactDto": {
         "type": "object",
@@ -3895,6 +4232,19 @@
           }
         }
       },
+      "ObserveProxmoxGuestRequest": {
+        "type": "object",
+        "description": "The observe-guest request: which machine the guest's facts record onto.",
+        "required": [
+          "machineId"
+        ],
+        "properties": {
+          "machineId": {
+            "type": "string",
+            "description": "The machine the guest is confirmed to be."
+          }
+        }
+      },
       "OnboardAuthDto": {
         "oneOf": [
           {
@@ -4313,6 +4663,118 @@
               "null"
             ],
             "description": "Cursor for the next page, or `null` on the last page."
+          }
+        }
+      },
+      "Page_AssociatedGuestDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One discovered guest with its Fleet-machine association candidates.",
+              "required": [
+                "kind",
+                "id",
+                "macs",
+                "warnings",
+                "pveVersion",
+                "observedAt",
+                "candidates"
+              ],
+              "properties": {
+                "agent": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ProviderAgentDto",
+                      "description": "The guest-agent view, when the guest has one."
+                    }
+                  ]
+                },
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AssociationCandidateDto"
+                  },
+                  "description": "The Fleet machines this guest may be — evidence, never merged."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The cluster-visible id."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "The normalized kind: `qemu` or `lxc`."
+                },
+                "macs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The config's MAC addresses, normalized."
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The display name, when carried."
+                },
+                "node": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The hosting node."
+                },
+                "observedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the observation was taken."
+                },
+                "pveVersion": {
+                  "type": "string",
+                  "description": "The PVE version the observation came from."
+                },
+                "status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The PVE status string, when carried."
+                },
+                "vmid": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "The VMID.",
+                  "minimum": 0
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The bounded per-surface warnings."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
           }
         }
       },
@@ -4914,6 +5376,76 @@
             "type": "integer",
             "format": "int64",
             "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
+      "ProviderAgentDto": {
+        "type": "object",
+        "description": "The guest-agent view.",
+        "required": [
+          "online",
+          "interfaces"
+        ],
+        "properties": {
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderInterfaceDto"
+            },
+            "description": "The network interfaces the agent saw."
+          },
+          "kernel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's kernel release, when carried."
+          },
+          "online": {
+            "type": "boolean",
+            "description": "The agent answered `info`: installed and reachable."
+          },
+          "osName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's OS name, when `get-osinfo` answered."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent version, when carried."
+          }
+        }
+      },
+      "ProviderInterfaceDto": {
+        "type": "object",
+        "description": "One guest network interface.",
+        "required": [
+          "name",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interface's addresses."
+          },
+          "mac": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The normalized MAC, when carried."
+          },
+          "name": {
+            "type": "string",
+            "description": "The interface name inside the guest."
           }
         }
       },

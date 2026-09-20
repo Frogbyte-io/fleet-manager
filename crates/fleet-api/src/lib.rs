@@ -126,6 +126,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox::ProxmoxDiscoveryDto,
         proxmox::ProxmoxFingerprintDto,
         proxmox::ProxmoxResourceDto,
+        proxmox::AssociatedGuestDto,
+        proxmox::AssociationCandidateDto,
+        proxmox::ObserveProxmoxGuestRequest,
+        proxmox::ProviderAgentDto,
+        proxmox::ProviderInterfaceDto,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
         node::EnrollmentTokenDto,
@@ -227,6 +232,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::observe_proxmox_fingerprint))
                 .routes(routes!(proxmox::confirm_proxmox_fingerprint))
                 .routes(routes!(proxmox::discover_proxmox_cluster))
+                .routes(routes!(proxmox::list_proxmox_guests))
+                .routes(routes!(proxmox::observe_proxmox_guest))
                 .with_state(state),
         )
         .split_for_parts();

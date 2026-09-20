@@ -1991,3 +1991,105 @@ fn parsing_refuses_the_undocumented_proxmox_forms() {
         );
     }
 }
+
+#[test]
+fn text_output_renders_proxmox_guests() {
+    let guests = json!({
+        "items": [
+            {"kind": "qemu", "id": "qemu/101", "vmid": 101, "name": "fleet-test-01",
+             "status": "running", "macs": ["de:ad:be:ef:00:01"],
+             "agent": {"online": true, "version": "7.2", "osName": "Ubuntu 24.04",
+                       "kernel": "6.8.0", "interfaces": []},
+             "warnings": [], "pveVersion": "9.2.2", "observedAt": 1,
+             "candidates": [{"machineId": "m1", "machineName": "box",
+                              "machineStatus": "agentless", "kind": "address_match",
+                              "evidence": "192.168.68.240"}]},
+            {"kind": "lxc", "id": "lxc/200", "vmid": 200, "name": "container",
+             "status": "running", "macs": [], "agent": null,
+             "warnings": [], "pveVersion": "9.2.2", "observedAt": 1, "candidates": []}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_proxmox_guests_for_test(&guests);
+    assert!(text.contains("VMID"), "{text}");
+    assert!(text.contains("fleet-test-01"), "{text}");
+    assert!(text.contains("online"), "{text}");
+    assert!(text.contains("box (address_match)"), "{text}");
+    assert!(!text.contains("(no guests reported)"), "{text}");
+    // The LXC row's null agent renders "-", its empty candidates "-".
+    assert!(text.contains("container"), "{text}");
+}
+
+#[test]
+fn parsing_walks_the_proxmox_guest_forms() {
+    let args: Vec<String> = ["proxmox", "guests", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxGuests { .. }
+    ));
+    let args: Vec<String> = [
+        "proxmox",
+        "observe-guest",
+        "acc-1",
+        "101",
+        "--machine",
+        "m-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxObserveGuest { .. }
+    ));
+    let args: Vec<String> = [
+        "proxmox",
+        "observe-guest",
+        "acc-1",
+        "abc",
+        "--machine",
+        "m-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("must be a number"), "{error}");
+}
+
+#[test]
+fn text_output_renders_the_guest_agent_states_honestly() {
+    let guests = json!({
+        "items": [
+            {"kind": "qemu", "id": "qemu/101", "vmid": 101, "name": "off-guest",
+             "status": "stopped", "macs": [], "agent": {"online": false},
+             "warnings": [], "pveVersion": "9.2.2", "observedAt": 1, "candidates": []},
+            {"kind": "lxc", "id": "lxc/200", "vmid": 200, "name": "container",
+             "status": "running", "macs": [], "agent": null,
+             "warnings": [], "pveVersion": "9.2.2", "observedAt": 1, "candidates": []}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_proxmox_guests_for_test(&guests);
+    assert!(text.contains("unreachable"), "{text}");
+    // The LXC row's agent column is the bare "-" marker.
+    let container_row = text
+        .lines()
+        .find(|line| line.contains("container"))
+        .expect("the container row");
+    let columns: Vec<&str> = container_row.split_whitespace().collect();
+    assert_eq!(columns[3], "-", "{container_row}");
+    // Empty candidates render "-".
+    assert_eq!(columns[4], "-", "{container_row}");
+}
+
+#[test]
+fn an_empty_guests_page_reports_no_guests_not_no_accounts() {
+    let empty = json!({"items": [], "page": {"limit": 50, "nextCursor": null}});
+    let text = fleetctl::render_proxmox_guests_for_test(&empty);
+    assert!(text.contains("(no guests reported)"), "{text}");
+    assert!(!text.contains("no Proxmox accounts"), "{text}");
+}

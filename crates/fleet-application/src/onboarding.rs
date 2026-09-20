@@ -1094,9 +1094,16 @@ pub fn endpoint_reference_matches(reference: &str, endpoint: &DraftEndpoint) -> 
         && reference_port(reference).is_some_and(|port| port == endpoint.port.to_string())
 }
 
-/// The host part of an endpoint reference, ignoring userinfo.
-fn reference_host(reference: &str) -> Option<&str> {
+/// The host part of an endpoint reference, ignoring userinfo. Bracketed
+/// IPv6 literals strip their brackets; the comparison sees the bare
+/// address.
+#[must_use]
+pub(crate) fn reference_host(reference: &str) -> Option<&str> {
     let (_, host_port) = reference.rsplit_once('@')?;
+    let host_port = match host_port.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(host_port, |(inner, _)| inner),
+        None => host_port,
+    };
     let (host, _) = host_port.rsplit_once(':')?;
     Some(host)
 }
