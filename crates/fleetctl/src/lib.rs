@@ -527,6 +527,21 @@ pub enum Command {
         /// The account's identity.
         account_id: String,
     },
+    /// List the account's guests with their Fleet-machine association
+    /// candidates (evidence only).
+    ProxmoxGuests {
+        /// The account's identity.
+        account_id: String,
+    },
+    /// Record one guest's facts onto a confirmed Fleet machine.
+    ProxmoxObserveGuest {
+        /// The account's identity.
+        account_id: String,
+        /// The guest's VMID.
+        vmid: u32,
+        /// The machine the guest is confirmed to be.
+        machine_id: String,
+    },
     /// Start the audited "Install Fleet Node" bootstrap on an agentless
     /// machine: download the checksummed service package on the node,
     /// install the systemd service, enroll, and wait for the gateway
@@ -1172,6 +1187,25 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
             [account_id] => Ok(Command::ProxmoxDiscover {
                 account_id: (*account_id).to_owned(),
             }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "guests" => match rest {
+            [account_id] => Ok(Command::ProxmoxGuests {
+                account_id: (*account_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "observe-guest" => match rest {
+            [account_id, vmid, "--machine", machine_id] => {
+                let parsed = vmid.parse::<u32>().map_err(|_| CliError {
+                    message: format!("the VMID must be a number, not {vmid:?}"),
+                })?;
+                Ok(Command::ProxmoxObserveGuest {
+                    account_id: (*account_id).to_owned(),
+                    vmid: parsed,
+                    machine_id: (*machine_id).to_owned(),
+                })
+            }
             _ => Err(CliError { message: usage() }),
         },
         _ => Err(CliError { message: usage() }),
@@ -2158,6 +2192,22 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             None,
         ),
+        Command::ProxmoxGuests { account_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/proxmox/accounts/{account_id}/guests"),
+            Vec::new(),
+            None,
+        ),
+        Command::ProxmoxObserveGuest {
+            account_id,
+            vmid,
+            machine_id,
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/proxmox/accounts/{account_id}/guests/{vmid}/observe"),
+            Vec::new(),
+            Some(serde_json::json!({ "machineId": machine_id })),
+        ),
         Command::TailnetImport {
             node_id,
             user,
@@ -2747,6 +2797,7 @@ pub fn render_proxmox_for_test(value: &Value) -> String {
     render_proxmox(Some(value))
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_proxmox(value: Option<&Value>) -> String {
     let Some(value) = value else {
         return String::new();
@@ -2785,6 +2836,61 @@ fn render_proxmox(value: Option<&Value>) -> String {
         }
         if let Some(version) = value.get("pveVersion").and_then(Value::as_str) {
             lines.insert(0, format!("PVE {version}"));
+        }
+        return lines.join("\n");
+    }
+    // Guests list: one row per guest with its agent state and candidates.
+    if let Some(items) = value.get("items").and_then(Value::as_array)
+        && items.first().is_some_and(|item| item.get("vmid").is_some())
+    {
+        let mut lines = vec![format!(
+            "{:<10} {:<10} {:<24} {:<12} {}",
+            "VMID", "KIND", "NAME", "AGENT", "FLEET CANDIDATES"
+        )];
+        for guest in items {
+            let agent = match &guest["agent"] {
+                Value::Null => "-".to_owned(),
+                agent => {
+                    if agent["online"] == true {
+                        "online".to_owned()
+                    } else {
+                        "unreachable".to_owned()
+                    }
+                }
+            };
+            let candidates = guest["candidates"]
+                .as_array()
+                .map(|candidates| {
+                    candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            Some(format!(
+                                "{} ({})",
+                                candidate["machineName"].as_str()?,
+                                candidate["kind"].as_str()?
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            lines.push(format!(
+                "{:<10} {:<10} {:<24} {:<12} {}",
+                guest["vmid"]
+                    .as_u64()
+                    .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                guest["kind"].as_str().unwrap_or("-"),
+                guest["name"].as_str().unwrap_or("-"),
+                agent,
+                if candidates.is_empty() {
+                    "-"
+                } else {
+                    &candidates
+                }
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no guests reported)".to_owned());
         }
         return lines.join("\n");
     }

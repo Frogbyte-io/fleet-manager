@@ -1991,3 +1991,69 @@ fn parsing_refuses_the_undocumented_proxmox_forms() {
         );
     }
 }
+
+#[test]
+fn text_output_renders_proxmox_guests() {
+    let guests = json!({
+        "items": [
+            {"kind": "qemu", "id": "qemu/101", "vmid": 101, "name": "fleet-test-01",
+             "status": "running", "macs": ["de:ad:be:ef:00:01"],
+             "agent": {"online": true, "version": "7.2", "osName": "Ubuntu 24.04",
+                       "kernel": "6.8.0", "interfaces": []},
+             "warnings": [], "pveVersion": "9.2.2", "observedAt": 1,
+             "candidates": [{"machineId": "m1", "machineName": "box",
+                              "machineStatus": "agentless", "kind": "address_match",
+                              "evidence": "192.168.68.240"}]},
+            {"kind": "lxc", "id": "lxc/200", "vmid": 200, "name": "container",
+             "status": "running", "macs": [], "agent": null,
+             "warnings": [], "pveVersion": "9.2.2", "observedAt": 1, "candidates": []}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_proxmox_for_test(&guests);
+    assert!(text.contains("VMID"), "{text}");
+    assert!(text.contains("fleet-test-01"), "{text}");
+    assert!(text.contains("online"), "{text}");
+    assert!(text.contains("box (address_match)"), "{text}");
+    assert!(!text.contains("(no guests reported)"), "{text}");
+}
+
+#[test]
+fn parsing_walks_the_proxmox_guest_forms() {
+    let args: Vec<String> = ["proxmox", "guests", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxGuests { .. }
+    ));
+    let args: Vec<String> = [
+        "proxmox",
+        "observe-guest",
+        "acc-1",
+        "101",
+        "--machine",
+        "m-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxObserveGuest { .. }
+    ));
+    let args: Vec<String> = [
+        "proxmox",
+        "observe-guest",
+        "acc-1",
+        "abc",
+        "--machine",
+        "m-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("must be a number"), "{error}");
+}

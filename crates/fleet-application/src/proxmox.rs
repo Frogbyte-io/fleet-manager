@@ -28,8 +28,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
+use crate::machine::{MachineFilter, MachineUseCaseError, MachineView, Machines};
 use crate::operation::AuditPort;
-use fleet_core::SensitiveString;
+use fleet_core::{CapabilityFact, CapabilityStatus, SensitiveString, Timestamp};
 
 /// Binds one credential-carrying call to one account, resolving the secret
 /// just in time.
@@ -88,7 +89,7 @@ pub enum FingerprintState {
 }
 
 /// A credential-store failure that is safe to print.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum CredentialStoreError {
     /// The store is unreadable or unwritable.
     Backend {
@@ -134,7 +135,7 @@ pub trait ProxmoxCredentialStore: fmt::Debug + Send + Sync {
 
 /// A discovery-source failure that is safe to print. Fingerprints and
 /// statuses travel here; tokens never do.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ProxmoxSourceError {
     /// The pinned fingerprint was refused, with the observed fingerprint as
     /// evidence. The pin did its job: the connection died at the handshake.
@@ -239,6 +240,144 @@ pub struct ProxmoxDiscovery {
     pub reported_count: usize,
     /// When the snapshot was taken (epoch millis).
     pub observed_at: i64,
+}
+
+/// One discovered guest with its Fleet-machine association candidates
+/// (evidence only). The guest's provider facts ride along with the
+/// account/version/time provenance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssociatedGuest {
+    /// The guest's provider facts.
+    pub guest: ProviderGuest,
+    /// The PVE version the observation came from.
+    pub pve_version: String,
+    /// When the observation was taken (epoch millis).
+    pub observed_at: i64,
+    /// The Fleet machines this guest may be — evidence, never merged.
+    pub candidates: Vec<AssociationCandidate>,
+}
+
+/// The application's view of one guest: the provider shape plus the
+/// provenance the discovery call attached.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderGuest {
+    /// The normalized kind: `qemu` or `lxc`.
+    pub kind: String,
+    /// The cluster-visible id, e.g. `qemu/101`.
+    pub id: String,
+    /// The hosting node.
+    pub node: Option<String>,
+    /// The VMID.
+    pub vmid: Option<u32>,
+    /// The display name, when carried.
+    pub name: Option<String>,
+    /// The PVE status string, when carried.
+    pub status: Option<String>,
+    /// The config's MAC addresses, normalized.
+    pub macs: Vec<String>,
+    /// The guest-agent view, when the guest has one (QEMU only).
+    pub agent: Option<ProviderAgent>,
+    /// The bounded per-surface warnings.
+    pub warnings: Vec<String>,
+}
+
+/// The guest-agent view as the application sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAgent {
+    /// The agent answered `info`: installed and reachable.
+    pub online: bool,
+    /// The agent version, when carried.
+    pub version: Option<String>,
+    /// The guest's OS name, when `get-osinfo` answered.
+    pub os_name: Option<String>,
+    /// The guest's kernel release, when carried.
+    pub kernel: Option<String>,
+    /// The network interfaces the agent saw.
+    pub interfaces: Vec<ProviderInterface>,
+}
+
+/// One guest network interface as the application sees it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInterface {
+    /// The interface name inside the guest.
+    pub name: String,
+    /// The normalized MAC, when carried.
+    pub mac: Option<String>,
+    /// The interface's addresses.
+    pub addresses: Vec<String>,
+}
+
+/// Why a guest may be one Fleet machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssociationKind {
+    /// A guest MAC matches a machine's recorded network fact.
+    MacMatch,
+    /// A guest-agent address matches a machine endpoint's host.
+    AddressMatch,
+    /// The guest's name matches the machine's name.
+    NameMatch,
+}
+
+impl AssociationKind {
+    /// The stable string used in the API.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::MacMatch => "mac_match",
+            Self::AddressMatch => "address_match",
+            Self::NameMatch => "name_match",
+        }
+    }
+}
+
+/// One Fleet machine a guest may be, with the evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssociationCandidate {
+    /// The existing machine's identity.
+    pub machine_id: String,
+    /// The existing machine's name.
+    pub machine_name: String,
+    /// The machine's derived connectivity state.
+    pub machine_status: String,
+    /// Why: the association kind's stable id.
+    pub kind: String,
+    /// The evidence value that matched (the MAC, address, or name).
+    pub evidence: String,
+}
+
+/// The guest-discovery port over one trusted account. The provider
+/// implements this over the PVE API; tests implement it over fixtures.
+#[async_trait]
+pub trait ProxmoxGuestDiscoverPort: fmt::Debug + Send + Sync {
+    /// Discovers the account's guests with their config MACs and agent
+    /// views.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProxmoxSourceError`].
+    async fn guest_discover(
+        &self,
+        account: &ProxmoxAccount,
+        secret: &SensitiveString,
+    ) -> Result<RawGuestDiscovery, ProxmoxSourceError>;
+}
+
+/// The provider's own guest-discovery shape, before application-layer
+/// enrichment. Provenance is attached by [`ProxmoxAccounts::guests`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawGuestDiscovery {
+    /// The PVE version seen.
+    pub version: String,
+    /// The guests, provenance pending.
+    pub guests: Vec<ProviderGuest>,
+    /// The cluster-level warnings.
+    pub warnings: Vec<String>,
 }
 
 /// The account record port: durable account state.
@@ -432,7 +571,9 @@ pub struct ProxmoxAccounts {
     accounts: Arc<dyn ProxmoxAccountPort>,
     credentials: Arc<dyn ProxmoxCredentialStore>,
     discovery: Arc<dyn ProxmoxDiscoverPort>,
+    guests: Arc<dyn ProxmoxGuestDiscoverPort>,
     trust: Arc<dyn ProxmoxTrustProbe>,
+    machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
 }
 
@@ -443,14 +584,18 @@ impl ProxmoxAccounts {
         accounts: Arc<dyn ProxmoxAccountPort>,
         credentials: Arc<dyn ProxmoxCredentialStore>,
         discovery: Arc<dyn ProxmoxDiscoverPort>,
+        guests: Arc<dyn ProxmoxGuestDiscoverPort>,
         trust: Arc<dyn ProxmoxTrustProbe>,
+        machines: Arc<Machines>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
             accounts,
             credentials,
             discovery,
+            guests,
             trust,
+            machines,
             audit,
         }
     }
@@ -793,23 +938,8 @@ impl ProxmoxAccounts {
             },
         )
         .map_err(ProxmoxUseCaseError::Denied)?;
-        let account = self.require_account(account_id).await?;
-        // The explicit-trust gate: without a confirmed fingerprint no
-        // credential-carrying call leaves Fleet. This is the acceptance
-        // criterion, not a convenience check.
-        let Some(_pinned) = account.fingerprint.clone() else {
-            return Err(ProxmoxUseCaseError::UnconfirmedTrust {
-                account: account.name.clone(),
-            });
-        };
-        let secret = self
-            .credentials
-            .load(account_id)
-            .await
-            .map_err(ProxmoxUseCaseError::Credentials)?
-            .ok_or_else(|| ProxmoxUseCaseError::NoSecret {
-                account: account.name.clone(),
-            })?;
+        let account = self.trusted_account(account_id).await?;
+        let secret = self.require_secret(&account).await?;
         let raw = self
             .discovery
             .discover(&account, &SensitiveString::new(secret))
@@ -833,6 +963,195 @@ impl ProxmoxAccounts {
             reported_count: raw.reported_count,
             observed_at: now,
         })
+    }
+
+    /// Lists the account's guests with their Fleet-machine association
+    /// candidates. Correlation needs the machine surface, so it degrades
+    /// honestly: guests still list, candidates come back empty when the
+    /// caller may not read machine detail — the FM-213 rule.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unconfirmed account, a missing secret, or any
+    /// source failure.
+    pub async fn guests(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        now: i64,
+    ) -> Result<Vec<AssociatedGuest>, ProxmoxUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ProxmoxRead,
+                resource: Some(account_id),
+            },
+        )
+        .map_err(ProxmoxUseCaseError::Denied)?;
+        let account = self.trusted_account(account_id).await?;
+        let secret = self.require_secret(&account).await?;
+        let raw = self
+            .guests
+            .guest_discover(&account, &SensitiveString::new(secret))
+            .await
+            .map_err(ProxmoxUseCaseError::Source)?;
+        // The machine surface: a degraded answer is empty candidates, not a
+        // failure. Correlation needs sensitive endpoint detail; without it
+        // the candidates are empty rather than half-redacted lies.
+        let machine_read = authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: None,
+            },
+        )
+        .is_ok();
+        let views = if machine_read {
+            self.machines
+                .list(authorizer, principal, &MachineFilter::default(), 200, now)
+                .await
+                .map_err(|error| ProxmoxUseCaseError::Backend {
+                    context: "association",
+                    detail: error.to_string(),
+                })?
+        } else {
+            Vec::new()
+        };
+        Ok(raw
+            .guests
+            .into_iter()
+            .map(|guest| {
+                let candidates = views
+                    .iter()
+                    .filter_map(|view| {
+                        // Association evidence lives in endpoint hosts and
+                        // recorded network facts: without the sensitive
+                        // read the candidates are empty rather than
+                        // half-redacted lies (the FM-213 rule).
+                        let sensitive = authorize(
+                            authorizer,
+                            AccessRequest {
+                                principal_id: &principal.id,
+                                action: Permission::MachineReadSensitive,
+                                resource: Some(view.id.as_str()),
+                            },
+                        )
+                        .is_ok();
+                        if !sensitive {
+                            return None;
+                        }
+                        association_candidate(&guest, view)
+                    })
+                    .collect();
+                AssociatedGuest {
+                    guest,
+                    pve_version: raw.version.clone(),
+                    observed_at: now,
+                    candidates,
+                }
+            })
+            .collect())
+    }
+
+    /// Records one guest's facts onto a confirmed Fleet machine as
+    /// capability facts through the machine funnel. The association is the
+    /// caller's confirmed claim — the candidates are evidence, and this
+    /// mutation turns the evidence into recorded observations under the
+    /// machine's own authorization and audit.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial (either surface), an unknown account or machine, an
+    /// unconfirmed account, or a source failure.
+    pub async fn observe_guest(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        account_id: &str,
+        vmid: u32,
+        machine_id: &str,
+        now: i64,
+    ) -> Result<(), ProxmoxUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ProxmoxRead,
+                resource: Some(account_id),
+            },
+        )
+        .map_err(ProxmoxUseCaseError::Denied)?;
+        let account = self.trusted_account(account_id).await?;
+        let secret = self.require_secret(&account).await?;
+        let raw = self
+            .guests
+            .guest_discover(&account, &SensitiveString::new(secret))
+            .await
+            .map_err(ProxmoxUseCaseError::Source)?;
+        let guest = raw
+            .guests
+            .into_iter()
+            .find(|guest| guest.vmid == Some(vmid))
+            .ok_or_else(|| ProxmoxUseCaseError::NotFound {
+                what: format!("guest {vmid}"),
+            })?;
+        // The machine funnel authorizes and audits the capability write;
+        // the Proxmox read is audited here.
+        self.audit_event(
+            principal,
+            Permission::ProxmoxRead,
+            Some(account_id),
+            "proxmox_guest_observed",
+            Some(("vmid", &vmid.to_string())),
+        )
+        .await?;
+        let facts = guest_facts(&guest, machine_id, &raw.version, now);
+        self.machines
+            .record_capabilities(authorizer, principal, machine_id, &facts)
+            .await
+            .map_err(|error| match error {
+                MachineUseCaseError::Denied(decision) => ProxmoxUseCaseError::Denied(decision),
+                MachineUseCaseError::NotFound { what } => ProxmoxUseCaseError::NotFound { what },
+                MachineUseCaseError::Conflict { detail }
+                | MachineUseCaseError::Invalid { detail } => {
+                    ProxmoxUseCaseError::Invalid { detail }
+                }
+                MachineUseCaseError::Backend { context, detail } => {
+                    ProxmoxUseCaseError::Backend { context, detail }
+                }
+            })
+    }
+
+    /// The account with the explicit-trust gate applied: without a
+    /// confirmed fingerprint no credential-carrying call leaves Fleet.
+    async fn trusted_account(
+        &self,
+        account_id: &str,
+    ) -> Result<ProxmoxAccount, ProxmoxUseCaseError> {
+        let account = self.require_account(account_id).await?;
+        if account.fingerprint.is_none() {
+            return Err(ProxmoxUseCaseError::UnconfirmedTrust {
+                account: account.name.clone(),
+            });
+        }
+        Ok(account)
+    }
+
+    /// The account's token secret, resolved just in time.
+    async fn require_secret(
+        &self,
+        account: &ProxmoxAccount,
+    ) -> Result<String, ProxmoxUseCaseError> {
+        self.credentials
+            .load(&account.id)
+            .await
+            .map_err(ProxmoxUseCaseError::Credentials)?
+            .ok_or_else(|| ProxmoxUseCaseError::NoSecret {
+                account: account.name.clone(),
+            })
     }
 
     async fn require_account(&self, id: &str) -> Result<ProxmoxAccount, ProxmoxUseCaseError> {
@@ -889,6 +1208,147 @@ impl ProxmoxAccounts {
                 detail,
             })
     }
+}
+
+/// The association evidence between one guest and one machine view, when
+/// any. MAC evidence outranks address evidence outranks name evidence; the
+/// first match wins so a candidate reports its strongest reason.
+#[must_use]
+fn association_candidate(
+    guest: &ProviderGuest,
+    view: &MachineView,
+) -> Option<AssociationCandidate> {
+    // The machine's recorded network facts, when the view carries them.
+    let machine_macs: Vec<&str> = view
+        .capabilities
+        .iter()
+        .filter(|fact| fact.namespace == "net" && fact.name.starts_with("mac"))
+        .filter_map(|fact| fact.value.as_deref())
+        .collect();
+    // MAC evidence: the agent's interfaces for QEMU, the config's `netN`
+    // MACs for every guest kind (LXC has no agent but has config MACs).
+    let guest_macs = guest
+        .agent
+        .iter()
+        .flat_map(|agent| &agent.interfaces)
+        .filter_map(|interface| interface.mac.as_deref())
+        .chain(guest.macs.iter().map(String::as_str));
+    for mac in guest_macs {
+        if machine_macs
+            .iter()
+            .any(|machine_mac| machine_mac.eq_ignore_ascii_case(mac))
+        {
+            return Some(AssociationCandidate {
+                machine_id: view.id.clone(),
+                machine_name: view.name.clone(),
+                machine_status: view.machine_status.id().to_owned(),
+                kind: AssociationKind::MacMatch.id().to_owned(),
+                evidence: mac.to_owned(),
+            });
+        }
+    }
+    // The guest-agent addresses against the machine endpoints' hosts. The
+    // endpoint reference is `user@host:port` (redacted forms carry `***`),
+    // so the host is the segment after the last `@` with the port stripped.
+    let endpoint_hosts: Vec<&str> = view
+        .endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let (_, host_port) = endpoint.reference.rsplit_once('@')?;
+            let (host, _) = host_port.rsplit_once(':')?;
+            Some(host)
+        })
+        .collect();
+    for interface in guest.agent.iter().flat_map(|agent| &agent.interfaces) {
+        for address in &interface.addresses {
+            if endpoint_hosts
+                .iter()
+                .any(|host| host.eq_ignore_ascii_case(address))
+            {
+                return Some(AssociationCandidate {
+                    machine_id: view.id.clone(),
+                    machine_name: view.name.clone(),
+                    machine_status: view.machine_status.id().to_owned(),
+                    kind: AssociationKind::AddressMatch.id().to_owned(),
+                    evidence: address.clone(),
+                });
+            }
+        }
+    }
+    // The name match: the guest's display name against the machine's name,
+    // case-insensitive, when both carry one.
+    if let Some(name) = &guest.name
+        && view.name.eq_ignore_ascii_case(name)
+    {
+        return Some(AssociationCandidate {
+            machine_id: view.id.clone(),
+            machine_name: view.name.clone(),
+            machine_status: view.machine_status.id().to_owned(),
+            kind: AssociationKind::NameMatch.id().to_owned(),
+            evidence: name.clone(),
+        });
+    }
+    None
+}
+
+/// The capability facts one guest contributes to its confirmed machine:
+/// the guest identity, the agent's availability and version, the OS and
+/// kernel when the agent answered, and the MACs. Provenance is the
+/// account's observation path; every fact carries the observation time.
+#[must_use]
+fn guest_facts(
+    guest: &ProviderGuest,
+    machine_id: &str,
+    pve_version: &str,
+    now: i64,
+) -> Vec<CapabilityFact> {
+    let source = format!("proxmox/{pve_version}");
+    let mut facts = Vec::new();
+    let mut push = |name: &str, value: Option<String>, status: CapabilityStatus| {
+        facts.push(CapabilityFact {
+            namespace: "pve".to_owned(),
+            name: name.to_owned(),
+            value,
+            status,
+            observed_at: Timestamp::from_unix_millis(now),
+            source: source.clone(),
+        });
+    };
+    let _ = machine_id;
+    push("guest", Some(guest.id.clone()), CapabilityStatus::Known);
+    if let Some(vmid) = guest.vmid {
+        push("vmid", Some(vmid.to_string()), CapabilityStatus::Known);
+    }
+    if let Some(node) = &guest.node {
+        push("node", Some(node.clone()), CapabilityStatus::Known);
+    }
+    match &guest.agent {
+        Some(agent) if agent.online => {
+            push("agent", agent.version.clone(), CapabilityStatus::Known);
+            if let Some(os) = &agent.os_name {
+                push("os", Some(os.clone()), CapabilityStatus::Known);
+            }
+            if let Some(kernel) = &agent.kernel {
+                push("kernel", Some(kernel.clone()), CapabilityStatus::Known);
+            }
+        }
+        // A QEMU guest whose agent did not answer: unavailable is honest —
+        // the guest may be off, not agentless.
+        Some(_) => push("agent", None, CapabilityStatus::Unavailable),
+        // LXC has no qemu-guest-agent by design: the absence is known.
+        None => push("agent", None, CapabilityStatus::Unknown),
+    }
+    for (index, mac) in guest.macs.iter().enumerate() {
+        facts.push(CapabilityFact {
+            namespace: "net".to_owned(),
+            name: format!("mac{index}"),
+            value: Some(mac.clone()),
+            status: CapabilityStatus::Known,
+            observed_at: Timestamp::from_unix_millis(now),
+            source: source.clone(),
+        });
+    }
+    facts
 }
 
 /// Normalizes a fingerprint for comparison. Exposed for the adapter layer's

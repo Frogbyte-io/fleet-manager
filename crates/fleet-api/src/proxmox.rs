@@ -14,7 +14,9 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use fleet_application::proxmox::{NewProxmoxAccount, ProxmoxAccount, ProxmoxUseCaseError};
+use fleet_application::proxmox::{
+    AssociatedGuest, NewProxmoxAccount, ProxmoxAccount, ProxmoxUseCaseError,
+};
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr as _;
@@ -182,6 +184,131 @@ pub struct ProxmoxDiscoveryDto {
     pub reported_count: usize,
     /// When the snapshot was taken.
     pub observed_at: i64,
+}
+
+/// One discovered guest with its Fleet-machine association candidates.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssociatedGuestDto {
+    /// The normalized kind: `qemu` or `lxc`.
+    pub kind: String,
+    /// The cluster-visible id.
+    pub id: String,
+    /// The hosting node.
+    pub node: Option<String>,
+    /// The VMID.
+    pub vmid: Option<u32>,
+    /// The display name, when carried.
+    pub name: Option<String>,
+    /// The PVE status string, when carried.
+    pub status: Option<String>,
+    /// The config's MAC addresses, normalized.
+    pub macs: Vec<String>,
+    /// The guest-agent view, when the guest has one.
+    pub agent: Option<ProviderAgentDto>,
+    /// The bounded per-surface warnings.
+    pub warnings: Vec<String>,
+    /// The PVE version the observation came from.
+    pub pve_version: String,
+    /// When the observation was taken.
+    pub observed_at: i64,
+    /// The Fleet machines this guest may be — evidence, never merged.
+    pub candidates: Vec<AssociationCandidateDto>,
+}
+
+/// The guest-agent view.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAgentDto {
+    /// The agent answered `info`: installed and reachable.
+    pub online: bool,
+    /// The agent version, when carried.
+    pub version: Option<String>,
+    /// The guest's OS name, when `get-osinfo` answered.
+    pub os_name: Option<String>,
+    /// The guest's kernel release, when carried.
+    pub kernel: Option<String>,
+    /// The network interfaces the agent saw.
+    pub interfaces: Vec<ProviderInterfaceDto>,
+}
+
+/// One guest network interface.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInterfaceDto {
+    /// The interface name inside the guest.
+    pub name: String,
+    /// The normalized MAC, when carried.
+    pub mac: Option<String>,
+    /// The interface's addresses.
+    pub addresses: Vec<String>,
+}
+
+/// One Fleet machine a guest may be, with the evidence.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssociationCandidateDto {
+    /// The existing machine's identity.
+    pub machine_id: String,
+    /// The existing machine's name.
+    pub machine_name: String,
+    /// The machine's derived connectivity state.
+    pub machine_status: String,
+    /// Why: `mac_match`, `address_match`, or `name_match`.
+    pub kind: String,
+    /// The evidence value that matched.
+    pub evidence: String,
+}
+
+impl From<AssociatedGuest> for AssociatedGuestDto {
+    fn from(associated: AssociatedGuest) -> Self {
+        Self {
+            kind: associated.guest.kind,
+            id: associated.guest.id,
+            node: associated.guest.node,
+            vmid: associated.guest.vmid,
+            name: associated.guest.name,
+            status: associated.guest.status,
+            macs: associated.guest.macs,
+            agent: associated.guest.agent.map(|agent| ProviderAgentDto {
+                online: agent.online,
+                version: agent.version,
+                os_name: agent.os_name,
+                kernel: agent.kernel,
+                interfaces: agent
+                    .interfaces
+                    .into_iter()
+                    .map(|interface| ProviderInterfaceDto {
+                        name: interface.name,
+                        mac: interface.mac,
+                        addresses: interface.addresses,
+                    })
+                    .collect(),
+            }),
+            warnings: associated.guest.warnings,
+            pve_version: associated.pve_version,
+            observed_at: associated.observed_at,
+            candidates: associated
+                .candidates
+                .into_iter()
+                .map(|candidate| AssociationCandidateDto {
+                    machine_id: candidate.machine_id,
+                    machine_name: candidate.machine_name,
+                    machine_status: candidate.machine_status,
+                    kind: candidate.kind,
+                    evidence: candidate.evidence,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The observe-guest request: which machine the guest's facts record onto.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ObserveProxmoxGuestRequest {
+    /// The machine the guest is confirmed to be.
+    pub machine_id: String,
 }
 
 /// The create-account request. The token secret is write-only.
@@ -611,4 +738,138 @@ pub async fn discover_proxmox_cluster(
         reported_count: discovery.reported_count,
         observed_at: discovery.observed_at,
     })))
+}
+
+/// Lists the account's guests with their Fleet-machine association
+/// candidates (evidence only).
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unconfirmed account, or
+/// a source failure.
+#[utoipa::path(
+    get,
+    path = "/proxmox/accounts/{accountId}/guests",
+    tag = "proxmox",
+    operation_id = "listProxmoxGuests",
+    params(
+        (
+            "accountId" = String,
+            Path,
+            description = "The account's identity."
+        ),
+    ),
+    responses(
+        (
+            status = 200,
+            description = "The guests with their association candidates.",
+            body = Page<AssociatedGuestDto>
+        ),
+        (
+            status = 403,
+            description = "The caller may not read the Proxmox surface.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 409,
+            description = "The account's trust is unconfirmed.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn list_proxmox_guests(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(account_id): Path<String>,
+) -> Result<Json<Page<AssociatedGuestDto>>, ApiErrorResponse> {
+    let proxmox = proxmox_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let guests = proxmox
+        .guests(
+            state.authorizer.as_ref(),
+            &principal,
+            &account_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_proxmox_error(&error, correlation_id))?;
+    let items: Vec<AssociatedGuestDto> = guests.into_iter().map(Into::into).collect();
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit: items.len().try_into().unwrap_or(u32::MAX),
+        },
+        items,
+    }))
+}
+
+/// Records one guest's facts onto a confirmed Fleet machine. The machine
+/// funnel authorizes and audits the capability write.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown account,
+/// guest, or machine, or a source failure.
+#[utoipa::path(
+    post,
+    path = "/proxmox/accounts/{accountId}/guests/{vmid}/observe",
+    tag = "proxmox",
+    operation_id = "observeProxmoxGuest",
+    params(
+        (
+            "accountId" = String,
+            Path,
+            description = "The account's identity."
+        ),
+        (
+            "vmid" = u32,
+            Path,
+            description = "The guest's VMID."
+        ),
+    ),
+    request_body = ObserveProxmoxGuestRequest,
+    responses(
+        (
+            status = 204,
+            description = "The guest's facts were recorded on the machine."
+        ),
+        (
+            status = 403,
+            description = "The caller may not read the Proxmox surface or write the machine's facts.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 404,
+            description = "The account, guest, or machine does not exist.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 409,
+            description = "The account's trust is unconfirmed or the source refused.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn observe_proxmox_guest(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path((account_id, vmid)): Path<(String, u32)>,
+    Json(request): Json<ObserveProxmoxGuestRequest>,
+) -> Result<StatusCode, ApiErrorResponse> {
+    let proxmox = proxmox_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    proxmox
+        .observe_guest(
+            state.authorizer.as_ref(),
+            &principal,
+            &account_id,
+            vmid,
+            &request.machine_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_proxmox_error(&error, correlation_id))?;
+    Ok(StatusCode::NO_CONTENT)
 }

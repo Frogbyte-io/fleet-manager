@@ -307,6 +307,109 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
     }
 }
 
+#[async_trait]
+impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery {
+    async fn guest_discover(
+        &self,
+        account: &fleet_application::proxmox::ProxmoxAccount,
+        secret: &SensitiveString,
+    ) -> Result<fleet_application::proxmox::RawGuestDiscovery, ProxmoxSourceError> {
+        let Some(pinned) = account.fingerprint.clone() else {
+            return Err(ProxmoxSourceError::Connect {
+                detail: "the account has no confirmed fingerprint; refusing to send credentials"
+                    .to_owned(),
+            });
+        };
+        let request = PveHttpRequest {
+            host: account.host.clone(),
+            port: account.port,
+            path: "/api2/json/cluster/resources".to_owned(),
+            pinned_fingerprint: Some(pinned.clone()),
+            credentials: Arc::new(PveCredentials {
+                token_id: account.token_id.clone(),
+                token: SensitiveString::new(secret.expose().to_owned()),
+            }),
+        };
+        match self.client.guest_discover(request).await {
+            Ok(discovery) => Ok(fleet_application::proxmox::RawGuestDiscovery {
+                version: discovery.version.clone(),
+                guests: discovery
+                    .guests
+                    .into_iter()
+                    .map(|guest| fleet_application::proxmox::ProviderGuest {
+                        kind: guest.resource.kind,
+                        id: guest.resource.id,
+                        node: guest.resource.node,
+                        vmid: guest.resource.vmid,
+                        name: guest.resource.name,
+                        status: guest.resource.status,
+                        macs: guest.macs,
+                        agent: guest
+                            .agent
+                            .map(|agent| fleet_application::proxmox::ProviderAgent {
+                                online: agent.online,
+                                version: agent.version,
+                                os_name: agent.os_name,
+                                kernel: agent.kernel,
+                                interfaces: agent
+                                    .interfaces
+                                    .into_iter()
+                                    .map(|interface| {
+                                        fleet_application::proxmox::ProviderInterface {
+                                            name: interface.name,
+                                            mac: interface.mac,
+                                            addresses: interface.addresses,
+                                        }
+                                    })
+                                    .collect(),
+                            }),
+                        warnings: guest.warnings,
+                    })
+                    .collect(),
+                warnings: discovery.warnings,
+            }),
+            Err(error) => Err(map_api_error(error)),
+        }
+    }
+}
+
+/// Maps one provider API error onto the application taxonomy.
+fn map_api_error(error: fleet_provider_proxmox::PveApiError) -> ProxmoxSourceError {
+    match error {
+        fleet_provider_proxmox::PveApiError::Auth => ProxmoxSourceError::Auth,
+        fleet_provider_proxmox::PveApiError::Forbidden { detail } => {
+            ProxmoxSourceError::Forbidden { detail }
+        }
+        fleet_provider_proxmox::PveApiError::Http { status, detail } => {
+            ProxmoxSourceError::Http { status, detail }
+        }
+        fleet_provider_proxmox::PveApiError::InvalidPayload { detail } => {
+            ProxmoxSourceError::InvalidPayload { detail }
+        }
+        fleet_provider_proxmox::PveApiError::Transport(
+            fleet_provider_proxmox::PveTransportError::FingerprintMismatch {
+                observed,
+                pinned: pin,
+            },
+        ) => {
+            let Some(pin) = pin else {
+                return ProxmoxSourceError::Connect {
+                    detail: format!(
+                        "the transport reported a fingerprint mismatch without a pin (observed {observed})"
+                    ),
+                };
+            };
+            ProxmoxSourceError::FingerprintMismatch {
+                observed,
+                pinned: pin,
+            }
+        }
+        fleet_provider_proxmox::PveApiError::Transport(other) => ProxmoxSourceError::Connect {
+            detail: other.to_string(),
+        },
+    }
+}
+
 /// Composes the Proxmox use cases over its ports.
 #[must_use]
 pub fn compose_proxmox(
@@ -316,11 +419,27 @@ pub fn compose_proxmox(
     audit: Arc<dyn fleet_application::operation::AuditPort>,
 ) -> fleet_application::proxmox::ProxmoxAccounts {
     let client = fleet_provider_proxmox::ProxmoxClient::new(transport.clone());
+    let discovery = Arc::new(ProviderDiscovery::new(client.clone()));
     fleet_application::proxmox::ProxmoxAccounts::new(
-        Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(pool)),
+        Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+            pool.clone(),
+        )),
         Arc::new(SecretBackedProxmoxCredentials::new(secrets)),
-        Arc::new(ProviderDiscovery::new(client)),
+        discovery.clone(),
+        discovery,
         Arc::new(ProviderTrustProbe::new(transport)),
+        machines_for(pool, audit.clone()),
         audit,
     )
+}
+
+/// The machine use cases over the shared pool and audit sink.
+fn machines_for(
+    pool: sqlx::SqlitePool,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+) -> Arc<fleet_application::machine::Machines> {
+    Arc::new(fleet_application::machine::Machines::new(
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(pool)),
+        audit,
+    ))
 }

@@ -442,7 +442,7 @@ impl std::error::Error for PveApiError {}
 /// One normalized cluster resource: a node, a QEMU guest, an LXC container,
 /// a storage, or a template. Provenance and time attach at the application
 /// layer; this is the provider's own shape.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PveResource {
     /// The normalized kind: `node`, `qemu`, `lxc`, `storage`, or
@@ -476,6 +476,72 @@ pub struct PveDiscovery {
     pub reported_count: usize,
 }
 
+/// The QEMU Guest Agent's view of one guest, with honest availability per
+/// surface. Every field is independent: an off guest is not an agentless
+/// guest, and an agent that answers `info` but not `network` is reported
+/// exactly so.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveGuestAgent {
+    /// The agent answered `info`: it is installed and reachable.
+    pub online: bool,
+    /// The agent version string, when `info` carried one.
+    pub version: Option<String>,
+    /// The guest's OS facts, when `get-osinfo` answered.
+    pub os_name: Option<String>,
+    /// The guest's kernel release, when `get-osinfo` carried one.
+    pub kernel: Option<String>,
+    /// The network interfaces the agent saw, when
+    /// `network-get-interfaces` answered. MACs are normalized
+    /// (lowercase, colon-separated); addresses are bare.
+    pub interfaces: Vec<PveGuestInterface>,
+}
+
+/// One network interface as the guest agent saw it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveGuestInterface {
+    /// The interface name inside the guest, e.g. `ens18`.
+    pub name: String,
+    /// The normalized MAC address, when the interface has one.
+    pub mac: Option<String>,
+    /// The interface's addresses, when it has any.
+    pub addresses: Vec<String>,
+}
+
+/// One guest with its provider-side facts: the cluster resource plus the
+/// config's MAC addresses and the agent view. Association and provenance
+/// attach at the application layer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveGuest {
+    /// The cluster resource the guest came from (`qemu` or `lxc`).
+    pub resource: PveResource,
+    /// The MAC addresses from the guest config's `netN` entries, normalized
+    /// lowercase colon-separated. LXC guests carry theirs in `config` too.
+    pub macs: Vec<String>,
+    /// The QEMU Guest Agent view; `None` for LXC (no qemu-guest-agent) or
+    /// when the config could not be read. Per-surface availability lives
+    /// inside.
+    pub agent: Option<PveGuestAgent>,
+    /// The bounded per-surface warnings: one failed agent call or a
+    /// malformed config entry warns here instead of dropping the guest.
+    pub warnings: Vec<String>,
+}
+
+/// The guest discovery result: the guests of one account's cluster.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveGuestDiscovery {
+    /// The PVE version seen.
+    pub version: String,
+    /// The discovered guests.
+    pub guests: Vec<PveGuest>,
+    /// The cluster-level warnings (a guest whose config or agent probing
+    /// failed is isolated here).
+    pub warnings: Vec<String>,
+}
+
 /// The discovery port. The provider implements this over the PVE API;
 /// tests implement it over recorded fixtures.
 #[async_trait]
@@ -488,10 +554,24 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
     /// transport failures. Per-resource normalization failures are isolated
     /// into the result's warnings instead.
     async fn discover(&self, request: PveHttpRequest) -> Result<PveDiscovery, PveApiError>;
+
+    /// Discovers the account's guests with their config MACs and guest-agent
+    /// views. Read-only; a guest whose config or agent probing fails is
+    /// isolated into the result's warnings instead of dropping the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] on auth, privilege, HTTP, payload, or
+    /// transport failures.
+    async fn guest_discover(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveGuestDiscovery, PveApiError>;
 }
 
 /// The provider client: transport plus normalization. Stateless — every
 /// call carries its own endpoint and credentials.
+#[derive(Clone)]
 pub struct ProxmoxClient {
     transport: Arc<dyn PveTransport>,
 }
@@ -509,6 +589,51 @@ impl ProxmoxClient {
     #[must_use]
     pub fn new(transport: Arc<dyn PveTransport>) -> Self {
         Self { transport }
+    }
+
+    /// The version string and the raw cluster-resources entries: the
+    /// prologue both discovery paths share.
+    async fn version_and_resources(
+        &self,
+        request: &PveHttpRequest,
+    ) -> Result<(String, Vec<serde_json::Value>), PveApiError> {
+        // The version first: it anchors provenance and proves the trust.
+        let version_request = PveHttpRequest {
+            path: "/api2/json/version".to_owned(),
+            ..request.clone()
+        };
+        let version_data = self.call(version_request).await?;
+        let version = version_data
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(32)
+            .collect::<String>();
+        if version.is_empty() {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the version payload carries no version string".to_owned(),
+            });
+        }
+        let resources_request = PveHttpRequest {
+            path: "/api2/json/cluster/resources".to_owned(),
+            ..request.clone()
+        };
+        let data = self.call(resources_request).await?;
+        let entries = match data {
+            serde_json::Value::Array(entries) => entries,
+            // `data: null` is an empty cluster: honest, not an error.
+            serde_json::Value::Null => Vec::new(),
+            other => {
+                return Err(PveApiError::InvalidPayload {
+                    detail: format!(
+                        "the resources payload is not a list (it is a {})",
+                        type_name_of(&other)
+                    ),
+                });
+            }
+        };
+        Ok((version, entries))
     }
 
     async fn call(&self, request: PveHttpRequest) -> Result<serde_json::Value, PveApiError> {
@@ -567,43 +692,7 @@ fn bounded_body(body: &[u8]) -> String {
 #[async_trait]
 impl ProxmoxSource for ProxmoxClient {
     async fn discover(&self, request: PveHttpRequest) -> Result<PveDiscovery, PveApiError> {
-        // The version first: it anchors provenance and proves the trust.
-        let version_request = PveHttpRequest {
-            path: "/api2/json/version".to_owned(),
-            ..request.clone()
-        };
-        let version_data = self.call(version_request).await?;
-        let version = version_data
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .chars()
-            .take(32)
-            .collect::<String>();
-        if version.is_empty() {
-            return Err(PveApiError::InvalidPayload {
-                detail: "the version payload carries no version string".to_owned(),
-            });
-        }
-
-        let resources_request = PveHttpRequest {
-            path: "/api2/json/cluster/resources".to_owned(),
-            ..request.clone()
-        };
-        let data = self.call(resources_request).await?;
-        let entries = match data {
-            serde_json::Value::Array(entries) => entries,
-            // `data: null` is an empty cluster: honest, not an error.
-            serde_json::Value::Null => Vec::new(),
-            other => {
-                return Err(PveApiError::InvalidPayload {
-                    detail: format!(
-                        "the resources payload is not a list (it is a {})",
-                        type_name_of(&other)
-                    ),
-                });
-            }
-        };
+        let (version, entries) = self.version_and_resources(&request).await?;
         let reported_count = entries.len();
         let mut resources = Vec::new();
         let mut warnings = Vec::new();
@@ -622,6 +711,279 @@ impl ProxmoxSource for ProxmoxClient {
             reported_count,
         })
     }
+
+    async fn guest_discover(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveGuestDiscovery, PveApiError> {
+        // The cluster snapshot names the guests; the config carries their
+        // MACs; the agent carries their inner facts. Each step degrades
+        // independently.
+        let (version, entries) = self.version_and_resources(&request).await?;
+        let mut guests = Vec::new();
+        let mut warnings = Vec::new();
+        for (index, entry) in entries.into_iter().enumerate() {
+            let resource = match normalize_resource(&entry) {
+                Ok(Some(resource)) if resource.kind == "qemu" || resource.kind == "lxc" => resource,
+                Ok(_) => continue,
+                Err(detail) => {
+                    warnings.push(format!("resource #{index}: {detail}"));
+                    continue;
+                }
+            };
+            let Some(node) = resource.node.clone() else {
+                warnings.push(format!(
+                    "guest {}: the cluster entry carries no node",
+                    resource.id
+                ));
+                continue;
+            };
+            let Some(vmid) = resource.vmid else {
+                warnings.push(format!(
+                    "guest {}: the cluster entry carries no vmid",
+                    resource.id
+                ));
+                continue;
+            };
+            let mut guest = PveGuest {
+                resource,
+                ..PveGuest::default()
+            };
+            // The config: MACs for the association evidence. A config
+            // failure warns; the guest survives without MAC evidence.
+            let config_request = PveHttpRequest {
+                path: format!(
+                    "/api2/json/nodes/{}/{}/{vmid}/config",
+                    urlencode(&node),
+                    if guest.resource.kind == "lxc" {
+                        "lxc"
+                    } else {
+                        "qemu"
+                    }
+                ),
+                ..request.clone()
+            };
+            match self.call(config_request.clone()).await {
+                Ok(config) => {
+                    guest.macs = config_macs(&config);
+                }
+                Err(PveApiError::Http { status, detail }) => {
+                    warnings.push(format!(
+                        "guest {}: the config answered {status}: {detail}",
+                        guest.resource.id
+                    ));
+                }
+                Err(other) => {
+                    warnings.push(format!(
+                        "guest {}: the config failed: {other}",
+                        guest.resource.id
+                    ));
+                }
+            }
+            // The agent: QEMU only, and every surface independently.
+            if guest.resource.kind == "qemu" {
+                guest.agent = Some(
+                    self.probe_agent(&request, &node, vmid, &mut guest.warnings)
+                        .await,
+                );
+            }
+            guests.push(guest);
+        }
+        Ok(PveGuestDiscovery {
+            version,
+            guests,
+            warnings,
+        })
+    }
+}
+
+/// The config's `netN` entries, parsed for MAC addresses. The value shape
+/// is `virtio=DE:AD:BE:EF:00:01,bridge=vmbr0` — the model is the first
+/// key=value pair whose value looks like a MAC.
+fn config_macs(config: &serde_json::Value) -> Vec<String> {
+    let mut macs = Vec::new();
+    if let Some(extra) = config.as_object() {
+        for (key, value) in extra {
+            if !(key.starts_with("net") && key[3..].chars().all(|c| c.is_ascii_digit())) {
+                continue;
+            }
+            let Some(text) = value.as_str() else {
+                continue;
+            };
+            for part in text.split(',') {
+                if let Some(mac) = normalize_mac(part) {
+                    macs.push(mac);
+                    break;
+                }
+            }
+        }
+    }
+    macs
+}
+
+/// Normalizes a MAC candidate: `key=AA:BB:…` or bare, lowercase
+/// colon-separated, only when it is six hex pairs.
+#[must_use]
+pub fn normalize_mac(candidate: &str) -> Option<String> {
+    let value = candidate.split('=').next_back().unwrap_or(candidate);
+    let bytes = value.split(':').collect::<Vec<_>>();
+    if bytes.len() != 6 {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(17);
+    for (index, byte) in bytes.iter().enumerate() {
+        if byte.len() != 2 || !byte.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        if index > 0 {
+            normalized.push(':');
+        }
+        normalized.extend(byte.to_lowercase().chars());
+    }
+    Some(normalized.into_iter().collect())
+}
+
+fn urlencode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+impl ProxmoxClient {
+    /// Probes one guest's agent surfaces, each independently honest. A
+    /// failed or absent surface is a warning on the guest, never a guest
+    /// failure.
+    async fn probe_agent(
+        &self,
+        request: &PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        warnings: &mut Vec<String>,
+    ) -> PveGuestAgent {
+        let mut agent = PveGuestAgent::default();
+        let base = format!("/api2/json/nodes/{}/qemu/{vmid}/agent", urlencode(node));
+        // info: is the agent there at all?
+        let info_request = PveHttpRequest {
+            path: format!("{base}/info"),
+            ..request.clone()
+        };
+        if self.call(info_request.clone()).await.is_err() {
+            warnings.push(format!("guest qemu/{vmid}: the agent is unreachable"));
+            // Every other surface would fail the same way; report the
+            // honest offline agent and stop here.
+            return agent;
+        }
+        // The agent answered `info`; the version detail rides the same
+        // envelope. Re-calling is avoided by treating info's success as
+        // online and fetching the version from the same call's data.
+        if let Ok(data) = self.call(info_request).await {
+            let result = data.get("result").cloned().unwrap_or(data);
+            agent.online = true;
+            agent.version = result
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| value.chars().take(64).collect());
+        }
+        // network-get-interfaces
+        let net_request = PveHttpRequest {
+            path: format!("{base}/network-get-interfaces"),
+            ..request.clone()
+        };
+        match self.call(net_request.clone()).await {
+            Ok(data) => {
+                let result = data.get("result").cloned().unwrap_or(data);
+                if let Some(interfaces) = result.as_array() {
+                    for interface in interfaces {
+                        match normalize_interface(interface) {
+                            Ok(Some(interface)) => agent.interfaces.push(interface),
+                            Ok(None) => {}
+                            Err(detail) => {
+                                warnings.push(format!("guest qemu/{vmid}: {detail}"));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "guest qemu/{vmid}: the agent's network surface failed: {error}"
+                ));
+            }
+        }
+        // get-osinfo
+        let os_request = PveHttpRequest {
+            path: format!("{base}/get-osinfo"),
+            ..request.clone()
+        };
+        match self.call(os_request.clone()).await {
+            Ok(data) => {
+                let result = data.get("result").cloned().unwrap_or(data);
+                agent.os_name = result
+                    .get("pretty-name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| value.chars().take(128).collect());
+                agent.kernel = result
+                    .get("kernel-release")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| value.chars().take(128).collect());
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "guest qemu/{vmid}: the agent's OS surface failed: {error}"
+                ));
+            }
+        }
+        agent
+    }
+}
+
+/// Normalizes one agent network interface. `Ok(None)` skips loopback-style
+/// entries without a MAC; `Err` warns.
+fn normalize_interface(interface: &serde_json::Value) -> Result<Option<PveGuestInterface>, String> {
+    let Some(name) = interface
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| value.chars().take(64).collect::<String>())
+    else {
+        return Err("the interface entry carries no name".to_owned());
+    };
+    let mac = interface
+        .get("hardware-address")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_mac);
+    let mut addresses = Vec::new();
+    if let Some(list) = interface
+        .get("ip-addresses")
+        .and_then(serde_json::Value::as_array)
+    {
+        for address in list {
+            if let Some(text) = address
+                .get("ip-address")
+                .and_then(serde_json::Value::as_str)
+            {
+                let bounded = text.chars().take(64).collect::<String>();
+                if !bounded.is_empty() {
+                    addresses.push(bounded);
+                }
+            }
+        }
+    }
+    if mac.is_none() && addresses.is_empty() {
+        // Loopback-style: no association evidence, skip silently.
+        return Ok(None);
+    }
+    Ok(Some(PveGuestInterface {
+        name,
+        mac,
+        addresses,
+    }))
 }
 
 fn type_name_of(value: &serde_json::Value) -> &'static str {
@@ -745,6 +1107,64 @@ mod tests {
         let mystery = serde_json::json!({"id": "weird/1", "type": "mystery"});
         let error = normalize_resource(&mystery).unwrap_err();
         assert!(error.contains("unrecognized type"), "{error}");
+    }
+
+    #[test]
+    fn config_macs_parse_the_netn_entries() {
+        let config = serde_json::json!({
+            "net0": "virtio=DE:AD:BE:EF:00:01,bridge=vmbr0,firewall=1",
+            "net1": "virtio=DE:AD:BE:EF:00:02",
+            "scsi0": "local-lvm:vm-101-disk-0",
+            "memory": 2048
+        });
+        let macs = config_macs(&config);
+        assert_eq!(macs.len(), 2, "{macs:?}");
+        assert_eq!(macs[0], "de:ad:be:ef:00:01");
+        assert_eq!(macs[1], "de:ad:be:ef:00:02");
+    }
+
+    #[test]
+    fn mac_normalization_refuses_non_macs() {
+        assert_eq!(
+            normalize_mac("AA:BB:CC:DD:EE:FF").as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
+        );
+        assert_eq!(
+            normalize_mac("virtio=DE:AD:BE:EF:00:01").as_deref(),
+            Some("de:ad:be:ef:00:01")
+        );
+        assert!(normalize_mac("bridge=vmbr0").is_none());
+        assert!(normalize_mac("AA:BB:CC").is_none());
+        assert!(normalize_mac("ZZ:BB:CC:DD:EE:FF").is_none());
+    }
+
+    #[test]
+    fn interfaces_normalize_and_skip_loopback() {
+        let interface = serde_json::json!({
+            "name": "ens18",
+            "hardware-address": "BC:24:11:97:DB:A8",
+            "ip-addresses": [
+                {"ip-address": "192.168.68.240", "ip-address-type": "ipv4", "prefix": 24}
+            ]
+        });
+        let normalized = normalize_interface(&interface).unwrap().unwrap();
+        assert_eq!(normalized.name, "ens18");
+        assert_eq!(normalized.mac.as_deref(), Some("bc:24:11:97:db:a8"));
+        assert_eq!(normalized.addresses, vec!["192.168.68.240".to_owned()]);
+
+        let loopback = serde_json::json!({
+            "name": "lo",
+            "hardware-address": "00:00:00:00:00:00",
+            "ip-addresses": [
+                {"ip-address": "127.0.0.1", "ip-address-type": "ipv4", "prefix": 8}
+            ]
+        });
+        // Loopback carries a MAC (all zeros) and an address: it lands, and
+        // the application layer decides its evidence weight.
+        assert!(normalize_interface(&loopback).unwrap().is_some());
+
+        let nameless = serde_json::json!({"hardware-address": "BC:24:11:97:DB:A8"});
+        assert!(normalize_interface(&nameless).is_err());
     }
 
     #[test]

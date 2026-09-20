@@ -238,6 +238,104 @@ export type ApplyAuthDto = {
 };
 
 /**
+ * One guest network interface.
+ */
+export interface ProviderInterfaceDto {
+  /** The interface's addresses. */
+  addresses: string[];
+  /**
+     * The normalized MAC, when carried.
+     * @nullable
+     */
+  mac?: string | null;
+  /** The interface name inside the guest. */
+  name: string;
+}
+
+/**
+ * The guest-agent view.
+ */
+export interface ProviderAgentDto {
+  /** The network interfaces the agent saw. */
+  interfaces: ProviderInterfaceDto[];
+  /**
+     * The guest's kernel release, when carried.
+     * @nullable
+     */
+  kernel?: string | null;
+  /** The agent answered `info`: installed and reachable. */
+  online: boolean;
+  /**
+     * The guest's OS name, when `get-osinfo` answered.
+     * @nullable
+     */
+  osName?: string | null;
+  /**
+     * The agent version, when carried.
+     * @nullable
+     */
+  version?: string | null;
+}
+
+/**
+ * One Fleet machine a guest may be, with the evidence.
+ */
+export interface AssociationCandidateDto {
+  /** The evidence value that matched. */
+  evidence: string;
+  /** Why: `mac_match`, `address_match`, or `name_match`. */
+  kind: string;
+  /** The existing machine's identity. */
+  machineId: string;
+  /** The existing machine's name. */
+  machineName: string;
+  /** The machine's derived connectivity state. */
+  machineStatus: string;
+}
+
+/**
+ * One discovered guest with its Fleet-machine association candidates.
+ */
+export interface AssociatedGuestDto {
+  agent?: null | ProviderAgentDto;
+  /** The Fleet machines this guest may be — evidence, never merged. */
+  candidates: AssociationCandidateDto[];
+  /** The cluster-visible id. */
+  id: string;
+  /** The normalized kind: `qemu` or `lxc`. */
+  kind: string;
+  /** The config's MAC addresses, normalized. */
+  macs: string[];
+  /**
+     * The display name, when carried.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * The hosting node.
+     * @nullable
+     */
+  node?: string | null;
+  /** When the observation was taken. */
+  observedAt: number;
+  /** The PVE version the observation came from. */
+  pveVersion: string;
+  /**
+     * The PVE status string, when carried.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * The VMID.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+  /** The bounded per-surface warnings. */
+  warnings: string[];
+}
+
+/**
  * How a checkout action's endpoint authenticates.
  */
 export type CheckoutAuthDto = {
@@ -734,6 +832,14 @@ export interface NodeViewDto {
 }
 
 /**
+ * The observe-guest request: which machine the guest's facts record onto.
+ */
+export interface ObserveProxmoxGuestRequest {
+  /** The machine the guest is confirmed to be. */
+  machineId: string;
+}
+
+/**
  * A host key as observed from the network, staged for review. Public data.
  */
 export interface OnboardHostKeyDto {
@@ -965,6 +1071,61 @@ export interface PageInfo {
      * @nullable
      */
   nextCursor?: string | null;
+}
+
+/**
+ * One discovered guest with its Fleet-machine association candidates.
+ */
+export type PageAssociatedGuestDtoItemsItem = {
+  agent?: null | ProviderAgentDto;
+  /** The Fleet machines this guest may be — evidence, never merged. */
+  candidates: AssociationCandidateDto[];
+  /** The cluster-visible id. */
+  id: string;
+  /** The normalized kind: `qemu` or `lxc`. */
+  kind: string;
+  /** The config's MAC addresses, normalized. */
+  macs: string[];
+  /**
+     * The display name, when carried.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * The hosting node.
+     * @nullable
+     */
+  node?: string | null;
+  /** When the observation was taken. */
+  observedAt: number;
+  /** The PVE version the observation came from. */
+  pveVersion: string;
+  /**
+     * The PVE status string, when carried.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * The VMID.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+  /** The bounded per-surface warnings. */
+  warnings: string[];
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageAssociatedGuestDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageAssociatedGuestDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
 }
 
 /**
@@ -4682,6 +4843,140 @@ export const discoverProxmoxCluster = async (accountId: string, options?: Reques
 
   const data: discoverProxmoxClusterResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as discoverProxmoxClusterResponse
+}
+
+
+
+export type listProxmoxGuestsResponse200 = {
+  data: PageAssociatedGuestDto
+  status: 200
+}
+
+export type listProxmoxGuestsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listProxmoxGuestsResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type listProxmoxGuestsResponseSuccess = (listProxmoxGuestsResponse200) & {
+  headers: Headers;
+};
+export type listProxmoxGuestsResponseError = (listProxmoxGuestsResponse403 | listProxmoxGuestsResponse409) & {
+  headers: Headers;
+};
+
+export type listProxmoxGuestsResponse = (listProxmoxGuestsResponseSuccess | listProxmoxGuestsResponseError)
+
+export const getListProxmoxGuestsUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/guests`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unconfirmed account, or
+ * a source failure.
+ * @summary Lists the account's guests with their Fleet-machine association
+candidates (evidence only).
+ */
+export const listProxmoxGuests = async (accountId: string, options?: RequestInit): Promise<listProxmoxGuestsResponse> => {
+
+  const res = await fetch(getListProxmoxGuestsUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listProxmoxGuestsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listProxmoxGuestsResponse
+}
+
+
+
+export type observeProxmoxGuestResponse204 = {
+  data: void
+  status: 204
+}
+
+export type observeProxmoxGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type observeProxmoxGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type observeProxmoxGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type observeProxmoxGuestResponseSuccess = (observeProxmoxGuestResponse204) & {
+  headers: Headers;
+};
+export type observeProxmoxGuestResponseError = (observeProxmoxGuestResponse403 | observeProxmoxGuestResponse404 | observeProxmoxGuestResponse409) & {
+  headers: Headers;
+};
+
+export type observeProxmoxGuestResponse = (observeProxmoxGuestResponseSuccess | observeProxmoxGuestResponseError)
+
+export const getObserveProxmoxGuestUrl = (accountId: string,
+    vmid: number,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/guests/${vmid}/observe`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account,
+ * guest, or machine, or a source failure.
+ * @summary Records one guest's facts onto a confirmed Fleet machine. The machine
+funnel authorizes and audits the capability write.
+ */
+export const observeProxmoxGuest = async (accountId: string,
+    vmid: number,
+    observeProxmoxGuestRequest: ObserveProxmoxGuestRequest, options?: RequestInit): Promise<observeProxmoxGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getObserveProxmoxGuestUrl(accountId,vmid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(observeProxmoxGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: observeProxmoxGuestResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as observeProxmoxGuestResponse
 }
 
 
