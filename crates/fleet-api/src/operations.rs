@@ -52,6 +52,10 @@ pub struct ApiState {
     /// The project use cases, when the controller was composed with a
     /// database; `None` only in document/test states.
     pub projects: Option<Arc<fleet_application::project::Projects>>,
+    /// The Proxmox use cases, when the controller was composed with a
+    /// database, a secret store, and the provider wired; `None` only in
+    /// document/test states.
+    pub proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -65,6 +69,7 @@ impl std::fmt::Debug for ApiState {
             .field("onboarding", &self.onboarding)
             .field("tailnet", &self.tailnet)
             .field("projects", &self.projects)
+            .field("proxmox", &self.proxmox)
             .finish()
     }
 }
@@ -236,6 +241,7 @@ impl ApiState {
             onboarding: None,
             tailnet: None,
             projects: None,
+            proxmox: None,
         }
     }
 }

@@ -347,6 +347,17 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             )),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         ));
+        // The Proxmox surface composes over the store, the secret store,
+        // and the provider's pinned-fingerprint transport. Without a secret
+        // store it serves the standard "unavailable" envelope.
+        let proxmox = secrets.as_ref().map(|secrets| {
+            std::sync::Arc::new(fleet_controller::proxmox_store::compose_proxmox(
+                store.pool().clone(),
+                secrets.clone(),
+                std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ))
+        });
         let served = serve(
             settings,
             pool,
@@ -354,6 +365,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             Some(onboarding),
             tailnet,
             Some(projects),
+            proxmox,
             shutdown_signal(),
         )
         .await;

@@ -129,6 +129,13 @@ pub enum Permission {
     /// Activate a validated candidate as the desired revision. A
     /// mutation: it changes what Fleet converges machines toward.
     SourceActivate,
+    /// List Proxmox accounts and their discovery snapshots, and observe a
+    /// host's certificate fingerprint. A read, but a
+    /// topology-revealing one.
+    ProxmoxRead,
+    /// Create, confirm trust for, or remove a Proxmox account. A
+    /// mutation: it stores or removes a credential or a trust anchor.
+    ProxmoxConfig,
 }
 
 impl Permission {
@@ -172,6 +179,8 @@ impl Permission {
         Permission::ApplyExecute,
         Permission::SourceFetch,
         Permission::SourceActivate,
+        Permission::ProxmoxRead,
+        Permission::ProxmoxConfig,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -214,6 +223,8 @@ impl Permission {
             Permission::ApplyExecute => "apply.execute",
             Permission::SourceFetch => "source.fetch",
             Permission::SourceActivate => "source.activate",
+            Permission::ProxmoxRead => "proxmox.read",
+            Permission::ProxmoxConfig => "proxmox.config",
         }
     }
 
@@ -258,7 +269,9 @@ impl Permission {
             | Permission::ProjectsReady
             | Permission::ApplyExecute
             | Permission::SourceFetch
-            | Permission::SourceActivate => true,
+            | Permission::SourceActivate
+            | Permission::ProxmoxRead
+            | Permission::ProxmoxConfig => true,
         }
     }
 
@@ -281,7 +294,9 @@ impl Permission {
             | Permission::ProjectsRead
             | Permission::ProjectsCreate
             | Permission::SourceFetch
-            | Permission::SourceActivate => false,
+            | Permission::SourceActivate
+            | Permission::ProxmoxRead
+            | Permission::ProxmoxConfig => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

@@ -490,6 +490,43 @@ pub enum Command {
         /// The SSH port; 22 when omitted.
         port: Option<u16>,
     },
+    /// List the configured Proxmox accounts.
+    ProxmoxAccounts,
+    /// Create a Proxmox account. The token secret is read from standard
+    /// input and never placed in a process argument.
+    ProxmoxCreate {
+        /// The operator-facing account name.
+        name: String,
+        /// The PVE host (IP or DNS name).
+        host: String,
+        /// The API port; 8006 when omitted.
+        port: Option<u16>,
+        /// The API token id (`user@realm!tokenname`).
+        token_id: String,
+    },
+    /// Remove a Proxmox account and its secret.
+    ProxmoxDelete {
+        /// The account's identity.
+        account_id: String,
+    },
+    /// Observe a host's certificate fingerprint without sending any
+    /// credential.
+    ProxmoxObserve {
+        /// The account's identity.
+        account_id: String,
+    },
+    /// Confirm the observed fingerprint as the account's trust anchor.
+    ProxmoxConfirm {
+        /// The account's identity.
+        account_id: String,
+        /// The fingerprint as observed (colons optional).
+        fingerprint: String,
+    },
+    /// Discover the cluster through one trusted account.
+    ProxmoxDiscover {
+        /// The account's identity.
+        account_id: String,
+    },
     /// Start the audited "Install Fleet Node" bootstrap on an agentless
     /// machine: download the checksummed service package on the node,
     /// install the systemd service, enroll, and wait for the gateway
@@ -628,6 +665,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             parse_install_node(machine_id, rest, &url)?
         }
         ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
+        ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
         ["projects", verb, rest @ ..] => parse_projects_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
@@ -1034,9 +1072,115 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
     }
 }
 
+/// Parses one `fleetctl proxmox` subcommand.
+#[allow(clippy::too_many_lines)]
+fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match verb {
+        "accounts" => match rest {
+            [] => Ok(Command::ProxmoxAccounts),
+            _ => Err(CliError { message: usage() }),
+        },
+        "create" => {
+            let mut name = None;
+            let mut host = None;
+            let mut port = None;
+            let mut token_id = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--name" => {
+                        name = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--name requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--host" => {
+                        host = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--host requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--port" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--port requires a value".to_owned(),
+                        })?;
+                        port = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--port must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--token-id" => {
+                        token_id = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--token-id requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::ProxmoxCreate {
+                name: name.ok_or_else(|| CliError {
+                    message: "--name is required".to_owned(),
+                })?,
+                host: host.ok_or_else(|| CliError {
+                    message: "--host is required".to_owned(),
+                })?,
+                port,
+                token_id: token_id.ok_or_else(|| CliError {
+                    message: "--token-id is required".to_owned(),
+                })?,
+            })
+        }
+        "delete" => match rest {
+            [account_id] => Ok(Command::ProxmoxDelete {
+                account_id: (*account_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "observe" => match rest {
+            [account_id] => Ok(Command::ProxmoxObserve {
+                account_id: (*account_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "confirm" => match rest {
+            [account_id, "--fingerprint", fingerprint] => Ok(Command::ProxmoxConfirm {
+                account_id: (*account_id).to_owned(),
+                fingerprint: (*fingerprint).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "discover" => match rest {
+            [account_id] => Ok(Command::ProxmoxDiscover {
+                account_id: (*account_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -1505,6 +1649,12 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::TailnetConfigure { .. }
             | Command::TailnetClear
             | Command::TailnetDevices { .. } => render_tailnet(Some(payload)),
+            Command::ProxmoxAccounts
+            | Command::ProxmoxCreate { .. }
+            | Command::ProxmoxDelete { .. }
+            | Command::ProxmoxObserve { .. }
+            | Command::ProxmoxConfirm { .. }
+            | Command::ProxmoxDiscover { .. } => render_proxmox(Some(payload)),
             _ => render_text(Some(payload)),
         },
     }
@@ -1951,6 +2101,61 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             limit
                 .map(|limit| vec![("limit", limit.to_string())])
                 .unwrap_or_default(),
+            None,
+        ),
+        Command::ProxmoxAccounts => (
+            reqwest::Method::GET,
+            "/api/v1/proxmox/accounts".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::ProxmoxCreate {
+            name,
+            host,
+            port,
+            token_id,
+        } => {
+            let mut body = serde_json::json!({
+                "name": name,
+                "host": host,
+                "tokenId": token_id,
+                "tokenSecret": read_stdin_line("the API token secret")?,
+            });
+            if let Some(port) = port {
+                body["port"] = serde_json::json!(port);
+            }
+            (
+                reqwest::Method::POST,
+                "/api/v1/proxmox/accounts".to_owned(),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::ProxmoxDelete { account_id } => (
+            reqwest::Method::DELETE,
+            format!("/api/v1/proxmox/accounts/{account_id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::ProxmoxObserve { account_id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/proxmox/accounts/{account_id}/observe"),
+            Vec::new(),
+            None,
+        ),
+        Command::ProxmoxConfirm {
+            account_id,
+            fingerprint,
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/proxmox/accounts/{account_id}/confirm"),
+            Vec::new(),
+            Some(serde_json::json!({ "fingerprint": fingerprint })),
+        ),
+        Command::ProxmoxDiscover { account_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/proxmox/accounts/{account_id}/discovery"),
+            Vec::new(),
             None,
         ),
         Command::TailnetImport {
@@ -2533,6 +2738,89 @@ fn render_project_mutation(payload: &Value) -> String {
 /// Renders a project deletion answer.
 fn render_project_deleted() -> String {
     "project removed".to_owned()
+}
+
+/// Renders the Proxmox surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_proxmox_for_test(value: &Value) -> String {
+    render_proxmox(Some(value))
+}
+
+fn render_proxmox(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    // Discovery: a snapshot with resources and honest warnings.
+    if let Some(resources) = value.get("resources").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<18} {:<10} {:<28} {:<20} {}",
+            "KIND", "VMID", "ID", "NAME", "STATUS"
+        )];
+        for resource in resources {
+            lines.push(format!(
+                "{:<18} {:<10} {:<28} {:<20} {}",
+                resource["kind"].as_str().unwrap_or("-"),
+                resource["vmid"]
+                    .as_u64()
+                    .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                resource["id"].as_str().unwrap_or("-"),
+                resource["name"].as_str().unwrap_or("-"),
+                resource["status"].as_str().unwrap_or("-"),
+            ));
+        }
+        if resources.is_empty() {
+            lines.push("(no resources reported)".to_owned());
+        }
+        if let Some(warnings) = value.get("warnings").and_then(Value::as_array)
+            && !warnings.is_empty()
+        {
+            lines.push(String::new());
+            lines.push("warnings:".to_owned());
+            for warning in warnings {
+                if let Some(text) = warning.as_str() {
+                    lines.push(format!("  {text}"));
+                }
+            }
+        }
+        if let Some(version) = value.get("pveVersion").and_then(Value::as_str) {
+            lines.insert(0, format!("PVE {version}"));
+        }
+        return lines.join("\n");
+    }
+    // Accounts list: one row per account with its trust state.
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<38} {:<24} {:<32} {}",
+            "ID", "NAME", "TOKEN ID", "TRUST"
+        )];
+        for account in items {
+            lines.push(format!(
+                "{:<38} {:<24} {:<32} {}",
+                account["id"].as_str().unwrap_or("-"),
+                account["name"].as_str().unwrap_or("-"),
+                account["tokenId"].as_str().unwrap_or("-"),
+                account["fingerprintState"].as_str().unwrap_or("-"),
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no Proxmox accounts)".to_owned());
+        }
+        return lines.join("\n");
+    }
+    // Single account / fingerprint / deletion answers: key facts only.
+    let mut lines = Vec::new();
+    for (key, val) in value.as_object().into_iter().flatten() {
+        let rendered = match val {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        lines.push(format!("{key}: {rendered}"));
+    }
+    if lines.is_empty() {
+        lines.push("account removed".to_owned());
+    }
+    lines.join("\n")
 }
 
 /// Renders the tailnet surface as human text; exposed for contract tests.

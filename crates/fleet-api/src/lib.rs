@@ -23,6 +23,7 @@ pub mod node;
 pub mod onboarding;
 pub mod operations;
 pub mod projects;
+pub mod proxmox;
 pub mod ready;
 pub mod skills;
 pub mod system;
@@ -119,6 +120,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         tailnet::CorrelationCandidateDto,
         tailnet::ImportTailnetDeviceRequest,
         tailnet::TailnetStatusDto,
+        proxmox::ConfirmProxmoxFingerprintRequest,
+        proxmox::CreateProxmoxAccountRequest,
+        proxmox::ProxmoxAccountDto,
+        proxmox::ProxmoxDiscoveryDto,
+        proxmox::ProxmoxFingerprintDto,
+        proxmox::ProxmoxResourceDto,
         node::CreateEnrollmentTokenRequest,
         node::EnrollmentTokenCreatedDto,
         node::EnrollmentTokenDto,
@@ -145,6 +152,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (
             name = "tailnet",
             description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
+        ),
+        (
+            name = "proxmox",
+            description = "Proxmox accounts, TLS fingerprint trust, and cluster discovery. The token secret is write-only; discovery is locked until the host fingerprint is confirmed."
         ),
         (
             name = "nodes",
@@ -208,6 +219,14 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(tailnet::clear_tailnet))
                 .routes(routes!(tailnet::list_tailnet_devices))
                 .routes(routes!(tailnet::import_tailnet_device))
+                .routes(routes!(
+                    proxmox::list_proxmox_accounts,
+                    proxmox::create_proxmox_account
+                ))
+                .routes(routes!(proxmox::delete_proxmox_account))
+                .routes(routes!(proxmox::observe_proxmox_fingerprint))
+                .routes(routes!(proxmox::confirm_proxmox_fingerprint))
+                .routes(routes!(proxmox::discover_proxmox_cluster))
                 .with_state(state),
         )
         .split_for_parts();

@@ -272,6 +272,7 @@ fn state_for(
         onboarding: None,
         tailnet: None,
         projects,
+        proxmox: None,
     })
 }
 
