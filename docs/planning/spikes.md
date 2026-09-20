@@ -43,6 +43,7 @@ Spike outcomes:
 | FM-S06 | Does `skills-manager-cli --json` cover agents, skills, presets, deploy/undeploy, and update status on both supported platforms, and which version range is pinned? | M3 | ADR-0005 | M3 Skills Manager epic | Degrade to detection and status only, and open an upstream contract request |
 | FM-S07 | Which Frogenv commands can run non-interactively with machine-readable output, and which approval ceremonies must stay manual? | M3 | ADR-0005 | M3 Frogenv epic | Report `blocked: manual approval required` and hand off to the operator |
 | FM-S08 | Does the experimental `proxmox-client` crate satisfy authentication, UPID task polling, custom TLS trust and pinning, unknown-field tolerance, and cancellation against PVE 8.x and 9.x? | M6 | ADR-0005 | M6 Proxmox epic | Small `reqwest` transport plus typed provider DTOs, borrowing Purple's parsing patterns |
+| FM-S09 | Which Packer/Proxmox-plugin version range supports modern `.pkr.json`, required template builds, stable machine-readable diagnostics, cancellation, and acceptable redistribution/deployment terms? | M7 | ADR-0005 | Image recipe/build/version epic | Require an operator-installed supported CLI and keep the image-build port available for another implementation |
 
 - **FM-S08 (resolved 2026-09-20, fallback chosen).** The typed
   `proxmox-client` crate (crates.io, `landrzejewski`, 0.9.2) failed the
@@ -61,8 +62,12 @@ Spike outcomes:
   integration host, positive and negative case, using the same TLS stack
   Fleet already standardizes on. Evidence and the rejected alternatives:
   [research/ecosystem.md](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike).
-
-| FM-S09 | Which Packer/Proxmox-plugin version range supports modern `.pkr.json`, required template builds, stable machine-readable diagnostics, cancellation, and acceptable redistribution/deployment terms? | M7 | ADR-0005 | Image recipe/build/version epic | Require an operator-installed supported CLI and keep the image-build port available for another implementation |
+  The PVE 8.x leg of the both-majors acceptance criterion is a recorded
+  deviation: no 8.x host is reachable in the integration environment, so 8.x
+  evidence is the endpoint/auth/task-shape documentation from the PVE 8.x API
+  archive, and the live 8.x validation moves to the M6 real-cluster suite.
+  The spike's decisive evidence is TLS behavior, which is client-side and
+  version-independent.
 
 ## Rules
 
