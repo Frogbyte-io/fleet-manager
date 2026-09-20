@@ -37,12 +37,37 @@ Spike outcomes:
   unsafe for Fleet semantics or an explicit non-goal of the first release. The
   purpose-built claim/complete loop over the existing table keeps one database,
   one transaction boundary, and one state machine.
+
 | FM-S04 | How does `fleetd` install as a Windows service, expose a named pipe, and authenticate a local peer at least as strictly as Unix socket peer credentials? | Later Windows in-guest slice | ADR-0003 | Windows `fleetd`/project-readiness epic | Keep Windows support at Proxmox lifecycle and QEMU Guest Agent observation until the broker can be secured |
 | FM-S05 | Is `purple_ssh` reusable as a dependency, as extracted MIT code with attribution, or only as a reference implementation? | M2 | ADR-0005 | FM-201, FM-202 | Direct system OpenSSH invocation using Purple's tested behaviour as a reference only |
 | FM-S06 | Does `skills-manager-cli --json` cover agents, skills, presets, deploy/undeploy, and update status on both supported platforms, and which version range is pinned? | M3 | ADR-0005 | M3 Skills Manager epic | Degrade to detection and status only, and open an upstream contract request |
 | FM-S07 | Which Frogenv commands can run non-interactively with machine-readable output, and which approval ceremonies must stay manual? | M3 | ADR-0005 | M3 Frogenv epic | Report `blocked: manual approval required` and hand off to the operator |
 | FM-S08 | Does the experimental `proxmox-client` crate satisfy authentication, UPID task polling, custom TLS trust and pinning, unknown-field tolerance, and cancellation against PVE 8.x and 9.x? | M6 | ADR-0005 | M6 Proxmox epic | Small `reqwest` transport plus typed provider DTOs, borrowing Purple's parsing patterns |
 | FM-S09 | Which Packer/Proxmox-plugin version range supports modern `.pkr.json`, required template builds, stable machine-readable diagnostics, cancellation, and acceptable redistribution/deployment terms? | M7 | ADR-0005 | Image recipe/build/version epic | Require an operator-installed supported CLI and keep the image-build port available for another implementation |
+
+- **FM-S08 (resolved 2026-09-20, fallback chosen).** The typed
+  `proxmox-client` crate (crates.io, `landrzejewski`, 0.9.2) failed the
+  spike's security gate: its entire TLS surface is
+  `accept_invalid_certs(bool)` — no fingerprint-pinning hook and no custom
+  trust store — while PVE hosts present their own cluster CA, so every
+  working configuration either disables verification (forbidden) or pins
+  outside the crate. Everything else passed: token auth, UPID status/log/stop,
+  broad QEMU/LXC/cluster/storage coverage, and genuinely tolerant decoding of
+  loose/null shapes. Supply-chain weight told the same story: 3 commits, 3
+  releases in one week, zero stars, 591 downloads, one maintainer, and a
+  reqwest 0.13 + aws-lc-rs TLS stack duplicating the workspace's reqwest 0.12
+  + ring. The fallback — a small `reqwest` transport with a custom rustls
+  verifier that pins the leaf certificate's SHA-256 fingerprint and refuses
+  mismatched hosts at the handshake — was proven live against the PVE 9.2
+  integration host, positive and negative case, using the same TLS stack
+  Fleet already standardizes on. Evidence and the rejected alternatives:
+  [research/ecosystem.md](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike).
+  The PVE 8.x leg of the both-majors acceptance criterion is a recorded
+  deviation: no 8.x host is reachable in the integration environment, so 8.x
+  evidence is the endpoint/auth/task-shape documentation from the PVE 8.x API
+  archive, and the live 8.x validation moves to the M6 real-cluster suite.
+  The spike's decisive evidence is TLS behavior, which is client-side and
+  version-independent.
 
 ## Rules
 
