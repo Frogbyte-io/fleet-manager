@@ -42,6 +42,7 @@ fn test_router() -> (axum::Router, Arc<FakePort>) {
         onboarding: None,
         tailnet: None,
         projects: None,
+        proxmox: None,
     });
     (
         router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
@@ -411,6 +412,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
         onboarding: None,
         tailnet: None,
         projects: None,
+        proxmox: None,
     })
 }
 
@@ -840,6 +842,7 @@ fn machine_state(
         onboarding: None,
         tailnet: None,
         projects: None,
+        proxmox: None,
     })
 }
 

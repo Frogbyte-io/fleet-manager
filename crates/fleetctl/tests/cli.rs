@@ -262,6 +262,7 @@ fn fleetctl_talks_to_a_real_controller() {
             None,
             None,
             None,
+            None,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -353,6 +354,7 @@ fn fleetctl_machines_read_a_real_controller() {
         let router = fleet_controller::build_router(
             &settings,
             Some(store.pool().clone()),
+            None,
             None,
             None,
             None,
@@ -516,6 +518,7 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
     let router = fleet_controller::build_router(
         &settings,
         Some(store.pool().clone()),
+        None,
         None,
         None,
         None,
@@ -807,6 +810,7 @@ fn fleetctl_onboards_a_real_controller() {
             Some(store.pool().clone()),
             None,
             Some(&onboarding),
+            None,
             None,
             None,
         );
@@ -1862,6 +1866,127 @@ fn parsing_refuses_the_undocumented_apply_forms() {
             error.message.contains("Usage")
                 || error.message.contains("requires a value")
                 || error.message.contains("is required"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn text_output_renders_proxmox_accounts_and_discoveries() {
+    let page = json!({
+        "items": [
+            {"id": "acc-1", "name": "pve-main", "host": "192.168.68.223", "port": 8006,
+             "tokenId": "root@pam!GLM-AGENT", "fingerprintState": "confirmed",
+             "fingerprint": "DC2C…6498", "createdAt": 1}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_proxmox_for_test(&page);
+    assert!(text.contains("ID"), "{text}");
+    assert!(text.contains("pve-main"), "{text}");
+    assert!(text.contains("confirmed"), "{text}");
+
+    let empty = json!({"items": [], "page": {"limit": 50, "nextCursor": null}});
+    let text = fleetctl::render_proxmox_for_test(&empty);
+    assert!(text.contains("no Proxmox accounts"), "{text}");
+
+    let discovery = json!({
+        "accountId": "acc-1",
+        "pveVersion": "9.2.2",
+        "resources": [
+            {"kind": "node", "id": "node/pve", "vmid": null, "name": "pve", "status": "online"},
+            {"kind": "qemu", "id": "qemu/100", "vmid": 100, "name": "dev-01", "status": "running"}
+        ],
+        "warnings": ["resource #2: the entry carries no id"],
+        "reportedCount": 3,
+        "observedAt": 1
+    });
+    let text = fleetctl::render_proxmox_for_test(&discovery);
+    assert!(text.contains("PVE 9.2.2"), "{text}");
+    assert!(text.contains("node/pve"), "{text}");
+    assert!(text.contains("qemu/100"), "{text}");
+    assert!(text.contains("resource #2"), "{text}");
+}
+
+#[test]
+fn parsing_walks_the_proxmox_forms() {
+    let args: Vec<String> = ["proxmox", "accounts"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxAccounts
+    ));
+
+    let args: Vec<String> = [
+        "proxmox",
+        "create",
+        "--name",
+        "pve-main",
+        "--host",
+        "192.168.68.223",
+        "--port",
+        "8006",
+        "--token-id",
+        "root@pam!GLM-AGENT",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxCreate { .. }
+    ));
+
+    let args: Vec<String> = ["proxmox", "delete", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxDelete { .. }
+    ));
+
+    let args: Vec<String> = ["proxmox", "observe", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxObserve { .. }
+    ));
+
+    let args: Vec<String> = ["proxmox", "confirm", "acc-1", "--fingerprint", "DC2C"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxConfirm { .. }
+    ));
+
+    let args: Vec<String> = ["proxmox", "discover", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxDiscover { .. }
+    ));
+}
+
+#[test]
+fn parsing_refuses_the_undocumented_proxmox_forms() {
+    for args in [
+        vec!["proxmox", "create", "--name", "pve-main"],
+        vec!["proxmox", "confirm", "acc-1"],
+        vec!["proxmox", "discover"],
+    ] {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("Usage") || error.message.contains("is required"),
             "{error}"
         );
     }

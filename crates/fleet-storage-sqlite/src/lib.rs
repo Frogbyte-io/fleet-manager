@@ -18,6 +18,7 @@ pub mod nodes;
 pub mod onboarding;
 pub mod operations;
 pub mod projects;
+pub mod proxmox;
 pub mod source;
 
 pub use audit::{AuditLedger, AuditSink};
@@ -26,6 +27,7 @@ pub use nodes::NodeRepository;
 pub use onboarding::OnboardingRepository;
 pub use operations::OperationRepository;
 pub use projects::ProjectRepository;
+pub use proxmox::ProxmoxAccountRepository;
 pub use source::SourceRepository;
 
 use std::path::{Path, PathBuf};

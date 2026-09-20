@@ -295,6 +295,14 @@ export interface ConfirmHostKeyRequest {
 }
 
 /**
+ * The confirm-trust request: the fingerprint the caller observed.
+ */
+export interface ConfirmProxmoxFingerprintRequest {
+  /** The SHA-256 fingerprint as observed (colons optional). */
+  fingerprint: string;
+}
+
+/**
  * One Fleet machine a tailnet device may be.
  */
 export interface CorrelationCandidateDto {
@@ -449,6 +457,26 @@ export interface CreateProjectRequest {
   name: string;
   /** The Git remote, in any common spelling; normalized here. */
   remote: string;
+}
+
+/**
+ * The create-account request. The token secret is write-only.
+ */
+export interface CreateProxmoxAccountRequest {
+  /** The PVE host (IP or DNS name). */
+  host: string;
+  /** The operator-facing name. */
+  name: string;
+  /**
+     * The API port; 8006 when omitted.
+     * @minimum 0
+     * @nullable
+     */
+  port?: number | null;
+  /** The API token id (`user@realm!tokenname`). */
+  tokenId: string;
+  /** The API token secret (write-only). */
+  tokenSecret: string;
 }
 
 /**
@@ -1202,6 +1230,47 @@ export interface PageProjectDto {
 }
 
 /**
+ * One configured Proxmox account. The token secret is never here.
+ */
+export type PageProxmoxAccountDtoItemsItem = {
+  /** When the account was created. */
+  createdAt: number;
+  /**
+     * The pinned fingerprint, once confirmed.
+     * @nullable
+     */
+  fingerprint?: string | null;
+  /** The trust state: `unconfirmed` until the fingerprint is pinned. */
+  fingerprintState: string;
+  /** The PVE host. */
+  host: string;
+  /** The account's identity. */
+  id: string;
+  /** The operator-facing name. */
+  name: string;
+  /**
+     * The API port.
+     * @minimum 0
+     */
+  port: number;
+  /** The API token id (`user@realm!tokenname`), not secret on its own. */
+  tokenId: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageProxmoxAccountDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageProxmoxAccountDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * A project as the detail view displays it.
  */
 export interface ProjectDto {
@@ -1219,6 +1288,105 @@ export interface ProjectDto {
   remote: string;
   /** Last mutation (epoch milliseconds). */
   updatedAt: number;
+}
+
+/**
+ * One configured Proxmox account. The token secret is never here.
+ */
+export interface ProxmoxAccountDto {
+  /** When the account was created. */
+  createdAt: number;
+  /**
+     * The pinned fingerprint, once confirmed.
+     * @nullable
+     */
+  fingerprint?: string | null;
+  /** The trust state: `unconfirmed` until the fingerprint is pinned. */
+  fingerprintState: string;
+  /** The PVE host. */
+  host: string;
+  /** The account's identity. */
+  id: string;
+  /** The operator-facing name. */
+  name: string;
+  /**
+     * The API port.
+     * @minimum 0
+     */
+  port: number;
+  /** The API token id (`user@realm!tokenname`), not secret on its own. */
+  tokenId: string;
+}
+
+/**
+ * One normalized discovery observation.
+ */
+export interface ProxmoxResourceDto {
+  /** The account that observed the resource. */
+  accountId: string;
+  /** The cluster-visible id. */
+  id: string;
+  /**
+     * The normalized kind: `node`, `qemu`, `lxc`, `qemu-template`, or
+     * `storage`.
+     */
+  kind: string;
+  /**
+     * The display name, when carried.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * The hosting node, when the resource has one.
+     * @nullable
+     */
+  node?: string | null;
+  /** When the observation was taken. */
+  observedAt: number;
+  /** The PVE version the observation came from. */
+  pveVersion: string;
+  /**
+     * The PVE status string, when carried.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * The VMID, when the resource has one.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+}
+
+/**
+ * The discovery snapshot.
+ */
+export interface ProxmoxDiscoveryDto {
+  /** The account that produced the snapshot. */
+  accountId: string;
+  /** When the snapshot was taken. */
+  observedAt: number;
+  /** The PVE version seen. */
+  pveVersion: string;
+  /**
+     * The count the API reported.
+     * @minimum 0
+     */
+  reportedCount: number;
+  /** The normalized resources. */
+  resources: ProxmoxResourceDto[];
+  /** The per-resource normalization warnings. */
+  warnings: string[];
+}
+
+/**
+ * The observed fingerprint report.
+ */
+export interface ProxmoxFingerprintDto {
+  /** The account the fingerprint was observed for. */
+  accountId: string;
+  /** The host certificate's SHA-256 fingerprint. */
+  fingerprint: string;
 }
 
 /**
@@ -1673,6 +1841,98 @@ export type ResourceProjectDtoData = {
 export interface ResourceProjectDto {
   /** A project as the detail view displays it. */
   data: ResourceProjectDtoData;
+}
+
+/**
+ * One configured Proxmox account. The token secret is never here.
+ */
+export type ResourceProxmoxAccountDtoData = {
+  /** When the account was created. */
+  createdAt: number;
+  /**
+     * The pinned fingerprint, once confirmed.
+     * @nullable
+     */
+  fingerprint?: string | null;
+  /** The trust state: `unconfirmed` until the fingerprint is pinned. */
+  fingerprintState: string;
+  /** The PVE host. */
+  host: string;
+  /** The account's identity. */
+  id: string;
+  /** The operator-facing name. */
+  name: string;
+  /**
+     * The API port.
+     * @minimum 0
+     */
+  port: number;
+  /** The API token id (`user@realm!tokenname`), not secret on its own. */
+  tokenId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProxmoxAccountDto {
+  /** One configured Proxmox account. The token secret is never here. */
+  data: ResourceProxmoxAccountDtoData;
+}
+
+/**
+ * The discovery snapshot.
+ */
+export type ResourceProxmoxDiscoveryDtoData = {
+  /** The account that produced the snapshot. */
+  accountId: string;
+  /** When the snapshot was taken. */
+  observedAt: number;
+  /** The PVE version seen. */
+  pveVersion: string;
+  /**
+     * The count the API reported.
+     * @minimum 0
+     */
+  reportedCount: number;
+  /** The normalized resources. */
+  resources: ProxmoxResourceDto[];
+  /** The per-resource normalization warnings. */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProxmoxDiscoveryDto {
+  /** The discovery snapshot. */
+  data: ResourceProxmoxDiscoveryDtoData;
+}
+
+/**
+ * The observed fingerprint report.
+ */
+export type ResourceProxmoxFingerprintDtoData = {
+  /** The account the fingerprint was observed for. */
+  accountId: string;
+  /** The host certificate's SHA-256 fingerprint. */
+  fingerprint: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProxmoxFingerprintDto {
+  /** The observed fingerprint report. */
+  data: ResourceProxmoxFingerprintDtoData;
 }
 
 /**
@@ -4085,6 +4345,389 @@ const res = await fetch(getStartReadyWorkflowUrl(projectId),
 
   const data: startReadyWorkflowResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startReadyWorkflowResponse
+}
+
+
+
+export type listProxmoxAccountsResponse200 = {
+  data: PageProxmoxAccountDto
+  status: 200
+}
+
+export type listProxmoxAccountsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listProxmoxAccountsResponseSuccess = (listProxmoxAccountsResponse200) & {
+  headers: Headers;
+};
+export type listProxmoxAccountsResponseError = (listProxmoxAccountsResponse403) & {
+  headers: Headers;
+};
+
+export type listProxmoxAccountsResponse = (listProxmoxAccountsResponseSuccess | listProxmoxAccountsResponseError)
+
+export const getListProxmoxAccountsUrl = () => {
+
+
+
+
+  return `/api/v1/proxmox/accounts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the configured accounts.
+ */
+export const listProxmoxAccounts = async ( options?: RequestInit): Promise<listProxmoxAccountsResponse> => {
+
+  const res = await fetch(getListProxmoxAccountsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listProxmoxAccountsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listProxmoxAccountsResponse
+}
+
+
+
+export type createProxmoxAccountResponse201 = {
+  data: ResourceProxmoxAccountDto
+  status: 201
+}
+
+export type createProxmoxAccountResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createProxmoxAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createProxmoxAccountResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createProxmoxAccountResponseSuccess = (createProxmoxAccountResponse201) & {
+  headers: Headers;
+};
+export type createProxmoxAccountResponseError = (createProxmoxAccountResponse400 | createProxmoxAccountResponse403 | createProxmoxAccountResponse409) & {
+  headers: Headers;
+};
+
+export type createProxmoxAccountResponse = (createProxmoxAccountResponseSuccess | createProxmoxAccountResponseError)
+
+export const getCreateProxmoxAccountUrl = () => {
+
+
+
+
+  return `/api/v1/proxmox/accounts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, conflict, or backend
+ * failure.
+ * @summary Registers an account and stores its token secret. The account starts
+`unconfirmed`: discovery stays locked until the fingerprint is confirmed.
+ */
+export const createProxmoxAccount = async (createProxmoxAccountRequest: CreateProxmoxAccountRequest, options?: RequestInit): Promise<createProxmoxAccountResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateProxmoxAccountUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createProxmoxAccountRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createProxmoxAccountResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createProxmoxAccountResponse
+}
+
+
+
+export type deleteProxmoxAccountResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteProxmoxAccountResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteProxmoxAccountResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteProxmoxAccountResponseSuccess = (deleteProxmoxAccountResponse204) & {
+  headers: Headers;
+};
+export type deleteProxmoxAccountResponseError = (deleteProxmoxAccountResponse403 | deleteProxmoxAccountResponse404) & {
+  headers: Headers;
+};
+
+export type deleteProxmoxAccountResponse = (deleteProxmoxAccountResponseSuccess | deleteProxmoxAccountResponseError)
+
+export const getDeleteProxmoxAccountUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or a
+ * backend failure.
+ * @summary Removes an account and its secret.
+ */
+export const deleteProxmoxAccount = async (accountId: string, options?: RequestInit): Promise<deleteProxmoxAccountResponse> => {
+
+  const res = await fetch(getDeleteProxmoxAccountUrl(accountId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteProxmoxAccountResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteProxmoxAccountResponse
+}
+
+
+
+export type confirmProxmoxFingerprintResponse200 = {
+  data: ResourceProxmoxAccountDto
+  status: 200
+}
+
+export type confirmProxmoxFingerprintResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type confirmProxmoxFingerprintResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type confirmProxmoxFingerprintResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type confirmProxmoxFingerprintResponseSuccess = (confirmProxmoxFingerprintResponse200) & {
+  headers: Headers;
+};
+export type confirmProxmoxFingerprintResponseError = (confirmProxmoxFingerprintResponse400 | confirmProxmoxFingerprintResponse403 | confirmProxmoxFingerprintResponse404) & {
+  headers: Headers;
+};
+
+export type confirmProxmoxFingerprintResponse = (confirmProxmoxFingerprintResponseSuccess | confirmProxmoxFingerprintResponseError)
+
+export const getConfirmProxmoxFingerprintUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/confirm`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or a
+ * malformed fingerprint.
+ * @summary Pins the confirmed fingerprint as the account's trust anchor.
+ */
+export const confirmProxmoxFingerprint = async (accountId: string,
+    confirmProxmoxFingerprintRequest: ConfirmProxmoxFingerprintRequest, options?: RequestInit): Promise<confirmProxmoxFingerprintResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getConfirmProxmoxFingerprintUrl(accountId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(confirmProxmoxFingerprintRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: confirmProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as confirmProxmoxFingerprintResponse
+}
+
+
+
+export type discoverProxmoxClusterResponse200 = {
+  data: ResourceProxmoxDiscoveryDto
+  status: 200
+}
+
+export type discoverProxmoxClusterResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type discoverProxmoxClusterResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type discoverProxmoxClusterResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type discoverProxmoxClusterResponseSuccess = (discoverProxmoxClusterResponse200) & {
+  headers: Headers;
+};
+export type discoverProxmoxClusterResponseError = (discoverProxmoxClusterResponse403 | discoverProxmoxClusterResponse404 | discoverProxmoxClusterResponse409) & {
+  headers: Headers;
+};
+
+export type discoverProxmoxClusterResponse = (discoverProxmoxClusterResponseSuccess | discoverProxmoxClusterResponseError)
+
+export const getDiscoverProxmoxClusterUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/discovery`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unconfirmed account, or
+ * a source failure.
+ * @summary Discovers the cluster through one trusted account.
+ */
+export const discoverProxmoxCluster = async (accountId: string, options?: RequestInit): Promise<discoverProxmoxClusterResponse> => {
+
+  const res = await fetch(getDiscoverProxmoxClusterUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: discoverProxmoxClusterResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as discoverProxmoxClusterResponse
+}
+
+
+
+export type observeProxmoxFingerprintResponse200 = {
+  data: ResourceProxmoxFingerprintDto
+  status: 200
+}
+
+export type observeProxmoxFingerprintResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type observeProxmoxFingerprintResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type observeProxmoxFingerprintResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type observeProxmoxFingerprintResponseSuccess = (observeProxmoxFingerprintResponse200) & {
+  headers: Headers;
+};
+export type observeProxmoxFingerprintResponseError = (observeProxmoxFingerprintResponse403 | observeProxmoxFingerprintResponse404 | observeProxmoxFingerprintResponse502) & {
+  headers: Headers;
+};
+
+export type observeProxmoxFingerprintResponse = (observeProxmoxFingerprintResponseSuccess | observeProxmoxFingerprintResponseError)
+
+export const getObserveProxmoxFingerprintUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/observe`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown account, or an
+ * unreachable host.
+ * @summary Captures the host's certificate fingerprint without sending any
+credential. The report is the input to the confirm step.
+ */
+export const observeProxmoxFingerprint = async (accountId: string, options?: RequestInit): Promise<observeProxmoxFingerprintResponse> => {
+
+  const res = await fetch(getObserveProxmoxFingerprintUrl(accountId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: observeProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as observeProxmoxFingerprintResponse
 }
 
 

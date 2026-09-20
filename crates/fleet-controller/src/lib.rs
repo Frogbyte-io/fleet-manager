@@ -20,6 +20,7 @@ pub mod install;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;
+pub mod proxmox_store;
 pub mod ready;
 pub mod skills;
 pub mod source;
@@ -133,6 +134,7 @@ fn api_state(
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<Arc<fleet_application::project::Projects>>,
+    proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
@@ -155,6 +157,7 @@ fn api_state(
             onboarding,
             tailnet,
             projects,
+            proxmox,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -170,6 +173,7 @@ fn api_state(
         onboarding: None,
         tailnet: None,
         projects: None,
+        proxmox: None,
     }
 }
 
@@ -273,6 +277,7 @@ pub fn build_router(
     onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<&Arc<fleet_application::project::Projects>>,
+    proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -284,6 +289,7 @@ pub fn build_router(
         onboarding.cloned(),
         tailnet.cloned(),
         projects.cloned(),
+        proxmox.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let mut router = Router::new()
@@ -361,6 +367,7 @@ async fn readyz(State(probe): State<Probe>) -> (StatusCode, String) {
 /// # Errors
 ///
 /// Fails if the listener cannot be bound or the server stops on an I/O error.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     settings: Settings,
     db: Option<SqlitePool>,
@@ -368,11 +375,12 @@ pub async fn serve(
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<Arc<fleet_application::project::Projects>>,
+    proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
     serve_on(
-        listener, settings, db, services, onboarding, tailnet, projects, shutdown,
+        listener, settings, db, services, onboarding, tailnet, projects, proxmox, shutdown,
     )
     .await
 }
@@ -393,6 +401,7 @@ pub async fn serve_on(
     onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<Arc<fleet_application::project::Projects>>,
+    proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -429,6 +438,7 @@ pub async fn serve_on(
             onboarding.as_ref(),
             tailnet.as_ref(),
             projects.as_ref(),
+            proxmox.as_ref(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
     )

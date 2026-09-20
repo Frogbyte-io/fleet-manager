@@ -622,6 +622,7 @@ dependencies = [
  "fleet-provider-frogenv",
  "fleet-provider-git",
  "fleet-provider-mise",
+ "fleet-provider-proxmox",
  "fleet-provider-skills-manager",
  "fleet-provider-ssh",
  "fleet-provider-tailscale",
@@ -723,8 +724,15 @@ dependencies = [
 name = "fleet-provider-proxmox"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fleet-application",
  "fleet-core",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -2287,6 +2295,7 @@ version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

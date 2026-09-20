@@ -15,6 +15,7 @@ pub mod onboarding;
 pub mod operation;
 pub mod planner;
 pub mod project;
+pub mod proxmox;
 pub mod ready;
 pub mod source;
 pub mod tailnet;

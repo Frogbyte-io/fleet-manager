@@ -1911,6 +1911,343 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts": {
+      "get": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Lists the configured accounts.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listProxmoxAccounts",
+        "responses": {
+          "200": {
+            "description": "The configured accounts, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ProxmoxAccountDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Registers an account and stores its token secret. The account starts\n`unconfirmed`: discovery stays locked until the fingerprint is confirmed.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, conflict, or backend\nfailure.",
+        "operationId": "createProxmoxAccount",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProxmoxAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The account was created; confirm its fingerprint before discovery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProxmoxAccountDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account name is taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}": {
+      "delete": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Removes an account and its secret.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, or a\nbackend failure.",
+        "operationId": "deleteProxmoxAccount",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The account was removed."
+          },
+          "403": {
+            "description": "The caller may not configure the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}/confirm": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Pins the confirmed fingerprint as the account's trust anchor.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, or a\nmalformed fingerprint.",
+        "operationId": "confirmProxmoxFingerprint",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmProxmoxFingerprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The fingerprint is pinned; discovery is unlocked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProxmoxAccountDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The fingerprint is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}/discovery": {
+      "get": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Discovers the cluster through one trusted account.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unconfirmed account, or\na source failure.",
+        "operationId": "discoverProxmoxCluster",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The discovery snapshot, availability-honest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProxmoxDiscoveryDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed or its fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}/observe": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Captures the host's certificate fingerprint without sending any\ncredential. The report is the input to the confirm step.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown account, or an\nunreachable host.",
+        "operationId": "observeProxmoxFingerprint",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The observed fingerprint; confirm it to trust the host.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProxmoxFingerprintDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The host is unreachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system": {
       "get": {
         "tags": [
@@ -2520,6 +2857,19 @@
           }
         }
       },
+      "ConfirmProxmoxFingerprintRequest": {
+        "type": "object",
+        "description": "The confirm-trust request: the fingerprint the caller observed.",
+        "required": [
+          "fingerprint"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The SHA-256 fingerprint as observed (colons optional)."
+          }
+        }
+      },
       "CorrelatedDeviceDto": {
         "type": "object",
         "description": "One tailnet device with its Fleet-machine candidates (evidence only).",
@@ -2771,6 +3121,43 @@
           "remote": {
             "type": "string",
             "description": "The Git remote, in any common spelling; normalized here."
+          }
+        }
+      },
+      "CreateProxmoxAccountRequest": {
+        "type": "object",
+        "description": "The create-account request. The token secret is write-only.",
+        "required": [
+          "name",
+          "host",
+          "tokenId",
+          "tokenSecret"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "The PVE host (IP or DNS name)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The operator-facing name."
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The API port; 8006 when omitted.",
+            "minimum": 0
+          },
+          "tokenId": {
+            "type": "string",
+            "description": "The API token id (`user@realm!tokenname`)."
+          },
+          "tokenSecret": {
+            "type": "string",
+            "description": "The API token secret (write-only)."
           }
         }
       },
@@ -4389,6 +4776,77 @@
           }
         }
       },
+      "Page_ProxmoxAccountDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One configured Proxmox account. The token secret is never here.",
+              "required": [
+                "id",
+                "name",
+                "host",
+                "port",
+                "tokenId",
+                "fingerprintState",
+                "createdAt"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the account was created."
+                },
+                "fingerprint": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The pinned fingerprint, once confirmed."
+                },
+                "fingerprintState": {
+                  "type": "string",
+                  "description": "The trust state: `unconfirmed` until the fingerprint is pinned."
+                },
+                "host": {
+                  "type": "string",
+                  "description": "The PVE host."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The account's identity."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The operator-facing name."
+                },
+                "port": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The API port.",
+                  "minimum": 0
+                },
+                "tokenId": {
+                  "type": "string",
+                  "description": "The API token id (`user@realm!tokenname`), not secret on its own."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "ProjectDto": {
         "type": "object",
         "description": "A project as the detail view displays it.",
@@ -4434,6 +4892,187 @@
             "type": "integer",
             "format": "int64",
             "description": "Last mutation (epoch milliseconds)."
+          }
+        }
+      },
+      "ProxmoxAccountDto": {
+        "type": "object",
+        "description": "One configured Proxmox account. The token secret is never here.",
+        "required": [
+          "id",
+          "name",
+          "host",
+          "port",
+          "tokenId",
+          "fingerprintState",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the account was created."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pinned fingerprint, once confirmed."
+          },
+          "fingerprintState": {
+            "type": "string",
+            "description": "The trust state: `unconfirmed` until the fingerprint is pinned."
+          },
+          "host": {
+            "type": "string",
+            "description": "The PVE host."
+          },
+          "id": {
+            "type": "string",
+            "description": "The account's identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The operator-facing name."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The API port.",
+            "minimum": 0
+          },
+          "tokenId": {
+            "type": "string",
+            "description": "The API token id (`user@realm!tokenname`), not secret on its own."
+          }
+        }
+      },
+      "ProxmoxDiscoveryDto": {
+        "type": "object",
+        "description": "The discovery snapshot.",
+        "required": [
+          "accountId",
+          "pveVersion",
+          "resources",
+          "warnings",
+          "reportedCount",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that produced the snapshot."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot was taken."
+          },
+          "pveVersion": {
+            "type": "string",
+            "description": "The PVE version seen."
+          },
+          "reportedCount": {
+            "type": "integer",
+            "description": "The count the API reported.",
+            "minimum": 0
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxResourceDto"
+            },
+            "description": "The normalized resources."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The per-resource normalization warnings."
+          }
+        }
+      },
+      "ProxmoxFingerprintDto": {
+        "type": "object",
+        "description": "The observed fingerprint report.",
+        "required": [
+          "accountId",
+          "fingerprint"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account the fingerprint was observed for."
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "The host certificate's SHA-256 fingerprint."
+          }
+        }
+      },
+      "ProxmoxResourceDto": {
+        "type": "object",
+        "description": "One normalized discovery observation.",
+        "required": [
+          "kind",
+          "id",
+          "accountId",
+          "pveVersion",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that observed the resource."
+          },
+          "id": {
+            "type": "string",
+            "description": "The cluster-visible id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The normalized kind: `node`, `qemu`, `lxc`, `qemu-template`, or\n`storage`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display name, when carried."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The hosting node, when the resource has one."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the observation was taken."
+          },
+          "pveVersion": {
+            "type": "string",
+            "description": "The PVE version the observation came from."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PVE status string, when carried."
+          },
+          "vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The VMID, when the resource has one.",
+            "minimum": 0
           }
         }
       },
@@ -5232,6 +5871,150 @@
           }
         }
       },
+      "Resource_ProxmoxAccountDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One configured Proxmox account. The token secret is never here.",
+            "required": [
+              "id",
+              "name",
+              "host",
+              "port",
+              "tokenId",
+              "fingerprintState",
+              "createdAt"
+            ],
+            "properties": {
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the account was created."
+              },
+              "fingerprint": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The pinned fingerprint, once confirmed."
+              },
+              "fingerprintState": {
+                "type": "string",
+                "description": "The trust state: `unconfirmed` until the fingerprint is pinned."
+              },
+              "host": {
+                "type": "string",
+                "description": "The PVE host."
+              },
+              "id": {
+                "type": "string",
+                "description": "The account's identity."
+              },
+              "name": {
+                "type": "string",
+                "description": "The operator-facing name."
+              },
+              "port": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The API port.",
+                "minimum": 0
+              },
+              "tokenId": {
+                "type": "string",
+                "description": "The API token id (`user@realm!tokenname`), not secret on its own."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ProxmoxDiscoveryDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The discovery snapshot.",
+            "required": [
+              "accountId",
+              "pveVersion",
+              "resources",
+              "warnings",
+              "reportedCount",
+              "observedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account that produced the snapshot."
+              },
+              "observedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the snapshot was taken."
+              },
+              "pveVersion": {
+                "type": "string",
+                "description": "The PVE version seen."
+              },
+              "reportedCount": {
+                "type": "integer",
+                "description": "The count the API reported.",
+                "minimum": 0
+              },
+              "resources": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProxmoxResourceDto"
+                },
+                "description": "The normalized resources."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The per-resource normalization warnings."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ProxmoxFingerprintDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The observed fingerprint report.",
+            "required": [
+              "accountId",
+              "fingerprint"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account the fingerprint was observed for."
+              },
+              "fingerprint": {
+                "type": "string",
+                "description": "The host certificate's SHA-256 fingerprint."
+              }
+            }
+          }
+        }
+      },
       "Resource_ReadyPlanDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -5848,6 +6631,10 @@
     {
       "name": "tailnet",
       "description": "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
+    },
+    {
+      "name": "proxmox",
+      "description": "Proxmox accounts, TLS fingerprint trust, and cluster discovery. The token secret is write-only; discovery is locked until the host fingerprint is confirmed."
     },
     {
       "name": "nodes",
