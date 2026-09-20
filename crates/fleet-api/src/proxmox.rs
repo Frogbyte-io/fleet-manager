@@ -768,6 +768,16 @@ pub async fn discover_proxmox_cluster(
             Path,
             description = "The account's identity."
         ),
+        (
+            "limit" = Option<u32>,
+            Query,
+            description = "The maximum number of guests to return."
+        ),
+        (
+            "cursor" = Option<String>,
+            Query,
+            description = "The opaque cursor: the last guest's cluster id of the previous page."
+        ),
     ),
     responses(
         (
@@ -830,11 +840,21 @@ pub async fn list_proxmox_guests(
         .unwrap_or(DEFAULT_PAGE_LIMIT)
         .min(MAX_PAGE_LIMIT);
     let start = match &params.cursor {
-        Some(cursor) => snapshot
-            .guests
-            .iter()
-            .position(|guest| guest.guest.id == *cursor)
-            .map_or(0, |position| position + 1),
+        Some(cursor) => {
+            let Some(position) = snapshot
+                .guests
+                .iter()
+                .position(|guest| guest.guest.id == *cursor)
+            else {
+                // A stale or malformed cursor is a client error, not a
+                // silent restart from the first page.
+                return Err(crate::machines::invalid_request(
+                    "the cursor names no guest in the snapshot",
+                    correlation_id,
+                ));
+            };
+            position + 1
+        }
         None => 0,
     };
     let page: Vec<AssociatedGuest> = snapshot

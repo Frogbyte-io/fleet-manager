@@ -2482,6 +2482,18 @@ limit?: number;
 cursor?: string;
 };
 
+export type ListProxmoxGuestsParams = {
+/**
+ * The maximum number of guests to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last guest's cluster id of the previous page.
+ */
+cursor?: string;
+};
+
 export type ListTailnetDevicesParams = {
 /**
  * The maximum number of devices to return.
@@ -4886,12 +4898,20 @@ export type listProxmoxGuestsResponseError = (listProxmoxGuestsResponse400 | lis
 
 export type listProxmoxGuestsResponse = (listProxmoxGuestsResponseSuccess | listProxmoxGuestsResponseError)
 
-export const getListProxmoxGuestsUrl = (accountId: string,) => {
+export const getListProxmoxGuestsUrl = (accountId: string,
+    params?: ListProxmoxGuestsParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/proxmox/accounts/${accountId}/guests`
+  return stringifiedParams.length > 0 ? `/api/v1/proxmox/accounts/${accountId}/guests?${stringifiedParams}` : `/api/v1/proxmox/accounts/${accountId}/guests`
 }
 
 /**
@@ -4902,9 +4922,10 @@ export const getListProxmoxGuestsUrl = (accountId: string,) => {
  * @summary Lists the account's guests with their Fleet-machine association
 candidates (evidence only).
  */
-export const listProxmoxGuests = async (accountId: string, options?: RequestInit): Promise<listProxmoxGuestsResponse> => {
+export const listProxmoxGuests = async (accountId: string,
+    params?: ListProxmoxGuestsParams, options?: RequestInit): Promise<listProxmoxGuestsResponse> => {
 
-  const res = await fetch(getListProxmoxGuestsUrl(accountId),
+  const res = await fetch(getListProxmoxGuestsUrl(accountId,params),
   {
     ...options,
     method: 'GET'
