@@ -21,7 +21,7 @@ const VERSION_BODY: &str =
 const RESOURCES_BODY: &str = r#"{"data":[
   {"id":"node/pve","type":"node","status":"online","maxcpu":16,"maxmem":67342831616},
   {"id":"qemu/100","type":"qemu","node":"pve","vmid":100,"name":"dev-01","status":"running","template":0},
-  {"id":"qemu/101","type":"qemu","node":"pve","vmid":101,"name":"fleet-test-01","status":"stopped","template":0},
+  {"id":"qemu/101","type":"qemu","node":"pve","vmid":101,"name":"fleet-test-01","status":"running","template":0},
   {"id":"qemu/900","type":"qemu","vmid":900,"template":1,"status":"stopped"},
   {"id":"sdn/zone1","type":"sdn"}
 ]}"#;
@@ -38,6 +38,16 @@ const AGENT_NETWORK_BODY: &str = r#"{"data":{"result":[
 ]}}"#;
 
 const AGENT_OSINFO_BODY: &str = r#"{"data":{"result":{"pretty-name":"Ubuntu 24.04.4 LTS","kernel-release":"6.8.0-138-generic"}}}"#;
+
+/// Per-guest fixtures keyed by VMID: each guest carries its own MAC and
+/// IP, so an association can only come from that guest's own evidence.
+const GUEST_100_CONFIG_BODY: &str =
+    r#"{"data":{"name":"dev-01","net0":"virtio=DE:AD:BE:EF:00:09,bridge=vmbr0","memory":2048}}"#;
+
+const AGENT_100_NETWORK_BODY: &str = r#"{"data":{"result":[
+  {"name":"ens18","hardware-address":"DE:AD:BE:EF:00:09","ip-addresses":[
+    {"ip-address":"192.168.68.241","ip-address-type":"ipv4","prefix":24}]}
+]}}"#;
 
 /// The pinned fingerprint the fake transport accepts.
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
@@ -84,10 +94,17 @@ impl PveTransport for FixedTransport {
             (Some(_), Behavior::Normal) => {
                 let body = if request.path.contains("/version") {
                     VERSION_BODY
+                } else if request.path.contains("/qemu/100/config") {
+                    GUEST_100_CONFIG_BODY
                 } else if request.path.contains("/config") {
                     GUEST_CONFIG_BODY
                 } else if request.path.contains("/agent/info") {
                     AGENT_INFO_BODY
+                } else if request
+                    .path
+                    .contains("/qemu/100/agent/network-get-interfaces")
+                {
+                    AGENT_100_NETWORK_BODY
                 } else if request.path.contains("/agent/network-get-interfaces") {
                     AGENT_NETWORK_BODY
                 } else if request.path.contains("/agent/get-osinfo") {
@@ -499,6 +516,14 @@ async fn the_guest_surface_walks_list_and_observe() {
     assert_eq!(guest["agent"]["osName"], "Ubuntu 24.04.4 LTS");
     assert_eq!(guest["candidates"][0]["machineId"], machine.id);
     assert_eq!(guest["candidates"][0]["kind"], "address_match");
+    // The other guest carries distinct evidence and no candidate: the
+    // association provably comes from this guest's own facts.
+    let other = guests
+        .iter()
+        .find(|guest| guest["vmid"] == 100)
+        .expect("the other guest lists");
+    assert_eq!(other["macs"][0], "de:ad:be:ef:00:09");
+    assert_eq!(other["candidates"].as_array().unwrap().len(), 0);
 
     // Observe records the guest facts onto the machine.
     let (status, body) = harness

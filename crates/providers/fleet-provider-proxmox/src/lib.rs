@@ -520,9 +520,10 @@ pub struct PveGuest {
     /// The MAC addresses from the guest config's `netN` entries, normalized
     /// lowercase colon-separated. LXC guests carry theirs in `config` too.
     pub macs: Vec<String>,
-    /// The QEMU Guest Agent view; `None` for LXC (no qemu-guest-agent) or
-    /// when the config could not be read. Per-surface availability lives
-    /// inside.
+    /// The QEMU Guest Agent view; `None` only for LXC (no
+    /// qemu-guest-agent by design). For QEMU the agent is always probed:
+    /// per-surface availability lives inside, and a failed config read
+    /// warns separately without hiding the agent's own state.
     pub agent: Option<PveGuestAgent>,
     /// The bounded per-surface warnings: one failed agent call or a
     /// malformed config entry warns here instead of dropping the guest.
@@ -765,7 +766,13 @@ impl ProxmoxSource for ProxmoxClient {
             };
             match self.call(config_request.clone()).await {
                 Ok(config) => {
-                    guest.macs = config_macs(&config);
+                    let (macs, config_warnings) = config_macs(&config);
+                    guest.macs = macs;
+                    for warning in config_warnings {
+                        guest
+                            .warnings
+                            .push(format!("guest {}: {warning}", guest.resource.id));
+                    }
                 }
                 Err(PveApiError::Http { status, detail }) => {
                     warnings.push(format!(
@@ -799,26 +806,28 @@ impl ProxmoxSource for ProxmoxClient {
 
 /// The config's `netN` entries, parsed for MAC addresses. The value shape
 /// is `virtio=DE:AD:BE:EF:00:01,bridge=vmbr0` — the model is the first
-/// key=value pair whose value looks like a MAC.
-fn config_macs(config: &serde_json::Value) -> Vec<String> {
+/// key=value pair whose value looks like a MAC. A `netN` entry without a
+/// valid MAC is a partial failure: it comes back as a warning, not silence.
+fn config_macs(config: &serde_json::Value) -> (Vec<String>, Vec<String>) {
     let mut macs = Vec::new();
+    let mut warnings = Vec::new();
     if let Some(extra) = config.as_object() {
         for (key, value) in extra {
             if !(key.starts_with("net") && key[3..].chars().all(|c| c.is_ascii_digit())) {
                 continue;
             }
             let Some(text) = value.as_str() else {
+                warnings.push(format!("the {key} entry is not a string"));
                 continue;
             };
-            for part in text.split(',') {
-                if let Some(mac) = normalize_mac(part) {
-                    macs.push(mac);
-                    break;
-                }
+            let found = text.split(',').find_map(normalize_mac);
+            match found {
+                Some(mac) => macs.push(mac),
+                None => warnings.push(format!("the {key} entry carries no parseable MAC address")),
             }
         }
     }
-    macs
+    (macs, warnings)
 }
 
 /// Normalizes a MAC candidate: `key=AA:BB:…` or bare, lowercase
@@ -874,23 +883,19 @@ impl ProxmoxClient {
             path: format!("{base}/info"),
             ..request.clone()
         };
-        if self.call(info_request.clone()).await.is_err() {
+        let Ok(info_data) = self.call(info_request).await else {
             warnings.push(format!("guest qemu/{vmid}: the agent is unreachable"));
             // Every other surface would fail the same way; report the
             // honest offline agent and stop here.
             return agent;
-        }
-        // The agent answered `info`; the version detail rides the same
-        // envelope. Re-calling is avoided by treating info's success as
-        // online and fetching the version from the same call's data.
-        if let Ok(data) = self.call(info_request).await {
-            let result = data.get("result").cloned().unwrap_or(data);
-            agent.online = true;
-            agent.version = result
-                .get("version")
-                .and_then(serde_json::Value::as_str)
-                .map(|value| value.chars().take(64).collect());
-        }
+        };
+        // The agent answers inside a `result` envelope.
+        let result = info_data.get("result").cloned().unwrap_or(info_data);
+        agent.online = true;
+        agent.version = result
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.chars().take(64).collect());
         // network-get-interfaces
         let net_request = PveHttpRequest {
             path: format!("{base}/network-get-interfaces"),
@@ -957,7 +962,10 @@ fn normalize_interface(interface: &serde_json::Value) -> Result<Option<PveGuestI
     let mac = interface
         .get("hardware-address")
         .and_then(serde_json::Value::as_str)
-        .and_then(normalize_mac);
+        .and_then(normalize_mac)
+        // The all-zero MAC is a loopback artifact, not association
+        // evidence.
+        .filter(|mac| mac != "00:00:00:00:00:00");
     let mut addresses = Vec::new();
     if let Some(list) = interface
         .get("ip-addresses")
@@ -1117,10 +1125,20 @@ mod tests {
             "scsi0": "local-lvm:vm-101-disk-0",
             "memory": 2048
         });
-        let macs = config_macs(&config);
+        let (macs, warnings) = config_macs(&config);
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(macs.len(), 2, "{macs:?}");
         assert_eq!(macs[0], "de:ad:be:ef:00:01");
         assert_eq!(macs[1], "de:ad:be:ef:00:02");
+    }
+
+    #[test]
+    fn a_net_entry_without_a_mac_warns() {
+        let config = serde_json::json!({"net0": "bridge=vmbr0,firewall=1"});
+        let (macs, warnings) = config_macs(&config);
+        assert!(macs.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("no parseable MAC"), "{warnings:?}");
     }
 
     #[test]

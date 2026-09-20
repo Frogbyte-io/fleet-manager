@@ -303,6 +303,16 @@ impl From<AssociatedGuest> for AssociatedGuestDto {
     }
 }
 
+/// The guests-list query parameters.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListProxmoxGuestsParams {
+    /// The maximum number of guests to return.
+    pub limit: Option<u32>,
+    /// The opaque cursor: the last guest's cluster id of the previous page.
+    pub cursor: Option<String>,
+}
+
 /// The observe-guest request: which machine the guest's facts record onto.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -771,8 +781,23 @@ pub async fn discover_proxmox_cluster(
             body = crate::error::ApiError
         ),
         (
+            status = 404,
+            description = "The account does not exist.",
+            body = crate::error::ApiError
+        ),
+        (
             status = 409,
-            description = "The account's trust is unconfirmed.",
+            description = "The account's trust is unconfirmed or the host fingerprint was refused.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 400,
+            description = "The cursor names no guest in the snapshot.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 502,
+            description = "The PVE API refused the token or failed.",
             body = crate::error::ApiError
         ),
     )
@@ -782,10 +807,11 @@ pub async fn list_proxmox_guests(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     Path(account_id): Path<String>,
+    Query(params): Query<ListProxmoxGuestsParams>,
 ) -> Result<Json<Page<AssociatedGuestDto>>, ApiErrorResponse> {
     let proxmox = proxmox_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let guests = proxmox
+    let snapshot = proxmox
         .guests(
             state.authorizer.as_ref(),
             &principal,
@@ -794,12 +820,41 @@ pub async fn list_proxmox_guests(
         )
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
-    let items: Vec<AssociatedGuestDto> = guests.into_iter().map(Into::into).collect();
+    // The snapshot is bounded in memory by the provider's own bounds; the
+    // page bound applies on the way out, with the cursor advancing through
+    // the guest list. Warnings are reported on the first page only — they
+    // describe the snapshot, not a page of it.
+    let limit = params
+        .limit
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .min(MAX_PAGE_LIMIT);
+    let start = match &params.cursor {
+        Some(cursor) => snapshot
+            .guests
+            .iter()
+            .position(|guest| guest.guest.id == *cursor)
+            .map_or(0, |position| position + 1),
+        None => 0,
+    };
+    let page: Vec<AssociatedGuest> = snapshot
+        .guests
+        .into_iter()
+        .skip(start)
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .collect();
+    let next_cursor = (page.len() == usize::try_from(limit).unwrap_or(0))
+        .then(|| page.last().map(|guest| guest.guest.id.clone()))
+        .flatten();
+    let mut items: Vec<AssociatedGuestDto> = page.into_iter().map(Into::into).collect();
+    if start == 0
+        && !snapshot.warnings.is_empty()
+        && let Some(first) = items.first_mut()
+    {
+        first.warnings.extend(snapshot.warnings.clone());
+    }
     Ok(Json(Page {
-        page: PageInfo {
-            next_cursor: None,
-            limit: items.len().try_into().unwrap_or(u32::MAX),
-        },
+        page: PageInfo { next_cursor, limit },
         items,
     }))
 }
@@ -846,7 +901,22 @@ pub async fn list_proxmox_guests(
         ),
         (
             status = 409,
-            description = "The account's trust is unconfirmed or the source refused.",
+            description = "The account's trust is unconfirmed or the host fingerprint was refused.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 400,
+            description = "The request is malformed.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 500,
+            description = "A backend port failed.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 502,
+            description = "The PVE API refused the token or failed.",
             body = crate::error::ApiError
         ),
     )

@@ -2237,6 +2237,16 @@
               }
             }
           },
+          "400": {
+            "description": "The cursor names no guest in the snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The caller may not read the Proxmox surface.",
             "content": {
@@ -2247,8 +2257,28 @@
               }
             }
           },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "409": {
-            "description": "The account's trust is unconfirmed.",
+            "description": "The account's trust is unconfirmed or the host fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API refused the token or failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2304,6 +2334,16 @@
           "204": {
             "description": "The guest's facts were recorded on the machine."
           },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The caller may not read the Proxmox surface or write the machine's facts.",
             "content": {
@@ -2325,7 +2365,27 @@
             }
           },
           "409": {
-            "description": "The account's trust is unconfirmed or the source refused.",
+            "description": "The account's trust is unconfirmed or the host fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API refused the token or failed.",
             "content": {
               "application/json": {
                 "schema": {

@@ -4852,9 +4852,19 @@ export type listProxmoxGuestsResponse200 = {
   status: 200
 }
 
+export type listProxmoxGuestsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type listProxmoxGuestsResponse403 = {
   data: ApiError
   status: 403
+}
+
+export type listProxmoxGuestsResponse404 = {
+  data: ApiError
+  status: 404
 }
 
 export type listProxmoxGuestsResponse409 = {
@@ -4862,10 +4872,15 @@ export type listProxmoxGuestsResponse409 = {
   status: 409
 }
 
+export type listProxmoxGuestsResponse502 = {
+  data: ApiError
+  status: 502
+}
+
 export type listProxmoxGuestsResponseSuccess = (listProxmoxGuestsResponse200) & {
   headers: Headers;
 };
-export type listProxmoxGuestsResponseError = (listProxmoxGuestsResponse403 | listProxmoxGuestsResponse409) & {
+export type listProxmoxGuestsResponseError = (listProxmoxGuestsResponse400 | listProxmoxGuestsResponse403 | listProxmoxGuestsResponse404 | listProxmoxGuestsResponse409 | listProxmoxGuestsResponse502) & {
   headers: Headers;
 };
 
@@ -4912,6 +4927,11 @@ export type observeProxmoxGuestResponse204 = {
   status: 204
 }
 
+export type observeProxmoxGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type observeProxmoxGuestResponse403 = {
   data: ApiError
   status: 403
@@ -4927,10 +4947,20 @@ export type observeProxmoxGuestResponse409 = {
   status: 409
 }
 
+export type observeProxmoxGuestResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type observeProxmoxGuestResponse502 = {
+  data: ApiError
+  status: 502
+}
+
 export type observeProxmoxGuestResponseSuccess = (observeProxmoxGuestResponse204) & {
   headers: Headers;
 };
-export type observeProxmoxGuestResponseError = (observeProxmoxGuestResponse403 | observeProxmoxGuestResponse404 | observeProxmoxGuestResponse409) & {
+export type observeProxmoxGuestResponseError = (observeProxmoxGuestResponse400 | observeProxmoxGuestResponse403 | observeProxmoxGuestResponse404 | observeProxmoxGuestResponse409 | observeProxmoxGuestResponse500 | observeProxmoxGuestResponse502) & {
   headers: Headers;
 };
 

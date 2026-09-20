@@ -380,6 +380,24 @@ pub struct RawGuestDiscovery {
     pub warnings: Vec<String>,
 }
 
+/// The guest-discovery snapshot: the associated guests plus the honest
+/// record of what the cluster reported but could not be turned into a
+/// guest (entries missing a node or VMID, malformed rows).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestSnapshot {
+    /// The account that produced the snapshot.
+    pub account_id: String,
+    /// The PVE version seen.
+    pub pve_version: String,
+    /// The discovered guests with their association candidates.
+    pub guests: Vec<AssociatedGuest>,
+    /// The cluster-level warnings, per isolated entry.
+    pub warnings: Vec<String>,
+    /// When the snapshot was taken (epoch millis).
+    pub observed_at: i64,
+}
+
 /// The account record port: durable account state.
 #[async_trait]
 pub trait ProxmoxAccountPort: fmt::Debug + Send + Sync {
@@ -980,7 +998,7 @@ impl ProxmoxAccounts {
         principal: &ActingPrincipal,
         account_id: &str,
         now: i64,
-    ) -> Result<Vec<AssociatedGuest>, ProxmoxUseCaseError> {
+    ) -> Result<GuestSnapshot, ProxmoxUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -1020,7 +1038,7 @@ impl ProxmoxAccounts {
         } else {
             Vec::new()
         };
-        Ok(raw
+        let associated = raw
             .guests
             .into_iter()
             .map(|guest| {
@@ -1053,7 +1071,14 @@ impl ProxmoxAccounts {
                     candidates,
                 }
             })
-            .collect())
+            .collect();
+        Ok(GuestSnapshot {
+            account_id: account.id,
+            pve_version: raw.version,
+            guests: associated,
+            warnings: raw.warnings,
+            observed_at: now,
+        })
     }
 
     /// Records one guest's facts onto a confirmed Fleet machine as
@@ -1084,6 +1109,18 @@ impl ProxmoxAccounts {
             },
         )
         .map_err(ProxmoxUseCaseError::Denied)?;
+        // The machine funnel's authorization is checked BEFORE any network
+        // work: a caller who may read Proxmox but not write the machine's
+        // facts never causes a credential-bearing request.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineUpdate,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(ProxmoxUseCaseError::Denied)?;
         let account = self.trusted_account(account_id).await?;
         let secret = self.require_secret(&account).await?;
         let raw = self
@@ -1108,7 +1145,7 @@ impl ProxmoxAccounts {
             Some(("vmid", &vmid.to_string())),
         )
         .await?;
-        let facts = guest_facts(&guest, machine_id, &raw.version, now);
+        let facts = guest_facts(&guest, &raw.version, now);
         self.machines
             .record_capabilities(authorizer, principal, machine_id, &facts)
             .await
@@ -1248,16 +1285,12 @@ fn association_candidate(
         }
     }
     // The guest-agent addresses against the machine endpoints' hosts. The
-    // endpoint reference is `user@host:port` (redacted forms carry `***`),
-    // so the host is the segment after the last `@` with the port stripped.
+    // shared reference parser strips userinfo and IPv6 brackets, so
+    // bracketed IPv6 evidence compares bare.
     let endpoint_hosts: Vec<&str> = view
         .endpoints
         .iter()
-        .filter_map(|endpoint| {
-            let (_, host_port) = endpoint.reference.rsplit_once('@')?;
-            let (host, _) = host_port.rsplit_once(':')?;
-            Some(host)
-        })
+        .filter_map(|endpoint| crate::onboarding::reference_host(&endpoint.reference))
         .collect();
     for interface in guest.agent.iter().flat_map(|agent| &agent.interfaces) {
         for address in &interface.addresses {
@@ -1296,12 +1329,7 @@ fn association_candidate(
 /// kernel when the agent answered, and the MACs. Provenance is the
 /// account's observation path; every fact carries the observation time.
 #[must_use]
-fn guest_facts(
-    guest: &ProviderGuest,
-    machine_id: &str,
-    pve_version: &str,
-    now: i64,
-) -> Vec<CapabilityFact> {
+fn guest_facts(guest: &ProviderGuest, pve_version: &str, now: i64) -> Vec<CapabilityFact> {
     let source = format!("proxmox/{pve_version}");
     let mut facts = Vec::new();
     let mut push = |name: &str, value: Option<String>, status: CapabilityStatus| {
@@ -1314,7 +1342,6 @@ fn guest_facts(
             source: source.clone(),
         });
     };
-    let _ = machine_id;
     push("guest", Some(guest.id.clone()), CapabilityStatus::Known);
     if let Some(vmid) = guest.vmid {
         push("vmid", Some(vmid.to_string()), CapabilityStatus::Known);

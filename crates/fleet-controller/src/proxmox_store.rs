@@ -273,36 +273,7 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
                 warnings: discovery.warnings,
                 reported_count: discovery.reported_count,
             }),
-            Err(fleet_provider_proxmox::PveApiError::Auth) => Err(ProxmoxSourceError::Auth),
-            Err(fleet_provider_proxmox::PveApiError::Forbidden { detail }) => {
-                Err(ProxmoxSourceError::Forbidden { detail })
-            }
-            Err(fleet_provider_proxmox::PveApiError::Http { status, detail }) => {
-                Err(ProxmoxSourceError::Http { status, detail })
-            }
-            Err(fleet_provider_proxmox::PveApiError::InvalidPayload { detail }) => {
-                Err(ProxmoxSourceError::InvalidPayload { detail })
-            }
-            Err(fleet_provider_proxmox::PveApiError::Transport(
-                fleet_provider_proxmox::PveTransportError::FingerprintMismatch { observed, pinned },
-            )) => {
-                // The discovery request always pins; a mismatch without a
-                // pin is a transport invariant violation, reported as such
-                // rather than papered over with a fabricated value.
-                let Some(pinned) = pinned else {
-                    return Err(ProxmoxSourceError::Connect {
-                        detail: format!(
-                            "the transport reported a fingerprint mismatch without a pin (observed {observed})"
-                        ),
-                    });
-                };
-                Err(ProxmoxSourceError::FingerprintMismatch { observed, pinned })
-            }
-            Err(fleet_provider_proxmox::PveApiError::Transport(other)) => {
-                Err(ProxmoxSourceError::Connect {
-                    detail: other.to_string(),
-                })
-            }
+            Err(error) => Err(map_api_error(error)),
         }
     }
 }

@@ -971,11 +971,12 @@ async fn guests_list_with_evidence_only_candidates() {
     )
     .await;
 
-    let guests = proxmox
+    let snapshot = proxmox
         .guests(&AllowAll, &principal(), &account.id, NOW)
         .await
         .unwrap();
-    assert_eq!(guests.len(), 2);
+    assert_eq!(snapshot.guests.len(), 2);
+    let guests = &snapshot.guests;
 
     let qemu = guests
         .iter()
@@ -1017,13 +1018,13 @@ async fn mac_evidence_outranks_address_and_name_evidence() {
         Some("DE:AD:BE:EF:00:01"),
     )
     .await;
-    let guests = proxmox
+    let snapshot = proxmox
         .guests(&AllowAll, &principal(), &account.id, NOW)
         .await
         .unwrap();
-    assert_eq!(guests[0].candidates.len(), 1);
-    assert_eq!(guests[0].candidates[0].machine_id, machine_id);
-    assert_eq!(guests[0].candidates[0].kind, "mac_match");
+    assert_eq!(snapshot.guests[0].candidates.len(), 1);
+    assert_eq!(snapshot.guests[0].candidates[0].machine_id, machine_id);
+    assert_eq!(snapshot.guests[0].candidates[0].kind, "mac_match");
 }
 
 #[tokio::test]
@@ -1035,14 +1036,14 @@ async fn unmatched_guests_list_without_candidates() {
     );
     let account = create_account(&proxmox).await;
     observe_and_confirm(&proxmox, &account.id).await;
-    let guests = proxmox
+    let snapshot = proxmox
         .guests(&AllowAll, &principal(), &account.id, NOW)
         .await
         .unwrap();
     assert!(
-        guests[0].candidates.is_empty(),
+        snapshot.guests[0].candidates.is_empty(),
         "{:?}",
-        guests[0].candidates
+        snapshot.guests[0].candidates
     );
 }
 
@@ -1070,13 +1071,13 @@ async fn a_sensitive_denial_degrades_candidates_not_the_guests() {
     // A machine whose name differs from the guest's, so the only possible
     // evidence is the address — which needs sensitive endpoint detail.
     register_machine(&machine_port, "physical-box", "ops@192.168.68.240:22", None).await;
-    let guests = proxmox
+    let snapshot = proxmox
         .guests(&SensitiveDenied, &principal(), &account.id, NOW)
         .await
         .unwrap();
-    // The guests still list; the redacted endpoint cannot match, so the
-    // candidates are empty rather than half-redacted lies.
-    assert!(guests[0].candidates.is_empty());
+    // The guests still list; without the sensitive read the candidates are
+    // empty rather than half-redacted lies.
+    assert!(snapshot.guests[0].candidates.is_empty());
 }
 
 #[tokio::test]
