@@ -317,6 +317,15 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 **Context:** M6 epic #9 depends on this spike; the ecosystem log's Proxmox section recorded a young, experimental typed crate as the only candidate at plan time.
 **Status:** Done 2026-09-20 (issue #97). Fallback chosen — small `reqwest` transport plus typed provider DTOs. Evidence and decision recorded in [research/ecosystem.md](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike) and [spikes.md](spikes.md): the typed crate's TLS surface (`accept_invalid_certs(bool)` only) cannot satisfy fingerprint pinning against PVE's cluster CA without disabling verification, and the fallback's pinned-fingerprint rustls verifier was proven live against the PVE 9.2 integration host (positive and negative case) on the workspace's existing reqwest 0.12 + ring stack. The PVE 8.x leg of the both-majors acceptance criterion is a recorded deviation: no 8.x host is reachable in the integration environment, so 8.x evidence is the endpoint/auth/task-shape documentation from the PVE 8.x API archive, and the live 8.x validation moves to the M6 real-cluster suite.
 
+## M6 — Proxmox infrastructure provider
+
+**Status: In progress (as of 2026-09-20).** Epics #9–#12 are open. Resolved: FM-S08 (#97, PR #98 — the client spike; fallback chosen: reqwest transport + pinned-fingerprint rustls verifier, recorded 8.x deviation). Resolved: FM-600 (#99, PR #100 — Proxmox accounts, TLS trust, and discovery: the `PveTransport` port over reqwest 0.12 + rustls `ring` with the `PinningVerifier` (SHA-256 leaf pinning, handshake refusal, observe-only trust probes that never send a credential); multi-account records with the token secret in the encrypted store resolved just in time; the explicit-trust gate with a persisted observation that `confirm` must match; honest auth/privilege/mismatch/connect failure taxonomy; tolerant decoding with per-resource isolation and a streaming body bound; STRICT migrations 0017/0018; the `/api/v1/proxmox/*` surface, `fleetctl proxmox` commands, and the authz catalog grown to 38 entries; three cubic review rounds addressed in-PR, including the trust-flow hole (confirm pinned any digest) caught before merge). Live-verified against the integration PVE 9.2.2 host; the 8.x leg follows the recorded FM-S08 deviation. Next: FM-601 (epic #10 — associations and guest-agent data), then the lifecycle and destructive epics.
+
+### FM-600 — Add Proxmox accounts, TLS trust, and discovery
+
+**Context:** FM-S08 chose the client approach; M6 begins with the accounts/trust/discovery slice.
+**Status:** Done 2026-09-20 (issue #99, PR #100). See the M6 status line above for the delivery summary and the review history.
+
 ### FM-400 — Add the desired resource schema and deterministic composition
 
 **Context:** The generic `apiVersion`/`kind`/metadata/spec envelope (FM-005) exists with only `FleetConfig` registered; M4 fills the registry with the real resource kinds and the composition semantics `docs/architecture/desired-state.md` defines.

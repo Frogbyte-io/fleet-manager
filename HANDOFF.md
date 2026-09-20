@@ -2,9 +2,10 @@
 
 **Read first:** `AGENTS.md`, `docs/PLAN.md`, `docs/planning/initial-issues.md` (the authoritative ledger — every milestone's status, issues, and findings are recorded there).
 
-## Where things stand (2026-09-18)
+## Where things stand (2026-09-20)
 
-- **M0–M4 complete.** All issues closed, epics #50–#53, #76, and #5–#8 closed. The authz catalog is at 36 entries. The exit gate for M4: an invalid revision cannot become active; a reviewed plan converges a test machine; restart/resume and partial-failure tests preserve truth and audit history — the unit/contract portions are covered; a live end-to-end run remains for the maintainer's environment.
+- **M0–M4 complete.** All issues closed, epics #50–#53, #76, and #5–#8 closed. The authz catalog is at 38 entries. The exit gate for M4: an invalid revision cannot become active; a reviewed plan converges a test machine; restart/resume and partial-failure tests preserve truth and audit history — the unit/contract portions are covered; a live end-to-end run remains for the maintainer's environment.
+- **M6 started.** FM-S08 (spike #97, PR #98) resolved: the Proxmox client is a small reqwest transport with a pinned-fingerprint rustls verifier — the typed crate's TLS surface cannot pin against PVE's cluster CA without disabling verification; the 8.x leg is a recorded deviation moving to the real-cluster suite. FM-600 (#99, PR #100) landed: Proxmox accounts, TLS trust, and discovery — multi-account records over the encrypted secret store, the explicit observe→confirm trust gate, honest failure taxonomy, `/api/v1/proxmox/*` + `fleetctl proxmox`, STRICT migrations 0017/0018, live-verified against the integration PVE 9.2.2 host. Epics #10–#12 (associations/guest-agent, lifecycle, destructive ops) are next.
 - **Repo is PUBLIC** since 2026-09-17 — no secrets in history (verified), private infra redacted.
 
 ## Workflow (established over M2–M3)
@@ -39,4 +40,10 @@
 
 ## Next up
 
-FM-401 (#90): observed-state normalization, the difference model (missing/extra/changed/unknown/unsupported), and the dependency-ordered planner with dry-run parity across API/web/CLI. See the issue and its approach comment.
+FM-601 (epic #10): Proxmox guest associations and QEMU Guest Agent data — stable association between a Proxmox guest and a Fleet machine identity, guest-agent readiness/IP with explicit unavailable states, per-resource failure isolation. FM-600's discovery and trust flow are the foundation; the provider's normalized `PveResource` shapes and the observed-state model from FM-401 are the vocabulary. Create the issue, post the approach, branch `fm-601-*`.
+
+## Established patterns (M6 additions)
+
+- **Proxmox transport**: `PveTransport` port in `fleet-provider-proxmox`, `PinningVerifier` (SHA-256 leaf pinning, TLS 12+13, `ring`), observe-only probes capture the fingerprint and refuse before any credential is sent; the body bound is enforced while streaming; `ProxmoxSource` normalizes at the provider boundary.
+- **Trust flow**: `observe` persists `observed_fingerprint`; `confirm` pins only what the probe saw (BEGIN IMMEDIATE update+readback); discovery is locked until confirmed; a changed certificate reports both fingerprints as evidence.
+- **Proxmox accounts**: secrets live as `proxmox/<account-id>` records in the encrypted store; two-phase audit intents (`*_creating`/`*_created`, `*_confirming`/`*_confirmed`, `*_deleting`/`*_deleted`) with the completion event after success.
