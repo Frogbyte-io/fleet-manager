@@ -2450,7 +2450,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             // in argv.
             let text = match params.as_deref() {
                 Some(text) => text.to_owned(),
-                None => read_stdin_line("the action parameters as JSON")?,
+                None => read_stdin_to_eof("the action parameters as JSON")?,
             };
             let params_value: serde_json::Value =
                 serde_json::from_str(&text).map_err(|error| CliError {
