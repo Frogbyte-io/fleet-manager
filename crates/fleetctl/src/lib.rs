@@ -542,6 +542,24 @@ pub enum Command {
         /// The machine the guest is confirmed to be.
         machine_id: String,
     },
+    /// Review then run a destructive-adjacent operation on a guest.
+    ProxmoxDestructive {
+        /// The action: snapshot, snapshot-revert, snapshot-delete, clone,
+        /// template, or task-cancel.
+        action: String,
+        /// The account's identity.
+        account_id: String,
+        /// The guest's hosting node.
+        node: String,
+        /// The guest's VMID.
+        vmid: u32,
+        /// The action-specific parameters, as JSON on standard input.
+        params: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Run a lifecycle action on a guest as a durable operation.
     ProxmoxLifecycle {
         /// The action: start, stop, shutdown, or reboot.
@@ -1223,6 +1241,81 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
             }
             _ => Err(CliError { message: usage() }),
         },
+        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template"
+        | "task-cancel" => {
+            let mut account_id = None;
+            let mut node = None;
+            let mut vmid = None;
+            let mut wait = false;
+            let mut timeout = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--account" => {
+                        account_id = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--account requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--node" => {
+                        node = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--node requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--vmid" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--vmid requires a value".to_owned(),
+                        })?;
+                        vmid = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--vmid must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--wait" => wait = true,
+                    "--timeout" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--timeout requires a value".to_owned(),
+                        })?;
+                        timeout = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--timeout must be a number, not {value:?}"),
+                        })?);
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            // The action's parameters arrive as JSON on standard input at
+            // request time; the CLI never puts them in argv.
+            Ok(Command::ProxmoxDestructive {
+                action: verb.to_owned(),
+                account_id: account_id.ok_or_else(|| CliError {
+                    message: "--account is required".to_owned(),
+                })?,
+                node: node.ok_or_else(|| CliError {
+                    message: "--node is required".to_owned(),
+                })?,
+                vmid: vmid.ok_or_else(|| CliError {
+                    message: "--vmid is required".to_owned(),
+                })?,
+                params: None,
+                wait,
+                timeout,
+            })
+        }
         "start" | "stop" | "shutdown" | "reboot" => {
             let mut account_id = None;
             let mut node = None;
@@ -1636,6 +1729,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         correlation_id,
     )?;
     let body = follow_wait_stage(&client, invocation, body)?;
+    let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
     let body = follow_checkout_wait(&client, invocation, body)?;
     let payload = if body.get("items").is_some() {
@@ -1669,6 +1763,50 @@ fn follow_install_wait(
         });
     }
     wait_for_operation(client, invocation, &operation_id, *poll_timeout)
+}
+
+/// The destructive command's two-step flow: the review's answer carries
+/// the token; the run request presents it with the identical payload, so
+/// what runs is what was reviewed.
+fn follow_review(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    body: Value,
+) -> Result<Value, CliError> {
+    let Command::ProxmoxDestructive {
+        action,
+        account_id,
+        node,
+        vmid,
+        ..
+    } = &invocation.command
+    else {
+        return Ok(body);
+    };
+    let Some(token) = body["data"]["reviewToken"].as_str() else {
+        return Err(CliError {
+            message: "the review did not answer with a token".to_owned(),
+        });
+    };
+    // The reviewed params are the ones the controller echoed back: reusing
+    // them guarantees the run's bytes match the reviewed bytes.
+    let params_value = body["data"]["params"].clone();
+    let run_body = serde_json::json!({
+        "node": node,
+        "reviewToken": token,
+        "params": params_value,
+        "timeoutSeconds": 300,
+    });
+    let correlation_id = uuid::Uuid::now_v7().to_string();
+    send(
+        client,
+        invocation,
+        reqwest::Method::POST,
+        &format!("/api/v1/proxmox/accounts/{account_id}/guests/{vmid}/{action}/run"),
+        &[],
+        Some(&run_body),
+        correlation_id,
+    )
 }
 
 /// The `--wait` stages chase their own operation to a terminal state and
@@ -1725,7 +1863,8 @@ fn follow_checkout_wait(
         | Command::MiseOperation { wait, timeout, .. }
         | Command::ProjectsReady { wait, timeout, .. }
         | Command::ApplyWorkflow { wait, timeout, .. }
-        | Command::ProxmoxLifecycle { wait, timeout, .. } => (*wait, *timeout),
+        | Command::ProxmoxLifecycle { wait, timeout, .. }
+        | Command::ProxmoxDestructive { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -2297,6 +2436,36 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             Some(serde_json::json!({ "machineId": machine_id })),
         ),
+        Command::ProxmoxDestructive {
+            action,
+            account_id,
+            node,
+            vmid,
+            params,
+            ..
+        } => {
+            // Step one: the review. The run request is composed after the
+            // review's token arrives (see follow_review). The parameters
+            // arrive as JSON on standard input; the CLI never puts them
+            // in argv.
+            let text = match params.as_deref() {
+                Some(text) => text.to_owned(),
+                None => read_stdin_to_eof("the action parameters as JSON")?,
+            };
+            let params_value: serde_json::Value =
+                serde_json::from_str(&text).map_err(|error| CliError {
+                    message: format!("the action parameters are not valid JSON: {error}"),
+                })?;
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/proxmox/accounts/{account_id}/guests/{vmid}/{action}/review"),
+                Vec::new(),
+                Some(serde_json::json!({
+                    "node": node,
+                    "params": params_value,
+                })),
+            )
+        }
         Command::ProxmoxLifecycle {
             action,
             account_id,
@@ -2420,6 +2589,26 @@ fn read_stdin_line(what: &str) -> Result<String, CliError> {
         });
     }
     Ok(line)
+}
+
+/// Reads standard input to EOF: JSON documents are multi-line. Only the
+/// document inputs use this; single-line secrets keep the newline-
+/// terminating reader.
+fn read_stdin_to_eof(what: &str) -> Result<String, CliError> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|error| CliError {
+            message: format!("cannot read {what} from stdin: {error}"),
+        })?;
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        return Err(CliError {
+            message: format!("{what} must not be empty"),
+        });
+    }
+    Ok(text)
 }
 
 /// Wall-clock now, in epoch milliseconds.

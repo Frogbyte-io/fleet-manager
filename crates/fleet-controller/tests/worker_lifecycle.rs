@@ -99,6 +99,7 @@ impl Harness {
                     deadline_at: None,
                     correlation_id: None,
                     payload_json: None,
+                    review_token: None,
                 },
             )
             .await

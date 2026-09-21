@@ -2167,3 +2167,104 @@ fn parsing_walks_the_proxmox_lifecycle_forms() {
     let error = fleetctl::parse(&args).unwrap_err();
     assert!(error.message.contains("must be a number"), "{error}");
 }
+
+#[test]
+fn parsing_walks_the_proxmox_destructive_forms() {
+    for verb in [
+        "snapshot",
+        "snapshot-revert",
+        "snapshot-delete",
+        "clone",
+        "template",
+        "task-cancel",
+    ] {
+        let args: Vec<String> = [
+            "proxmox",
+            verb,
+            "--account",
+            "acc-1",
+            "--node",
+            "pve",
+            "--vmid",
+            "101",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let invocation = fleetctl::parse(&args).unwrap();
+        match invocation.command {
+            fleetctl::Command::ProxmoxDestructive { action, .. } => {
+                assert_eq!(action, verb);
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+    }
+    let args: Vec<String> = ["proxmox", "clone", "--account", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("is required"), "{error}");
+}
+
+#[test]
+fn parsing_destructive_flags_and_vmid_validation() {
+    // --wait and --timeout parse for a destructive verb.
+    let args: Vec<String> = [
+        "proxmox",
+        "snapshot",
+        "--account",
+        "acc-1",
+        "--node",
+        "pve",
+        "--vmid",
+        "101",
+        "--wait",
+        "--timeout",
+        "120",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxDestructive {
+            wait: true,
+            timeout: Some(120),
+            ..
+        }
+    ));
+    // A bad VMID refuses.
+    let args: Vec<String> = [
+        "proxmox",
+        "clone",
+        "--account",
+        "acc-1",
+        "--node",
+        "pve",
+        "--vmid",
+        "abc",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("must be a number"), "{error}");
+    // An unknown flag refuses.
+    let args: Vec<String> = [
+        "proxmox",
+        "template",
+        "--account",
+        "acc-1",
+        "--node",
+        "pve",
+        "--vmid",
+        "101",
+        "--bogus",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("unknown flag"), "{error}");
+}

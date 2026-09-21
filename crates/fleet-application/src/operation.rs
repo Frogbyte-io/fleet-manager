@@ -43,7 +43,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 35] = [
+pub const CREATABLE_KINDS: [&str; 41] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -79,6 +79,12 @@ pub const CREATABLE_KINDS: [&str; 35] = [
     "proxmox.guest.stop",
     "proxmox.guest.shutdown",
     "proxmox.guest.reboot",
+    "proxmox.guest.snapshot",
+    "proxmox.guest.snapshot-revert",
+    "proxmox.guest.snapshot-delete",
+    "proxmox.guest.clone",
+    "proxmox.guest.template",
+    "proxmox.task-cancel",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -103,6 +109,12 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         | "proxmox.guest.stop"
         | "proxmox.guest.shutdown"
         | "proxmox.guest.reboot" => Some(Permission::ProxmoxOperate),
+        "proxmox.guest.snapshot"
+        | "proxmox.guest.snapshot-revert"
+        | "proxmox.guest.snapshot-delete"
+        | "proxmox.guest.clone"
+        | "proxmox.guest.template"
+        | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
         _ => None,
     }
 }
@@ -144,6 +156,48 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
 
 /// The payload bound for provider inputs.
 pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
+
+/// The destructive-adjacent kinds: their creation requires a review token
+/// computed over exactly the payload being created.
+pub const DESTRUCTIVE_KINDS: [&str; 6] = [
+    "proxmox.guest.snapshot",
+    "proxmox.guest.snapshot-revert",
+    "proxmox.guest.snapshot-delete",
+    "proxmox.guest.clone",
+    "proxmox.guest.template",
+    "proxmox.task-cancel",
+];
+
+/// The review token for one destructive operation: the SHA-256 of the
+/// kind and the exact payload bytes. Deterministic, payload-bound, and
+/// computable only over material the caller actually holds.
+#[must_use]
+pub fn review_token_for(kind: &str, payload_json: &str) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(payload_json.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest.iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+/// Compares two token strings in constant time over their bytes.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 /// The public view of a durable operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -438,6 +492,13 @@ pub struct NewOperation {
     pub correlation_id: Option<String>,
     /// The bounded provider input, for kinds that need one.
     pub payload_json: Option<String>,
+    /// The verified review material for destructive-adjacent kinds: the
+    /// review token recomputed over exactly this payload, which only a
+    /// caller that ran the review over the same bytes can present. The
+    /// generic surface leaves it `None`, which refuses destructive kinds
+    /// outright; a `Some` value that does not match the payload is refused
+    /// as well, so the field cannot be forged by setting it.
+    pub review_token: Option<String>,
 }
 
 /// The authorized operation use cases.
@@ -460,6 +521,7 @@ impl Operations {
     /// # Errors
     ///
     /// Fails on denial, unknown kind, or a backend failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn create(
         &self,
         authorizer: &dyn Authorizer,
@@ -525,6 +587,31 @@ impl Operations {
             )
             .map_err(OperationUseCaseError::Denied)?;
         } else if let Some(permission) = catalog_scoped_kind_permission(&new.kind) {
+            // The destructive-adjacent Proxmox kinds never route through
+            // the generic surface: their creation goes through the
+            // dedicated reviewed endpoint, which binds the operation to a
+            // confirmed review token. A generic-surface create is a
+            // route-around attempt, refused as malformed.
+            if DESTRUCTIVE_KINDS.contains(&new.kind.as_str()) {
+                // The review token is the SHA-256 of the canonical
+                // operation material, recomputed here: a caller that never
+                // reviewed these exact bytes cannot present a matching
+                // token, and setting the field arbitrarily fails the
+                // comparison.
+                let expected =
+                    review_token_for(&new.kind, new.payload_json.as_deref().unwrap_or_default());
+                match new.review_token.as_deref() {
+                    Some(presented) if constant_time_eq(presented, &expected) => {}
+                    _ => {
+                        return Err(OperationUseCaseError::Invalid {
+                            detail: format!(
+                                "the {kind} kind is destructive-adjacent and requires a valid review token; review the operation first",
+                                kind = new.kind
+                            ),
+                        });
+                    }
+                }
+            }
             authorize(
                 authorizer,
                 AccessRequest {

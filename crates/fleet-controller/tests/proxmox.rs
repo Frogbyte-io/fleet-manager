@@ -81,6 +81,16 @@ impl FixedTransport {
 
 #[async_trait]
 impl PveTransport for FixedTransport {
+    async fn execute_with_body(
+        &self,
+        request: PveHttpRequest,
+        _body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        // The canned fixtures answer by path regardless of the body: the
+        // recorded responses are keyed on the endpoint, not the payload.
+        self.execute(request).await
+    }
+
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         let behavior = *self.behavior.lock().unwrap();
         match (&request.pinned_fingerprint, behavior) {
@@ -576,6 +586,13 @@ const TASK_OK_BODY: &str = r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#;
 const TASK_ERROR_BODY: &str =
     r#"{"data":{"status":"stopped","exitstatus":"ERROR: start failed: KVM is not available"}}"#;
 
+const SNAPSHOT_CREATE_BODY: &str =
+    r#"{"data":"UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmsnapshot:101:root@pam!GLM-AGENT:"}"#;
+
+const SNAPSHOT_LIST_BODY: &str = r#"{"data":[
+  {"name":"current","description":"","vmstate":0}
+]}"#;
+
 /// What the lifecycle fixture answers per poll.
 #[derive(Debug, Clone, Copy)]
 enum TaskOutcome {
@@ -597,11 +614,33 @@ impl LifecycleTransport {
 
 #[async_trait]
 impl PveTransport for LifecycleTransport {
+    async fn execute_with_body(
+        &self,
+        request: PveHttpRequest,
+        _body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        self.execute(request).await
+    }
+
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         // The observe-only trust probe: capture and refuse.
         if request.pinned_fingerprint.is_none() {
             return Err(PveTransportError::ObserveRefused {
                 observed: FP.to_owned(),
+            });
+        }
+        if request.path.ends_with("/snapshot")
+            && request.method == fleet_provider_proxmox::PveHttpMethod::Post
+        {
+            return Ok(PveHttpResponse {
+                status: 200,
+                body: SNAPSHOT_CREATE_BODY.as_bytes().to_vec(),
+            });
+        }
+        if request.path.ends_with("/snapshot") {
+            return Ok(PveHttpResponse {
+                status: 200,
+                body: SNAPSHOT_LIST_BODY.as_bytes().to_vec(),
             });
         }
         if request.path.contains("/status/start") {
@@ -680,6 +719,13 @@ async fn lifecycle_harness(outcome: TaskOutcome) -> Harness {
         Arc::new(fleet_application::worker::NoopExecutor),
         Arc::new(
             fleet_controller::proxmox_exec::ProxmoxLifecycleExecutor::new(
+                accounts.clone(),
+                credentials.clone(),
+                fleet_provider_proxmox::ProxmoxClient::new(transport.clone()),
+            ),
+        ),
+        Arc::new(
+            fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
                 accounts,
                 credentials,
                 fleet_provider_proxmox::ProxmoxClient::new(transport),
@@ -894,6 +940,106 @@ async fn an_unrecognized_action_refuses_with_invalid_request() {
         .post(
             &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/destroy"),
             json!({"node": "pve", "vmid": 101, "timeoutSeconds": 30}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn a_destructive_operation_requires_the_review_token_and_runs() {
+    let harness = lifecycle_harness(TaskOutcome::OkAfterOne).await;
+    let account_id = trusted_account(&harness).await;
+
+    // The create without a review token is refused.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/snapshot/run"),
+            json!({
+                "node": "pve",
+                "reviewToken": "not-the-token",
+                "params": {"snapshot": "demo-snap", "description": "demo"},
+                "timeoutSeconds": 30
+            }),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+
+    // The review renders exactly what will run and returns the token.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/snapshot/review"),
+            json!({
+                "node": "pve",
+                "params": {"snapshot": "demo-snap", "description": "demo"}
+            }),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["action"], "snapshot");
+    assert_eq!(body["data"]["vmid"], 101);
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+
+    // The create with the token is accepted and runs to task OK.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/snapshot/run"),
+            json!({
+                "node": "pve",
+                "reviewToken": token,
+                "params": {"snapshot": "demo-snap", "description": "demo"},
+                "timeoutSeconds": 30
+            }),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+    let operation_id = body["data"]["id"].as_str().unwrap().to_owned();
+    let mut terminal = String::new();
+    for _ in 0..50 {
+        let (_, body) = harness
+            .get(&format!("/api/v1/operations/{operation_id}"))
+            .await;
+        terminal = body["data"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if terminal == "succeeded" || terminal == "failed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(terminal, "succeeded", "{body}");
+}
+
+#[tokio::test]
+async fn a_tampered_review_payload_is_refused() {
+    let harness = lifecycle_harness(TaskOutcome::OkAfterOne).await;
+    let account_id = trusted_account(&harness).await;
+
+    // Review one payload...
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/snapshot/review"),
+            json!({
+                "node": "pve",
+                "params": {"snapshot": "demo-snap", "description": "demo"}
+            }),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+
+    // ...then try to run a DIFFERENT one with the same token: refused.
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/snapshot/run"),
+            json!({
+                "node": "pve",
+                "reviewToken": token,
+                "params": {"snapshot": "OTHER-snap", "description": "demo"},
+                "timeoutSeconds": 30
+            }),
         )
         .await;
     assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");

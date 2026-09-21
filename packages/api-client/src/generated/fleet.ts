@@ -1551,6 +1551,28 @@ export interface ProxmoxFingerprintDto {
 }
 
 /**
+ * The review record: exactly what the destructive operation will run,
+ * bound to a token the create call must present.
+ */
+export interface ProxmoxReviewDto {
+  /** The account the operation will run under. */
+  accountId: string;
+  /** The action under review. */
+  action: string;
+  /** The guest's hosting node. */
+  node: string;
+  /** The action-specific parameters, as reviewed. */
+  params: unknown;
+  /** The token binding this review to the request it described. */
+  reviewToken: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * How the workflow's endpoint authenticates.
  */
 export type ReadyAuthDto = {
@@ -2097,6 +2119,42 @@ export interface ResourceProxmoxFingerprintDto {
 }
 
 /**
+ * The review record: exactly what the destructive operation will run,
+ * bound to a token the create call must present.
+ */
+export type ResourceProxmoxReviewDtoData = {
+  /** The account the operation will run under. */
+  accountId: string;
+  /** The action under review. */
+  action: string;
+  /** The guest's hosting node. */
+  node: string;
+  /** The action-specific parameters, as reviewed. */
+  params: unknown;
+  /** The token binding this review to the request it described. */
+  reviewToken: string;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProxmoxReviewDto {
+  /**
+     * The review record: exactly what the destructive operation will run,
+     * bound to a token the create call must present.
+     */
+  data: ResourceProxmoxReviewDtoData;
+}
+
+/**
  * The dry run's plan response: the step vocabulary and the conditions
  * under which each step runs.
  */
@@ -2155,6 +2213,19 @@ export interface ResourceTailnetStatusDto {
      * fixed read-only scope.
      */
   data: ResourceTailnetStatusDtoData;
+}
+
+/**
+ * The destructive-review request.
+ */
+export interface ReviewProxmoxOperationRequest {
+  /** The guest's hosting node. */
+  node: string;
+  /**
+     * The action-specific parameters (snapshot name/description, clone
+     * target id/name, and so on).
+     */
+  params?: unknown;
 }
 
 /**
@@ -2335,6 +2406,24 @@ export interface StartReadyRequest {
   timeoutSeconds?: number;
   /** The tools the project declares, as pinned requests. */
   tools?: ReadyToolDto[];
+}
+
+/**
+ * The create call for a reviewed destructive operation: carries the
+ * review token binding it to what was reviewed.
+ */
+export interface StartReviewedProxmoxOperationRequest {
+  /** The guest's hosting node. */
+  node: string;
+  /** The action-specific parameters, identical to the reviewed ones. */
+  params?: unknown;
+  /** The review token from the review call. */
+  reviewToken: string;
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
 }
 
 /**
@@ -5118,6 +5207,148 @@ const res = await fetch(getStartProxmoxLifecycleUrl(accountId,vmid,action),
 
   const data: startProxmoxLifecycleResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startProxmoxLifecycleResponse
+}
+
+
+
+export type reviewProxmoxOperationResponse200 = {
+  data: ResourceProxmoxReviewDto
+  status: 200
+}
+
+export type reviewProxmoxOperationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type reviewProxmoxOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type reviewProxmoxOperationResponseSuccess = (reviewProxmoxOperationResponse200) & {
+  headers: Headers;
+};
+export type reviewProxmoxOperationResponseError = (reviewProxmoxOperationResponse400 | reviewProxmoxOperationResponse403) & {
+  headers: Headers;
+};
+
+export type reviewProxmoxOperationResponse = (reviewProxmoxOperationResponseSuccess | reviewProxmoxOperationResponseError)
+
+export const getReviewProxmoxOperationUrl = (accountId: string,
+    vmid: number,
+    action: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/guests/${vmid}/${action}/review`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed request.
+ * @summary Reviews one destructive-adjacent operation: renders exactly what will
+run and returns the token the create call must present.
+ */
+export const reviewProxmoxOperation = async (accountId: string,
+    vmid: number,
+    action: string,
+    reviewProxmoxOperationRequest: ReviewProxmoxOperationRequest, options?: RequestInit): Promise<reviewProxmoxOperationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReviewProxmoxOperationUrl(accountId,vmid,action),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(reviewProxmoxOperationRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: reviewProxmoxOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as reviewProxmoxOperationResponse
+}
+
+
+
+export type startReviewedProxmoxOperationResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startReviewedProxmoxOperationResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startReviewedProxmoxOperationResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startReviewedProxmoxOperationResponseSuccess = (startReviewedProxmoxOperationResponse202) & {
+  headers: Headers;
+};
+export type startReviewedProxmoxOperationResponseError = (startReviewedProxmoxOperationResponse400 | startReviewedProxmoxOperationResponse403) & {
+  headers: Headers;
+};
+
+export type startReviewedProxmoxOperationResponse = (startReviewedProxmoxOperationResponseSuccess | startReviewedProxmoxOperationResponseError)
+
+export const getStartReviewedProxmoxOperationUrl = (accountId: string,
+    vmid: number,
+    action: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/guests/${vmid}/${action}/run`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a missing/stale review
+ * token, or a malformed request.
+ * @summary Runs a reviewed destructive-adjacent operation as a durable operation.
+The review token must match the request exactly: what runs is what was
+reviewed. The generic operations surface refuses these kinds outright.
+ */
+export const startReviewedProxmoxOperation = async (accountId: string,
+    vmid: number,
+    action: string,
+    startReviewedProxmoxOperationRequest: StartReviewedProxmoxOperationRequest, options?: RequestInit): Promise<startReviewedProxmoxOperationResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartReviewedProxmoxOperationUrl(accountId,vmid,action),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startReviewedProxmoxOperationRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startReviewedProxmoxOperationResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startReviewedProxmoxOperationResponse
 }
 
 

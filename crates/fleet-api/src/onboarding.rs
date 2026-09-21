@@ -702,6 +702,7 @@ async fn start_onboarding_operation(
                 deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + deadline_ms),
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(serde_json::json!({ "draftId": draft_id }).to_string()),
+                review_token: None,
             },
         )
         .await

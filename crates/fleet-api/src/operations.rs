@@ -395,6 +395,7 @@ pub async fn create_operation(
                 deadline_at: request.deadline_at,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: request.payload_json.clone(),
+                review_token: None,
             },
         )
         .await

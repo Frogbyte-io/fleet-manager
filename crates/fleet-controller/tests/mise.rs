@@ -100,6 +100,7 @@ impl Fixture {
                     deadline_at: None,
                     correlation_id: None,
                     payload_json: Some(payload.to_string()),
+                    review_token: None,
                 },
             )
             .await

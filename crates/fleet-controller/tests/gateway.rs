@@ -162,6 +162,7 @@ impl Harness {
                     deadline_at,
                     correlation_id: None,
                     payload_json: Some(serde_json::json!({ "machineId": machine_id }).to_string()),
+                    review_token: None,
                 },
             )
             .await

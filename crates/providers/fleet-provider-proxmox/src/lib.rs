@@ -83,6 +83,8 @@ pub enum PveHttpMethod {
     Get,
     /// A mutation.
     Post,
+    /// A removal.
+    Delete,
 }
 
 impl PveHttpRequest {
@@ -179,6 +181,18 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
     /// Fails with [`PveTransportError`]; HTTP statuses travel inside the
     /// response.
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError>;
+
+    /// Executes one request with a JSON body.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveTransportError`]; HTTP statuses travel inside the
+    /// response.
+    async fn execute_with_body(
+        &self,
+        request: PveHttpRequest,
+        body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError>;
 }
 
 /// The reqwest-backed transport: rustls with the pinned-fingerprint
@@ -318,7 +332,25 @@ pub fn normalize_fingerprint(value: &str) -> String {
 
 #[async_trait]
 impl PveTransport for ReqwestPveTransport {
+    async fn execute_with_body(
+        &self,
+        request: PveHttpRequest,
+        body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        self.execute_inner(request, Some(body)).await
+    }
+
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
+        self.execute_inner(request, None).await
+    }
+}
+
+impl ReqwestPveTransport {
+    async fn execute_inner(
+        &self,
+        request: PveHttpRequest,
+        body: Option<Vec<u8>>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
         let policy = match &request.pinned_fingerprint {
             Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
             None => TlsPolicy::Observe,
@@ -357,44 +389,48 @@ impl PveTransport for ReqwestPveTransport {
         let request_builder = match request.method {
             PveHttpMethod::Get => client.get(&url),
             PveHttpMethod::Post => client.post(&url),
+            PveHttpMethod::Delete => client.delete(&url),
         };
-        let response = request_builder
-            .header(
-                "Authorization",
-                format!(
-                    "PVEAPIToken={}={}",
-                    request.credentials.token_id,
-                    request.credentials.token.expose()
-                ),
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                // The verifier's refusal surfaces as an opaque connect
-                // error; the trust facts live in the capture the verifier
-                // wrote before refusing.
-                let observed = captured
-                    .lock()
-                    .expect("the capture lock is not poisoned")
-                    .clone();
-                match (observed, request.pinned_fingerprint.as_deref()) {
-                    // A mismatch is only a mismatch when the fingerprints
-                    // differ: a later TLS failure with a matching pin is a
-                    // connection failure, not an instruction to re-confirm.
-                    (Some(observed), Some(pinned))
-                        if normalize_fingerprint(&observed) != normalize_fingerprint(pinned) =>
-                    {
-                        PveTransportError::FingerprintMismatch {
-                            observed,
-                            pinned: Some(pinned.to_owned()),
-                        }
+        let request_builder = request_builder.header(
+            "Authorization",
+            format!(
+                "PVEAPIToken={}={}",
+                request.credentials.token_id,
+                request.credentials.token.expose()
+            ),
+        );
+        let request_builder = match body {
+            Some(bytes) => request_builder
+                .header("Content-Type", "application/json")
+                .body(bytes),
+            None => request_builder,
+        };
+        let response = request_builder.send().await.map_err(|error| {
+            // The verifier's refusal surfaces as an opaque connect
+            // error; the trust facts live in the capture the verifier
+            // wrote before refusing.
+            let observed = captured
+                .lock()
+                .expect("the capture lock is not poisoned")
+                .clone();
+            match (observed, request.pinned_fingerprint.as_deref()) {
+                // A mismatch is only a mismatch when the fingerprints
+                // differ: a later TLS failure with a matching pin is a
+                // connection failure, not an instruction to re-confirm.
+                (Some(observed), Some(pinned))
+                    if normalize_fingerprint(&observed) != normalize_fingerprint(pinned) =>
+                {
+                    PveTransportError::FingerprintMismatch {
+                        observed,
+                        pinned: Some(pinned.to_owned()),
                     }
-                    (Some(_), Some(_)) | (None, _) => PveTransportError::Connect {
-                        detail: error.to_string(),
-                    },
-                    (Some(observed), None) => PveTransportError::ObserveRefused { observed },
                 }
-            })?;
+                (Some(_), Some(_)) | (None, _) => PveTransportError::Connect {
+                    detail: error.to_string(),
+                },
+                (Some(observed), None) => PveTransportError::ObserveRefused { observed },
+            }
+        })?;
         let status = u16::from(response.status());
         // The body bound is enforced while streaming: a hostile or broken
         // host cannot make Fleet materialize an unbounded response.
@@ -763,6 +799,114 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
         request: PveHttpRequest,
         upid: &Upid,
     ) -> Result<TaskStatus, PveApiError>;
+
+    /// Creates a snapshot of one guest. Idempotent on name: the caller
+    /// checks existence first (or classifies the existing snapshot), and
+    /// the provider refuses only transport/API-level failures.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_snapshot(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        snapshot: &str,
+        description: &str,
+        include_ram: bool,
+    ) -> Result<Option<Upid>, PveApiError>;
+
+    /// Rolls one guest back to a snapshot. The task is synchronous for
+    /// LXC and a UPID for QEMU; the provider normalizes both to an
+    /// optional UPID.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_snapshot_rollback(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        snapshot: &str,
+    ) -> Result<Option<Upid>, PveApiError>;
+
+    /// Deletes one snapshot. Synchronous on both guest kinds: the
+    /// outcome is immediate.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_snapshot_delete(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        snapshot: &str,
+    ) -> Result<(), PveApiError>;
+
+    /// Clones one guest to a new VMID with the requested name. The caller
+    /// classifies idempotency; the provider refuses only transport/API
+    /// failures.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_clone(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        new_id: u32,
+        name: &str,
+        full_copy: bool,
+    ) -> Result<Upid, PveApiError>;
+
+    /// Converts one guest into a template. Idempotent: converting an
+    /// existing template succeeds without an operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_convert_template(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Option<Upid>, PveApiError>;
+
+    /// Stops one running task. Destructive-adjacent: the caller owns the
+    /// authorization; the outcome may be unknown if the task exits
+    /// between the stop and the status read.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn stop_task(&self, request: PveHttpRequest, upid: &Upid) -> Result<(), PveApiError>;
+
+    /// Lists one guest's snapshots, normalized.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_snapshots(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Vec<PveSnapshot>, PveApiError>;
+}
+
+/// One guest snapshot, normalized.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PveSnapshot {
+    /// The snapshot's name.
+    pub name: String,
+    /// The snapshot's description, when carried.
+    pub description: String,
+    /// Whether the snapshot holds the guest's RAM.
+    pub includes_ram: bool,
 }
 
 /// The provider client: transport plus normalization. Stateless — every
@@ -785,6 +929,37 @@ impl ProxmoxClient {
     #[must_use]
     pub fn new(transport: Arc<dyn PveTransport>) -> Self {
         Self { transport }
+    }
+
+    /// One POST with a JSON body, unwrapping the envelope.
+    async fn call_with_body(
+        &self,
+        request: PveHttpRequest,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, PveApiError> {
+        let mut request = request;
+        request.path = path.to_owned();
+        request.method = PveHttpMethod::Post;
+        let response = self
+            .transport
+            .execute_with_body(request, body.to_string().into_bytes())
+            .await
+            .map_err(PveApiError::Transport)?;
+        Self::status_to_result(&response)
+    }
+
+    /// One DELETE, unwrapping the envelope.
+    async fn call_delete(&self, request: PveHttpRequest, path: &str) -> Result<(), PveApiError> {
+        let mut request = request;
+        request.path = path.to_owned();
+        request.method = PveHttpMethod::Delete;
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(PveApiError::Transport)?;
+        Self::status_to_result(&response).map(|_| ())
     }
 
     /// The version string and the raw cluster-resources entries: the
@@ -838,6 +1013,12 @@ impl ProxmoxClient {
             .execute(request)
             .await
             .map_err(PveApiError::Transport)?;
+        Self::status_to_result(&response)
+    }
+
+    /// Maps one response onto the envelope: statuses become caller-safe
+    /// errors, a good body unwraps `{"data": ...}`.
+    fn status_to_result(response: &PveHttpResponse) -> Result<serde_json::Value, PveApiError> {
         match response.status {
             401 => Err(PveApiError::Auth),
             403 => Err(PveApiError::Forbidden {
@@ -875,6 +1056,24 @@ fn push_bounded(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), PveTransportErro
     }
     body.extend_from_slice(chunk);
     Ok(())
+}
+
+/// The optional UPID string a mutating endpoint answered; a synchronous
+/// outcome carries no UPID.
+fn upid_from_data(data: &serde_json::Value) -> Result<Option<Upid>, PveApiError> {
+    match data {
+        // A synchronous outcome carries `null` or no UPID at all.
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(raw) => Upid::parse(raw)
+            .map(Some)
+            .map_err(|detail| PveApiError::InvalidPayload { detail }),
+        other => Err(PveApiError::InvalidPayload {
+            detail: format!(
+                "the mutating answer is neither a UPID string nor null (it is a {})",
+                type_name_of(other)
+            ),
+        }),
+    }
 }
 
 /// A bounded, credential-free body excerpt for error details.
@@ -1031,6 +1230,189 @@ impl ProxmoxSource for ProxmoxClient {
     ) -> Result<TaskStatus, PveApiError> {
         self.task_status_impl(&request, upid).await
     }
+    async fn guest_snapshot(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        snapshot: &str,
+        description: &str,
+        include_ram: bool,
+    ) -> Result<Option<Upid>, PveApiError> {
+        // PVE's qemu snapshot schema names the RAM flag `vmstate`; the
+        // caller's `include_ram` intent maps onto it.
+        let body = if include_ram {
+            serde_json::json!({
+                "snapname": snapshot,
+                "description": description,
+                "vmstate": 1,
+            })
+        } else {
+            serde_json::json!({
+                "snapname": snapshot,
+                "description": description,
+            })
+        };
+        let data = self
+            .call_with_body(
+                request,
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/snapshot", urlencode(node)),
+                &body,
+            )
+            .await?;
+        upid_from_data(&data)
+    }
+
+    async fn guest_snapshot_rollback(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        snapshot: &str,
+    ) -> Result<Option<Upid>, PveApiError> {
+        let data = self
+            .call_with_body(
+                request,
+                &format!(
+                    "/api2/json/nodes/{}/qemu/{vmid}/snapshot/{}/rollback",
+                    urlencode(node),
+                    urlencode(snapshot)
+                ),
+                &serde_json::json!({}),
+            )
+            .await?;
+        upid_from_data(&data)
+    }
+
+    async fn guest_snapshot_delete(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        snapshot: &str,
+    ) -> Result<(), PveApiError> {
+        self.call_delete(
+            request,
+            &format!(
+                "/api2/json/nodes/{}/qemu/{vmid}/snapshot/{}",
+                urlencode(node),
+                urlencode(snapshot)
+            ),
+        )
+        .await
+    }
+
+    async fn guest_clone(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        new_id: u32,
+        name: &str,
+        full_copy: bool,
+    ) -> Result<Upid, PveApiError> {
+        let body = serde_json::json!({
+            "newid": new_id,
+            "name": name,
+            "full": full_copy,
+        });
+        let data = self
+            .call_with_body(
+                request,
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/clone", urlencode(node)),
+                &body,
+            )
+            .await?;
+        let Some(upid_raw) = data.as_str() else {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the clone answer carries no UPID string".to_owned(),
+            });
+        };
+        Upid::parse(upid_raw).map_err(|detail| PveApiError::InvalidPayload { detail })
+    }
+
+    async fn guest_convert_template(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Option<Upid>, PveApiError> {
+        let data = self
+            .call_with_body(
+                request,
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/template", urlencode(node)),
+                &serde_json::json!({}),
+            )
+            .await?;
+        upid_from_data(&data)
+    }
+
+    async fn stop_task(&self, request: PveHttpRequest, upid: &Upid) -> Result<(), PveApiError> {
+        self.call_delete(
+            request,
+            // PVE's stop-task endpoint is the task itself, not its status
+            // subresource.
+            &format!(
+                "/api2/json/nodes/{}/tasks/{}",
+                urlencode(&upid.node),
+                urlencode(&upid.raw)
+            ),
+        )
+        .await
+    }
+
+    async fn guest_snapshots(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Vec<PveSnapshot>, PveApiError> {
+        let data = self
+            .call(PveHttpRequest {
+                path: format!("/api2/json/nodes/{node}/qemu/{vmid}/snapshot"),
+                ..request.clone()
+            })
+            .await?;
+        let entries = match data {
+            serde_json::Value::Array(entries) => entries,
+            serde_json::Value::Null => Vec::new(),
+            other => {
+                return Err(PveApiError::InvalidPayload {
+                    detail: format!(
+                        "the snapshots payload is not a list (it is a {})",
+                        type_name_of(&other)
+                    ),
+                });
+            }
+        };
+        let mut snapshots = Vec::new();
+        for entry in entries {
+            // `current` is the live state marker, not a snapshot.
+            let name = entry
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if name == "current" || name.is_empty() {
+                continue;
+            }
+            snapshots.push(PveSnapshot {
+                name: name.chars().take(64).collect(),
+                description: entry
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(512)
+                    .collect(),
+                includes_ram: entry
+                    .get("vmstate")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+                    == 1,
+            });
+        }
+        Ok(snapshots)
+    }
 }
 
 /// The config's `netN` entries, parsed for MAC addresses. The value shape
@@ -1175,6 +1557,30 @@ impl ProxmoxClient {
             }
         }
         agent
+    }
+
+    /// Lists the cluster's QEMU resources by the caller's purpose: the
+    /// idempotency classifications read the cluster's truth, not a cache.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    pub async fn list_guest_resources(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<Vec<PveResource>, PveApiError> {
+        let (version, entries) = self.version_and_resources(&request).await?;
+        let mut resources = Vec::new();
+        for entry in entries {
+            if let Ok(Some(resource)) = normalize_resource(&entry) {
+                let _ = &version;
+                resources.push(resource);
+            }
+        }
+        Ok(resources
+            .into_iter()
+            .filter(|resource| matches!(resource.kind.as_str(), "qemu" | "qemu-template" | "lxc"))
+            .collect())
     }
 
     /// Reads one task's status.
