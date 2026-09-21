@@ -186,6 +186,7 @@ impl ProxmoxTrustProbe for ProviderTrustProbe {
                 token_id: "observe-only".to_owned(),
                 token: SensitiveString::new("observe-only"),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         };
         match self.transport.execute(request).await {
             Err(fleet_provider_proxmox::PveTransportError::ObserveRefused { observed }) => {
@@ -248,6 +249,7 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
                 token_id: account.token_id.clone(),
                 token: SensitiveString::new(secret.expose().to_owned()),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         };
         match self.client.discover(request).await {
             Ok(discovery) => Ok(RawDiscovery {
@@ -300,6 +302,7 @@ impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery 
                 token_id: account.token_id.clone(),
                 token: SensitiveString::new(secret.expose().to_owned()),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         };
         match self.client.guest_discover(request).await {
             Ok(discovery) => Ok(fleet_application::proxmox::RawGuestDiscovery {
@@ -413,4 +416,37 @@ fn machines_for(
         Arc::new(fleet_storage_sqlite::MachineRepository::new(pool)),
         audit,
     ))
+}
+
+/// The credential store answering nothing, composed when the controller
+/// runs without a secret store: lifecycle operations then fail honestly
+/// instead of the composition panicking.
+#[derive(Debug)]
+pub struct AbsentProxmoxCredentials;
+
+#[async_trait]
+impl ProxmoxCredentialStore for AbsentProxmoxCredentials {
+    async fn load(
+        &self,
+        _account_id: &str,
+    ) -> Result<Option<String>, fleet_application::proxmox::CredentialStoreError> {
+        Ok(None)
+    }
+
+    async fn store(
+        &self,
+        _account_id: &str,
+        _secret: &str,
+    ) -> Result<(), fleet_application::proxmox::CredentialStoreError> {
+        Err(fleet_application::proxmox::CredentialStoreError::Backend {
+            detail: "the controller runs without a secret store".to_owned(),
+        })
+    }
+
+    async fn clear(
+        &self,
+        _account_id: &str,
+    ) -> Result<(), fleet_application::proxmox::CredentialStoreError> {
+        Ok(())
+    }
 }

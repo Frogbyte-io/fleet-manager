@@ -2290,6 +2290,24 @@ export interface StartMiseOperationRequest {
 }
 
 /**
+ * The lifecycle request: the guest's node and VMID.
+ */
+export interface StartProxmoxLifecycleRequest {
+  /** The guest's hosting node. */
+  node: string;
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * The body of the start-ready-workflow request.
  */
 export interface StartReadyRequest {
@@ -5028,6 +5046,78 @@ const res = await fetch(getObserveProxmoxGuestUrl(accountId,vmid),
 
   const data: observeProxmoxGuestResponse['data'] = body ? JSON.parse(body) : undefined
   return { data, status: res.status, headers: res.headers } as observeProxmoxGuestResponse
+}
+
+
+
+export type startProxmoxLifecycleResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startProxmoxLifecycleResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startProxmoxLifecycleResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startProxmoxLifecycleResponseSuccess = (startProxmoxLifecycleResponse202) & {
+  headers: Headers;
+};
+export type startProxmoxLifecycleResponseError = (startProxmoxLifecycleResponse400 | startProxmoxLifecycleResponse403) & {
+  headers: Headers;
+};
+
+export type startProxmoxLifecycleResponse = (startProxmoxLifecycleResponseSuccess | startProxmoxLifecycleResponseError)
+
+export const getStartProxmoxLifecycleUrl = (accountId: string,
+    vmid: number,
+    action: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/guests/${vmid}/${action}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed request.
+ * @summary Runs a lifecycle action on one guest as a durable operation. The
+operation is authorized through the catalog's `proxmox.operate`
+(catalog-level, like the source kinds — a Proxmox guest is not a Fleet
+machine) and executed by the worker with Fleet-owned UPID polling.
+ */
+export const startProxmoxLifecycle = async (accountId: string,
+    vmid: number,
+    action: string,
+    startProxmoxLifecycleRequest: StartProxmoxLifecycleRequest, options?: RequestInit): Promise<startProxmoxLifecycleResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartProxmoxLifecycleUrl(accountId,vmid,action),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startProxmoxLifecycleRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startProxmoxLifecycleResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startProxmoxLifecycleResponse
 }
 
 

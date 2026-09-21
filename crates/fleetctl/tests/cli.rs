@@ -2093,3 +2093,77 @@ fn an_empty_guests_page_reports_no_guests_not_no_accounts() {
     assert!(text.contains("(no guests reported)"), "{text}");
     assert!(!text.contains("no Proxmox accounts"), "{text}");
 }
+
+#[test]
+fn parsing_walks_the_proxmox_lifecycle_forms() {
+    for verb in ["start", "stop", "shutdown", "reboot"] {
+        let args: Vec<String> = [
+            "proxmox",
+            verb,
+            "--account",
+            "acc-1",
+            "--node",
+            "pve",
+            "--vmid",
+            "101",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let invocation = fleetctl::parse(&args).unwrap();
+        match invocation.command {
+            fleetctl::Command::ProxmoxLifecycle { action, .. } => {
+                assert_eq!(action, verb);
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+    }
+    // --wait and --timeout parse.
+    let args: Vec<String> = [
+        "proxmox",
+        "start",
+        "--account",
+        "acc-1",
+        "--node",
+        "pve",
+        "--vmid",
+        "101",
+        "--wait",
+        "--timeout",
+        "60",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxLifecycle {
+            wait: true,
+            timeout: Some(60),
+            ..
+        }
+    ));
+    // Missing flags refuse.
+    let args: Vec<String> = ["proxmox", "start", "--account", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("is required"), "{error}");
+    // A bad VMID refuses.
+    let args: Vec<String> = [
+        "proxmox",
+        "start",
+        "--account",
+        "acc-1",
+        "--node",
+        "pve",
+        "--vmid",
+        "abc",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("must be a number"), "{error}");
+}

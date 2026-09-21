@@ -43,7 +43,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 31] = [
+pub const CREATABLE_KINDS: [&str; 35] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -75,6 +75,10 @@ pub const CREATABLE_KINDS: [&str; 31] = [
     "apply.workflow",
     "source.fetch",
     "source.activate",
+    "proxmox.guest.start",
+    "proxmox.guest.stop",
+    "proxmox.guest.shutdown",
+    "proxmox.guest.reboot",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -83,12 +87,23 @@ pub const CREATABLE_KINDS: [&str; 31] = [
 /// governs both the dedicated endpoint and the generic one.
 #[must_use]
 fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<Permission> {
-    // The source kinds are catalog-level: their permission is enforced
-    // here with `resource: None`, never a machine id.
+    machine_scoped_kind_permission_inner(kind, payload)
+}
+
+/// The catalog-level permission a kind's creation requires, when any.
+/// The source and Proxmox lifecycle kinds act on infrastructure that is
+/// not a Fleet machine, so their permission is enforced with
+/// `resource: None` — never a machine id.
+#[must_use]
+fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
     match kind {
         "source.fetch" => Some(Permission::SourceFetch),
         "source.activate" => Some(Permission::SourceActivate),
-        _ => machine_scoped_kind_permission_inner(kind, payload),
+        "proxmox.guest.start"
+        | "proxmox.guest.stop"
+        | "proxmox.guest.shutdown"
+        | "proxmox.guest.reboot" => Some(Permission::ProxmoxOperate),
+        _ => None,
     }
 }
 
@@ -509,6 +524,16 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
+        } else if let Some(permission) = catalog_scoped_kind_permission(&new.kind) {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: permission,
+                    resource: None,
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
         }
         let operation = self
             .port
@@ -632,6 +657,19 @@ impl Operations {
     pub async fn get_state(&self, id: &str) -> Result<String, PortFailure> {
         let operation = self.port.get(id).await?;
         Ok(operation.state)
+    }
+
+    /// Whether cancellation has been requested for the operation. The
+    /// worker reads this between poll cycles; it bypasses authorization
+    /// like the other worker-side reads, because the worker already owns
+    /// the claimed operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the operation is unknown or the backend errors.
+    pub async fn cancel_requested(&self, id: &str) -> Result<bool, PortFailure> {
+        let operation = self.port.get(id).await?;
+        Ok(operation.cancel_requested)
     }
 
     /// Reads one operation.

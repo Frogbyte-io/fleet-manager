@@ -963,3 +963,139 @@ pub async fn observe_proxmox_guest(
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// The lifecycle request: the guest's node and VMID.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartProxmoxLifecycleRequest {
+    /// The guest's hosting node.
+    pub node: String,
+    /// The guest's VMID.
+    pub vmid: u32,
+    /// The deadline, in seconds. Bounded by the executor.
+    pub timeout_seconds: u64,
+}
+
+/// Runs a lifecycle action on one guest as a durable operation. The
+/// operation is authorized through the catalog's `proxmox.operate`
+/// (catalog-level, like the source kinds — a Proxmox guest is not a Fleet
+/// machine) and executed by the worker with Fleet-owned UPID polling.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or a malformed request.
+#[utoipa::path(
+    post,
+    path = "/proxmox/accounts/{accountId}/guests/{vmid}/{action}",
+    tag = "proxmox",
+    operation_id = "startProxmoxLifecycle",
+    params(
+        (
+            "accountId" = String,
+            Path,
+            description = "The account's identity."
+        ),
+        (
+            "vmid" = u32,
+            Path,
+            description = "The guest's VMID."
+        ),
+        (
+            "action" = String,
+            Path,
+            description = "The lifecycle action: start, stop, shutdown, or reboot."
+        ),
+    ),
+    request_body = StartProxmoxLifecycleRequest,
+    responses(
+        (
+            status = 202,
+            description = "The lifecycle operation was accepted and is durable.",
+            body = Resource<crate::operations::OperationDto>
+        ),
+        (
+            status = 400,
+            description = "The action is unrecognized or the request is malformed.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 403,
+            description = "The caller may not operate Proxmox guests.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn start_proxmox_lifecycle(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
+    Path((account_id, vmid, action)): Path<(String, u32, String)>,
+    Json(request): Json<StartProxmoxLifecycleRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The body's VMID must agree with the path's: two names for one guest
+    // is a malformed request, not a fallback.
+    if request.vmid != vmid {
+        return Err(crate::machines::invalid_request(
+            "the body's vmid does not match the path's guest",
+            correlation_id,
+        ));
+    }
+    // The action is validated here so a malformed path is a 400, not an
+    // operation that fails later in the worker. The stable ids match the
+    // provider's `LifecycleAction` vocabulary; the executor re-validates.
+    if !matches!(action.as_str(), "start" | "stop" | "shutdown" | "reboot") {
+        return Err(crate::machines::invalid_request(
+            &format!("unrecognized lifecycle action {action:?}"),
+            correlation_id,
+        ));
+    }
+    // The executor re-applies the same gate at the account boundary; the
+    // catalog-level permission is checked here so a denial never creates
+    // an operation.
+    if let Err(decision) = fleet_application::authz::authorize(
+        state.authorizer.as_ref(),
+        fleet_application::authz::AccessRequest {
+            principal_id: &principal.id,
+            action: fleet_application::authz::Permission::ProxmoxOperate,
+            resource: None,
+        },
+    ) {
+        return Err(crate::machines::denied_error(decision, correlation_id));
+    }
+    let payload = serde_json::json!({
+        "accountId": account_id,
+        "node": request.node,
+        "vmid": vmid,
+        "timeoutSeconds": request.timeout_seconds,
+    });
+    let kind = format!("proxmox.guest.{action}");
+    // A caller-scoped idempotency key makes a retried POST return the
+    // original operation instead of a second one.
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:{key}", principal.id));
+    let operation = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            &principal.id,
+            &fleet_application::operation::NewOperation {
+                kind,
+                idempotency_key,
+                deadline_at: None,
+                correlation_id: Some(correlation_id.to_string()),
+                payload_json: Some(payload.to_string()),
+            },
+        )
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(Resource::new(crate::operations::OperationDto::from(
+            operation,
+        ))),
+    ))
+}

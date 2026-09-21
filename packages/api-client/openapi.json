@@ -2417,6 +2417,89 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/guests/{vmid}/{action}": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Runs a lifecycle action on one guest as a durable operation. The\noperation is authorized through the catalog's `proxmox.operate`\n(catalog-level, like the source kinds — a Proxmox guest is not a Fleet\nmachine) and executed by the worker with Fleet-owned UPID polling.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or a malformed request.",
+        "operationId": "startProxmoxLifecycle",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "description": "The lifecycle action: start, stop, shutdown, or reboot.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartProxmoxLifecycleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The lifecycle operation was accepted and is durable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The action is unrecognized or the request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not operate Proxmox guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/proxmox/accounts/{accountId}/observe": {
       "post": {
         "tags": [
@@ -6893,6 +6976,33 @@
               "null"
             ],
             "description": "The pinned version to install, for the install action."
+          }
+        }
+      },
+      "StartProxmoxLifecycleRequest": {
+        "type": "object",
+        "description": "The lifecycle request: the guest's node and VMID.",
+        "required": [
+          "node",
+          "vmid",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The guest's hosting node."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds. Bounded by the executor.",
+            "minimum": 0
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
           }
         }
       },
