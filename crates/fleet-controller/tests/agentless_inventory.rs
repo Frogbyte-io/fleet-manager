@@ -194,7 +194,7 @@ async fn an_inventory_operation_probes_and_ingests() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload_json),
-                reviewed: false,
+                review_token: None,
             },
         )
         .await

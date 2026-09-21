@@ -192,10 +192,7 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
         &self,
         request: PveHttpRequest,
         body: Vec<u8>,
-    ) -> Result<PveHttpResponse, PveTransportError> {
-        let _ = body;
-        self.execute(request).await
-    }
+    ) -> Result<PveHttpResponse, PveTransportError>;
 }
 
 /// The reqwest-backed transport: rustls with the pinned-fingerprint
@@ -1063,8 +1060,20 @@ fn push_bounded(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), PveTransportErro
 
 /// The optional UPID string a mutating endpoint answered; a synchronous
 /// outcome carries no UPID.
-fn upid_from_data(data: &serde_json::Value) -> Option<Upid> {
-    data.as_str().and_then(|raw| Upid::parse(raw).ok())
+fn upid_from_data(data: &serde_json::Value) -> Result<Option<Upid>, PveApiError> {
+    match data {
+        // A synchronous outcome carries `null` or no UPID at all.
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(raw) => Upid::parse(raw)
+            .map(Some)
+            .map_err(|detail| PveApiError::InvalidPayload { detail }),
+        other => Err(PveApiError::InvalidPayload {
+            detail: format!(
+                "the mutating answer is neither a UPID string nor null (it is a {})",
+                type_name_of(other)
+            ),
+        }),
+    }
 }
 
 /// A bounded, credential-free body excerpt for error details.
@@ -1247,11 +1256,11 @@ impl ProxmoxSource for ProxmoxClient {
         let data = self
             .call_with_body(
                 request,
-                &format!("/api2/json/nodes/{node}/qemu/{vmid}/snapshot"),
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/snapshot", urlencode(node)),
                 &body,
             )
             .await?;
-        Ok(upid_from_data(&data))
+        upid_from_data(&data)
     }
 
     async fn guest_snapshot_rollback(
@@ -1264,11 +1273,15 @@ impl ProxmoxSource for ProxmoxClient {
         let data = self
             .call_with_body(
                 request,
-                &format!("/api2/json/nodes/{node}/qemu/{vmid}/snapshot/{snapshot}/rollback"),
+                &format!(
+                    "/api2/json/nodes/{}/qemu/{vmid}/snapshot/{}/rollback",
+                    urlencode(node),
+                    urlencode(snapshot)
+                ),
                 &serde_json::json!({}),
             )
             .await?;
-        Ok(upid_from_data(&data))
+        upid_from_data(&data)
     }
 
     async fn guest_snapshot_delete(
@@ -1280,7 +1293,11 @@ impl ProxmoxSource for ProxmoxClient {
     ) -> Result<(), PveApiError> {
         self.call_delete(
             request,
-            &format!("/api2/json/nodes/{node}/qemu/{vmid}/snapshot/{snapshot}"),
+            &format!(
+                "/api2/json/nodes/{}/qemu/{vmid}/snapshot/{}",
+                urlencode(node),
+                urlencode(snapshot)
+            ),
         )
         .await
     }
@@ -1302,7 +1319,7 @@ impl ProxmoxSource for ProxmoxClient {
         let data = self
             .call_with_body(
                 request,
-                &format!("/api2/json/nodes/{node}/qemu/{vmid}/clone"),
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/clone", urlencode(node)),
                 &body,
             )
             .await?;
@@ -1323,18 +1340,20 @@ impl ProxmoxSource for ProxmoxClient {
         let data = self
             .call_with_body(
                 request,
-                &format!("/api2/json/nodes/{node}/qemu/{vmid}/template"),
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/template", urlencode(node)),
                 &serde_json::json!({}),
             )
             .await?;
-        Ok(upid_from_data(&data))
+        upid_from_data(&data)
     }
 
     async fn stop_task(&self, request: PveHttpRequest, upid: &Upid) -> Result<(), PveApiError> {
         self.call_delete(
             request,
+            // PVE's stop-task endpoint is the task itself, not its status
+            // subresource.
             &format!(
-                "/api2/json/nodes/{}/tasks/{}/status",
+                "/api2/json/nodes/{}/tasks/{}",
                 urlencode(&upid.node),
                 urlencode(&upid.raw)
             ),
@@ -1546,7 +1565,7 @@ impl ProxmoxClient {
     /// # Errors
     ///
     /// Fails with [`PveApiError`].
-    pub async fn list_qemu_resources(
+    pub async fn list_guest_resources(
         &self,
         request: PveHttpRequest,
     ) -> Result<Vec<PveResource>, PveApiError> {
@@ -1560,7 +1579,7 @@ impl ProxmoxClient {
         }
         Ok(resources
             .into_iter()
-            .filter(|resource| resource.kind == "qemu" || resource.kind == "qemu-template")
+            .filter(|resource| matches!(resource.kind.as_str(), "qemu" | "qemu-template" | "lxc"))
             .collect())
     }
 

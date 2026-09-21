@@ -1778,7 +1778,6 @@ fn follow_review(
         account_id,
         node,
         vmid,
-        params,
         ..
     } = &invocation.command
     else {
@@ -1789,10 +1788,9 @@ fn follow_review(
             message: "the review did not answer with a token".to_owned(),
         });
     };
-    let params_value: Value = params
-        .as_deref()
-        .and_then(|text| serde_json::from_str(text).ok())
-        .unwrap_or(Value::Null);
+    // The reviewed params are the ones the controller echoed back: reusing
+    // them guarantees the run's bytes match the reviewed bytes.
+    let params_value = body["data"]["params"].clone();
     let run_body = serde_json::json!({
         "node": node,
         "reviewToken": token,
@@ -1865,7 +1863,8 @@ fn follow_checkout_wait(
         | Command::MiseOperation { wait, timeout, .. }
         | Command::ProjectsReady { wait, timeout, .. }
         | Command::ApplyWorkflow { wait, timeout, .. }
-        | Command::ProxmoxLifecycle { wait, timeout, .. } => (*wait, *timeout),
+        | Command::ProxmoxLifecycle { wait, timeout, .. }
+        | Command::ProxmoxDestructive { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -2577,19 +2576,25 @@ fn read_stdin_to_end(what: &str) -> Result<String, CliError> {
 }
 
 fn read_stdin_line(what: &str) -> Result<String, CliError> {
-    let mut line = String::new();
+    read_stdin_to_eof(what)
+}
+
+/// Reads standard input to EOF: JSON documents are multi-line.
+fn read_stdin_to_eof(what: &str) -> Result<String, CliError> {
+    use std::io::Read as _;
+    let mut text = String::new();
     std::io::stdin()
-        .read_line(&mut line)
+        .read_to_string(&mut text)
         .map_err(|error| CliError {
             message: format!("cannot read {what} from stdin: {error}"),
         })?;
-    let line = line.trim().to_owned();
-    if line.is_empty() {
+    let text = text.trim().to_owned();
+    if text.is_empty() {
         return Err(CliError {
             message: format!("{what} must not be empty"),
         });
     }
-    Ok(line)
+    Ok(text)
 }
 
 /// Wall-clock now, in epoch milliseconds.

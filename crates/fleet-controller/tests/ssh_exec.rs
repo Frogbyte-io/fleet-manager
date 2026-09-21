@@ -76,7 +76,7 @@ async fn an_unverified_endpoint_refuses_to_execute() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload_json_string),
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -155,7 +155,7 @@ async fn a_verified_endpoint_runs_the_script_and_reports_output() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload_json_string),
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -197,7 +197,7 @@ async fn an_unknown_kind_fails_honestly() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -219,7 +219,7 @@ async fn the_noop_kind_still_runs_through_the_composed_executor() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await

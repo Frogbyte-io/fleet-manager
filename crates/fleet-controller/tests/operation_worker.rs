@@ -30,7 +30,7 @@ async fn the_noop_operation_runs_end_to_end() {
                 deadline_at: None,
                 correlation_id: Some("corr-worker-1".to_owned()),
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -73,7 +73,7 @@ async fn two_workers_cannot_claim_the_same_operation() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -112,7 +112,7 @@ async fn a_crashed_workers_lease_is_recovered_as_failed_not_retried() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -163,7 +163,7 @@ async fn a_cancelled_operation_stops_without_running() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -216,7 +216,7 @@ async fn a_deadline_expires_even_when_no_worker_claims_it() {
                 deadline_at: Some(now - 1_000),
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await
@@ -259,7 +259,7 @@ async fn restart_preserves_terminal_truth() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: None,
-                reviewed: false,
+                review_token: None,
             },
         )
         .await

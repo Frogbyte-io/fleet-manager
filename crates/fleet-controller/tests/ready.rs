@@ -134,7 +134,7 @@ impl Fixture {
                     deadline_at: None,
                     correlation_id: None,
                     payload_json: Some(payload.to_string()),
-                    reviewed: false,
+                    review_token: None,
                 },
             )
             .await

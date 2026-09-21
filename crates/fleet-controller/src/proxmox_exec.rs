@@ -168,7 +168,10 @@ impl ProxmoxLifecycleExecutor {
                 .task_status(request.clone(), &upid)
                 .await
                 .map_err(|error| {
-                    format!("the task status failed: {error}; the task's outcome is unknown")
+                    format!(
+                        "the task status failed: {error}; the task {} on node {} keeps its outcome unknown",
+                        upid.raw, upid.node
+                    )
                 })?;
             match status {
                 TaskStatus::Running => {}
@@ -595,7 +598,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 // resources are the truth.
                 let resources = self
                     .client
-                    .list_qemu_resources(request.clone())
+                    .list_guest_resources(request.clone())
                     .await
                     .map_err(|error| format!("the resource listing failed: {error}"))?;
                 if resources
@@ -639,7 +642,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 // succeeds without an operation.
                 let resources = self
                     .client
-                    .list_qemu_resources(request.clone())
+                    .list_guest_resources(request.clone())
                     .await
                     .map_err(|error| format!("the resource listing failed: {error}"))?;
                 let resource = resources
@@ -678,6 +681,33 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                     .and_then(serde_json::Value::as_str)
                     .ok_or("the reviewed parameters carry no UPID")?;
                 let upid = Upid::parse(raw)?;
+                // The reviewed UPID must belong to the reviewed guest: a
+                // task on another node or for another VMID is refused, so
+                // the review scope is the cancellation scope.
+                if upid.node != payload.node {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "conflict",
+                        &format!(
+                            "the reviewed task runs on node {}, not the reviewed node {}",
+                            upid.node, payload.node
+                        ),
+                    )
+                    .await;
+                }
+                if upid.target != payload.vmid.to_string() {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "conflict",
+                        &format!(
+                            "the reviewed task targets {}, not the reviewed guest qemu/{}",
+                            upid.target, payload.vmid
+                        ),
+                    )
+                    .await;
+                }
                 self.client
                     .stop_task(request.clone(), &upid)
                     .await
@@ -861,8 +891,8 @@ impl ProxmoxDestructiveExecutor {
                     operation_id,
                     "cancelled",
                     &format!(
-                        "cancelled while waiting; the remote task on node {} keeps running and its outcome is unknown",
-                        upid.node
+                        "cancelled while waiting; the remote task {} on node {} keeps running and its outcome is unknown",
+                        upid.raw, upid.node
                     ),
                 )
                 .await;
@@ -872,7 +902,10 @@ impl ProxmoxDestructiveExecutor {
                 .task_status(request.clone(), &upid)
                 .await
                 .map_err(|error| {
-                    format!("the task status failed: {error}; the task's outcome is unknown")
+                    format!(
+                        "the task status failed: {error}; the task {} on node {} keeps its outcome unknown",
+                        upid.raw, upid.node
+                    )
                 })?;
             match status {
                 TaskStatus::Running => {}
@@ -884,8 +917,8 @@ impl ProxmoxDestructiveExecutor {
                     operation_id,
                     "deadline_expired",
                     &format!(
-                        "the deadline expired while the task still runs; its final state is unknown (task on node {})",
-                        upid.node
+                        "the deadline expired while the task still runs; its final state is unknown (task {} on node {})",
+                        upid.raw, upid.node
                     ),
                 )
                 .await;

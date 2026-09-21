@@ -1088,7 +1088,7 @@ pub async fn start_proxmox_lifecycle(
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(payload.to_string()),
-                reviewed: true,
+                review_token: None,
             },
         )
         .await
@@ -1132,33 +1132,70 @@ pub struct ReviewProxmoxOperationRequest {
     pub params: serde_json::Value,
 }
 
-/// The token binding one reviewed request to its create call: the SHA-256
-/// of the canonical reviewed material. Stateless — the controller holds no
-/// review store; a create presents the token computed from exactly the
-/// payload it carries, so what runs is what was reviewed.
+/// The token binding one reviewed request to its create call: the
+/// application's payload-bound review token, computed over the exact
+/// operation bytes the run will carry.
 #[must_use]
-fn review_token(
-    account_id: &str,
-    vmid: u32,
-    action: &str,
-    request: &ReviewProxmoxOperationRequest,
-) -> String {
-    use sha2::Digest as _;
-    let canonical = serde_json::json!({
-        "accountId": account_id,
-        "vmid": vmid,
-        "action": action,
-        "node": request.node,
-        "params": request.params,
-    });
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(serde_json::to_string(&canonical).unwrap_or_default());
-    let digest: [u8; 32] = hasher.finalize().into();
-    digest.iter().fold(String::with_capacity(64), |mut out, b| {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-        out
-    })
+fn review_token(kind: &str, payload_json: &str) -> String {
+    fleet_application::operation::review_token_for(kind, payload_json)
+}
+
+/// Validates one action's required parameters: a malformed review is a
+/// client error, not a durable failure.
+fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Result<(), String> {
+    match action {
+        "snapshot" => {
+            let name = params
+                .get("snapshot")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if name.is_empty() {
+                return Err("the snapshot action requires a snapshot name".to_owned());
+            }
+            Ok(())
+        }
+        "snapshot-revert" | "snapshot-delete" => {
+            let name = params
+                .get("snapshot")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if name.is_empty() {
+                return Err(
+                    "the {action} action requires a snapshot name".replace("{action}", action)
+                );
+            }
+            Ok(())
+        }
+        "clone" => {
+            if params
+                .get("newId")
+                .and_then(serde_json::Value::as_u64)
+                .is_none()
+            {
+                return Err("the clone action requires a newId".to_owned());
+            }
+            if params
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            {
+                return Err("the clone action requires a name".to_owned());
+            }
+            Ok(())
+        }
+        "task-cancel" => {
+            if params
+                .get("upid")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            {
+                return Err("the task-cancel action requires a upid".to_owned());
+            }
+            Ok(())
+        }
+        // `template` carries no parameters.
+        _ => Ok(()),
+    }
 }
 
 /// Reviews one destructive-adjacent operation: renders exactly what will
@@ -1219,6 +1256,12 @@ pub async fn review_proxmox_operation(
             correlation_id,
         ));
     }
+    // Each action's required parameters are validated here, before a
+    // token exists: a malformed request is a 400, never a durable
+    // operation the worker immediately fails.
+    if let Err(detail) = validate_destructive_params(&action, &request.params) {
+        return Err(crate::machines::invalid_request(&detail, correlation_id));
+    }
     if let Err(decision) = fleet_application::authz::authorize(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
@@ -1229,8 +1272,23 @@ pub async fn review_proxmox_operation(
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
     }
+    // The token binds the exact payload the run will carry, so the
+    // reviewed bytes and the executed bytes are the same by construction.
+    let kind = if action == "task-cancel" {
+        "proxmox.task-cancel".to_owned()
+    } else {
+        format!("proxmox.guest.{action}")
+    };
+    let payload = serde_json::json!({
+        "accountId": account_id,
+        "node": request.node,
+        "vmid": vmid,
+        "timeoutSeconds": 300,
+        "params": request.params,
+    });
+    let token = review_token(&kind, &payload.to_string());
     Ok(Json(Resource::new(ProxmoxReviewDto {
-        review_token: review_token(&account_id, vmid, &action, &request),
+        review_token: token,
         action,
         node: request.node,
         vmid,
@@ -1320,40 +1378,27 @@ pub async fn start_reviewed_proxmox_operation(
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
     }
-    // The review gate: the token is recomputed from THIS request, so the
-    // create runs only what was reviewed — any parameter change invalidates
-    // the token.
-    let presented = ReviewProxmoxOperationRequest {
-        node: request.node.clone(),
-        params: request.params.clone(),
-    };
-    let expected = review_token(&account_id, vmid, &action, &presented);
-    if expected != request.review_token {
-        return Err(crate::machines::invalid_request(
-            "the review token does not match this request; review again",
-            correlation_id,
-        ));
-    }
     if request.node.is_empty() || request.node.len() > 128 {
         return Err(crate::machines::invalid_request(
             "the node must be 1..=128 characters",
             correlation_id,
         ));
     }
-    let mut payload = serde_json::json!({
-        "accountId": account_id,
-        "node": request.node,
-        "vmid": vmid,
-        "timeoutSeconds": request.timeout_seconds,
-        "params": request.params,
-    });
-    let _ = &mut payload;
-    let kind = format!("proxmox.guest.{action}");
+    // The payload is byte-identical to the reviewed one (the timeout is
+    // fixed at review time), so the application's token comparison binds
+    // what runs to what was reviewed.
     let kind = if action == "task-cancel" {
         "proxmox.task-cancel".to_owned()
     } else {
-        kind
+        format!("proxmox.guest.{action}")
     };
+    let payload = serde_json::json!({
+        "accountId": account_id,
+        "node": request.node,
+        "vmid": vmid,
+        "timeoutSeconds": 300,
+        "params": request.params,
+    });
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -1369,7 +1414,7 @@ pub async fn start_reviewed_proxmox_operation(
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(payload.to_string()),
-                reviewed: true,
+                review_token: Some(request.review_token),
             },
         )
         .await

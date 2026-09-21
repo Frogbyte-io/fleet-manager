@@ -81,6 +81,16 @@ impl FixedTransport {
 
 #[async_trait]
 impl PveTransport for FixedTransport {
+    async fn execute_with_body(
+        &self,
+        request: PveHttpRequest,
+        _body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        // The canned fixtures answer by path regardless of the body: the
+        // recorded responses are keyed on the endpoint, not the payload.
+        self.execute(request).await
+    }
+
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         let behavior = *self.behavior.lock().unwrap();
         match (&request.pinned_fingerprint, behavior) {
@@ -604,13 +614,16 @@ impl LifecycleTransport {
 
 #[async_trait]
 impl PveTransport for LifecycleTransport {
+    async fn execute_with_body(
+        &self,
+        request: PveHttpRequest,
+        _body: Vec<u8>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        self.execute(request).await
+    }
+
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         // The observe-only trust probe: capture and refuse.
-        if request.pinned_fingerprint.is_none() {
-            return Err(PveTransportError::ObserveRefused {
-                observed: FP.to_owned(),
-            });
-        }
         if request.pinned_fingerprint.is_none() {
             return Err(PveTransportError::ObserveRefused {
                 observed: FP.to_owned(),

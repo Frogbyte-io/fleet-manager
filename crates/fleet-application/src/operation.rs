@@ -157,6 +157,48 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
 /// The payload bound for provider inputs.
 pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
+/// The destructive-adjacent kinds: their creation requires a review token
+/// computed over exactly the payload being created.
+pub const DESTRUCTIVE_KINDS: [&str; 6] = [
+    "proxmox.guest.snapshot",
+    "proxmox.guest.snapshot-revert",
+    "proxmox.guest.snapshot-delete",
+    "proxmox.guest.clone",
+    "proxmox.guest.template",
+    "proxmox.task-cancel",
+];
+
+/// The review token for one destructive operation: the SHA-256 of the
+/// kind and the exact payload bytes. Deterministic, payload-bound, and
+/// computable only over material the caller actually holds.
+#[must_use]
+pub fn review_token_for(kind: &str, payload_json: &str) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(payload_json.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest.iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+/// Compares two token strings in constant time over their bytes.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// The public view of a durable operation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -450,11 +492,13 @@ pub struct NewOperation {
     pub correlation_id: Option<String>,
     /// The bounded provider input, for kinds that need one.
     pub payload_json: Option<String>,
-    /// Whether the request arrived through a dedicated endpoint that
-    /// already enforced the kind's extra gate (e.g. the destructive
-    /// review). Only the dedicated surface sets it; the generic surface
-    /// leaves it off, which refuses destructive kinds outright.
-    pub reviewed: bool,
+    /// The verified review material for destructive-adjacent kinds: the
+    /// review token recomputed over exactly this payload, which only a
+    /// caller that ran the review over the same bytes can present. The
+    /// generic surface leaves it `None`, which refuses destructive kinds
+    /// outright; a `Some` value that does not match the payload is refused
+    /// as well, so the field cannot be forged by setting it.
+    pub review_token: Option<String>,
 }
 
 /// The authorized operation use cases.
@@ -548,19 +592,25 @@ impl Operations {
             // dedicated reviewed endpoint, which binds the operation to a
             // confirmed review token. A generic-surface create is a
             // route-around attempt, refused as malformed.
-            if !new.reviewed
-                && (new.kind.starts_with("proxmox.guest.snapshot")
-                    || matches!(
-                        new.kind.as_str(),
-                        "proxmox.guest.clone" | "proxmox.guest.template" | "proxmox.task-cancel"
-                    ))
-            {
-                return Err(OperationUseCaseError::Invalid {
-                    detail: format!(
-                        "the {kind} kind is destructive-adjacent and runs only through its reviewed dedicated endpoint",
-                        kind = new.kind
-                    ),
-                });
+            if DESTRUCTIVE_KINDS.contains(&new.kind.as_str()) {
+                // The review token is the SHA-256 of the canonical
+                // operation material, recomputed here: a caller that never
+                // reviewed these exact bytes cannot present a matching
+                // token, and setting the field arbitrarily fails the
+                // comparison.
+                let expected =
+                    review_token_for(&new.kind, new.payload_json.as_deref().unwrap_or_default());
+                match new.review_token.as_deref() {
+                    Some(presented) if constant_time_eq(presented, &expected) => {}
+                    _ => {
+                        return Err(OperationUseCaseError::Invalid {
+                            detail: format!(
+                                "the {kind} kind is destructive-adjacent and requires a valid review token; review the operation first",
+                                kind = new.kind
+                            ),
+                        });
+                    }
+                }
             }
             authorize(
                 authorizer,
