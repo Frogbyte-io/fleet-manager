@@ -2576,10 +2576,24 @@ fn read_stdin_to_end(what: &str) -> Result<String, CliError> {
 }
 
 fn read_stdin_line(what: &str) -> Result<String, CliError> {
-    read_stdin_to_eof(what)
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| CliError {
+            message: format!("cannot read {what} from stdin: {error}"),
+        })?;
+    let line = line.trim().to_owned();
+    if line.is_empty() {
+        return Err(CliError {
+            message: format!("{what} must not be empty"),
+        });
+    }
+    Ok(line)
 }
 
-/// Reads standard input to EOF: JSON documents are multi-line.
+/// Reads standard input to EOF: JSON documents are multi-line. Only the
+/// document inputs use this; single-line secrets keep the newline-
+/// terminating reader.
 fn read_stdin_to_eof(what: &str) -> Result<String, CliError> {
     use std::io::Read as _;
     let mut text = String::new();
