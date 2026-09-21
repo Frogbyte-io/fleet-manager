@@ -70,6 +70,19 @@ pub struct PveHttpRequest {
     pub pinned_fingerprint: Option<String>,
     /// The credentials for the call.
     pub credentials: Arc<PveCredentials>,
+    /// The HTTP method; `GET` for reads, `POST` for mutations. PVE's
+    /// lifecycle endpoints require `POST`.
+    pub method: PveHttpMethod,
+}
+
+/// The HTTP methods the transport speaks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PveHttpMethod {
+    /// A read.
+    #[default]
+    Get,
+    /// A mutation.
+    Post,
 }
 
 impl PveHttpRequest {
@@ -341,8 +354,11 @@ impl PveTransport for ReqwestPveTransport {
             request.port,
             request.path
         );
-        let response = client
-            .get(&url)
+        let request_builder = match request.method {
+            PveHttpMethod::Get => client.get(&url),
+            PveHttpMethod::Post => client.post(&url),
+        };
+        let response = request_builder
             .header(
                 "Authorization",
                 format!(
@@ -658,13 +674,19 @@ impl Upid {
         if !trailing.is_empty() {
             return Err("the UPID carries trailing material".to_owned());
         }
+        if raw.len() > 256 {
+            return Err(format!(
+                "the UPID is {} bytes, over the 256-byte bound",
+                raw.len()
+            ));
+        }
         let bounded = |part: &str, max: usize| part.chars().take(max).collect::<String>();
         Ok(Self {
             node: bounded(node, 128),
             task_type: bounded(task_type, 64),
             target: bounded(target, 64),
             user: bounded(user, 128),
-            raw: raw.chars().take(256).collect(),
+            raw: raw.to_owned(),
         })
     }
 }
@@ -989,6 +1011,7 @@ impl ProxmoxSource for ProxmoxClient {
                 urlencode(node),
                 action.path_segment()
             ),
+            method: PveHttpMethod::Post,
             ..request.clone()
         };
         let data = self.call(lifecycle_request).await?;
@@ -1178,16 +1201,14 @@ impl ProxmoxClient {
         match object.get("status").and_then(serde_json::Value::as_str) {
             Some("running") => Ok(TaskStatus::Running),
             Some("stopped") => {
-                let exitstatus = object
-                    .get("exitstatus")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                if exitstatus == "OK" {
-                    Ok(TaskStatus::Ok)
-                } else {
-                    Ok(TaskStatus::Error {
-                        detail: exitstatus.chars().take(256).collect(),
-                    })
+                match object.get("exitstatus").and_then(serde_json::Value::as_str) {
+                    Some("OK") => Ok(TaskStatus::Ok),
+                    Some(detail) => Ok(TaskStatus::Error {
+                        detail: detail.chars().take(256).collect(),
+                    }),
+                    // A stopped task without an exit status is honest
+                    // uncertainty, not an empty error.
+                    None => Ok(TaskStatus::Unknown),
                 }
             }
             _ => Ok(TaskStatus::Unknown),
@@ -1471,6 +1492,7 @@ mod tests {
                 token_id: "t".to_owned(),
                 token: SensitiveString::new("s"),
             }),
+            method: PveHttpMethod::Get,
         };
         assert_eq!(request("2001:db8::1").authority(), "[2001:db8::1]");
         assert_eq!(request("192.168.68.223").authority(), "192.168.68.223");

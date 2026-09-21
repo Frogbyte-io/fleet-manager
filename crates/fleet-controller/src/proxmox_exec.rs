@@ -119,32 +119,57 @@ impl ProxmoxLifecycleExecutor {
                 token_id: account.token_id.clone(),
                 token: fleet_core::SensitiveString::new(secret.to_owned()),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         }
     }
 
     /// Runs one action and polls its task to a terminal state, with the
-    /// injected sleep keeping the loop deterministic under test.
+    /// injected sleep keeping the loop deterministic under test. The
+    /// deadline starts before the mutation and bounds every poll; a
+    /// cancellation observed mid-poll stops the *waiting* — the remote PVE
+    /// task keeps running, and the operation records that honestly.
     async fn run_action(
         &self,
-        request: &fleet_provider_proxmox::PveHttpRequest,
-        node: &str,
-        vmid: u32,
-        action: LifecycleAction,
-        deadline: Duration,
-        sleep: Arc<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>,
+        operations: &Operations,
+        params: RunParams,
     ) -> Result<TaskStatus, String> {
+        let RunParams {
+            operation_id,
+            request,
+            node,
+            vmid,
+            action,
+            deadline,
+            sleep,
+        } = params;
+        let started = std::time::Instant::now();
         let upid = self
             .client
-            .guest_lifecycle(request.clone(), node, vmid, action)
+            .guest_lifecycle(request.clone(), &node, vmid, action)
             .await
             .map_err(|error| format!("the lifecycle action failed: {error}"))?;
-        let started = std::time::Instant::now();
         loop {
+            // Cancellation is honored between polls: the remote task keeps
+            // running, and the operation says so.
+            let cancelled = operations
+                .cancel_requested(&operation_id)
+                .await
+                .unwrap_or(false);
+            if cancelled {
+                return Ok(TaskStatus::Error {
+                    detail: format!(
+                        "cancelled while waiting; the remote task on node {} keeps running and its outcome is unknown",
+                        upid.node
+                    ),
+                });
+            }
             let status = self
                 .client
                 .task_status(request.clone(), &upid)
                 .await
-                .map_err(|error| format!("the task status failed: {error}"))?;
+                .map_err(|error| {
+                    format!("the task status failed: {error}; the task's outcome is unknown")
+                })?;
             match status {
                 TaskStatus::Running => {}
                 terminal => return Ok(terminal),
@@ -240,15 +265,19 @@ impl ProxmoxLifecycleExecutor {
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let status = self
             .run_action(
-                &request,
-                &payload.node,
-                payload.vmid,
-                action,
-                deadline,
-                Arc::new(|duration| {
-                    Box::pin(tokio::time::sleep(duration))
-                        as futures_util::future::BoxFuture<'static, ()>
-                }),
+                operations,
+                RunParams {
+                    operation_id: operation.id.clone(),
+                    request,
+                    node: payload.node,
+                    vmid: payload.vmid,
+                    action,
+                    deadline,
+                    sleep: Arc::new(|duration| {
+                        Box::pin(tokio::time::sleep(duration))
+                            as futures_util::future::BoxFuture<'static, ()>
+                    }),
+                },
             )
             .await?;
         self.finish(operations, &operation.id, action, status).await
@@ -267,6 +296,25 @@ impl OperationExecutor for ProxmoxLifecycleExecutor {
         };
         self.lifecycle(operations, operation, action).await
     }
+}
+
+/// The parameters of one lifecycle run, grouped so the poll loop's
+/// signature stays readable.
+struct RunParams {
+    /// The operation whose cancellation is observed between polls.
+    operation_id: String,
+    /// The provider request carrying the account and pin.
+    request: fleet_provider_proxmox::PveHttpRequest,
+    /// The guest's hosting node.
+    node: String,
+    /// The guest's VMID.
+    vmid: u32,
+    /// The action to run.
+    action: LifecycleAction,
+    /// The polling deadline.
+    deadline: Duration,
+    /// The injected sleep, for deterministic tests.
+    sleep: Arc<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>,
 }
 
 /// Decodes and validates an operation's payload.

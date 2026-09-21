@@ -1034,6 +1034,14 @@ pub async fn start_proxmox_lifecycle(
     Json(request): Json<StartProxmoxLifecycleRequest>,
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The body's VMID must agree with the path's: two names for one guest
+    // is a malformed request, not a fallback.
+    if request.vmid != vmid {
+        return Err(crate::machines::invalid_request(
+            "the body's vmid does not match the path's guest",
+            correlation_id,
+        ));
+    }
     // The action is validated here so a malformed path is a 400, not an
     // operation that fails later in the worker. The stable ids match the
     // provider's `LifecycleAction` vocabulary; the executor re-validates.

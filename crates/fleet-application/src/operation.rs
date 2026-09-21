@@ -659,6 +659,19 @@ impl Operations {
         Ok(operation.state)
     }
 
+    /// Whether cancellation has been requested for the operation. The
+    /// worker reads this between poll cycles; it bypasses authorization
+    /// like the other worker-side reads, because the worker already owns
+    /// the claimed operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the operation is unknown or the backend errors.
+    pub async fn cancel_requested(&self, id: &str) -> Result<bool, PortFailure> {
+        let operation = self.port.get(id).await?;
+        Ok(operation.cancel_requested)
+    }
+
     /// Reads one operation.
     ///
     /// # Errors

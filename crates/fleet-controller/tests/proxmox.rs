@@ -587,15 +587,11 @@ enum TaskOutcome {
 #[derive(Debug)]
 struct LifecycleTransport {
     outcome: TaskOutcome,
-    polls: Mutex<Vec<String>>,
 }
 
 impl LifecycleTransport {
     fn with(outcome: TaskOutcome) -> Arc<Self> {
-        Arc::new(Self {
-            outcome,
-            polls: Mutex::new(Vec::new()),
-        })
+        Arc::new(Self { outcome })
     }
 }
 
@@ -615,7 +611,6 @@ impl PveTransport for LifecycleTransport {
             });
         }
         if request.path.contains("/tasks/") && request.path.contains("/status") {
-            self.polls.lock().unwrap().push(request.path.clone());
             let body = match self.outcome {
                 TaskOutcome::OkAfterOne => TASK_OK_BODY,
                 TaskOutcome::Error => TASK_ERROR_BODY,
@@ -658,10 +653,13 @@ async fn lifecycle_harness(outcome: TaskOutcome) -> Harness {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let secrets = Arc::new(SecretStore::open(store.pool().clone(), &key_path).unwrap());
+    // One shared transport: the HTTP surface and the worker see the same
+    // fixture, so the test exercises one consistent PVE.
+    let transport = LifecycleTransport::with(outcome);
     let proxmox = Arc::new(compose_proxmox(
         store.pool().clone(),
         secrets.clone(),
-        LifecycleTransport::with(outcome),
+        transport.clone(),
         Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
     ));
 
@@ -684,7 +682,7 @@ async fn lifecycle_harness(outcome: TaskOutcome) -> Harness {
             fleet_controller::proxmox_exec::ProxmoxLifecycleExecutor::new(
                 accounts,
                 credentials,
-                fleet_provider_proxmox::ProxmoxClient::new(LifecycleTransport::with(outcome)),
+                fleet_provider_proxmox::ProxmoxClient::new(transport),
             ),
         ),
     ));

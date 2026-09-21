@@ -41,6 +41,7 @@ async fn pinned_transport_converses_with_the_live_host() {
             token_id,
             token: SensitiveString::new(key),
         }),
+        method: fleet_provider_proxmox::PveHttpMethod::Get,
     };
     let client = ProxmoxClient::new(transport);
     let discovery = client.discover(request).await.unwrap();
@@ -68,6 +69,7 @@ async fn a_wrong_fingerprint_is_refused_at_the_handshake() {
             token_id,
             token: SensitiveString::new(key),
         }),
+        method: fleet_provider_proxmox::PveHttpMethod::Get,
     };
     let error = transport.execute(request).await.unwrap_err();
     match error {
@@ -99,6 +101,7 @@ async fn an_unpinned_host_is_observed_not_conversed_with() {
             token_id,
             token: SensitiveString::new(key),
         }),
+        method: fleet_provider_proxmox::PveHttpMethod::Get,
     };
     let error = transport.execute(request).await.unwrap_err();
     match error {

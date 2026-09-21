@@ -186,6 +186,7 @@ impl ProxmoxTrustProbe for ProviderTrustProbe {
                 token_id: "observe-only".to_owned(),
                 token: SensitiveString::new("observe-only"),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         };
         match self.transport.execute(request).await {
             Err(fleet_provider_proxmox::PveTransportError::ObserveRefused { observed }) => {
@@ -248,6 +249,7 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
                 token_id: account.token_id.clone(),
                 token: SensitiveString::new(secret.expose().to_owned()),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         };
         match self.client.discover(request).await {
             Ok(discovery) => Ok(RawDiscovery {
@@ -300,6 +302,7 @@ impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery 
                 token_id: account.token_id.clone(),
                 token: SensitiveString::new(secret.expose().to_owned()),
             }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
         };
         match self.client.guest_discover(request).await {
             Ok(discovery) => Ok(fleet_application::proxmox::RawGuestDiscovery {

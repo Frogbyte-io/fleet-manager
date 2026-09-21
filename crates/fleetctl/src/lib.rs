@@ -1724,7 +1724,8 @@ fn follow_checkout_wait(
         | Command::FrogenvOperation { wait, timeout, .. }
         | Command::MiseOperation { wait, timeout, .. }
         | Command::ProjectsReady { wait, timeout, .. }
-        | Command::ApplyWorkflow { wait, timeout, .. } => (*wait, *timeout),
+        | Command::ApplyWorkflow { wait, timeout, .. }
+        | Command::ProxmoxLifecycle { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -2303,20 +2304,16 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             vmid,
             timeout,
             ..
-        } => {
-            let mut body = serde_json::json!({
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/proxmox/accounts/{account_id}/guests/{vmid}/{action}"),
+            Vec::new(),
+            Some(serde_json::json!({
                 "node": node,
                 "vmid": vmid,
                 "timeoutSeconds": timeout.unwrap_or(300),
-            });
-            let _ = &mut body;
-            (
-                reqwest::Method::POST,
-                format!("/api/v1/proxmox/accounts/{account_id}/guests/{vmid}/{action}"),
-                Vec::new(),
-                Some(body),
-            )
-        }
+            })),
+        ),
         Command::TailnetImport {
             node_id,
             user,
