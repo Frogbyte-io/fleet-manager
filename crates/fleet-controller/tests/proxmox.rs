@@ -128,6 +128,8 @@ struct Harness {
     pool: sqlx::SqlitePool,
     address: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    /// The lifecycle harness's worker; aborted on drop.
+    _worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 async fn harness_with(transport: Arc<FixedTransport>) -> Harness {
@@ -192,6 +194,7 @@ async fn harness_with(transport: Arc<FixedTransport>) -> Harness {
         pool: store.pool().clone(),
         address,
         shutdown: Some(shutdown_tx),
+        _worker: None,
     }
 }
 
@@ -561,4 +564,340 @@ async fn the_guest_surface_walks_list_and_observe() {
         .await;
     assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "not_found");
+}
+
+const LIFECYCLE_UPID_BODY: &str =
+    r#"{"data":"UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmstart:101:root@pam!GLM-AGENT:"}"#;
+
+const TASK_RUNNING_BODY: &str = r#"{"data":{"status":"running"}}"#;
+
+const TASK_OK_BODY: &str = r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#;
+
+const TASK_ERROR_BODY: &str =
+    r#"{"data":{"status":"stopped","exitstatus":"ERROR: start failed: KVM is not available"}}"#;
+
+/// What the lifecycle fixture answers per poll.
+#[derive(Debug, Clone, Copy)]
+enum TaskOutcome {
+    OkAfterOne,
+    Error,
+    AlwaysRunning,
+}
+
+#[derive(Debug)]
+struct LifecycleTransport {
+    outcome: TaskOutcome,
+    polls: Mutex<Vec<String>>,
+}
+
+impl LifecycleTransport {
+    fn with(outcome: TaskOutcome) -> Arc<Self> {
+        Arc::new(Self {
+            outcome,
+            polls: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl PveTransport for LifecycleTransport {
+    async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
+        // The observe-only trust probe: capture and refuse.
+        if request.pinned_fingerprint.is_none() {
+            return Err(PveTransportError::ObserveRefused {
+                observed: FP.to_owned(),
+            });
+        }
+        if request.path.contains("/status/start") {
+            return Ok(PveHttpResponse {
+                status: 200,
+                body: LIFECYCLE_UPID_BODY.as_bytes().to_vec(),
+            });
+        }
+        if request.path.contains("/tasks/") && request.path.contains("/status") {
+            self.polls.lock().unwrap().push(request.path.clone());
+            let body = match self.outcome {
+                TaskOutcome::OkAfterOne => TASK_OK_BODY,
+                TaskOutcome::Error => TASK_ERROR_BODY,
+                TaskOutcome::AlwaysRunning => TASK_RUNNING_BODY,
+            };
+            return Ok(PveHttpResponse {
+                status: 200,
+                body: body.as_bytes().to_vec(),
+            });
+        }
+        if request.path.contains("/version") {
+            return Ok(PveHttpResponse {
+                status: 200,
+                body: VERSION_BODY.as_bytes().to_vec(),
+            });
+        }
+        Err(PveTransportError::Connect {
+            detail: format!("unexpected path {}", request.path),
+        })
+    }
+}
+
+async fn lifecycle_harness(outcome: TaskOutcome) -> Harness {
+    let dist = tempfile::tempdir().unwrap();
+    std::fs::write(dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&store_dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let key_dir = tempfile::tempdir().unwrap();
+    let key_path = key_dir.path().join("master.key");
+    std::fs::write(
+        &key_path,
+        "1 0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let secrets = Arc::new(SecretStore::open(store.pool().clone(), &key_path).unwrap());
+    let proxmox = Arc::new(compose_proxmox(
+        store.pool().clone(),
+        secrets.clone(),
+        LifecycleTransport::with(outcome),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+    ));
+
+    // The worker runs the lifecycle executor against the same transport,
+    // so the durable operation executes end to end in the test.
+    let worker_operations = Arc::new(fleet_application::operation::Operations::new(
+        Arc::new(fleet_storage_sqlite::OperationRepository::new(
+            store.pool().clone(),
+        )),
+        Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+    ));
+    let accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort> = Arc::new(
+        fleet_storage_sqlite::ProxmoxAccountRepository::new(store.pool().clone()),
+    );
+    let credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore> =
+        Arc::new(fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(secrets));
+    let executor = Arc::new(fleet_controller::proxmox_exec::ProxmoxDispatch::new(
+        Arc::new(fleet_application::worker::NoopExecutor),
+        Arc::new(
+            fleet_controller::proxmox_exec::ProxmoxLifecycleExecutor::new(
+                accounts,
+                credentials,
+                fleet_provider_proxmox::ProxmoxClient::new(LifecycleTransport::with(outcome)),
+            ),
+        ),
+    ));
+    let worker_host = fleet_controller::worker::WorkerHost::new(worker_operations, executor, 4);
+    // The shutdown future must never resolve while the test runs: an
+    // immediately-ready `async {}` would drain the worker on the first
+    // tick.
+    let _worker_handle = tokio::spawn(async move {
+        worker_host.run(std::future::pending::<()>()).await;
+    });
+
+    let settings = Settings {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        web_dist: dist.path().to_path_buf(),
+        artifacts_dir: None,
+    };
+    let router = build_router(
+        &settings,
+        Some(store.pool().clone()),
+        None,
+        None,
+        None,
+        None,
+        Some(&proxmox),
+    );
+    let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .expect("the test server must serve");
+    });
+    Harness {
+        _dist: dist,
+        _store_dir: store_dir,
+        _key_dir: key_dir,
+        pool: store.pool().clone(),
+        address,
+        shutdown: Some(shutdown_tx),
+        _worker: None,
+    }
+}
+
+/// The setup shared by the lifecycle tests: a trusted account.
+async fn trusted_account(harness: &Harness) -> String {
+    let (_, body) = harness
+        .post(
+            "/api/v1/proxmox/accounts",
+            json!({
+                "name": "pve-main",
+                "host": "192.168.68.223",
+                "tokenId": "root@pam!GLM-AGENT",
+                "tokenSecret": "the-token-secret-material"
+            }),
+        )
+        .await;
+    let account_id = body["data"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/observe"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "observe must answer");
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/confirm"),
+            json!({"fingerprint": FP}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "confirm must answer: {body}"
+    );
+    account_id
+}
+
+#[tokio::test]
+async fn a_lifecycle_operation_runs_to_task_ok() {
+    let harness = lifecycle_harness(TaskOutcome::OkAfterOne).await;
+    let account_id = trusted_account(&harness).await;
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/start"),
+            json!({"node": "pve", "vmid": 101, "timeoutSeconds": 30}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+    let operation_id = body["data"]["id"].as_str().unwrap().to_owned();
+    eprintln!("created operation {operation_id}");
+
+    // The worker picks it up; wait for the terminal state.
+    let mut terminal = String::new();
+    for _ in 0..50 {
+        let (_, body) = harness
+            .get(&format!("/api/v1/operations/{operation_id}"))
+            .await;
+        terminal = body["data"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if terminal == "succeeded" || terminal == "failed" {
+            eprintln!("terminal {terminal}: {body}");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(terminal, "succeeded", "terminal={terminal} body={body}");
+    let (_, body) = harness
+        .get(&format!("/api/v1/operations/{operation_id}"))
+        .await;
+    let result: Value = serde_json::from_str(body["data"]["resultJson"].as_str().unwrap())
+        .expect("the result is JSON");
+    assert_eq!(result["taskState"], "ok", "{body}");
+}
+
+#[tokio::test]
+async fn a_failing_task_fails_the_operation_with_the_detail() {
+    let harness = lifecycle_harness(TaskOutcome::Error).await;
+    let account_id = trusted_account(&harness).await;
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/start"),
+            json!({"node": "pve", "vmid": 101, "timeoutSeconds": 30}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+    let operation_id = body["data"]["id"].as_str().unwrap().to_owned();
+    let mut terminal = String::new();
+    let mut error_detail = String::new();
+    for _ in 0..50 {
+        let (_, body) = harness
+            .get(&format!("/api/v1/operations/{operation_id}"))
+            .await;
+        terminal = body["data"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if terminal == "succeeded" || terminal == "failed" {
+            // The error detail rides the operation's errorJson string.
+            if let Some(error_json) = body["data"]["errorJson"].as_str() {
+                let parsed: Value = serde_json::from_str(error_json).unwrap_or(Value::Null);
+                error_detail = parsed["detail"].as_str().unwrap_or_default().to_owned();
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(terminal, "failed");
+    assert!(
+        error_detail.contains("KVM is not available"),
+        "{error_detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_deadline_expiry_fails_honestly_naming_the_uncertainty() {
+    let harness = lifecycle_harness(TaskOutcome::AlwaysRunning).await;
+    let account_id = trusted_account(&harness).await;
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/start"),
+            // A 1-second deadline: the poll loop expires while the task
+            // still runs.
+            json!({"node": "pve", "vmid": 101, "timeoutSeconds": 1}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+    let operation_id = body["data"]["id"].as_str().unwrap().to_owned();
+    let mut terminal = String::new();
+    let mut error_detail = String::new();
+    for _ in 0..100 {
+        let (_, body) = harness
+            .get(&format!("/api/v1/operations/{operation_id}"))
+            .await;
+        terminal = body["data"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if terminal == "succeeded" || terminal == "failed" {
+            if let Some(error_json) = body["data"]["errorJson"].as_str() {
+                let parsed: Value = serde_json::from_str(error_json).unwrap_or(Value::Null);
+                error_detail = parsed["detail"].as_str().unwrap_or_default().to_owned();
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(terminal, "failed");
+    assert!(
+        error_detail.contains("final state is unknown"),
+        "{error_detail}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrecognized_action_refuses_with_invalid_request() {
+    let harness = lifecycle_harness(TaskOutcome::OkAfterOne).await;
+    let account_id = trusted_account(&harness).await;
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/destroy"),
+            json!({"node": "pve", "vmid": 101, "timeoutSeconds": 30}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
 }

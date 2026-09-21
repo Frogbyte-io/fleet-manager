@@ -136,6 +136,9 @@ pub enum Permission {
     /// Create, confirm trust for, or remove a Proxmox account. A
     /// mutation: it stores or removes a credential or a trust anchor.
     ProxmoxConfig,
+    /// Run a lifecycle action (start/stop/shutdown/reboot) on a Proxmox
+    /// guest. A mutation: it changes the guest's power state.
+    ProxmoxOperate,
 }
 
 impl Permission {
@@ -181,6 +184,7 @@ impl Permission {
         Permission::SourceActivate,
         Permission::ProxmoxRead,
         Permission::ProxmoxConfig,
+        Permission::ProxmoxOperate,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -225,6 +229,7 @@ impl Permission {
             Permission::SourceActivate => "source.activate",
             Permission::ProxmoxRead => "proxmox.read",
             Permission::ProxmoxConfig => "proxmox.config",
+            Permission::ProxmoxOperate => "proxmox.operate",
         }
     }
 
@@ -271,7 +276,8 @@ impl Permission {
             | Permission::SourceFetch
             | Permission::SourceActivate
             | Permission::ProxmoxRead
-            | Permission::ProxmoxConfig => true,
+            | Permission::ProxmoxConfig
+            | Permission::ProxmoxOperate => true,
         }
     }
 
@@ -296,7 +302,8 @@ impl Permission {
             | Permission::SourceFetch
             | Permission::SourceActivate
             | Permission::ProxmoxRead
-            | Permission::ProxmoxConfig => false,
+            | Permission::ProxmoxConfig
+            | Permission::ProxmoxOperate => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

@@ -285,6 +285,41 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     )),
                 ))
             };
+            // The Proxmox lifecycle executor handles the FM-602 kinds over
+            // the same accounts and secret store the discovery surfaces
+            // use; it composes after the source dispatch so its kinds
+            // reach it and everything else falls through.
+            let with_proxmox: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let proxmox_client = fleet_provider_proxmox::ProxmoxClient::new(
+                    std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
+                );
+                let accounts: std::sync::Arc<dyn fleet_application::proxmox::ProxmoxAccountPort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                        store.pool().clone(),
+                    ));
+                let credentials: std::sync::Arc<
+                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
+                > = match &secrets {
+                    Some(secrets) => std::sync::Arc::new(
+                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                            secrets.clone(),
+                        ),
+                    ),
+                    None => std::sync::Arc::new(
+                        fleet_controller::proxmox_store::AbsentProxmoxCredentials,
+                    ),
+                };
+                std::sync::Arc::new(fleet_controller::proxmox_exec::ProxmoxDispatch::new(
+                    with_source.clone(),
+                    std::sync::Arc::new(
+                        fleet_controller::proxmox_exec::ProxmoxLifecycleExecutor::new(
+                            accounts,
+                            credentials,
+                            proxmox_client,
+                        ),
+                    ),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -295,11 +330,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_source.clone(),
+                            with_proxmox.clone(),
                         ));
                     executor
                 }
-                None => with_source.clone(),
+                None => with_proxmox.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);

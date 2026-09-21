@@ -542,6 +542,21 @@ pub enum Command {
         /// The machine the guest is confirmed to be.
         machine_id: String,
     },
+    /// Run a lifecycle action on a guest as a durable operation.
+    ProxmoxLifecycle {
+        /// The action: start, stop, shutdown, or reboot.
+        action: String,
+        /// The account's identity.
+        account_id: String,
+        /// The guest's hosting node.
+        node: String,
+        /// The guest's VMID.
+        vmid: u32,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Start the audited "Install Fleet Node" bootstrap on an agentless
     /// machine: download the checksummed service package on the node,
     /// install the systemd service, enroll, and wait for the gateway
@@ -1208,6 +1223,77 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
             }
             _ => Err(CliError { message: usage() }),
         },
+        "start" | "stop" | "shutdown" | "reboot" => {
+            let mut account_id = None;
+            let mut node = None;
+            let mut vmid = None;
+            let mut wait = false;
+            let mut timeout = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--account" => {
+                        account_id = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--account requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--node" => {
+                        node = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--node requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--vmid" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--vmid requires a value".to_owned(),
+                        })?;
+                        vmid = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--vmid must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--wait" => wait = true,
+                    "--timeout" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--timeout requires a value".to_owned(),
+                        })?;
+                        timeout = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--timeout must be a number, not {value:?}"),
+                        })?);
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::ProxmoxLifecycle {
+                action: verb.to_owned(),
+                account_id: account_id.ok_or_else(|| CliError {
+                    message: "--account is required".to_owned(),
+                })?,
+                node: node.ok_or_else(|| CliError {
+                    message: "--node is required".to_owned(),
+                })?,
+                vmid: vmid.ok_or_else(|| CliError {
+                    message: "--vmid is required".to_owned(),
+                })?,
+                wait,
+                timeout,
+            })
+        }
         _ => Err(CliError { message: usage() }),
     }
 }
@@ -2210,6 +2296,27 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             Some(serde_json::json!({ "machineId": machine_id })),
         ),
+        Command::ProxmoxLifecycle {
+            action,
+            account_id,
+            node,
+            vmid,
+            timeout,
+            ..
+        } => {
+            let mut body = serde_json::json!({
+                "node": node,
+                "vmid": vmid,
+                "timeoutSeconds": timeout.unwrap_or(300),
+            });
+            let _ = &mut body;
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/proxmox/accounts/{account_id}/guests/{vmid}/{action}"),
+                Vec::new(),
+                Some(body),
+            )
+        }
         Command::TailnetImport {
             node_id,
             user,

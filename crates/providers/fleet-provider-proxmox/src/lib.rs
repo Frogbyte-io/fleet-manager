@@ -543,6 +543,149 @@ pub struct PveGuestDiscovery {
     pub warnings: Vec<String>,
 }
 
+/// One lifecycle action on one guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleAction {
+    /// Start a stopped guest.
+    Start,
+    /// Stop a running guest immediately (no guest-side shutdown).
+    Stop,
+    /// ACPI-shutdown a running guest.
+    Shutdown,
+    /// Reboot a running guest.
+    Reboot,
+}
+
+impl LifecycleAction {
+    /// The URL path segment PVE expects for the action.
+    #[must_use]
+    pub const fn path_segment(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Shutdown => "shutdown",
+            Self::Reboot => "reboot",
+        }
+    }
+
+    /// Parses the stable string used in payloads and audit events.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unrecognized action id.
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "start" => Ok(Self::Start),
+            "stop" => Ok(Self::Stop),
+            "shutdown" => Ok(Self::Shutdown),
+            "reboot" => Ok(Self::Reboot),
+            other => Err(format!("unrecognized lifecycle action {other:?}")),
+        }
+    }
+
+    /// The stable string used in payloads and audit events.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Shutdown => "shutdown",
+            Self::Reboot => "reboot",
+        }
+    }
+}
+
+/// A parsed UPID. Fleet parses the string itself — the node it polls comes
+/// from the parse, never from trust in the caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Upid {
+    /// The hosting node the task runs on.
+    pub node: String,
+    /// The task type, e.g. `qmstart`.
+    pub task_type: String,
+    /// The task's target id (the VMID for guest tasks).
+    pub target: String,
+    /// The user the task runs as.
+    pub user: String,
+    /// The raw UPID string, for API round trips.
+    pub raw: String,
+}
+
+impl Upid {
+    /// Parses `UPID:<node>:<pid>:<pstart>:<starttime>:<type>:<id>:<user>:`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a malformed UPID, with a bounded detail and no echo of the
+    /// raw value beyond its shape.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let body = raw
+            .strip_prefix("UPID:")
+            .ok_or_else(|| "the UPID is missing its UPID: prefix".to_owned())?;
+        let parts: Vec<&str> = body.split(':').collect();
+        if parts.len() != 8 {
+            return Err(format!(
+                "the UPID carries {} fields, expected 8",
+                parts.len()
+            ));
+        }
+        let [
+            node,
+            pid,
+            pstart,
+            starttime,
+            task_type,
+            target,
+            user,
+            trailing,
+        ] = parts[..]
+        else {
+            return Err("the UPID fields did not destructure".to_owned());
+        };
+        for (label, part) in [
+            ("node", node),
+            ("pid", pid),
+            ("pstart", pstart),
+            ("starttime", starttime),
+            ("type", task_type),
+            ("id", target),
+            ("user", user),
+        ] {
+            if part.is_empty() {
+                return Err(format!("the UPID's {label} field is empty"));
+            }
+        }
+        if !trailing.is_empty() {
+            return Err("the UPID carries trailing material".to_owned());
+        }
+        let bounded = |part: &str, max: usize| part.chars().take(max).collect::<String>();
+        Ok(Self {
+            node: bounded(node, 128),
+            task_type: bounded(task_type, 64),
+            target: bounded(target, 64),
+            user: bounded(user, 128),
+            raw: raw.chars().take(256).collect(),
+        })
+    }
+}
+
+/// The status of one PVE task, as the API reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskStatus {
+    /// The task is still running.
+    Running,
+    /// The task finished successfully.
+    Ok,
+    /// The task finished with an error, carrying the bounded exit status.
+    Error {
+        /// The bounded exit status string.
+        detail: String,
+    },
+    /// The task is unknown to the node: it may have been rotated out of
+    /// the task list. Honest uncertainty, never assumed success.
+    Unknown,
+}
+
 /// The discovery port. The provider implements this over the PVE API;
 /// tests implement it over recorded fixtures.
 #[async_trait]
@@ -568,6 +711,36 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
         &self,
         request: PveHttpRequest,
     ) -> Result<PveGuestDiscovery, PveApiError>;
+
+    /// Runs one lifecycle action on one QEMU guest, returning the parsed
+    /// UPID of the task PVE started. Read-only until this point; this is
+    /// the first mutating surface in the provider.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] on auth, privilege, HTTP, payload, or
+    /// transport failures.
+    async fn guest_lifecycle(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        action: LifecycleAction,
+    ) -> Result<Upid, PveApiError>;
+
+    /// Reads one task's status by node and UPID. An unknown task is an
+    /// honest [`TaskStatus::Unknown`], not an error: PVE rotates old task
+    /// entries out, and assuming success would be a lie.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] on auth, privilege, HTTP, payload, or
+    /// transport failures.
+    async fn task_status(
+        &self,
+        request: PveHttpRequest,
+        upid: &Upid,
+    ) -> Result<TaskStatus, PveApiError>;
 }
 
 /// The provider client: transport plus normalization. Stateless — every
@@ -802,6 +975,39 @@ impl ProxmoxSource for ProxmoxClient {
             warnings,
         })
     }
+
+    async fn guest_lifecycle(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        action: LifecycleAction,
+    ) -> Result<Upid, PveApiError> {
+        let lifecycle_request = PveHttpRequest {
+            path: format!(
+                "/api2/json/nodes/{}/qemu/{vmid}/status/{}",
+                urlencode(node),
+                action.path_segment()
+            ),
+            ..request.clone()
+        };
+        let data = self.call(lifecycle_request).await?;
+        // The mutating API answers `{"data": "<UPID string>"}`.
+        let Some(upid_raw) = data.as_str() else {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the lifecycle answer carries no UPID string".to_owned(),
+            });
+        };
+        Upid::parse(upid_raw).map_err(|detail| PveApiError::InvalidPayload { detail })
+    }
+
+    async fn task_status(
+        &self,
+        request: PveHttpRequest,
+        upid: &Upid,
+    ) -> Result<TaskStatus, PveApiError> {
+        self.task_status_impl(&request, upid).await
+    }
 }
 
 /// The config's `netN` entries, parsed for MAC addresses. The value shape
@@ -946,6 +1152,46 @@ impl ProxmoxClient {
             }
         }
         agent
+    }
+
+    /// Reads one task's status.
+    async fn task_status_impl(
+        &self,
+        request: &PveHttpRequest,
+        upid: &Upid,
+    ) -> Result<TaskStatus, PveApiError> {
+        let status_request = PveHttpRequest {
+            path: format!(
+                "/api2/json/nodes/{}/tasks/{}/status",
+                urlencode(&upid.node),
+                urlencode(&upid.raw)
+            ),
+            ..request.clone()
+        };
+        let data = self.call(status_request).await?;
+        // The task-status payload: `status: running|stopped`,
+        // `exitstatus: OK|ERROR ...`. `data: null` means the task entry is
+        // unknown to the node — honest uncertainty.
+        let Some(object) = data.as_object() else {
+            return Ok(TaskStatus::Unknown);
+        };
+        match object.get("status").and_then(serde_json::Value::as_str) {
+            Some("running") => Ok(TaskStatus::Running),
+            Some("stopped") => {
+                let exitstatus = object
+                    .get("exitstatus")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if exitstatus == "OK" {
+                    Ok(TaskStatus::Ok)
+                } else {
+                    Ok(TaskStatus::Error {
+                        detail: exitstatus.chars().take(256).collect(),
+                    })
+                }
+            }
+            _ => Ok(TaskStatus::Unknown),
+        }
     }
 }
 
@@ -1130,6 +1376,35 @@ mod tests {
         assert_eq!(macs.len(), 2, "{macs:?}");
         assert_eq!(macs[0], "de:ad:be:ef:00:01");
         assert_eq!(macs[1], "de:ad:be:ef:00:02");
+    }
+
+    #[test]
+    fn upids_parse_and_refuse_malformed_shapes() {
+        let raw = "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101:root@pam!GLM-AGENT:";
+        let upid = Upid::parse(raw).unwrap();
+        assert_eq!(upid.node, "pve");
+        assert_eq!(upid.task_type, "qmreboot");
+        assert_eq!(upid.target, "101");
+        assert_eq!(upid.user, "root@pam!GLM-AGENT");
+
+        assert!(Upid::parse("not-a-upid").is_err());
+        assert!(Upid::parse("UPID:pve:0015:0C6D:6AAF:qmreboot:101:").is_err());
+        // A field is empty: refused.
+        assert!(Upid::parse("UPID:pve::0C6DF532:6AAFE1EC:qmreboot:101:user:").is_err());
+        // Trailing material: refused.
+        assert!(
+            Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101:user:extra").is_err()
+        );
+    }
+
+    #[test]
+    fn lifecycle_actions_round_trip_their_ids() {
+        for id in ["start", "stop", "shutdown", "reboot"] {
+            let action = LifecycleAction::from_id(id).unwrap();
+            assert_eq!(action.id(), id);
+            assert_eq!(action.path_segment(), id);
+        }
+        assert!(LifecycleAction::from_id("destroy").is_err());
     }
 
     #[test]
