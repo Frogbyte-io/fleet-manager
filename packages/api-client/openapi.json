@@ -2500,6 +2500,172 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/guests/{vmid}/{action}/review": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Reviews one destructive-adjacent operation: renders exactly what will\nrun and returns the token the create call must present.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or a malformed request.",
+        "operationId": "reviewProxmoxOperation",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, or task-cancel.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewProxmoxOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The review record; present its token to the create call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProxmoxReviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The action is unrecognized or the request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not operate Proxmox guests destructively.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}/guests/{vmid}/{action}/run": {
+      "post": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Runs a reviewed destructive-adjacent operation as a durable operation.\nThe review token must match the request exactly: what runs is what was\nreviewed. The generic operations surface refuses these kinds outright.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a missing/stale review\ntoken, or a malformed request.",
+        "operationId": "startReviewedProxmoxOperation",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "description": "The guest's VMID.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "description": "The reviewed destructive action.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartReviewedProxmoxOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The operation was accepted and is durable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The action is unrecognized or the review token does not match the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not operate Proxmox guests destructively.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/proxmox/accounts/{accountId}/observe": {
       "post": {
         "tags": [
@@ -5713,6 +5879,45 @@
           }
         }
       },
+      "ProxmoxReviewDto": {
+        "type": "object",
+        "description": "The review record: exactly what the destructive operation will run,\nbound to a token the create call must present.",
+        "required": [
+          "reviewToken",
+          "action",
+          "node",
+          "vmid",
+          "accountId",
+          "params"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account the operation will run under."
+          },
+          "action": {
+            "type": "string",
+            "description": "The action under review."
+          },
+          "node": {
+            "type": "string",
+            "description": "The guest's hosting node."
+          },
+          "params": {
+            "description": "The action-specific parameters, as reviewed."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The token binding this review to the request it described."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "ReadyAuthDto": {
         "oneOf": [
           {
@@ -6652,6 +6857,54 @@
           }
         }
       },
+      "Resource_ProxmoxReviewDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The review record: exactly what the destructive operation will run,\nbound to a token the create call must present.",
+            "required": [
+              "reviewToken",
+              "action",
+              "node",
+              "vmid",
+              "accountId",
+              "params"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account the operation will run under."
+              },
+              "action": {
+                "type": "string",
+                "description": "The action under review."
+              },
+              "node": {
+                "type": "string",
+                "description": "The guest's hosting node."
+              },
+              "params": {
+                "description": "The action-specific parameters, as reviewed."
+              },
+              "reviewToken": {
+                "type": "string",
+                "description": "The token binding this review to the request it described."
+              },
+              "vmid": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_ReadyPlanDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -6739,6 +6992,22 @@
           "immediate",
           "backoff"
         ]
+      },
+      "ReviewProxmoxOperationRequest": {
+        "type": "object",
+        "description": "The destructive-review request.",
+        "required": [
+          "node"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The guest's hosting node."
+          },
+          "params": {
+            "description": "The action-specific parameters (snapshot name/description, clone\ntarget id/name, and so on)."
+          }
+        }
       },
       "SkillsAuthDto": {
         "oneOf": [
@@ -7062,6 +7331,34 @@
               "$ref": "#/components/schemas/ReadyToolDto"
             },
             "description": "The tools the project declares, as pinned requests."
+          }
+        }
+      },
+      "StartReviewedProxmoxOperationRequest": {
+        "type": "object",
+        "description": "The create call for a reviewed destructive operation: carries the\nreview token binding it to what was reviewed.",
+        "required": [
+          "node",
+          "reviewToken",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The guest's hosting node."
+          },
+          "params": {
+            "description": "The action-specific parameters, identical to the reviewed ones."
+          },
+          "reviewToken": {
+            "type": "string",
+            "description": "The review token from the review call."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds. Bounded by the executor.",
+            "minimum": 0
           }
         }
       },

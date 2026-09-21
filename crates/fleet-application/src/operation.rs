@@ -43,7 +43,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 35] = [
+pub const CREATABLE_KINDS: [&str; 41] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -79,6 +79,12 @@ pub const CREATABLE_KINDS: [&str; 35] = [
     "proxmox.guest.stop",
     "proxmox.guest.shutdown",
     "proxmox.guest.reboot",
+    "proxmox.guest.snapshot",
+    "proxmox.guest.snapshot-revert",
+    "proxmox.guest.snapshot-delete",
+    "proxmox.guest.clone",
+    "proxmox.guest.template",
+    "proxmox.task-cancel",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -103,6 +109,12 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         | "proxmox.guest.stop"
         | "proxmox.guest.shutdown"
         | "proxmox.guest.reboot" => Some(Permission::ProxmoxOperate),
+        "proxmox.guest.snapshot"
+        | "proxmox.guest.snapshot-revert"
+        | "proxmox.guest.snapshot-delete"
+        | "proxmox.guest.clone"
+        | "proxmox.guest.template"
+        | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
         _ => None,
     }
 }
@@ -438,6 +450,11 @@ pub struct NewOperation {
     pub correlation_id: Option<String>,
     /// The bounded provider input, for kinds that need one.
     pub payload_json: Option<String>,
+    /// Whether the request arrived through a dedicated endpoint that
+    /// already enforced the kind's extra gate (e.g. the destructive
+    /// review). Only the dedicated surface sets it; the generic surface
+    /// leaves it off, which refuses destructive kinds outright.
+    pub reviewed: bool,
 }
 
 /// The authorized operation use cases.
@@ -460,6 +477,7 @@ impl Operations {
     /// # Errors
     ///
     /// Fails on denial, unknown kind, or a backend failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn create(
         &self,
         authorizer: &dyn Authorizer,
@@ -525,6 +543,25 @@ impl Operations {
             )
             .map_err(OperationUseCaseError::Denied)?;
         } else if let Some(permission) = catalog_scoped_kind_permission(&new.kind) {
+            // The destructive-adjacent Proxmox kinds never route through
+            // the generic surface: their creation goes through the
+            // dedicated reviewed endpoint, which binds the operation to a
+            // confirmed review token. A generic-surface create is a
+            // route-around attempt, refused as malformed.
+            if !new.reviewed
+                && (new.kind.starts_with("proxmox.guest.snapshot")
+                    || matches!(
+                        new.kind.as_str(),
+                        "proxmox.guest.clone" | "proxmox.guest.template" | "proxmox.task-cancel"
+                    ))
+            {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: format!(
+                        "the {kind} kind is destructive-adjacent and runs only through its reviewed dedicated endpoint",
+                        kind = new.kind
+                    ),
+                });
+            }
             authorize(
                 authorizer,
                 AccessRequest {

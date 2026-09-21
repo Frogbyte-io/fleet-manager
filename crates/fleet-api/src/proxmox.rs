@@ -1088,6 +1088,288 @@ pub async fn start_proxmox_lifecycle(
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(payload.to_string()),
+                reviewed: true,
+            },
+        )
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(Resource::new(crate::operations::OperationDto::from(
+            operation,
+        ))),
+    ))
+}
+
+/// The review record: exactly what the destructive operation will run,
+/// bound to a token the create call must present.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxReviewDto {
+    /// The token binding this review to the request it described.
+    pub review_token: String,
+    /// The action under review.
+    pub action: String,
+    /// The guest's hosting node.
+    pub node: String,
+    /// The guest's VMID.
+    pub vmid: u32,
+    /// The account the operation will run under.
+    pub account_id: String,
+    /// The action-specific parameters, as reviewed.
+    pub params: serde_json::Value,
+}
+
+/// The destructive-review request.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewProxmoxOperationRequest {
+    /// The guest's hosting node.
+    pub node: String,
+    /// The action-specific parameters (snapshot name/description, clone
+    /// target id/name, and so on).
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// The token binding one reviewed request to its create call: the SHA-256
+/// of the canonical reviewed material. Stateless — the controller holds no
+/// review store; a create presents the token computed from exactly the
+/// payload it carries, so what runs is what was reviewed.
+#[must_use]
+fn review_token(
+    account_id: &str,
+    vmid: u32,
+    action: &str,
+    request: &ReviewProxmoxOperationRequest,
+) -> String {
+    use sha2::Digest as _;
+    let canonical = serde_json::json!({
+        "accountId": account_id,
+        "vmid": vmid,
+        "action": action,
+        "node": request.node,
+        "params": request.params,
+    });
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(serde_json::to_string(&canonical).unwrap_or_default());
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest.iter().fold(String::with_capacity(64), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+/// Reviews one destructive-adjacent operation: renders exactly what will
+/// run and returns the token the create call must present.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or a malformed request.
+#[utoipa::path(
+    post,
+    path = "/proxmox/accounts/{accountId}/guests/{vmid}/{action}/review",
+    tag = "proxmox",
+    operation_id = "reviewProxmoxOperation",
+    params(
+        ("accountId" = String, Path, description = "The account's identity."),
+        ("vmid" = u32, Path, description = "The guest's VMID."),
+        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, or task-cancel.")
+    ),
+    request_body = ReviewProxmoxOperationRequest,
+    responses(
+        (
+            status = 200,
+            description = "The review record; present its token to the create call.",
+            body = Resource<ProxmoxReviewDto>
+        ),
+        (
+            status = 400,
+            description = "The action is unrecognized or the request is malformed.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 403,
+            description = "The caller may not operate Proxmox guests destructively.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn review_proxmox_operation(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path((account_id, vmid, action)): Path<(String, u32, String)>,
+    Json(request): Json<ReviewProxmoxOperationRequest>,
+) -> Result<Json<Resource<ProxmoxReviewDto>>, ApiErrorResponse> {
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    if !matches!(
+        action.as_str(),
+        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template" | "task-cancel"
+    ) {
+        return Err(crate::machines::invalid_request(
+            &format!("unrecognized destructive action {action:?}"),
+            correlation_id,
+        ));
+    }
+    if request.node.is_empty() || request.node.len() > 128 {
+        return Err(crate::machines::invalid_request(
+            "the node must be 1..=128 characters",
+            correlation_id,
+        ));
+    }
+    if let Err(decision) = fleet_application::authz::authorize(
+        state.authorizer.as_ref(),
+        fleet_application::authz::AccessRequest {
+            principal_id: &principal.id,
+            action: fleet_application::authz::Permission::ProxmoxDestructive,
+            resource: None,
+        },
+    ) {
+        return Err(crate::machines::denied_error(decision, correlation_id));
+    }
+    Ok(Json(Resource::new(ProxmoxReviewDto {
+        review_token: review_token(&account_id, vmid, &action, &request),
+        action,
+        node: request.node,
+        vmid,
+        account_id,
+        params: request.params,
+    })))
+}
+
+/// The create call for a reviewed destructive operation: carries the
+/// review token binding it to what was reviewed.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartReviewedProxmoxOperationRequest {
+    /// The guest's hosting node.
+    pub node: String,
+    /// The review token from the review call.
+    pub review_token: String,
+    /// The action-specific parameters, identical to the reviewed ones.
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// The deadline, in seconds. Bounded by the executor.
+    pub timeout_seconds: u64,
+}
+
+/// Runs a reviewed destructive-adjacent operation as a durable operation.
+/// The review token must match the request exactly: what runs is what was
+/// reviewed. The generic operations surface refuses these kinds outright.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a missing/stale review
+/// token, or a malformed request.
+#[utoipa::path(
+    post,
+    path = "/proxmox/accounts/{accountId}/guests/{vmid}/{action}/run",
+    tag = "proxmox",
+    operation_id = "startReviewedProxmoxOperation",
+    params(
+        ("accountId" = String, Path, description = "The account's identity."),
+        ("vmid" = u32, Path, description = "The guest's VMID."),
+        ("action" = String, Path, description = "The reviewed destructive action.")
+    ),
+    request_body = StartReviewedProxmoxOperationRequest,
+    responses(
+        (
+            status = 202,
+            description = "The operation was accepted and is durable.",
+            body = Resource<crate::operations::OperationDto>
+        ),
+        (
+            status = 400,
+            description = "The action is unrecognized or the review token does not match the request.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 403,
+            description = "The caller may not operate Proxmox guests destructively.",
+            body = crate::error::ApiError
+        ),
+    )
+)]
+pub async fn start_reviewed_proxmox_operation(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
+    Path((account_id, vmid, action)): Path<(String, u32, String)>,
+    Json(request): Json<StartReviewedProxmoxOperationRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    if !matches!(
+        action.as_str(),
+        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template" | "task-cancel"
+    ) {
+        return Err(crate::machines::invalid_request(
+            &format!("unrecognized destructive action {action:?}"),
+            correlation_id,
+        ));
+    }
+    if let Err(decision) = fleet_application::authz::authorize(
+        state.authorizer.as_ref(),
+        fleet_application::authz::AccessRequest {
+            principal_id: &principal.id,
+            action: fleet_application::authz::Permission::ProxmoxDestructive,
+            resource: None,
+        },
+    ) {
+        return Err(crate::machines::denied_error(decision, correlation_id));
+    }
+    // The review gate: the token is recomputed from THIS request, so the
+    // create runs only what was reviewed — any parameter change invalidates
+    // the token.
+    let presented = ReviewProxmoxOperationRequest {
+        node: request.node.clone(),
+        params: request.params.clone(),
+    };
+    let expected = review_token(&account_id, vmid, &action, &presented);
+    if expected != request.review_token {
+        return Err(crate::machines::invalid_request(
+            "the review token does not match this request; review again",
+            correlation_id,
+        ));
+    }
+    if request.node.is_empty() || request.node.len() > 128 {
+        return Err(crate::machines::invalid_request(
+            "the node must be 1..=128 characters",
+            correlation_id,
+        ));
+    }
+    let mut payload = serde_json::json!({
+        "accountId": account_id,
+        "node": request.node,
+        "vmid": vmid,
+        "timeoutSeconds": request.timeout_seconds,
+        "params": request.params,
+    });
+    let _ = &mut payload;
+    let kind = format!("proxmox.guest.{action}");
+    let kind = if action == "task-cancel" {
+        "proxmox.task-cancel".to_owned()
+    } else {
+        kind
+    };
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:{key}", principal.id));
+    let operation = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            &principal.id,
+            &fleet_application::operation::NewOperation {
+                kind,
+                idempotency_key,
+                deadline_at: None,
+                correlation_id: Some(correlation_id.to_string()),
+                payload_json: Some(payload.to_string()),
+                reviewed: true,
             },
         )
         .await

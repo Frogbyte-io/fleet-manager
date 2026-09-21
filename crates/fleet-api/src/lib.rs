@@ -130,6 +130,9 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox::AssociationCandidateDto,
         proxmox::ObserveProxmoxGuestRequest,
         proxmox::StartProxmoxLifecycleRequest,
+        proxmox::ProxmoxReviewDto,
+        proxmox::ReviewProxmoxOperationRequest,
+        proxmox::StartReviewedProxmoxOperationRequest,
         proxmox::ProviderAgentDto,
         proxmox::ProviderInterfaceDto,
         node::CreateEnrollmentTokenRequest,
@@ -236,6 +239,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::list_proxmox_guests))
                 .routes(routes!(proxmox::observe_proxmox_guest))
                 .routes(routes!(proxmox::start_proxmox_lifecycle))
+                .routes(routes!(proxmox::review_proxmox_operation))
+                .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )
         .split_for_parts();

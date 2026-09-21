@@ -166,6 +166,7 @@ async fn an_unapproved_plan_completes_blocked_naming_the_steps() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload.to_string()),
+                reviewed: false,
             },
         )
         .await
@@ -237,6 +238,7 @@ async fn a_kind_state_mismatched_payload_fails_honestly() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload.to_string()),
+                reviewed: false,
             },
         )
         .await
@@ -309,6 +311,7 @@ async fn an_approved_plan_executes_every_action_and_succeeds() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload.to_string()),
+                reviewed: false,
             },
         )
         .await
@@ -387,6 +390,7 @@ async fn a_failing_step_stops_with_compensations_and_remainder() {
                 deadline_at: None,
                 correlation_id: None,
                 payload_json: Some(payload.to_string()),
+                reviewed: false,
             },
         )
         .await

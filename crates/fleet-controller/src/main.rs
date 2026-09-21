@@ -313,6 +313,13 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     with_source.clone(),
                     std::sync::Arc::new(
                         fleet_controller::proxmox_exec::ProxmoxLifecycleExecutor::new(
+                            accounts.clone(),
+                            credentials.clone(),
+                            proxmox_client.clone(),
+                        ),
+                    ),
+                    std::sync::Arc::new(
+                        fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
                             accounts,
                             credentials,
                             proxmox_client,

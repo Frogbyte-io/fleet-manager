@@ -551,6 +551,7 @@ impl ApplyExecutor {
                     deadline_at: None,
                     correlation_id: None,
                     payload_json: Some(payload_json.to_owned()),
+                    reviewed: false,
                 },
             )
             .await
@@ -639,6 +640,7 @@ impl ApplyExecutor {
                     deadline_at: None,
                     correlation_id: None,
                     payload_json: Some(payload_json.to_string()),
+                    reviewed: false,
                 },
             )
             .await

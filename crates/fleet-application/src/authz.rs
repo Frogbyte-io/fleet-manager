@@ -139,6 +139,10 @@ pub enum Permission {
     /// Run a lifecycle action (start/stop/shutdown/reboot) on a Proxmox
     /// guest. A mutation: it changes the guest's power state.
     ProxmoxOperate,
+    /// Run a destructive-adjacent Proxmox operation: snapshot, revert,
+    /// snapshot delete, clone, template conversion, or remote task
+    /// cancellation. A mutation: it changes or destroys guest state.
+    ProxmoxDestructive,
 }
 
 impl Permission {
@@ -185,6 +189,7 @@ impl Permission {
         Permission::ProxmoxRead,
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
+        Permission::ProxmoxDestructive,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -230,6 +235,7 @@ impl Permission {
             Permission::ProxmoxRead => "proxmox.read",
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
+            Permission::ProxmoxDestructive => "proxmox.destructive",
         }
     }
 
@@ -277,7 +283,8 @@ impl Permission {
             | Permission::SourceActivate
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
-            | Permission::ProxmoxOperate => true,
+            | Permission::ProxmoxOperate
+            | Permission::ProxmoxDestructive => true,
         }
     }
 
@@ -303,7 +310,8 @@ impl Permission {
             | Permission::SourceActivate
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
-            | Permission::ProxmoxOperate => false,
+            | Permission::ProxmoxOperate
+            | Permission::ProxmoxDestructive => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
