@@ -142,6 +142,7 @@ async fn harness() -> Harness {
         Some(&tailnet),
         None,
         None,
+        None,
     );
     let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

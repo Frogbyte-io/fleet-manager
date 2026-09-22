@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod images;
 pub mod machines;
 pub mod nodes;
 pub mod onboarding;
@@ -22,6 +23,7 @@ pub mod proxmox;
 pub mod source;
 
 pub use audit::{AuditLedger, AuditSink};
+pub use images::RecipeRepository;
 pub use machines::MachineRepository;
 pub use nodes::NodeRepository;
 pub use onboarding::OnboardingRepository;

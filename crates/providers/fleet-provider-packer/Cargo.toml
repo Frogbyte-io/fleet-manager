@@ -1,0 +1,19 @@
+[package]
+name = "fleet-provider-packer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+tokio = { version = "1", features = ["process", "time", "rt"] }
+fleet-core = { path = "../../fleet-core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true

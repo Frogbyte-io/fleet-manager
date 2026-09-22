@@ -560,6 +560,41 @@ pub enum Command {
         /// How long to wait, in seconds.
         timeout: Option<u64>,
     },
+    /// List image recipe drafts.
+    ImagesRecipes,
+    /// Create an image recipe draft. The recipe content is read from
+    /// standard input as JSON.
+    ImagesCreate {
+        /// The recipe name.
+        name: String,
+        /// The recipe description.
+        description: String,
+        /// The PVE node the recipe builds on.
+        node: String,
+        /// The PVE storage pool the build writes to.
+        storage_pool: String,
+        /// What the recipe builds from: iso or clone.
+        source: String,
+    },
+    /// Publish a recipe draft: freeze an immutable version.
+    ImagesPublish {
+        /// The recipe's identity.
+        recipe_id: String,
+    },
+    /// List a recipe's published versions.
+    ImagesVersions {
+        /// The recipe's identity.
+        recipe_id: String,
+    },
+    /// Start a build of one published version as a durable operation.
+    ImagesBuild {
+        /// The published recipe version to build.
+        version_id: String,
+        /// Wait for the build to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Run a lifecycle action on a guest as a durable operation.
     ProxmoxLifecycle {
         /// The action: start, stop, shutdown, or reboot.
@@ -714,6 +749,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         }
         ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
         ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
+        ["images", verb, rest @ ..] => parse_images_command(verb, rest)?,
         ["projects", verb, rest @ ..] => parse_projects_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
@@ -1120,6 +1156,63 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
     }
 }
 
+/// Parses one `fleetctl images` subcommand.
+fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match verb {
+        "recipes" => match rest {
+            [] => Ok(Command::ImagesRecipes),
+            _ => Err(CliError { message: usage() }),
+        },
+        "create" => match rest {
+            [
+                "--name",
+                name,
+                "--description",
+                description,
+                "--node",
+                node,
+                "--storage-pool",
+                pool,
+                "--source",
+                source,
+            ] => Ok(Command::ImagesCreate {
+                name: (*name).to_owned(),
+                description: (*description).to_owned(),
+                node: (*node).to_owned(),
+                storage_pool: (*pool).to_owned(),
+                source: (*source).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "publish" => match rest {
+            [recipe_id] => Ok(Command::ImagesPublish {
+                recipe_id: (*recipe_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "versions" => match rest {
+            [recipe_id] => Ok(Command::ImagesVersions {
+                recipe_id: (*recipe_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "build" => match rest {
+            [version_id] => Ok(Command::ImagesBuild {
+                version_id: (*version_id).to_owned(),
+                wait: false,
+                timeout: None,
+            }),
+            [version_id, "--wait"] => Ok(Command::ImagesBuild {
+                version_id: (*version_id).to_owned(),
+                wait: true,
+                timeout: None,
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
 /// Parses one `fleetctl proxmox` subcommand.
 #[allow(clippy::too_many_lines)]
 fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
@@ -1393,7 +1486,7 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -2466,6 +2559,52 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 })),
             )
         }
+        Command::ImagesRecipes => (
+            reqwest::Method::GET,
+            "/api/v1/images/recipes".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::ImagesCreate {
+            name,
+            description,
+            node,
+            storage_pool,
+            source,
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/images/recipes".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "name": name,
+                "description": description,
+                "node": node,
+                "storagePool": storage_pool,
+                "source": source,
+                "content": read_stdin_to_eof("the recipe content as JSON")?,
+            })),
+        ),
+        Command::ImagesPublish { recipe_id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/images/recipes/{recipe_id}/publish"),
+            Vec::new(),
+            None,
+        ),
+        Command::ImagesVersions { recipe_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/images/recipes/{recipe_id}/versions"),
+            Vec::new(),
+            None,
+        ),
+        Command::ImagesBuild { version_id, .. } => (
+            reqwest::Method::POST,
+            "/api/v1/images/builds".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "versionId": version_id,
+                "timeoutSeconds": 14400,
+            })),
+        ),
         Command::ProxmoxLifecycle {
             action,
             account_id,
@@ -3083,6 +3222,52 @@ fn render_project_mutation(payload: &Value) -> String {
 /// Renders a project deletion answer.
 fn render_project_deleted() -> String {
     "project removed".to_owned()
+}
+
+/// Renders the image surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_images_for_test(value: &Value) -> String {
+    render_images(Some(value))
+}
+
+fn render_images(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    // Recipes/versions lists: one row per entry.
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let mut lines = vec![format!(
+            "{:<38} {:<24} {:<20} {}",
+            "ID", "NAME", "SOURCE", "PUBLISHED FROM"
+        )];
+        for item in items {
+            lines.push(format!(
+                "{:<38} {:<24} {:<20} {}",
+                item["id"].as_str().unwrap_or("-"),
+                item["name"].as_str().unwrap_or("-"),
+                item["source"].as_str().unwrap_or("-"),
+                item["publishedFrom"].as_str().unwrap_or("-"),
+            ));
+        }
+        if items.is_empty() {
+            lines.push("(no image recipes)".to_owned());
+        }
+        return lines.join("\n");
+    }
+    // Single recipe/version/answers: key facts only.
+    let mut lines = Vec::new();
+    for (key, val) in value.as_object().into_iter().flatten() {
+        let rendered = match val {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        lines.push(format!("{key}: {rendered}"));
+    }
+    if lines.is_empty() {
+        lines.push("done".to_owned());
+    }
+    lines.join("\n")
 }
 
 /// Renders the Proxmox surface as human text; exposed for contract tests.

@@ -623,6 +623,7 @@ dependencies = [
  "fleet-provider-frogenv",
  "fleet-provider-git",
  "fleet-provider-mise",
+ "fleet-provider-packer",
  "fleet-provider-proxmox",
  "fleet-provider-skills-manager",
  "fleet-provider-ssh",
@@ -655,6 +656,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "uuid",
 ]
@@ -718,6 +720,16 @@ dependencies = [
  "fleet-core",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fleet-provider-packer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fleet-core",
+ "serde",
  "tokio",
 ]
 

@@ -24,6 +24,7 @@ fleet-provider-mise = { version = "0.1.0", path = "../providers/fleet-provider-m
 fleet-provider-skills-manager = { version = "0.1.0", path = "../providers/fleet-provider-skills-manager" }
 fleet-provider-tailscale = { path = "../providers/fleet-provider-tailscale" }
 fleet-provider-proxmox = { path = "../providers/fleet-provider-proxmox" }
+fleet-provider-packer = { path = "../providers/fleet-provider-packer" }
 fleet-secrets = { version = "0.1.0", path = "../fleet-secrets" }
 fleet-storage-sqlite = { version = "0.1.0", path = "../fleet-storage-sqlite" }
 futures-util = "0.3.31"

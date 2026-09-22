@@ -347,6 +347,7 @@ fn state_for(
             tailnet: None,
             projects: None,
             proxmox: None,
+            images: None,
         }),
         handle,
     )

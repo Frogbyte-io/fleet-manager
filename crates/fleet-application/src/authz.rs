@@ -143,6 +143,12 @@ pub enum Permission {
     /// snapshot delete, clone, template conversion, or remote task
     /// cancellation. A mutation: it changes or destroys guest state.
     ProxmoxDestructive,
+    /// List and read image recipes and their published versions. A read,
+    /// but a build-infrastructure-revealing one.
+    ImagesRead,
+    /// Create, edit, publish, or remove an image recipe, and run builds.
+    /// A mutation: it changes build inputs or produces images.
+    ImagesConfig,
 }
 
 impl Permission {
@@ -190,6 +196,8 @@ impl Permission {
         Permission::ProxmoxConfig,
         Permission::ProxmoxOperate,
         Permission::ProxmoxDestructive,
+        Permission::ImagesRead,
+        Permission::ImagesConfig,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -236,6 +244,8 @@ impl Permission {
             Permission::ProxmoxConfig => "proxmox.config",
             Permission::ProxmoxOperate => "proxmox.operate",
             Permission::ProxmoxDestructive => "proxmox.destructive",
+            Permission::ImagesRead => "images.read",
+            Permission::ImagesConfig => "images.config",
         }
     }
 
@@ -251,7 +261,8 @@ impl Permission {
             | Permission::AuditRead
             | Permission::MachineRead
             | Permission::NodeRead
-            | Permission::ProjectsRead => false,
+            | Permission::ProjectsRead
+            | Permission::ImagesRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -284,7 +295,8 @@ impl Permission {
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
-            | Permission::ProxmoxDestructive => true,
+            | Permission::ProxmoxDestructive
+            | Permission::ImagesConfig => true,
         }
     }
 
@@ -311,7 +323,9 @@ impl Permission {
             | Permission::ProxmoxRead
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
-            | Permission::ProxmoxDestructive => false,
+            | Permission::ProxmoxDestructive
+            | Permission::ImagesRead
+            | Permission::ImagesConfig => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

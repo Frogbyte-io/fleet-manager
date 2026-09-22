@@ -89,6 +89,7 @@ async fn harness() -> Harness {
         None,
         None,
         None,
+        None,
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

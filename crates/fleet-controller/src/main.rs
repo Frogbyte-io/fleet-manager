@@ -327,6 +327,24 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     ),
                 ))
             };
+            // The images executor handles the FM-700 build kind over the
+            // operator-installed Packer CLI; it composes after the Proxmox
+            // dispatch so its kind reaches it and everything else falls
+            // through.
+            let with_images: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let versions: std::sync::Arc<dyn fleet_application::images::RecipePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                        store.pool().clone(),
+                    ));
+                std::sync::Arc::new(fleet_controller::images_exec::ImagesDispatch::new(
+                    with_proxmox.clone(),
+                    std::sync::Arc::new(fleet_controller::images_exec::ImagesExecutor::new(
+                        versions,
+                        std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
+                        config.data_dir.join("image-builds"),
+                    )),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -337,11 +355,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_proxmox.clone(),
+                            with_images.clone(),
                         ));
                     executor
                 }
-                None => with_proxmox.clone(),
+                None => with_images.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);
@@ -389,6 +407,14 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             )),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         ));
+        // The image surface composes over the store alone: recipes and
+        // versions need no secret material.
+        let images = std::sync::Arc::new(fleet_application::images::Images::new(
+            std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                store.pool().clone(),
+            )),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        ));
         // The Proxmox surface composes over the store, the secret store,
         // and the provider's pinned-fingerprint transport. Without a secret
         // store it serves the standard "unavailable" envelope.
@@ -408,6 +434,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             tailnet,
             Some(projects),
             proxmox,
+            Some(images),
             shutdown_signal(),
         )
         .await;

@@ -10,6 +10,394 @@
     "version": "v1"
   },
   "paths": {
+    "/api/v1/images/builds": {
+      "post": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Starts a build of one published version as a durable operation. The\nexecutor verifies the CLI version, validates the recipe, and runs the\nbuild over the operator-installed Packer CLI.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or a malformed request.",
+        "operationId": "startImageBuild",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuildImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The build operation was accepted and is durable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/recipes": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Lists the recipe drafts.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listImageRecipes",
+        "responses": {
+          "200": {
+            "description": "The recipe drafts, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RecipeDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Creates a recipe draft.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, conflict, or malformed\nrequest.",
+        "operationId": "createImageRecipe",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveRecipeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The draft was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RecipeDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The recipe name is taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/recipes/{recipeId}": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Reads one draft.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown recipe.",
+        "operationId": "getImageRecipe",
+        "parameters": [
+          {
+            "name": "recipeId",
+            "in": "path",
+            "description": "The recipe's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RecipeDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The recipe does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Replaces a draft's content.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, malformed request, or\nunknown recipe.",
+        "operationId": "updateImageRecipe",
+        "parameters": [
+          {
+            "name": "recipeId",
+            "in": "path",
+            "description": "The recipe's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveRecipeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The draft was updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RecipeDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The recipe does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Removes a draft. Published versions are immutable and stay.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown recipe.",
+        "operationId": "deleteImageRecipe",
+        "parameters": [
+          {
+            "name": "recipeId",
+            "in": "path",
+            "description": "The recipe's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The draft was removed."
+          },
+          "404": {
+            "description": "The recipe does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/recipes/{recipeId}/publish": {
+      "post": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Publishes a draft: freezes an immutable version identified by its\ncontent digest. Idempotent by construction.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown recipe.",
+        "operationId": "publishImageRecipe",
+        "parameters": [
+          {
+            "name": "recipeId",
+            "in": "path",
+            "description": "The recipe's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The version was published.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RecipeVersionDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The recipe does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/recipes/{recipeId}/versions": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Lists a recipe's published versions.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown recipe.",
+        "operationId": "listImageRecipeVersions",
+        "parameters": [
+          {
+            "name": "recipeId",
+            "in": "path",
+            "description": "The recipe's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The published versions, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RecipeVersionDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -3310,6 +3698,26 @@
           }
         }
       },
+      "BuildImageRequest": {
+        "type": "object",
+        "description": "The build request: which version to build and the deadline.",
+        "required": [
+          "versionId",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The deadline, in seconds. Bounded by the executor.",
+            "minimum": 0
+          },
+          "versionId": {
+            "type": "string",
+            "description": "The published recipe version to build."
+          }
+        }
+      },
       "CapabilityFactDto": {
         "type": "object",
         "description": "One capability fact as the read model displays it: the recorded status\nwith the staleness rule applied at the read time.",
@@ -5580,6 +5988,158 @@
           }
         }
       },
+      "Page_RecipeDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One recipe draft.",
+              "required": [
+                "id",
+                "name",
+                "description",
+                "node",
+                "storagePool",
+                "source",
+                "content",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "description": "The raw Packer template content, verbatim."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the draft was created."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "The recipe description."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The draft's identity."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The recipe name."
+                },
+                "node": {
+                  "type": "string",
+                  "description": "The PVE node the recipe builds on."
+                },
+                "publishedFrom": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The published version this draft descends from, when any."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "What the recipe builds from: `iso` or `clone`."
+                },
+                "storagePool": {
+                  "type": "string",
+                  "description": "The PVE storage pool the build writes to."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the draft was last edited."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_RecipeVersionDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One published recipe version.",
+              "required": [
+                "id",
+                "recipeId",
+                "name",
+                "contentDigest",
+                "content",
+                "source",
+                "node",
+                "storagePool",
+                "publishedAt"
+              ],
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "description": "The frozen content."
+                },
+                "contentDigest": {
+                  "type": "string",
+                  "description": "The frozen content digest."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The version's identity."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The recipe name at publication time."
+                },
+                "node": {
+                  "type": "string",
+                  "description": "The node at publication time."
+                },
+                "publishedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the version was published."
+                },
+                "recipeId": {
+                  "type": "string",
+                  "description": "The recipe the version came from."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "What the version builds from."
+                },
+                "storagePool": {
+                  "type": "string",
+                  "description": "The storage pool at publication time."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "ProjectDto": {
         "type": "object",
         "description": "A project as the detail view displays it.",
@@ -6027,6 +6587,122 @@
           "version": {
             "type": "string",
             "description": "The pinned version."
+          }
+        }
+      },
+      "RecipeDto": {
+        "type": "object",
+        "description": "One recipe draft.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "node",
+          "storagePool",
+          "source",
+          "content",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The raw Packer template content, verbatim."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the draft was created."
+          },
+          "description": {
+            "type": "string",
+            "description": "The recipe description."
+          },
+          "id": {
+            "type": "string",
+            "description": "The draft's identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The recipe name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The PVE node the recipe builds on."
+          },
+          "publishedFrom": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The published version this draft descends from, when any."
+          },
+          "source": {
+            "type": "string",
+            "description": "What the recipe builds from: `iso` or `clone`."
+          },
+          "storagePool": {
+            "type": "string",
+            "description": "The PVE storage pool the build writes to."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the draft was last edited."
+          }
+        }
+      },
+      "RecipeVersionDto": {
+        "type": "object",
+        "description": "One published recipe version.",
+        "required": [
+          "id",
+          "recipeId",
+          "name",
+          "contentDigest",
+          "content",
+          "source",
+          "node",
+          "storagePool",
+          "publishedAt"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The frozen content."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "The frozen content digest."
+          },
+          "id": {
+            "type": "string",
+            "description": "The version's identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "The recipe name at publication time."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node at publication time."
+          },
+          "publishedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the version was published."
+          },
+          "recipeId": {
+            "type": "string",
+            "description": "The recipe the version came from."
+          },
+          "source": {
+            "type": "string",
+            "description": "What the version builds from."
+          },
+          "storagePool": {
+            "type": "string",
+            "description": "The storage pool at publication time."
           }
         }
       },
@@ -6950,6 +7626,140 @@
           }
         }
       },
+      "Resource_RecipeDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One recipe draft.",
+            "required": [
+              "id",
+              "name",
+              "description",
+              "node",
+              "storagePool",
+              "source",
+              "content",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "The raw Packer template content, verbatim."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the draft was created."
+              },
+              "description": {
+                "type": "string",
+                "description": "The recipe description."
+              },
+              "id": {
+                "type": "string",
+                "description": "The draft's identity."
+              },
+              "name": {
+                "type": "string",
+                "description": "The recipe name."
+              },
+              "node": {
+                "type": "string",
+                "description": "The PVE node the recipe builds on."
+              },
+              "publishedFrom": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The published version this draft descends from, when any."
+              },
+              "source": {
+                "type": "string",
+                "description": "What the recipe builds from: `iso` or `clone`."
+              },
+              "storagePool": {
+                "type": "string",
+                "description": "The PVE storage pool the build writes to."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the draft was last edited."
+              }
+            }
+          }
+        }
+      },
+      "Resource_RecipeVersionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One published recipe version.",
+            "required": [
+              "id",
+              "recipeId",
+              "name",
+              "contentDigest",
+              "content",
+              "source",
+              "node",
+              "storagePool",
+              "publishedAt"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "The frozen content."
+              },
+              "contentDigest": {
+                "type": "string",
+                "description": "The frozen content digest."
+              },
+              "id": {
+                "type": "string",
+                "description": "The version's identity."
+              },
+              "name": {
+                "type": "string",
+                "description": "The recipe name at publication time."
+              },
+              "node": {
+                "type": "string",
+                "description": "The node at publication time."
+              },
+              "publishedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the version was published."
+              },
+              "recipeId": {
+                "type": "string",
+                "description": "The recipe the version came from."
+              },
+              "source": {
+                "type": "string",
+                "description": "What the version builds from."
+              },
+              "storagePool": {
+                "type": "string",
+                "description": "The storage pool at publication time."
+              }
+            }
+          }
+        }
+      },
       "Resource_TailnetStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -7006,6 +7816,44 @@
           },
           "params": {
             "description": "The action-specific parameters (snapshot name/description, clone\ntarget id/name, and so on)."
+          }
+        }
+      },
+      "SaveRecipeRequest": {
+        "type": "object",
+        "description": "The create/update request. The content passes through verbatim.",
+        "required": [
+          "name",
+          "description",
+          "node",
+          "storagePool",
+          "source",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The raw Packer template content, verbatim."
+          },
+          "description": {
+            "type": "string",
+            "description": "The recipe description."
+          },
+          "name": {
+            "type": "string",
+            "description": "The recipe name."
+          },
+          "node": {
+            "type": "string",
+            "description": "The PVE node the recipe builds on."
+          },
+          "source": {
+            "type": "string",
+            "description": "What the recipe builds from: `iso` or `clone`."
+          },
+          "storagePool": {
+            "type": "string",
+            "description": "The PVE storage pool the build writes to."
           }
         }
       },

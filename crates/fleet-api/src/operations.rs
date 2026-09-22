@@ -56,6 +56,9 @@ pub struct ApiState {
     /// database, a secret store, and the provider wired; `None` only in
     /// document/test states.
     pub proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    /// The image use cases, when the controller was composed with a
+    /// database; `None` only in document/test states.
+    pub images: Option<Arc<fleet_application::images::Images>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -70,6 +73,7 @@ impl std::fmt::Debug for ApiState {
             .field("tailnet", &self.tailnet)
             .field("projects", &self.projects)
             .field("proxmox", &self.proxmox)
+            .field("images", &self.images)
             .finish()
     }
 }
@@ -242,6 +246,7 @@ impl ApiState {
             tailnet: None,
             projects: None,
             proxmox: None,
+            images: None,
         }
     }
 }
