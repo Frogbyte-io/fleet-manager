@@ -95,6 +95,12 @@ pub enum VersionGateError {
         /// The bounded detail.
         detail: String,
     },
+    /// The binary exists but cannot be started (permissions, broken
+    /// install). The operator must repair the install, not install it.
+    Unstartable {
+        /// The bounded detail.
+        detail: String,
+    },
 }
 
 impl fmt::Display for VersionGateError {
@@ -115,6 +121,9 @@ impl fmt::Display for VersionGateError {
                     f,
                     "the packer CLI's version answer is not parseable: {detail}"
                 )
+            }
+            Self::Unstartable { detail } => {
+                write!(f, "the packer CLI cannot be started: {detail}")
             }
         }
     }
@@ -270,7 +279,22 @@ impl PackerClient {
                 Duration::from_secs(30),
             )
             .await
-            .map_err(|_| VersionGateError::Absent)?;
+            .map_err(|detail| {
+                // A spawn failure is preserved: "absent" and "unstartable"
+                // are different operator actions.
+                if detail.contains("cannot be started") {
+                    // The transport's own wording distinguishes an absent
+                    // binary (PATH lookup failed) from a broken install.
+                    if detail.contains("No such file or directory") || detail.contains("not found")
+                    {
+                        VersionGateError::Absent
+                    } else {
+                        VersionGateError::Unstartable { detail }
+                    }
+                } else {
+                    VersionGateError::Unstartable { detail }
+                }
+            })?;
         if outcome.exit_code.is_none() && outcome.killed_by_deadline {
             return Err(VersionGateError::Unparseable {
                 detail: "the version call was killed at its deadline".to_owned(),
@@ -296,9 +320,9 @@ impl PackerClient {
             parse_version(&version).ok_or_else(|| VersionGateError::Unparseable {
                 detail: format!("the version {version:?} is not semver-shaped"),
             })?;
-        // Outside the range: a 2.x CLI or a pre-1.15 one. The pinned range
-        // is `>= 1.15 < 2`.
-        if major >= 2 || (major == MIN_CLI_MAJOR && minor < MIN_CLI_MINOR) {
+        // Outside the range: any major other than 1, or a pre-1.15 one.
+        // The pinned range is `>= 1.15 < 2`.
+        if !(major == MIN_CLI_MAJOR && minor >= MIN_CLI_MINOR) {
             return Err(VersionGateError::OutsideRange {
                 reported: version,
                 required: format!(">= {MIN_CLI_MAJOR}.{MIN_CLI_MINOR} < 2"),
@@ -399,6 +423,9 @@ impl Default for ProcessTransport {
 impl PackerTransport for ProcessTransport {
     async fn run(&self, command: &PackerCommand, deadline: Duration) -> Result<CliOutcome, String> {
         let mut cmd = tokio::process::Command::new(&self.binary);
+        // kill_on_drop: a deadline kill must actually kill the packer
+        // process, not orphan it while the caller records the kill.
+        cmd.kill_on_drop(true);
         cmd.args(&command.args)
             .current_dir(&command.work_dir)
             .stdout(std::process::Stdio::piped())
@@ -420,9 +447,10 @@ impl PackerTransport for ProcessTransport {
             }
             Ok(Err(error)) => Err(format!("the packer CLI failed: {error}")),
             Err(_) => {
-                // The deadline expired: the child was dropped and killed
-                // by the runtime, and the plugin's own cleanup ran inside
-                // it before the kill — reported honestly as unknown-state.
+                // The deadline expired and the process was killed: the
+                // remote outcome is unknown. The plugin's cleanup cannot
+                // be assumed from a kill — the caller must verify host
+                // state, and this outcome says so.
                 Ok(CliOutcome {
                     stdout: String::new(),
                     stderr: String::new(),

@@ -53,6 +53,7 @@ impl RecipeRepository {
             id: row.get("id"),
             recipe_id: row.get("recipe_id"),
             name: row.get("name"),
+            description: row.get("description"),
             content_digest: row.get("content_digest"),
             content: row.get("content"),
             source: RecipeSource::from_id(&source)?,
@@ -149,31 +150,41 @@ impl RecipePort for RecipeRepository {
         recipe_id: &str,
         version: &RecipeVersion,
     ) -> Result<RecipeVersion, String> {
-        // The draft records what it published from; the version row is
-        // immutable (insert-only, unique on recipe+digest).
+        // The draft pointer and the version row commit together: a failed
+        // insert must not leave a draft referencing a missing version.
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("publish failed: {error}"))?;
         sqlx::query("UPDATE image_recipes SET published_from = ?2 WHERE id = ?1")
             .bind(recipe_id)
             .bind(&version.id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(|error| format!("publish failed: {error}"))?;
         let result = sqlx::query(
-            "INSERT INTO image_recipe_versions (id, recipe_id, name, content_digest, content, source, node, storage_pool, published_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            "INSERT INTO image_recipe_versions (id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT (recipe_id, content_digest) DO NOTHING",
         )
         .bind(&version.id)
         .bind(&version.recipe_id)
         .bind(&version.name)
+        .bind(&version.description)
         .bind(&version.content_digest)
         .bind(&version.content)
         .bind(version.source.id())
         .bind(&version.node)
         .bind(&version.storage_pool)
         .bind(version.published_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| format!("publish failed: {error}"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("publish failed: {error}"))?;
         if result.rows_affected() == 0 {
             // The same content was already published: return the existing
             // version, which is the idempotent answer.
@@ -183,7 +194,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn get_version(&self, id: &str) -> Result<RecipeVersion, String> {
-        sqlx::query("SELECT id, recipe_id, name, content_digest, content, source, node, storage_pool, published_at FROM image_recipe_versions WHERE id = ?1")
+        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at FROM image_recipe_versions WHERE id = ?1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -194,7 +205,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String> {
-        let rows = sqlx::query("SELECT id, recipe_id, name, content_digest, content, source, node, storage_pool, published_at FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
+        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
             .bind(recipe_id)
             .fetch_all(&self.pool)
             .await

@@ -40,6 +40,7 @@ impl Authorizer for DenyAll {
 struct FakeRecipes {
     recipes: Mutex<Vec<Recipe>>,
     versions: Mutex<Vec<RecipeVersion>>,
+    port_calls: Mutex<Vec<&'static str>>,
 }
 
 impl FakeRecipes {
@@ -56,6 +57,7 @@ impl FakeRecipes {
 #[async_trait]
 impl RecipePort for FakeRecipes {
     async fn create(&self, recipe: &NewRecipe, now: i64) -> Result<Recipe, String> {
+        self.port_calls.lock().unwrap().push("create");
         let mut recipes = self.recipes.lock().unwrap();
         if recipes
             .iter()
@@ -83,10 +85,12 @@ impl RecipePort for FakeRecipes {
     }
 
     async fn list(&self) -> Result<Vec<Recipe>, String> {
+        self.port_calls.lock().unwrap().push("list");
         Ok(self.recipes.lock().unwrap().clone())
     }
 
     async fn update(&self, id: &str, content: &RecipeContent, now: i64) -> Result<Recipe, String> {
+        self.port_calls.lock().unwrap().push("update");
         let mut recipes = self.recipes.lock().unwrap();
         let recipe = recipes
             .iter_mut()
@@ -98,6 +102,7 @@ impl RecipePort for FakeRecipes {
     }
 
     async fn delete(&self, id: &str) -> Result<(), String> {
+        self.port_calls.lock().unwrap().push("delete");
         let mut recipes = self.recipes.lock().unwrap();
         let before = recipes.len();
         recipes.retain(|recipe| recipe.id != id);
@@ -112,6 +117,7 @@ impl RecipePort for FakeRecipes {
         recipe_id: &str,
         version: &RecipeVersion,
     ) -> Result<RecipeVersion, String> {
+        self.port_calls.lock().unwrap().push("publish");
         if self.find(recipe_id).is_none() {
             return Err(format!("recipe {recipe_id} not found"));
         }

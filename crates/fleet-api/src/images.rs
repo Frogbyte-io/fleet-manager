@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use fleet_application::images::{NewRecipe, Recipe, RecipeUseCaseError, RecipeVersion};
@@ -18,7 +18,7 @@ use fleet_core::{CorrelationId, ErrorCode, PublicError, RecipeContent, RecipeSou
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::envelope::{Page, PageInfo, Resource};
+use crate::envelope::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page, PageInfo, Resource};
 use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the image use cases from the API state, or answers with the
@@ -203,6 +203,16 @@ impl SaveRecipeRequest {
 
 use std::str::FromStr as _;
 
+/// The list-recipes query parameters.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRecipesParams {
+    /// The maximum number of recipes to return.
+    pub limit: Option<u32>,
+    /// The opaque cursor: the last recipe id of the previous page.
+    pub cursor: Option<String>,
+}
+
 /// Lists the recipe drafts.
 ///
 /// # Errors
@@ -213,28 +223,49 @@ use std::str::FromStr as _;
     path = "/images/recipes",
     tag = "images",
     operation_id = "listImageRecipes",
+    params(
+        ("limit" = Option<u32>, Query, description = "The maximum number of recipes to return."),
+        ("cursor" = Option<String>, Query, description = "The opaque cursor: the last recipe id of the previous page.")
+    ),
     responses(
         (status = 200, description = "The recipe drafts, newest first.", body = Page<RecipeDto>),
         (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
     )
 )]
+
 pub async fn list_image_recipes(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    Query(params): Query<ListRecipesParams>,
 ) -> Result<Json<Page<RecipeDto>>, ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let recipes = images
+    let limit = params
+        .limit
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .min(MAX_PAGE_LIMIT);
+    let mut recipes = images
         .list(state.authorizer.as_ref(), &principal)
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
+    if let Some(cursor) = &params.cursor {
+        let Some(position) = recipes.iter().position(|recipe| recipe.id == *cursor) else {
+            return Err(crate::machines::invalid_request(
+                "the cursor names no recipe in the list",
+                correlation_id,
+            ));
+        };
+        recipes.drain(..=position);
+    }
+    recipes.truncate(usize::try_from(limit).unwrap_or(recipes.len()));
+    let next_cursor = (recipes.len() == usize::try_from(limit).unwrap_or(0))
+        .then(|| recipes.last().map(|recipe| recipe.id.clone()))
+        .flatten();
     let items: Vec<RecipeDto> = recipes.into_iter().map(Into::into).collect();
     Ok(Json(Page {
-        page: PageInfo {
-            next_cursor: None,
-            limit: items.len().try_into().unwrap_or(u32::MAX),
-        },
+        page: PageInfo { next_cursor, limit },
         items,
     }))
 }
@@ -512,6 +543,14 @@ pub async fn start_image_build(
             "the timeout must be 1..=14400 seconds",
             correlation_id,
         ));
+    }
+    // The version must exist before the operation is queued: an invalid
+    // build is a 404 here, not a worker failure later.
+    if let Some(images) = &state.images {
+        images
+            .get_version(state.authorizer.as_ref(), &principal, &request.version_id)
+            .await
+            .map_err(|error| map_images_error(&error, correlation_id))?;
     }
     let payload = serde_json::json!({
         "versionId": request.version_id,

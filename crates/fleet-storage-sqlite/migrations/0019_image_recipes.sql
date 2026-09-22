@@ -14,10 +14,13 @@ CREATE TABLE image_recipes (
     updated_at     INTEGER NOT NULL
 ) STRICT;
 
+-- No ON DELETE CASCADE: published versions are immutable history that
+-- survives draft deletion (builds reference version ids).
 CREATE TABLE image_recipe_versions (
     id             TEXT PRIMARY KEY,
-    recipe_id      TEXT NOT NULL REFERENCES image_recipes (id) ON DELETE CASCADE,
+    recipe_id      TEXT NOT NULL,
     name           TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
     content_digest TEXT NOT NULL,
     content        TEXT NOT NULL,
     source         TEXT NOT NULL,

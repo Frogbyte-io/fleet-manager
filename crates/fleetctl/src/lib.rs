@@ -1196,19 +1196,43 @@ fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> 
             }),
             _ => Err(CliError { message: usage() }),
         },
-        "build" => match rest {
-            [version_id] => Ok(Command::ImagesBuild {
-                version_id: (*version_id).to_owned(),
-                wait: false,
-                timeout: None,
-            }),
-            [version_id, "--wait"] => Ok(Command::ImagesBuild {
-                version_id: (*version_id).to_owned(),
-                wait: true,
-                timeout: None,
-            }),
-            _ => Err(CliError { message: usage() }),
-        },
+        "build" => {
+            let mut version_id = None;
+            let mut wait = false;
+            let mut timeout = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--wait" => wait = true,
+                    "--timeout" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--timeout requires a value".to_owned(),
+                        })?;
+                        timeout = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--timeout must be a number, not {value:?}"),
+                        })?);
+                    }
+                    other if version_id.is_none() && !other.starts_with('-') => {
+                        version_id = Some((*other).to_owned());
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::ImagesBuild {
+                version_id: version_id.ok_or_else(|| CliError {
+                    message: "a version id is required".to_owned(),
+                })?,
+                wait,
+                timeout,
+            })
+        }
         _ => Err(CliError { message: usage() }),
     }
 }
@@ -1957,7 +1981,8 @@ fn follow_checkout_wait(
         | Command::ProjectsReady { wait, timeout, .. }
         | Command::ApplyWorkflow { wait, timeout, .. }
         | Command::ProxmoxLifecycle { wait, timeout, .. }
-        | Command::ProxmoxDestructive { wait, timeout, .. } => (*wait, *timeout),
+        | Command::ProxmoxDestructive { wait, timeout, .. }
+        | Command::ImagesBuild { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -1998,6 +2023,11 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::ProjectsGet { .. }
             | Command::ProjectsDiscover { .. }
             | Command::ProjectsRecord { .. } => render_projects(Some(payload)),
+            Command::ImagesRecipes
+            | Command::ImagesCreate { .. }
+            | Command::ImagesPublish { .. }
+            | Command::ImagesVersions { .. }
+            | Command::ImagesBuild { .. } => render_images(Some(payload)),
             Command::TailnetStatus
             | Command::TailnetConfigure { .. }
             | Command::TailnetClear

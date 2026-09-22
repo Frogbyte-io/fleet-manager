@@ -303,6 +303,8 @@ impl Images {
                     RecipeUseCaseError::NotFound {
                         what: format!("recipe {id}"),
                     }
+                } else if detail.contains("taken") || detail.contains("UNIQUE") {
+                    RecipeUseCaseError::Conflict { detail }
                 } else {
                     RecipeUseCaseError::Backend {
                         context: "recipes",
@@ -386,6 +388,7 @@ impl Images {
             id: format!("{}@{}", recipe.id, &digest[..16]),
             recipe_id: recipe.id.clone(),
             name: recipe.content.name.clone(),
+            description: recipe.content.description.clone(),
             content_digest: digest,
             content: recipe.content.content.clone(),
             source: recipe.content.source,

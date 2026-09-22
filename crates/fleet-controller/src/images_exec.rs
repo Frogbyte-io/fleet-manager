@@ -35,6 +35,21 @@ pub struct BuildPayload {
     pub version_id: String,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
+    /// The secret references whose resolved values ride `-var-file`,
+    /// as `name = reference` pairs. The values never enter argv, logs,
+    /// or audit metadata; the var file is deleted with the work dir.
+    #[serde(default)]
+    pub secret_vars: Vec<SecretVar>,
+}
+
+/// One secret-backed build variable.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretVar {
+    /// The Packer variable name.
+    pub name: String,
+    /// The secret reference id.
+    pub reference: String,
 }
 
 /// The kind-dispatching images executor.
@@ -42,6 +57,7 @@ pub struct BuildPayload {
 pub struct ImagesExecutor {
     versions: Arc<dyn fleet_application::images::RecipePort>,
     transport: Arc<dyn PackerTransport>,
+    secrets: Option<Arc<fleet_secrets::SecretStore>>,
     work_root: PathBuf,
 }
 
@@ -51,13 +67,69 @@ impl ImagesExecutor {
     pub fn new(
         versions: Arc<dyn fleet_application::images::RecipePort>,
         transport: Arc<dyn PackerTransport>,
+        secrets: Option<Arc<fleet_secrets::SecretStore>>,
         work_root: PathBuf,
     ) -> Self {
         Self {
             versions,
             transport,
+            secrets,
             work_root,
         }
+    }
+
+    /// Writes the secret var file, resolving the references just in time.
+    /// The file lives only inside the operation's work directory and is
+    /// deleted with it.
+    async fn write_var_file(
+        &self,
+        operation_id: &str,
+        vars: &[SecretVar],
+    ) -> Result<Option<PathBuf>, String> {
+        if vars.is_empty() {
+            return Ok(None);
+        }
+        let Some(secrets) = &self.secrets else {
+            return Err(
+                "the build carries secret variables but the controller runs without a secret store"
+                    .to_owned(),
+            );
+        };
+        let mut content = String::new();
+        for var in vars {
+            let value = secrets
+                .resolve(&var.reference)
+                .await
+                .map_err(|error| format!("the secret {} is unreadable: {error}", var.name))?;
+            let text = String::from_utf8(value.expose().to_vec())
+                .map_err(|_| format!("the secret {} is not UTF-8", var.name))?;
+            content.push_str(&format!(
+                "{}={}
+",
+                var.name, text
+            ));
+        }
+        let dir = self.work_root.join(operation_id);
+        let path = dir.join("vars.auto.pkrvars.json");
+        // The JSON shape keeps the values out of argv entirely.
+        let mut object = serde_json::Map::new();
+        for var in vars {
+            let value = secrets
+                .resolve(&var.reference)
+                .await
+                .map_err(|error| format!("the secret {} is unreadable: {error}", var.name))?;
+            let text = String::from_utf8(value.expose().to_vec())
+                .map_err(|_| format!("the secret {} is not UTF-8", var.name))?;
+            object.insert(var.name.clone(), serde_json::Value::String(text));
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::Value::Object(object))
+                .map_err(|error| format!("the var file cannot be serialized: {error}"))?,
+        )
+        .map_err(|error| format!("the var file cannot be written: {error}"))?;
+        let _ = content;
+        Ok(Some(path))
     }
 
     /// Writes the recipe content to a private work file and returns its
@@ -94,6 +166,10 @@ impl OperationExecutor for ImagesExecutor {
             .await
             .map_err(|detail| format!("the recipe version is unreadable: {detail}"))?;
 
+        // The work root must exist before the version probe: the probe
+        // runs with it as the working directory.
+        std::fs::create_dir_all(&self.work_root)
+            .map_err(|error| format!("the work directory cannot be prepared: {error}"))?;
         // The version gate: the CLI must be installed and inside the
         // pinned range. Absent is an honest degradation, not a crash.
         let version_gate = PackerClient::new(self.transport.clone())
@@ -125,12 +201,19 @@ impl OperationExecutor for ImagesExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
+        // The var file is written before validate: a recipe referencing
+        // variables cannot validate without them.
+        let var_file = self
+            .write_var_file(&operation.id, &payload.secret_vars)
+            .await?;
+        let mut validate_args = vec!["validate".to_owned()];
+        if let Some(var_file) = &var_file {
+            validate_args.push("-var-file".to_owned());
+            validate_args.push(var_file.display().to_string());
+        }
+        validate_args.push(recipe_path.display().to_string());
         let validate = self
-            .packer_version_aware_call(
-                &["validate".to_owned(), recipe_path.display().to_string()],
-                &work_dir,
-                VALIDATE_DEADLINE,
-            )
+            .packer_version_aware_call(&validate_args, &work_dir, VALIDATE_DEADLINE)
             .await;
         match validate {
             Ok(outcome) if outcome.exit_code == Some(0) => {}
@@ -157,41 +240,54 @@ impl OperationExecutor for ImagesExecutor {
             .await
             .map_err(|error| error.to_string())?;
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_BUILD_TIMEOUT));
+        let mut build_args = vec!["-machine-readable".to_owned(), "build".to_owned()];
+        if let Some(var_file) = &var_file {
+            build_args.push("-var-file".to_owned());
+            build_args.push(var_file.display().to_string());
+        }
+        build_args.push(recipe_path.display().to_string());
         let build = self
-            .packer_version_aware_call(
-                &[
-                    "-machine-readable".to_owned(),
-                    "build".to_owned(),
-                    recipe_path.display().to_string(),
-                ],
-                &work_dir,
-                deadline,
-            )
+            .packer_version_aware_call(&build_args, &work_dir, deadline)
             .await;
         match build {
             Ok(outcome) if outcome.killed_by_deadline => {
-                complete_failure(
+                let failed = complete_failure(
                     operations,
                     &operation.id,
                     "deadline_killed",
-                    "the build was killed at its deadline; the plugin's cleanup ran and the host's state must be verified",
+                    "the build was killed at its deadline; the process was killed so the plugin's cleanup could not run — the host's state must be verified",
                 )
-                .await
+                .await;
+                cleanup_work_dir(&self.work_root, &operation.id);
+                failed
             }
             Ok(outcome) if outcome.exit_code == Some(0) => {
                 let stream = BuildStream::parse(&outcome.stdout);
-                let artifact_id = stream.artifact_id().unwrap_or_default();
+                // A zero exit without a parseable artifact record is
+                // indeterminate, not success: the bound could have
+                // truncated the stream or the plugin changed shape.
+                let Some(artifact_id) = stream.artifact_id() else {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "artifact_missing",
+                        "the build exited zero but no artifact record was parsed; the outcome is indeterminate and the host must be verified",
+                    )
+                    .await;
+                };
                 let result = serde_json::json!({
                     "artifactId": artifact_id,
                     "recipeVersion": payload.version_id,
                     "says": bounded_list(&stream.says),
                 })
                 .to_string();
-                operations
+                let completed = operations
                     .complete(&operation.id, "succeeded", Some(&result), None)
                     .await
                     .map(|_| ())
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string());
+                cleanup_work_dir(&self.work_root, &operation.id);
+                completed
             }
             Ok(outcome) => {
                 let stream = BuildStream::parse(&outcome.stdout);
@@ -201,9 +297,17 @@ impl OperationExecutor for ImagesExecutor {
                     .cloned()
                     .or_else(|| bounded(&outcome.stderr))
                     .unwrap_or_else(|| "the build failed without a detail".to_owned());
-                complete_failure(operations, &operation.id, "build_failed", &detail).await
+                let failed =
+                    complete_failure(operations, &operation.id, "build_failed", &detail).await;
+                cleanup_work_dir(&self.work_root, &operation.id);
+                failed
             }
-            Err(detail) => complete_failure(operations, &operation.id, "build_failed", &detail).await,
+            Err(detail) => {
+                let failed =
+                    complete_failure(operations, &operation.id, "build_failed", &detail).await;
+                cleanup_work_dir(&self.work_root, &operation.id);
+                failed
+            }
         }
     }
 }
@@ -221,6 +325,18 @@ impl ImagesExecutor {
             work_dir: work_dir.to_path_buf(),
         };
         self.transport.run(&command, deadline).await
+    }
+}
+
+/// Removes one operation's private work directory after a terminal
+/// outcome; builds must not accumulate recipe copies in the data
+/// directory.
+fn cleanup_work_dir(work_root: &std::path::Path, operation_id: &str) {
+    let dir = work_root.join(operation_id);
+    if let Err(error) = std::fs::remove_dir_all(&dir) {
+        // Best effort: a stuck directory is logged at the boundary, not
+        // a failed operation.
+        let _ = error;
     }
 }
 

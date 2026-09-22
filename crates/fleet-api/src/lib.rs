@@ -168,6 +168,14 @@ pub const API_BASE_PATH: &str = "/api/v1";
             description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
         ),
         (
+            name = "images",
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+        ),
+        (
+            name = "images",
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+        ),
+        (
             name = "proxmox",
             description = "Proxmox accounts, TLS fingerprint trust, and cluster discovery. The token secret is write-only; discovery is locked until the host fingerprint is confirmed."
         ),

@@ -80,8 +80,17 @@ impl RecipeContent {
                 self.content.len()
             ));
         }
+        // The digest covers every build-affecting field: the Packer bytes
+        // AND the Fleet metadata (node, pool, source), so a metadata-only
+        // edit produces a new version instead of silently reusing one.
         let mut hasher = sha2::Sha256::new();
         hasher.update(self.content.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.node.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.storage_pool.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(self.source.id().as_bytes());
         let digest: [u8; 32] = hasher.finalize().into();
         Ok(digest.iter().fold(String::with_capacity(64), |mut out, b| {
             use std::fmt::Write as _;
@@ -131,6 +140,8 @@ pub struct RecipeVersion {
     pub name: String,
     /// The frozen content digest.
     pub content_digest: String,
+    /// The frozen description.
+    pub description: String,
     /// The frozen content.
     pub content: String,
     /// The source at publication time.

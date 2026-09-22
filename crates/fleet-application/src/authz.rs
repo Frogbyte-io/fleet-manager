@@ -261,8 +261,7 @@ impl Permission {
             | Permission::AuditRead
             | Permission::MachineRead
             | Permission::NodeRead
-            | Permission::ProjectsRead
-            | Permission::ImagesRead => false,
+            | Permission::ProjectsRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -296,7 +295,8 @@ impl Permission {
             | Permission::ProxmoxConfig
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
-            | Permission::ImagesConfig => true,
+            | Permission::ImagesConfig
+            | Permission::ImagesRead => true,
         }
     }
 

@@ -2755,6 +2755,18 @@ export interface UpdateProjectRequest {
   name: string;
 }
 
+export type ListImageRecipesParams = {
+/**
+ * The maximum number of recipes to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last recipe id of the previous page.
+ */
+cursor?: string;
+};
+
 export type ListMachinesParams = {
 /**
  * Only machines carrying this tag.
@@ -2941,12 +2953,19 @@ export type listImageRecipesResponseError = (listImageRecipesResponse403) & {
 
 export type listImageRecipesResponse = (listImageRecipesResponseSuccess | listImageRecipesResponseError)
 
-export const getListImageRecipesUrl = () => {
+export const getListImageRecipesUrl = (params?: ListImageRecipesParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/images/recipes`
+  return stringifiedParams.length > 0 ? `/api/v1/images/recipes?${stringifiedParams}` : `/api/v1/images/recipes`
 }
 
 /**
@@ -2955,9 +2974,9 @@ export const getListImageRecipesUrl = () => {
  * Returns the public error envelope on refusal or backend failure.
  * @summary Lists the recipe drafts.
  */
-export const listImageRecipes = async ( options?: RequestInit): Promise<listImageRecipesResponse> => {
+export const listImageRecipes = async (params?: ListImageRecipesParams, options?: RequestInit): Promise<listImageRecipesResponse> => {
 
-  const res = await fetch(getListImageRecipesUrl(),
+  const res = await fetch(getListImageRecipesUrl(params),
   {
     ...options,
     method: 'GET'

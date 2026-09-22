@@ -341,6 +341,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_controller::images_exec::ImagesExecutor::new(
                         versions,
                         std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
+                        secrets.clone(),
                         config.data_dir.join("image-builds"),
                     )),
                 ))
