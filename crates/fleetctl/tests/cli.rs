@@ -264,6 +264,7 @@ fn fleetctl_talks_to_a_real_controller() {
             None,
             None,
             None,
+            None,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -355,6 +356,7 @@ fn fleetctl_machines_read_a_real_controller() {
         let router = fleet_controller::build_router(
             &settings,
             Some(store.pool().clone()),
+            None,
             None,
             None,
             None,
@@ -520,6 +522,7 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
     let router = fleet_controller::build_router(
         &settings,
         Some(store.pool().clone()),
+        None,
         None,
         None,
         None,
@@ -813,6 +816,7 @@ fn fleetctl_onboards_a_real_controller() {
             Some(store.pool().clone()),
             None,
             Some(&onboarding),
+            None,
             None,
             None,
             None,
@@ -2376,4 +2380,125 @@ fn parsing_walks_the_promotion_forms() {
         fleetctl::parse(&args).unwrap().command,
         fleetctl::Command::ImagesVersion { .. }
     ));
+}
+
+#[test]
+fn text_output_renders_lab_templates_and_provisions() {
+    let page = json!({
+        "items": [
+            {"id": "tpl-1", "name": "ubuntu-lab", "cores": 2,
+             "imageVersionId": "rcp-1@abc"}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_lab_for_test(&page);
+    assert!(text.contains("ubuntu-lab"), "{text}");
+    assert!(text.contains("rcp-1@abc"), "{text}");
+
+    let provisions = json!({
+        "items": [
+            {"id": "prv-1", "state": "provisioning", "vmid": null,
+             "templateVersionId": "tpl-1@abc"}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_lab_provisions_for_test(&provisions);
+    assert!(text.contains("provisioning"), "{text}");
+}
+
+#[test]
+fn parsing_walks_the_lab_forms() {
+    let args: Vec<String> = ["lab", "templates"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabTemplates
+    ));
+    let args: Vec<String> = [
+        "lab",
+        "create",
+        "--name",
+        "ubuntu-lab",
+        "--description",
+        "base",
+        "--image-version",
+        "rcp-1@abc",
+        "--cores",
+        "2",
+        "--memory",
+        "2048",
+        "--disk",
+        "20",
+        "--probe",
+        "guest_agent",
+        "--readiness-deadline",
+        "300",
+        "--ttl",
+        "3600",
+        "--cleanup",
+        "destroy",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabCreate { .. }
+    ));
+    let args: Vec<String> = ["lab", "publish", "tpl-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabPublish { .. }
+    ));
+    let args: Vec<String> = ["lab", "provision", "tpl-1@abc"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabProvision { .. }
+    ));
+    let args: Vec<String> = ["lab", "provisions"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabProvisions
+    ));
+    // A bad core count refuses.
+    let args: Vec<String> = [
+        "lab",
+        "create",
+        "--name",
+        "x",
+        "--description",
+        "d",
+        "--image-version",
+        "v",
+        "--cores",
+        "abc",
+        "--memory",
+        "1",
+        "--disk",
+        "1",
+        "--probe",
+        "guest_agent",
+        "--readiness-deadline",
+        "1",
+        "--ttl",
+        "1",
+        "--cleanup",
+        "destroy",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("must be a number"), "{error}");
 }

@@ -274,6 +274,7 @@ fn state_for(
         projects,
         proxmox: None,
         images: None,
+        lab: None,
     })
 }
 

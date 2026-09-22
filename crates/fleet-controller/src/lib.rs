@@ -130,6 +130,7 @@ pub fn compose_onboarding(
 /// Machine workflow service, composed over the same store and the
 /// controller's SSH work directory; without it the onboarding surface
 /// answers with the standard envelope.
+#[allow(clippy::too_many_arguments)]
 fn api_state(
     db: Option<SqlitePool>,
     nodes: Option<Arc<fleet_application::node::Nodes>>,
@@ -138,6 +139,7 @@ fn api_state(
     projects: Option<Arc<fleet_application::project::Projects>>,
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<Arc<fleet_application::images::Images>>,
+    lab: Option<Arc<fleet_application::lab::Lab>>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
@@ -162,6 +164,7 @@ fn api_state(
             projects,
             proxmox,
             images,
+            lab,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -179,6 +182,7 @@ fn api_state(
         projects: None,
         proxmox: None,
         images: None,
+        lab: None,
     }
 }
 
@@ -285,6 +289,7 @@ pub fn build_router(
     projects: Option<&Arc<fleet_application::project::Projects>>,
     proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<&Arc<fleet_application::images::Images>>,
+    lab: Option<&Arc<fleet_application::lab::Lab>>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -298,6 +303,7 @@ pub fn build_router(
         projects.cloned(),
         proxmox.cloned(),
         images.cloned(),
+        lab.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let mut router = Router::new()
@@ -385,11 +391,13 @@ pub async fn serve(
     projects: Option<Arc<fleet_application::project::Projects>>,
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<Arc<fleet_application::images::Images>>,
+    lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
     serve_on(
-        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, shutdown,
+        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, lab,
+        shutdown,
     )
     .await
 }
@@ -412,6 +420,7 @@ pub async fn serve_on(
     projects: Option<Arc<fleet_application::project::Projects>>,
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<Arc<fleet_application::images::Images>>,
+    lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -450,6 +459,7 @@ pub async fn serve_on(
             projects.as_ref(),
             proxmox.as_ref(),
             images.as_ref(),
+            lab.as_ref(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
     )

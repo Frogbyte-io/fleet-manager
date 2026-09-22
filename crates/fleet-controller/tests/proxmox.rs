@@ -183,6 +183,7 @@ async fn harness_with(transport: Arc<FixedTransport>) -> Harness {
         None,
         Some(&proxmox),
         None,
+        None,
     );
     let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -754,6 +755,7 @@ async fn lifecycle_harness(outcome: TaskOutcome) -> Harness {
         None,
         None,
         Some(&proxmox),
+        None,
         None,
     );
     let listener = TokioListener::bind("127.0.0.1:0").await.unwrap();

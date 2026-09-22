@@ -17,6 +17,7 @@ mod envelope;
 mod error;
 pub mod frogenv;
 pub mod images;
+pub mod lab;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -135,6 +136,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox::ReviewProxmoxOperationRequest,
         proxmox::StartReviewedProxmoxOperationRequest,
         images::BuildImageRequest,
+        lab::LabTemplateDto,
+        lab::LabTemplateContentDto,
+        lab::LabTemplateVersionDto,
+        lab::ProvisionRecordDto,
+        lab::SaveLabTemplateRequest,
         images::RecipeDto,
         images::RecipeVersionDto,
         images::SaveRecipeRequest,
@@ -168,8 +174,16 @@ pub const API_BASE_PATH: &str = "/api/v1";
             description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
         ),
         (
+            name = "lab",
+            description = "Fleet Lab: versioned templates pinning promoted image versions, the provisioning saga's records, and the readiness states. TTL begins at ready."
+        ),
+        (
             name = "images",
             description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+        ),
+        (
+            name = "lab",
+            description = "Fleet Lab: versioned templates pinning promoted image versions, the provisioning saga's records, and the readiness states. TTL begins at ready."
         ),
         (
             name = "images",
@@ -265,6 +279,13 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::start_image_build))
                 .routes(routes!(images::promote_image_version))
                 .routes(routes!(images::get_image_version))
+                .routes(routes!(lab::list_lab_templates, lab::create_lab_template))
+                .routes(routes!(lab::get_lab_template))
+                .routes(routes!(lab::update_lab_template))
+                .routes(routes!(lab::delete_lab_template))
+                .routes(routes!(lab::publish_lab_template))
+                .routes(routes!(lab::start_lab_provision))
+                .routes(routes!(lab::list_lab_provisions))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )

@@ -59,6 +59,9 @@ pub struct ApiState {
     /// The image use cases, when the controller was composed with a
     /// database; `None` only in document/test states.
     pub images: Option<Arc<fleet_application::images::Images>>,
+    /// The Lab use cases, when the controller was composed with a
+    /// database; `None` only in document/test states.
+    pub lab: Option<Arc<fleet_application::lab::Lab>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -74,6 +77,7 @@ impl std::fmt::Debug for ApiState {
             .field("projects", &self.projects)
             .field("proxmox", &self.proxmox)
             .field("images", &self.images)
+            .field("lab", &self.lab)
             .finish()
     }
 }
@@ -247,6 +251,7 @@ impl ApiState {
             projects: None,
             proxmox: None,
             images: None,
+            lab: None,
         }
     }
 }

@@ -536,6 +536,464 @@
         }
       }
     },
+    "/api/v1/lab/provisions": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Lists the provisioning records.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listLabProvisions",
+        "responses": {
+          "200": {
+            "description": "The provisioning records, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ProvisionRecordDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/templates": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Lists the template drafts.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listLabTemplates",
+        "responses": {
+          "200": {
+            "description": "The template drafts, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_LabTemplateDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Creates a template draft.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, conflict, refused pin,\nor malformed request.",
+        "operationId": "createLabTemplate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveLabTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The draft was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabTemplateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name is taken or the image pin was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/templates/{templateId}": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Reads one draft.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown template.",
+        "operationId": "getLabTemplate",
+        "parameters": [
+          {
+            "name": "templateId",
+            "in": "path",
+            "description": "The template's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabTemplateDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The template does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Updates a draft.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, refused pin, or unknown\ntemplate.",
+        "operationId": "updateLabTemplate",
+        "parameters": [
+          {
+            "name": "templateId",
+            "in": "path",
+            "description": "The template's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveLabTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The draft was updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabTemplateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The template does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The name is taken or the image pin was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Removes a draft. Published versions stay.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown template.",
+        "operationId": "deleteLabTemplate",
+        "parameters": [
+          {
+            "name": "templateId",
+            "in": "path",
+            "description": "The template's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The draft was removed."
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The template does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/templates/{templateId}/publish": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Publishes a draft: freezes an immutable version with provenance. The\npin is re-validated at publish time.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, refused pin, or unknown\ntemplate.",
+        "operationId": "publishLabTemplate",
+        "parameters": [
+          {
+            "name": "templateId",
+            "in": "path",
+            "description": "The template's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The version was published.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabTemplateVersionDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The template does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The image pin was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/versions/{versionId}/provision": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Starts provisioning a published template version.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, refused pin, or unknown\nversion.",
+        "operationId": "startLabProvision",
+        "parameters": [
+          {
+            "name": "versionId",
+            "in": "path",
+            "description": "The template version's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The provisioning record was created; the saga runs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProvisionRecordDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision Lab guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The image pin was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -4682,6 +5140,238 @@
           }
         }
       },
+      "LabTemplateContentDto": {
+        "type": "object",
+        "description": "The frozen template content.",
+        "required": [
+          "name",
+          "description",
+          "imageVersionId",
+          "cores",
+          "memoryMib",
+          "diskGib",
+          "readinessProbe",
+          "readinessDeadlineSeconds",
+          "ttlSeconds",
+          "cleanup"
+        ],
+        "properties": {
+          "bootstrapProjectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bootstrap profile reference, when pinned."
+          },
+          "cleanup": {
+            "type": "string",
+            "description": "The cleanup strategy."
+          },
+          "cores": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The vCPU count.",
+            "minimum": 0
+          },
+          "description": {
+            "type": "string",
+            "description": "The template description."
+          },
+          "diskGib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The disk size in GiB.",
+            "minimum": 0
+          },
+          "imageVersionId": {
+            "type": "string",
+            "description": "The pinned image version id."
+          },
+          "memoryMib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The memory in MiB.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The template name."
+          },
+          "readinessCommand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH probe command, when pinned."
+          },
+          "readinessDeadlineSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The readiness deadline in seconds.",
+            "minimum": 0
+          },
+          "readinessProbe": {
+            "type": "string",
+            "description": "The readiness probe."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The default TTL in seconds.",
+            "minimum": 0
+          }
+        }
+      },
+      "LabTemplateDto": {
+        "type": "object",
+        "description": "One template draft.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "imageVersionId",
+          "cores",
+          "memoryMib",
+          "diskGib",
+          "readinessProbe",
+          "readinessDeadlineSeconds",
+          "ttlSeconds",
+          "cleanup",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "bootstrapProjectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bootstrap profile reference, when pinned."
+          },
+          "cleanup": {
+            "type": "string",
+            "description": "The cleanup strategy."
+          },
+          "cores": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The vCPU count.",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the draft was created."
+          },
+          "description": {
+            "type": "string",
+            "description": "The template description."
+          },
+          "diskGib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The disk size in GiB.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The draft's identity."
+          },
+          "imageVersionId": {
+            "type": "string",
+            "description": "The pinned image version id."
+          },
+          "memoryMib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The memory in MiB.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The template name."
+          },
+          "publishedFrom": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The published version this draft descends from, when any."
+          },
+          "readinessCommand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH probe command, when pinned."
+          },
+          "readinessDeadlineSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The readiness deadline in seconds.",
+            "minimum": 0
+          },
+          "readinessProbe": {
+            "type": "string",
+            "description": "The readiness probe."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The default TTL in seconds, beginning at ready.",
+            "minimum": 0
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the draft was last edited."
+          }
+        }
+      },
+      "LabTemplateVersionDto": {
+        "type": "object",
+        "description": "One published template version.",
+        "required": [
+          "id",
+          "templateId",
+          "name",
+          "content",
+          "imageDigest",
+          "publishedBy",
+          "publishedAt"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/LabTemplateContentDto",
+            "description": "The frozen content."
+          },
+          "id": {
+            "type": "string",
+            "description": "The version's identity."
+          },
+          "imageDigest": {
+            "type": "string",
+            "description": "The pinned image version's digest at publication time."
+          },
+          "name": {
+            "type": "string",
+            "description": "The template name at publication time."
+          },
+          "publishedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the version was published."
+          },
+          "publishedBy": {
+            "type": "string",
+            "description": "Who published the version."
+          },
+          "templateId": {
+            "type": "string",
+            "description": "The template the version came from."
+          }
+        }
+      },
       "MachineDto": {
         "type": "object",
         "description": "A machine, as the list and detail endpoints display it.",
@@ -5676,6 +6366,130 @@
           }
         }
       },
+      "Page_LabTemplateDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One template draft.",
+              "required": [
+                "id",
+                "name",
+                "description",
+                "imageVersionId",
+                "cores",
+                "memoryMib",
+                "diskGib",
+                "readinessProbe",
+                "readinessDeadlineSeconds",
+                "ttlSeconds",
+                "cleanup",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "bootstrapProjectId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The bootstrap profile reference, when pinned."
+                },
+                "cleanup": {
+                  "type": "string",
+                  "description": "The cleanup strategy."
+                },
+                "cores": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The vCPU count.",
+                  "minimum": 0
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the draft was created."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "The template description."
+                },
+                "diskGib": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The disk size in GiB.",
+                  "minimum": 0
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The draft's identity."
+                },
+                "imageVersionId": {
+                  "type": "string",
+                  "description": "The pinned image version id."
+                },
+                "memoryMib": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The memory in MiB.",
+                  "minimum": 0
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The template name."
+                },
+                "publishedFrom": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The published version this draft descends from, when any."
+                },
+                "readinessCommand": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The SSH probe command, when pinned."
+                },
+                "readinessDeadlineSeconds": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The readiness deadline in seconds.",
+                  "minimum": 0
+                },
+                "readinessProbe": {
+                  "type": "string",
+                  "description": "The readiness probe."
+                },
+                "ttlSeconds": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The default TTL in seconds, beginning at ready.",
+                  "minimum": 0
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the draft was last edited."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "Page_MachineDto": {
         "type": "object",
         "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
@@ -6044,6 +6858,97 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "Last mutation (epoch milliseconds)."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_ProvisionRecordDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One provisioning record.",
+              "required": [
+                "id",
+                "templateVersionId",
+                "state",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "cloneUpid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The clone task's UPID, while running."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the record was created."
+                },
+                "guestIpv4": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The guest's IPv4 address, once reported."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The record's identity."
+                },
+                "node": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The PVE node the guest landed on, once cloned."
+                },
+                "readyAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When the guest reached ready, when it did."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "The guest's current state."
+                },
+                "templateVersionId": {
+                  "type": "string",
+                  "description": "The template version the guest was provisioned from."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the record was last updated."
+                },
+                "vmid": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "The guest's VMID, once cloned.",
+                  "minimum": 0
                 }
               }
             },
@@ -6424,6 +7329,79 @@
           "name": {
             "type": "string",
             "description": "The interface name inside the guest."
+          }
+        }
+      },
+      "ProvisionRecordDto": {
+        "type": "object",
+        "description": "One provisioning record.",
+        "required": [
+          "id",
+          "templateVersionId",
+          "state",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "cloneUpid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The clone task's UPID, while running."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the record was created."
+          },
+          "guestIpv4": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's IPv4 address, once reported."
+          },
+          "id": {
+            "type": "string",
+            "description": "The record's identity."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PVE node the guest landed on, once cloned."
+          },
+          "readyAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the guest reached ready, when it did."
+          },
+          "state": {
+            "type": "string",
+            "description": "The guest's current state."
+          },
+          "templateVersionId": {
+            "type": "string",
+            "description": "The template version the guest was provisioned from."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the record was last updated."
+          },
+          "vmid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The guest's VMID, once cloned.",
+            "minimum": 0
           }
         }
       },
@@ -6990,6 +7968,174 @@
               "token": {
                 "type": "string",
                 "description": "The token value. Shown once."
+              }
+            }
+          }
+        }
+      },
+      "Resource_LabTemplateDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One template draft.",
+            "required": [
+              "id",
+              "name",
+              "description",
+              "imageVersionId",
+              "cores",
+              "memoryMib",
+              "diskGib",
+              "readinessProbe",
+              "readinessDeadlineSeconds",
+              "ttlSeconds",
+              "cleanup",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "bootstrapProjectId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The bootstrap profile reference, when pinned."
+              },
+              "cleanup": {
+                "type": "string",
+                "description": "The cleanup strategy."
+              },
+              "cores": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The vCPU count.",
+                "minimum": 0
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the draft was created."
+              },
+              "description": {
+                "type": "string",
+                "description": "The template description."
+              },
+              "diskGib": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The disk size in GiB.",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string",
+                "description": "The draft's identity."
+              },
+              "imageVersionId": {
+                "type": "string",
+                "description": "The pinned image version id."
+              },
+              "memoryMib": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The memory in MiB.",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string",
+                "description": "The template name."
+              },
+              "publishedFrom": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The published version this draft descends from, when any."
+              },
+              "readinessCommand": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The SSH probe command, when pinned."
+              },
+              "readinessDeadlineSeconds": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The readiness deadline in seconds.",
+                "minimum": 0
+              },
+              "readinessProbe": {
+                "type": "string",
+                "description": "The readiness probe."
+              },
+              "ttlSeconds": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The default TTL in seconds, beginning at ready.",
+                "minimum": 0
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the draft was last edited."
+              }
+            }
+          }
+        }
+      },
+      "Resource_LabTemplateVersionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One published template version.",
+            "required": [
+              "id",
+              "templateId",
+              "name",
+              "content",
+              "imageDigest",
+              "publishedBy",
+              "publishedAt"
+            ],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/LabTemplateContentDto",
+                "description": "The frozen content."
+              },
+              "id": {
+                "type": "string",
+                "description": "The version's identity."
+              },
+              "imageDigest": {
+                "type": "string",
+                "description": "The pinned image version's digest at publication time."
+              },
+              "name": {
+                "type": "string",
+                "description": "The template name at publication time."
+              },
+              "publishedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the version was published."
+              },
+              "publishedBy": {
+                "type": "string",
+                "description": "Who published the version."
+              },
+              "templateId": {
+                "type": "string",
+                "description": "The template the version came from."
               }
             }
           }
@@ -7589,6 +8735,88 @@
           }
         }
       },
+      "Resource_ProvisionRecordDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One provisioning record.",
+            "required": [
+              "id",
+              "templateVersionId",
+              "state",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "cloneUpid": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The clone task's UPID, while running."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the record was created."
+              },
+              "guestIpv4": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The guest's IPv4 address, once reported."
+              },
+              "id": {
+                "type": "string",
+                "description": "The record's identity."
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The PVE node the guest landed on, once cloned."
+              },
+              "readyAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the guest reached ready, when it did."
+              },
+              "state": {
+                "type": "string",
+                "description": "The guest's current state."
+              },
+              "templateVersionId": {
+                "type": "string",
+                "description": "The template version the guest was provisioned from."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the record was last updated."
+              },
+              "vmid": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The guest's VMID, once cloned.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_ProxmoxAccountDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -8047,6 +9275,88 @@
           },
           "params": {
             "description": "The action-specific parameters (snapshot name/description, clone\ntarget id/name, and so on)."
+          }
+        }
+      },
+      "SaveLabTemplateRequest": {
+        "type": "object",
+        "description": "The create/update request.",
+        "required": [
+          "name",
+          "description",
+          "imageVersionId",
+          "cores",
+          "memoryMib",
+          "diskGib",
+          "readinessProbe",
+          "readinessDeadlineSeconds",
+          "ttlSeconds",
+          "cleanup"
+        ],
+        "properties": {
+          "bootstrapProjectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bootstrap profile reference, when pinned."
+          },
+          "cleanup": {
+            "type": "string",
+            "description": "The cleanup strategy."
+          },
+          "cores": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The vCPU count.",
+            "minimum": 0
+          },
+          "description": {
+            "type": "string",
+            "description": "The template description."
+          },
+          "diskGib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The disk size in GiB.",
+            "minimum": 0
+          },
+          "imageVersionId": {
+            "type": "string",
+            "description": "The pinned image version id."
+          },
+          "memoryMib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The memory in MiB.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The template name."
+          },
+          "readinessCommand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SSH probe command, when pinned."
+          },
+          "readinessDeadlineSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The readiness deadline in seconds.",
+            "minimum": 0
+          },
+          "readinessProbe": {
+            "type": "string",
+            "description": "The readiness probe."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The default TTL in seconds.",
+            "minimum": 0
           }
         }
       },
@@ -8763,8 +10073,16 @@
       "description": "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
     },
     {
+      "name": "lab",
+      "description": "Fleet Lab: versioned templates pinning promoted image versions, the provisioning saga's records, and the readiness states. TTL begins at ready."
+    },
+    {
       "name": "images",
       "description": "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+    },
+    {
+      "name": "lab",
+      "description": "Fleet Lab: versioned templates pinning promoted image versions, the provisioning saga's records, and the readiness states. TTL begins at ready."
     },
     {
       "name": "images",

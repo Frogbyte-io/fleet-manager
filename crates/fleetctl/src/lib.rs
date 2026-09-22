@@ -586,6 +586,45 @@ pub enum Command {
         /// The recipe's identity.
         recipe_id: String,
     },
+    /// List Lab template drafts.
+    LabTemplates,
+    /// Create a Lab template draft. The content fields ride the flags.
+    LabCreate {
+        /// The template name.
+        name: String,
+        /// The template description.
+        description: String,
+        /// The pinned image version id.
+        image_version_id: String,
+        /// The vCPU count.
+        cores: u32,
+        /// The memory in MiB.
+        memory_mib: u32,
+        /// The disk size in GiB.
+        disk_gib: u32,
+        /// The readiness probe.
+        readiness_probe: String,
+        /// The SSH probe command, for the `ssh_exec` probe.
+        readiness_command: Option<String>,
+        /// The readiness deadline in seconds.
+        readiness_deadline_seconds: u32,
+        /// The default TTL in seconds.
+        ttl_seconds: u32,
+        /// The cleanup strategy.
+        cleanup: String,
+    },
+    /// Publish a Lab template draft.
+    LabPublish {
+        /// The template's identity.
+        template_id: String,
+    },
+    /// Start provisioning a published template version.
+    LabProvision {
+        /// The template version's identity.
+        version_id: String,
+    },
+    /// List the provisioning records.
+    LabProvisions,
     /// Promote one version as the recipe's built image.
     ImagesPromote {
         /// The version's identity.
@@ -760,6 +799,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
         ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
         ["images", verb, rest @ ..] => parse_images_command(verb, rest)?,
+        ["lab", verb, rest @ ..] => parse_lab_command(verb, rest)?,
         ["projects", verb, rest @ ..] => parse_projects_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
@@ -1166,6 +1206,185 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
     }
 }
 
+/// Parses one `fleetctl lab` subcommand.
+#[allow(clippy::too_many_lines)]
+fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match verb {
+        "templates" => match rest {
+            [] => Ok(Command::LabTemplates),
+            _ => Err(CliError { message: usage() }),
+        },
+        "create" => {
+            let mut name = None;
+            let mut description = None;
+            let mut image_version_id = None;
+            let mut cores = None;
+            let mut memory_mib = None;
+            let mut disk_gib = None;
+            let mut readiness_probe = None;
+            let readiness_command = None;
+            let mut readiness_deadline_seconds = None;
+            let mut ttl_seconds = None;
+            let mut cleanup = None;
+            let mut flags = rest.iter().copied();
+            while let Some(flag) = flags.next() {
+                match flag {
+                    "--name" => {
+                        name = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--name requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--description" => {
+                        description = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--description requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--image-version" => {
+                        image_version_id = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--image-version requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--cores" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--cores requires a value".to_owned(),
+                        })?;
+                        cores = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--cores must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--memory" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--memory requires a value".to_owned(),
+                        })?;
+                        memory_mib = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--memory must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--disk" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--disk requires a value".to_owned(),
+                        })?;
+                        disk_gib = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--disk must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--probe" => {
+                        readiness_probe = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--probe requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    "--readiness-deadline" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--readiness-deadline requires a value".to_owned(),
+                        })?;
+                        readiness_deadline_seconds = Some(value.parse().map_err(|_| CliError {
+                            message: format!(
+                                "--readiness-deadline must be a number, not {value:?}"
+                            ),
+                        })?);
+                    }
+                    "--ttl" => {
+                        let value = flags.next().ok_or_else(|| CliError {
+                            message: "--ttl requires a value".to_owned(),
+                        })?;
+                        ttl_seconds = Some(value.parse().map_err(|_| CliError {
+                            message: format!("--ttl must be a number, not {value:?}"),
+                        })?);
+                    }
+                    "--cleanup" => {
+                        cleanup = Some(
+                            flags
+                                .next()
+                                .ok_or_else(|| CliError {
+                                    message: "--cleanup requires a value".to_owned(),
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                    other => {
+                        return Err(CliError {
+                            message: format!(
+                                "unknown flag {other:?}; see the usage below\n\n{}",
+                                usage()
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(Command::LabCreate {
+                name: name.ok_or_else(|| CliError {
+                    message: "--name is required".to_owned(),
+                })?,
+                description: description.ok_or_else(|| CliError {
+                    message: "--description is required".to_owned(),
+                })?,
+                image_version_id: image_version_id.ok_or_else(|| CliError {
+                    message: "--image-version is required".to_owned(),
+                })?,
+                cores: cores.ok_or_else(|| CliError {
+                    message: "--cores is required".to_owned(),
+                })?,
+                memory_mib: memory_mib.ok_or_else(|| CliError {
+                    message: "--memory is required".to_owned(),
+                })?,
+                disk_gib: disk_gib.ok_or_else(|| CliError {
+                    message: "--disk is required".to_owned(),
+                })?,
+                readiness_probe: readiness_probe.ok_or_else(|| CliError {
+                    message: "--probe is required".to_owned(),
+                })?,
+                readiness_command,
+                readiness_deadline_seconds: readiness_deadline_seconds.ok_or_else(|| CliError {
+                    message: "--readiness-deadline is required".to_owned(),
+                })?,
+                ttl_seconds: ttl_seconds.ok_or_else(|| CliError {
+                    message: "--ttl is required".to_owned(),
+                })?,
+                cleanup: cleanup.ok_or_else(|| CliError {
+                    message: "--cleanup is required".to_owned(),
+                })?,
+            })
+        }
+        "publish" => match rest {
+            [template_id] => Ok(Command::LabPublish {
+                template_id: (*template_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "provision" => match rest {
+            [version_id] => Ok(Command::LabProvision {
+                version_id: (*version_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "provisions" => match rest {
+            [] => Ok(Command::LabProvisions),
+            _ => Err(CliError { message: usage() }),
+        },
+        _ => Err(CliError { message: usage() }),
+    }
+}
+
 /// Parses one `fleetctl images` subcommand.
 fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
     match verb {
@@ -1532,7 +1751,7 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provisions\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -2650,6 +2869,65 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             None,
         ),
+        Command::LabTemplates => (
+            reqwest::Method::GET,
+            "/api/v1/lab/templates".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::LabCreate {
+            name,
+            description,
+            image_version_id,
+            cores,
+            memory_mib,
+            disk_gib,
+            readiness_probe,
+            readiness_command,
+            readiness_deadline_seconds,
+            ttl_seconds,
+            cleanup,
+        } => {
+            let mut body = serde_json::json!({
+                "name": name,
+                "description": description,
+                "imageVersionId": image_version_id,
+                "cores": cores,
+                "memoryMib": memory_mib,
+                "diskGib": disk_gib,
+                "readinessProbe": readiness_probe,
+                "readinessDeadlineSeconds": readiness_deadline_seconds,
+                "ttlSeconds": ttl_seconds,
+                "cleanup": cleanup,
+            });
+            if let Some(command) = &readiness_command {
+                body["readinessCommand"] = serde_json::json!(command);
+            }
+            (
+                reqwest::Method::POST,
+                "/api/v1/lab/templates".to_owned(),
+                Vec::new(),
+                Some(body),
+            )
+        }
+        Command::LabPublish { template_id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/templates/{template_id}/publish"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabProvision { version_id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/versions/{version_id}/provision"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabProvisions => (
+            reqwest::Method::GET,
+            "/api/v1/lab/provisions".to_owned(),
+            Vec::new(),
+            None,
+        ),
         Command::ImagesPromote { version_id } => (
             reqwest::Method::POST,
             format!("/api/v1/images/versions/{version_id}/promote"),
@@ -3288,6 +3566,94 @@ fn render_project_mutation(payload: &Value) -> String {
 /// Renders a project deletion answer.
 fn render_project_deleted() -> String {
     "project removed".to_owned()
+}
+
+/// Which Lab surface a payload belongs to: the lists share the page
+/// envelope, so the renderer is scoped by command rather than guessing
+/// from the payload.
+#[derive(Clone, Copy, Debug)]
+enum LabSurface {
+    /// The template drafts.
+    Templates,
+    /// The provisioning records.
+    Provisions,
+}
+
+/// Renders the Lab surface as human text; exposed for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_lab_for_test(value: &Value) -> String {
+    render_lab(Some(value), LabSurface::Templates)
+}
+
+/// The provisions renderer for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_lab_provisions_for_test(value: &Value) -> String {
+    render_lab(Some(value), LabSurface::Provisions)
+}
+
+fn render_lab(value: Option<&Value>, _surface: LabSurface) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    // Template/provision lists: one row per entry.
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let is_provision = items
+            .first()
+            .is_some_and(|item| item.get("state").is_some());
+        let mut lines = if is_provision {
+            vec![format!(
+                "{:<38} {:<16} {:<10} {}",
+                "ID", "STATE", "VMID", "TEMPLATE VERSION"
+            )]
+        } else {
+            vec![format!(
+                "{:<38} {:<24} {:<10} {}",
+                "ID", "NAME", "CORES", "IMAGE VERSION"
+            )]
+        };
+        for item in items {
+            if is_provision {
+                lines.push(format!(
+                    "{:<38} {:<16} {:<10} {}",
+                    item["id"].as_str().unwrap_or("-"),
+                    item["state"].as_str().unwrap_or("-"),
+                    item["vmid"]
+                        .as_u64()
+                        .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                    item["templateVersionId"].as_str().unwrap_or("-"),
+                ));
+            } else {
+                lines.push(format!(
+                    "{:<38} {:<24} {:<10} {}",
+                    item["id"].as_str().unwrap_or("-"),
+                    item["name"].as_str().unwrap_or("-"),
+                    item["cores"]
+                        .as_u64()
+                        .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                    item["imageVersionId"].as_str().unwrap_or("-"),
+                ));
+            }
+        }
+        if items.is_empty() {
+            lines.push(if is_provision {
+                "(no provisions)".to_owned()
+            } else {
+                "(no Lab templates)".to_owned()
+            });
+        }
+        return lines.join("\n");
+    }
+    let mut lines = Vec::new();
+    for (key, val) in value.as_object().into_iter().flatten() {
+        let rendered = match val {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        lines.push(format!("{key}: {rendered}"));
+    }
+    lines.join("\n")
 }
 
 /// Renders the image surface as human text; exposed for contract tests.

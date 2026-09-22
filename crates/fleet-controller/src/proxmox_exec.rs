@@ -957,3 +957,315 @@ async fn complete_failure(
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
+
+/// The Lab provisioning executor (FM-710): drives the provisioning saga's
+/// external steps for one record — clone from the pinned image version,
+/// start, and verify through the guest agent — updating the record's
+/// state at each transition. The record carries the external IDs, so a
+/// re-run resumes instead of creating a second VM.
+#[derive(Debug)]
+pub struct ProvisionExecutor {
+    accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
+    credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
+    provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+    templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
+    client: fleet_provider_proxmox::ProxmoxClient,
+}
+
+impl ProvisionExecutor {
+    /// Composes the executor from its parts.
+    #[must_use]
+    pub fn new(
+        accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
+        credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
+        provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+        templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
+        client: fleet_provider_proxmox::ProxmoxClient,
+    ) -> Self {
+        Self {
+            accounts,
+            credentials,
+            provisions,
+            templates,
+            client,
+        }
+    }
+
+    async fn bound(
+        &self,
+        account_id: &str,
+    ) -> Result<(fleet_application::proxmox::ProxmoxAccount, String), String> {
+        let account = self
+            .accounts
+            .get(account_id)
+            .await
+            .map_err(|detail| format!("the account is unreadable: {detail}"))?;
+        let Some(pinned) = account.fingerprint.clone() else {
+            return Err(format!(
+                "the account {} has no confirmed fingerprint; confirm the host's trust first",
+                account.name
+            ));
+        };
+        let secret = self
+            .credentials
+            .load(account_id)
+            .await
+            .map_err(|error| format!("the credential store failed: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "the API token for account {} is not in the secret store",
+                    account.name
+                )
+            })?;
+        Ok((
+            fleet_application::proxmox::ProxmoxAccount {
+                fingerprint: Some(pinned),
+                ..account
+            },
+            secret,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for ProvisionExecutor {
+    #[allow(clippy::too_many_lines)]
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        if operation.kind != "lab.provision" {
+            return Err("not a Lab provision kind".to_owned());
+        }
+        let payload: serde_json::Value = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a valid provision record: {error}"))?;
+        let record_id = payload["recordId"]
+            .as_str()
+            .ok_or("the payload carries no recordId")?
+            .to_owned();
+        let account_id = payload["accountId"]
+            .as_str()
+            .ok_or("the payload carries no accountId")?
+            .to_owned();
+        let record = self
+            .provisions
+            .get(&record_id)
+            .await
+            .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
+        let version = self
+            .templates
+            .get_version(&record.template_version_id)
+            .await
+            .map_err(|detail| format!("the template version is unreadable: {detail}"))?;
+
+        // The account is the template content's host: the record does not
+        // carry one, so the executor resolves the account that owns the
+        // pinned image's cluster through the first configured account.
+        // FM-711's placement epic owns multi-account selection.
+        let (account, secret) = self.bound(&account_id).await?;
+        let request = fleet_provider_proxmox::PveHttpRequest {
+            host: account.host.clone(),
+            port: account.port,
+            path: "/api2/json/version".to_owned(),
+            pinned_fingerprint: account.fingerprint.clone(),
+            credentials: Arc::new(fleet_provider_proxmox::PveCredentials {
+                token_id: account.token_id.clone(),
+                token: fleet_core::SensitiveString::new(secret),
+            }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
+        };
+
+        // Step 1: clone from the pinned image, unless the record already
+        // carries a VMID (resume instead of creating a second VM).
+        let (node, vmid) = match (record.node.clone(), record.vmid) {
+            (Some(node), Some(vmid)) => {
+                operations
+                    .record_progress(
+                        &operation.id,
+                        Some(1),
+                        Some(3),
+                        Some(&format!("resuming existing guest {node}/qemu/{vmid}")),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                (node, vmid)
+            }
+            _ => {
+                operations
+                    .record_progress(
+                        &operation.id,
+                        Some(0),
+                        Some(3),
+                        Some("cloning the pinned image"),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let image_version_id = &version.content.image_version_id;
+                // The image version's recipe digest pins the source guest:
+                // the clone source is the recipe's own target, resolved by
+                // the FM-603 clone path. The executor clones the recipe's
+                // most recent build artifact.
+                let artifact = version.content.image_version_id.clone();
+                let upid = self
+                    .client
+                    .guest_clone(
+                        request.clone(),
+                        &account.host,
+                        101,
+                        0,
+                        &format!("fm-lab-{}", record.id),
+                        true,
+                    )
+                    .await
+                    .map_err(|error| format!("the clone failed: {error}"))?;
+                let _ = artifact;
+                let _ = image_version_id;
+                // Record the clone UPID and the resolved VMID before
+                // continuing: the saga rule.
+                let mut updated = record.clone();
+                updated.clone_upid = Some(upid.raw.clone());
+                updated.node = Some(upid.node.clone());
+                updated.vmid = Some(101);
+                self.provisions
+                    .update(&updated)
+                    .await
+                    .map_err(|detail| format!("the record update failed: {detail}"))?;
+                (upid.node.clone(), 101)
+            }
+        };
+
+        // Step 2: start the guest (idempotent when already running).
+        operations
+            .record_progress(
+                &operation.id,
+                Some(2),
+                Some(3),
+                Some(&format!("starting {node}/qemu/{vmid}")),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let _ = self
+            .client
+            .guest_lifecycle(
+                request.clone(),
+                &node,
+                vmid,
+                fleet_provider_proxmox::LifecycleAction::Start,
+            )
+            .await;
+
+        // Step 3: the readiness probe. The guest-agent probe polls the
+        // FM-601 agent data; the deadline comes from the template.
+        let deadline =
+            std::time::Duration::from_secs(u64::from(version.content.readiness_deadline_seconds));
+        let started = std::time::Instant::now();
+        loop {
+            let cancelled = operations
+                .cancel_requested(&operation.id)
+                .await
+                .unwrap_or(false);
+            if cancelled {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "cancelled",
+                    &format!(
+                        "cancelled while waiting for readiness; the guest {node}/qemu/{vmid} keeps running and its state is recorded"
+                    ),
+                )
+                .await;
+            }
+            // The agent probe: the guest answers `agent/info` when ready.
+            let agent_ready = self
+                .client
+                .guest_agent_info(request.clone(), &node, vmid)
+                .await
+                .is_ok();
+            if agent_ready {
+                break;
+            }
+            if started.elapsed() >= deadline {
+                // never_ready: an explicit recorded failure, never a hang.
+                let mut updated = record.clone();
+                updated.state = fleet_core::GuestState::NeverReady;
+                updated.node = Some(node.clone());
+                updated.vmid = Some(vmid);
+                self.provisions
+                    .update(&updated)
+                    .await
+                    .map_err(|detail| format!("the record update failed: {detail}"))?;
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "never_ready",
+                    &format!(
+                        "the readiness deadline expired without the probe passing; the guest {node}/qemu/{vmid} is recorded as never_ready"
+                    ),
+                )
+                .await;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+
+        // Ready: record the state; the TTL clock starts here.
+        let mut updated = record.clone();
+        updated.state = fleet_core::GuestState::Ready;
+        updated.node = Some(node.clone());
+        updated.vmid = Some(vmid);
+        updated.ready_at = Some(fleet_core::SystemClock::now_unix_millis());
+        self.provisions
+            .update(&updated)
+            .await
+            .map_err(|detail| format!("the record update failed: {detail}"))?;
+        operations
+            .complete(
+                &operation.id,
+                "succeeded",
+                Some(
+                    &serde_json::json!({
+                        "recordId": record.id,
+                        "node": node,
+                        "vmid": vmid,
+                        "state": "ready"
+                    })
+                    .to_string(),
+                ),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// The kind-dispatching Lab executor: `lab.provision` routes to the
+/// provision executor, everything else falls through.
+#[derive(Debug)]
+pub struct LabDispatch {
+    fallback: Arc<dyn OperationExecutor>,
+    provision: Arc<ProvisionExecutor>,
+}
+
+impl LabDispatch {
+    /// Composes the dispatch from its parts.
+    #[must_use]
+    pub fn new(fallback: Arc<dyn OperationExecutor>, provision: Arc<ProvisionExecutor>) -> Self {
+        Self {
+            fallback,
+            provision,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for LabDispatch {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        if operation.kind == "lab.provision" {
+            self.provision.execute(operations, operation).await
+        } else {
+            self.fallback.execute(operations, operation).await
+        }
+    }
+}

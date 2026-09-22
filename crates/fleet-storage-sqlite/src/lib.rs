@@ -14,6 +14,7 @@
 
 pub mod audit;
 pub mod images;
+pub mod lab;
 pub mod machines;
 pub mod nodes;
 pub mod onboarding;
@@ -24,6 +25,7 @@ pub mod source;
 
 pub use audit::{AuditLedger, AuditSink};
 pub use images::RecipeRepository;
+pub use lab::LabRepository;
 pub use machines::MachineRepository;
 pub use nodes::NodeRepository;
 pub use onboarding::OnboardingRepository;

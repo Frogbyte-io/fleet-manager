@@ -450,3 +450,31 @@ impl ProxmoxCredentialStore for AbsentProxmoxCredentials {
         Ok(())
     }
 }
+
+/// The image-pin validator over the recipe repository: the Lab boundary
+/// where the promotion state lives (FM-710).
+#[derive(Debug)]
+pub struct RecipeImagePinValidator {
+    versions: Arc<dyn fleet_application::images::RecipePort>,
+}
+
+impl RecipeImagePinValidator {
+    /// Composes the validator over the recipe port.
+    #[must_use]
+    pub fn new(versions: Arc<dyn fleet_application::images::RecipePort>) -> Self {
+        Self { versions }
+    }
+}
+
+#[async_trait]
+impl fleet_application::lab::ImagePinValidator for RecipeImagePinValidator {
+    async fn promoted_version(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<fleet_core::RecipeVersion>, String> {
+        self.versions.get_version(version_id).await.map(|version| {
+            // Only a promoted version pins.
+            version.promoted_at.is_some().then_some(version)
+        })
+    }
+}

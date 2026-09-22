@@ -1,0 +1,803 @@
+//! The Lab use cases (FM-710): versioned templates and the provisioning
+//! saga's first half — template management, provisioning, and readiness.
+//!
+//! A template pins a **promoted** image version: the pin is validated
+//! against the image use cases at creation/publish time, so a template
+//! cannot pin an unpromoted or nonexistent version. Guest states are
+//! explicit — `provisioned` (cloned + booted) is distinct from `ready`
+//! (the probe passed), and `never_ready` is the recorded failure when the
+//! readiness deadline expires. TTL begins only at ready.
+//!
+//! The saga records external IDs before continuing: the provisioned
+//! guest's VMID/node live in the provisioning record, so a re-run
+//! discovers existing state and resumes instead of creating a second VM.
+#![warn(missing_docs)]
+
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
+use crate::operation::AuditPort;
+pub use fleet_core::{
+    CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe, RecipeVersion,
+};
+
+/// A stored template draft.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabTemplate {
+    /// The draft's identity.
+    pub id: String,
+    /// The template content.
+    pub content: LabTemplateContent,
+    /// The published version this draft descends from, when any.
+    pub published_from: Option<String>,
+    /// When the draft was created (epoch millis).
+    pub created_at: i64,
+    /// When the draft was last edited (epoch millis).
+    pub updated_at: i64,
+}
+
+/// A published template version: immutable, with provenance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabTemplateVersion {
+    /// The version's identity.
+    pub id: String,
+    /// The template the version came from.
+    pub template_id: String,
+    /// The template name at publication time.
+    pub name: String,
+    /// The frozen content.
+    pub content: LabTemplateContent,
+    /// The pinned image version's digest at publication time: the
+    /// provenance that makes an active lease reproducible.
+    pub image_digest: String,
+    /// Who published the version.
+    pub published_by: String,
+    /// When the version was published (epoch millis).
+    pub published_at: i64,
+}
+
+/// A creation or edit request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewLabTemplate {
+    /// The template content.
+    pub content: LabTemplateContent,
+}
+
+/// The image-version pin validator: the application boundary where the
+/// image use cases live. The lab use cases call it before accepting a
+/// pin; a template cannot reference an unpromoted or nonexistent version.
+#[async_trait]
+pub trait ImagePinValidator: fmt::Debug + Send + Sync {
+    /// The pinned version, when it exists **and is promoted**.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read.
+    async fn promoted_version(&self, version_id: &str) -> Result<Option<RecipeVersion>, String>;
+}
+
+/// The template storage port.
+#[async_trait]
+pub trait LabTemplatePort: fmt::Debug + Send + Sync {
+    /// Creates a draft, minting its identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the name is taken or the backend errors.
+    async fn create(&self, template: &NewLabTemplate, now: i64) -> Result<LabTemplate, String>;
+    /// Reads one draft.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn get(&self, id: &str) -> Result<LabTemplate, String>;
+    /// Lists drafts, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn list(&self) -> Result<Vec<LabTemplate>, String>;
+    /// Replaces a draft's content.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn update(
+        &self,
+        id: &str,
+        content: &LabTemplateContent,
+        now: i64,
+    ) -> Result<LabTemplate, String>;
+    /// Removes a draft. Published versions stay.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn delete(&self, id: &str) -> Result<(), String>;
+    /// Publishes a draft: freezes an immutable version with provenance.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn publish(
+        &self,
+        template_id: &str,
+        version: &LabTemplateVersion,
+    ) -> Result<LabTemplateVersion, String>;
+    /// Reads one published version.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn get_version(&self, id: &str) -> Result<LabTemplateVersion, String>;
+}
+
+/// A provisioning record: the saga's durable state for one provisioned
+/// guest, carrying the external IDs each step recorded.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionRecord {
+    /// The record's identity.
+    pub id: String,
+    /// The template version the guest was provisioned from.
+    pub template_version_id: String,
+    /// The guest's current state.
+    pub state: GuestState,
+    /// The PVE node the guest landed on, once cloned.
+    pub node: Option<String>,
+    /// The guest's VMID, once cloned.
+    pub vmid: Option<u32>,
+    /// The clone task's UPID, while running.
+    pub clone_upid: Option<String>,
+    /// The guest's IPv4 address, once the agent reported one.
+    pub guest_ipv4: Option<String>,
+    /// The caller-scoped idempotency key, when one was supplied.
+    pub idempotency_key: Option<String>,
+    /// When the guest reached ready (epoch millis), when it did — the TTL
+    /// clock's start.
+    pub ready_at: Option<i64>,
+    /// When the record was created (epoch millis).
+    pub created_at: i64,
+    /// When the record was last updated (epoch millis).
+    pub updated_at: i64,
+}
+
+/// A new provisioning record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewProvision {
+    /// The template version being provisioned.
+    pub template_version_id: String,
+    /// The caller-scoped idempotency key, when one was supplied.
+    pub idempotency_key: Option<String>,
+}
+
+/// The provisioning storage port.
+#[async_trait]
+pub trait ProvisionPort: fmt::Debug + Send + Sync {
+    /// Creates a record, minting its identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn create(&self, new: &NewProvision, now: i64) -> Result<ProvisionRecord, String>;
+    /// The record carrying this caller-scoped idempotency key, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<ProvisionRecord>, String>;
+    /// Reads one record.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn get(&self, id: &str) -> Result<ProvisionRecord, String>;
+    /// Updates the record's saga state (external IDs, guest state).
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn update(&self, record: &ProvisionRecord) -> Result<(), String>;
+    /// Lists records, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn list(&self) -> Result<Vec<ProvisionRecord>, String>;
+}
+
+/// A use-case rejection, mapped onto public API errors by the adapter.
+#[derive(Debug)]
+pub enum LabUseCaseError {
+    /// The caller may not perform the action.
+    Denied(Decision),
+    /// The request is malformed.
+    Invalid {
+        /// What is wrong.
+        detail: String,
+    },
+    /// The addressed template, version, or record does not exist.
+    NotFound {
+        /// What was not found.
+        what: String,
+    },
+    /// The template name is taken.
+    Conflict {
+        /// The conflict detail.
+        detail: String,
+    },
+    /// The image pin was refused: the version is unknown or unpromoted.
+    PinRefused {
+        /// The refusal detail.
+        detail: String,
+    },
+    /// A port failed.
+    Backend {
+        /// Where.
+        context: &'static str,
+        /// The failure detail.
+        detail: String,
+    },
+}
+
+impl fmt::Display for LabUseCaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied(decision) => write!(f, "denied: {decision}"),
+            Self::Invalid { detail } => write!(f, "invalid request: {detail}"),
+            Self::NotFound { what } => write!(f, "not found: {what}"),
+            Self::Conflict { detail } => write!(f, "conflict: {detail}"),
+            Self::PinRefused { detail } => write!(f, "the image pin was refused: {detail}"),
+            Self::Backend { context, detail } => write!(f, "lab {context} failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for LabUseCaseError {}
+
+/// The Lab use cases.
+#[derive(Debug)]
+pub struct Lab {
+    templates: Arc<dyn LabTemplatePort>,
+    provisions: Arc<dyn ProvisionPort>,
+    image_pins: Arc<dyn ImagePinValidator>,
+    audit: Arc<dyn AuditPort>,
+}
+
+impl Lab {
+    /// Composes the service from its ports.
+    #[must_use]
+    pub fn new(
+        templates: Arc<dyn LabTemplatePort>,
+        provisions: Arc<dyn ProvisionPort>,
+        image_pins: Arc<dyn ImagePinValidator>,
+        audit: Arc<dyn AuditPort>,
+    ) -> Self {
+        Self {
+            templates,
+            provisions,
+            image_pins,
+            audit,
+        }
+    }
+
+    /// Lists the template drafts.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_templates(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<LabTemplate>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.templates
+            .list()
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "templates",
+                detail,
+            })
+    }
+
+    /// Creates a template draft after validating the image pin. The audit
+    /// intent lands before any mutation.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed request, a refused pin, a name
+    /// conflict, or a backend failure.
+    pub async fn create_template(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        new: NewLabTemplate,
+        now: i64,
+    ) -> Result<LabTemplate, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabConfig,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        new.content
+            .validate()
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        self.validate_pin(&new.content.image_version_id).await?;
+        self.audit_event(
+            principal,
+            Permission::LabConfig,
+            None,
+            "lab_template_creating",
+            Some(("name", new.content.name.as_str())),
+        )
+        .await?;
+        self.templates.create(&new, now).await.map_err(|detail| {
+            if detail.contains("taken") || detail.contains("UNIQUE") {
+                LabUseCaseError::Conflict { detail }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "templates",
+                    detail,
+                }
+            }
+        })
+    }
+
+    /// Reads one draft.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown template, or a backend failure.
+    pub async fn get_template(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<LabTemplate, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.require_template(id).await
+    }
+
+    /// Replaces a draft's content after validating the image pin.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a malformed request, a refused pin, an unknown
+    /// template, or a backend failure.
+    pub async fn update_template(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+        content: LabTemplateContent,
+        now: i64,
+    ) -> Result<LabTemplate, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabConfig,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        content
+            .validate()
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        self.validate_pin(&content.image_version_id).await?;
+        self.audit_event(
+            principal,
+            Permission::LabConfig,
+            Some(id),
+            "lab_template_updating",
+            None,
+        )
+        .await?;
+        self.templates
+            .update(id, &content, now)
+            .await
+            .map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("template {id}"),
+                    }
+                } else if detail.contains("taken") || detail.contains("UNIQUE") {
+                    LabUseCaseError::Conflict { detail }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "templates",
+                        detail,
+                    }
+                }
+            })
+    }
+
+    /// Removes a draft. Published versions stay.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown template, or a backend failure.
+    pub async fn delete_template(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<(), LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabConfig,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.audit_event(
+            principal,
+            Permission::LabConfig,
+            Some(id),
+            "lab_template_deleting",
+            None,
+        )
+        .await?;
+        self.templates.delete(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("template {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "templates",
+                    detail,
+                }
+            }
+        })
+    }
+
+    /// Publishes a draft: freezes an immutable version with provenance
+    /// (the publisher and the pinned image's digest). The pin is
+    /// re-validated at publish time — an image demoted between edit and
+    /// publish refuses here.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, a refused pin, an unknown template, or a backend
+    /// failure.
+    pub async fn publish_template(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        template_id: &str,
+        now: i64,
+    ) -> Result<LabTemplateVersion, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabConfig,
+                resource: Some(template_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let template = self.require_template(template_id).await?;
+        let pin = self
+            .validate_pin(&template.content.image_version_id)
+            .await?;
+        let version = LabTemplateVersion {
+            id: format!("{}@{}", template.id, &pin.content_digest[..16]),
+            template_id: template.id.clone(),
+            name: template.content.name.clone(),
+            content: template.content.clone(),
+            image_digest: pin.content_digest.clone(),
+            published_by: principal.id.clone(),
+            published_at: now,
+        };
+        self.audit_event(
+            principal,
+            Permission::LabConfig,
+            Some(template_id),
+            "lab_template_publishing",
+            Some(("digest", pin.content_digest.as_str())),
+        )
+        .await?;
+        self.templates
+            .publish(template_id, &version)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "versions",
+                detail,
+            })
+    }
+
+    /// Reads one published version.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown version, or a backend failure.
+    pub async fn get_template_version(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        version_id: &str,
+    ) -> Result<LabTemplateVersion, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: Some(version_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.templates
+            .get_version(version_id)
+            .await
+            .map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("version {version_id}"),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "versions",
+                        detail,
+                    }
+                }
+            })
+    }
+
+    /// Starts provisioning a published template version: creates the
+    /// record and returns it in `provisioning`. An idempotency key scoped
+    /// to the caller makes a retry return the in-flight record instead of
+    /// creating a second guest saga. The saga's external-ID steps are
+    /// driven by the executor; this use case is the durable entry point.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown version, or a backend failure.
+    pub async fn start_provision(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        version_id: &str,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<ProvisionRecord, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabProvision,
+                resource: Some(version_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        // The version must exist and its image pin must still be
+        // promoted: a demotion between publish and provision refuses.
+        let version = self
+            .templates
+            .get_version(version_id)
+            .await
+            .map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("version {version_id}"),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "versions",
+                        detail,
+                    }
+                }
+            })?;
+        self.validate_pin(&version.content.image_version_id).await?;
+        self.audit_event(
+            principal,
+            Permission::LabProvision,
+            Some(version_id),
+            "lab_provision_starting",
+            Some(("digest", version.image_digest.as_str())),
+        )
+        .await?;
+        // Idempotent replay: the caller-scoped key returns the in-flight
+        // record instead of creating a second guest saga.
+        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        if let Some(key) = &scoped_key
+            && let Some(existing) =
+                self.provisions
+                    .find_by_idempotency_key(key)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "provisions",
+                        detail,
+                    })?
+        {
+            return Ok(existing);
+        }
+        self.provisions
+            .create(
+                &NewProvision {
+                    template_version_id: version_id.to_owned(),
+                    idempotency_key: scoped_key,
+                },
+                now,
+            )
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "provisions",
+                detail,
+            })
+    }
+
+    /// Lists the provisioning records.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_provisions(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<ProvisionRecord>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.provisions
+            .list()
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "provisions",
+                detail,
+            })
+    }
+
+    /// Reads one provisioning record.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown record, or a backend failure.
+    pub async fn get_provision(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<ProvisionRecord, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.provisions.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("provision {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "provisions",
+                    detail,
+                }
+            }
+        })
+    }
+
+    async fn validate_pin(&self, version_id: &str) -> Result<RecipeVersion, LabUseCaseError> {
+        let promoted = self
+            .image_pins
+            .promoted_version(version_id)
+            .await
+            .map_err(|detail| {
+                // An unknown version is a pin refusal, not a backend
+                // failure: the caller named an image that does not exist.
+                if detail.contains("not found") {
+                    LabUseCaseError::PinRefused {
+                        detail: format!(
+                            "the image version {version_id} does not exist; only promoted versions can be pinned"
+                        ),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "image_pins",
+                        detail,
+                    }
+                }
+            })?;
+        promoted.ok_or_else(|| LabUseCaseError::PinRefused {
+            detail: format!(
+                "the image version {version_id} is not promoted; only promoted versions can be pinned"
+            ),
+        })
+    }
+
+    async fn require_template(&self, id: &str) -> Result<LabTemplate, LabUseCaseError> {
+        self.templates.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("template {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "templates",
+                    detail,
+                }
+            }
+        })
+    }
+
+    async fn audit_event(
+        &self,
+        principal: &ActingPrincipal,
+        action: Permission,
+        template_id: Option<&str>,
+        event: &str,
+        fact: Option<(&str, &str)>,
+    ) -> Result<(), LabUseCaseError> {
+        let mut metadata = crate::audit::AuditMetadata::default();
+        metadata
+            .insert("event", event)
+            .map_err(|error| LabUseCaseError::Backend {
+                context: "audit",
+                detail: error.to_string(),
+            })?;
+        if let Some((key, value)) = fact {
+            metadata
+                .insert(key, value)
+                .map_err(|error| LabUseCaseError::Backend {
+                    context: "audit",
+                    detail: error.to_string(),
+                })?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal.id.clone(),
+                action: action.id().to_owned(),
+                resource: template_id.map(str::to_owned),
+                decision: Decision::allow(),
+                correlation_id: None,
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "audit",
+                detail,
+            })
+    }
+}
