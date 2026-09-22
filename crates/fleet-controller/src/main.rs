@@ -410,10 +410,26 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         ));
         // The image surface composes over the store alone: recipes and
         // versions need no secret material.
-        let images = std::sync::Arc::new(fleet_application::images::Images::new(
+        let recipe_versions: std::sync::Arc<dyn fleet_application::images::RecipePort> =
             std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                 store.pool().clone(),
+            ));
+        let images = std::sync::Arc::new(fleet_application::images::Images::new(
+            recipe_versions.clone(),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        ));
+        // The Lab surface composes over the store and the image pin
+        // validator: a template cannot pin an unpromoted image version.
+        let lab = std::sync::Arc::new(fleet_application::lab::Lab::new(
+            std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                store.pool().clone(),
             )),
+            std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                store.pool().clone(),
+            )),
+            std::sync::Arc::new(
+                fleet_controller::proxmox_store::RecipeImagePinValidator::new(recipe_versions),
+            ),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         ));
         // The Proxmox surface composes over the store, the secret store,
@@ -436,6 +452,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             Some(projects),
             proxmox,
             Some(images),
+            Some(lab),
             shutdown_signal(),
         )
         .await;

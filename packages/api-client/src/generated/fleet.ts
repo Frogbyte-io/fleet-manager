@@ -725,6 +725,139 @@ export interface ImportTailnetDeviceRequest {
 }
 
 /**
+ * The frozen template content.
+ */
+export interface LabTemplateContentDto {
+  /**
+     * The bootstrap profile reference, when pinned.
+     * @nullable
+     */
+  bootstrapProjectId?: string | null;
+  /** The cleanup strategy. */
+  cleanup: string;
+  /**
+     * The vCPU count.
+     * @minimum 0
+     */
+  cores: number;
+  /** The template description. */
+  description: string;
+  /**
+     * The disk size in GiB.
+     * @minimum 0
+     */
+  diskGib: number;
+  /** The pinned image version id. */
+  imageVersionId: string;
+  /**
+     * The memory in MiB.
+     * @minimum 0
+     */
+  memoryMib: number;
+  /** The template name. */
+  name: string;
+  /**
+     * The SSH probe command, when pinned.
+     * @nullable
+     */
+  readinessCommand?: string | null;
+  /**
+     * The readiness deadline in seconds.
+     * @minimum 0
+     */
+  readinessDeadlineSeconds: number;
+  /** The readiness probe. */
+  readinessProbe: string;
+  /**
+     * The default TTL in seconds.
+     * @minimum 0
+     */
+  ttlSeconds: number;
+}
+
+/**
+ * One template draft.
+ */
+export interface LabTemplateDto {
+  /**
+     * The bootstrap profile reference, when pinned.
+     * @nullable
+     */
+  bootstrapProjectId?: string | null;
+  /** The cleanup strategy. */
+  cleanup: string;
+  /**
+     * The vCPU count.
+     * @minimum 0
+     */
+  cores: number;
+  /** When the draft was created. */
+  createdAt: number;
+  /** The template description. */
+  description: string;
+  /**
+     * The disk size in GiB.
+     * @minimum 0
+     */
+  diskGib: number;
+  /** The draft's identity. */
+  id: string;
+  /** The pinned image version id. */
+  imageVersionId: string;
+  /**
+     * The memory in MiB.
+     * @minimum 0
+     */
+  memoryMib: number;
+  /** The template name. */
+  name: string;
+  /**
+     * The published version this draft descends from, when any.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /**
+     * The SSH probe command, when pinned.
+     * @nullable
+     */
+  readinessCommand?: string | null;
+  /**
+     * The readiness deadline in seconds.
+     * @minimum 0
+     */
+  readinessDeadlineSeconds: number;
+  /** The readiness probe. */
+  readinessProbe: string;
+  /**
+     * The default TTL in seconds, beginning at ready.
+     * @minimum 0
+     */
+  ttlSeconds: number;
+  /** When the draft was last edited. */
+  updatedAt: number;
+}
+
+/**
+ * One published template version.
+ */
+export interface LabTemplateVersionDto {
+  /** The frozen content. */
+  content: LabTemplateContentDto;
+  /** The version's identity. */
+  id: string;
+  /** The pinned image version's digest at publication time. */
+  imageDigest: string;
+  /** The template name at publication time. */
+  name: string;
+  /** When the version was published. */
+  publishedAt: number;
+  /** Who published the version. */
+  publishedBy: string;
+  /** The template the version came from. */
+  templateId: string;
+}
+
+/**
  * Non-authoritative description of the API this controller serves.
  */
 export interface Meta {
@@ -1197,6 +1330,81 @@ export interface PageCorrelatedDeviceDto {
 }
 
 /**
+ * One template draft.
+ */
+export type PageLabTemplateDtoItemsItem = {
+  /**
+     * The bootstrap profile reference, when pinned.
+     * @nullable
+     */
+  bootstrapProjectId?: string | null;
+  /** The cleanup strategy. */
+  cleanup: string;
+  /**
+     * The vCPU count.
+     * @minimum 0
+     */
+  cores: number;
+  /** When the draft was created. */
+  createdAt: number;
+  /** The template description. */
+  description: string;
+  /**
+     * The disk size in GiB.
+     * @minimum 0
+     */
+  diskGib: number;
+  /** The draft's identity. */
+  id: string;
+  /** The pinned image version id. */
+  imageVersionId: string;
+  /**
+     * The memory in MiB.
+     * @minimum 0
+     */
+  memoryMib: number;
+  /** The template name. */
+  name: string;
+  /**
+     * The published version this draft descends from, when any.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /**
+     * The SSH probe command, when pinned.
+     * @nullable
+     */
+  readinessCommand?: string | null;
+  /**
+     * The readiness deadline in seconds.
+     * @minimum 0
+     */
+  readinessDeadlineSeconds: number;
+  /** The readiness probe. */
+  readinessProbe: string;
+  /**
+     * The default TTL in seconds, beginning at ready.
+     * @minimum 0
+     */
+  ttlSeconds: number;
+  /** When the draft was last edited. */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageLabTemplateDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageLabTemplateDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * A machine, as the list and detail endpoints display it.
  */
 export type PageMachineDtoItemsItem = {
@@ -1399,6 +1607,56 @@ export type PageProjectDtoItemsItem = {
 export interface PageProjectDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageProjectDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One provisioning record.
+ */
+export type PageProvisionRecordDtoItemsItem = {
+  /** When the record was created. */
+  createdAt: number;
+  /**
+     * The guest's IPv4 address, once reported.
+     * @nullable
+     */
+  guestIpv4?: string | null;
+  /** The record's identity. */
+  id: string;
+  /**
+     * The PVE node the guest landed on, once cloned.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * When the guest reached ready, when it did.
+     * @nullable
+     */
+  readyAt?: number | null;
+  /** The guest's current state. */
+  state: string;
+  /** The template version the guest was provisioned from. */
+  templateVersionId: string;
+  /** When the record was last updated. */
+  updatedAt: number;
+  /**
+     * The guest's VMID, once cloned.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageProvisionRecordDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageProvisionRecordDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -1613,6 +1871,43 @@ export interface ProjectDto {
   remote: string;
   /** Last mutation (epoch milliseconds). */
   updatedAt: number;
+}
+
+/**
+ * One provisioning record.
+ */
+export interface ProvisionRecordDto {
+  /** When the record was created. */
+  createdAt: number;
+  /**
+     * The guest's IPv4 address, once reported.
+     * @nullable
+     */
+  guestIpv4?: string | null;
+  /** The record's identity. */
+  id: string;
+  /**
+     * The PVE node the guest landed on, once cloned.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * When the guest reached ready, when it did.
+     * @nullable
+     */
+  readyAt?: number | null;
+  /** The guest's current state. */
+  state: string;
+  /** The template version the guest was provisioned from. */
+  templateVersionId: string;
+  /** When the record was last updated. */
+  updatedAt: number;
+  /**
+     * The guest's VMID, once cloned.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
 }
 
 /**
@@ -1916,6 +2211,110 @@ export interface ResourceEnrollmentTokenCreatedDto {
      * once; only its hash is stored.
      */
   data: ResourceEnrollmentTokenCreatedDtoData;
+}
+
+/**
+ * One template draft.
+ */
+export type ResourceLabTemplateDtoData = {
+  /**
+     * The bootstrap profile reference, when pinned.
+     * @nullable
+     */
+  bootstrapProjectId?: string | null;
+  /** The cleanup strategy. */
+  cleanup: string;
+  /**
+     * The vCPU count.
+     * @minimum 0
+     */
+  cores: number;
+  /** When the draft was created. */
+  createdAt: number;
+  /** The template description. */
+  description: string;
+  /**
+     * The disk size in GiB.
+     * @minimum 0
+     */
+  diskGib: number;
+  /** The draft's identity. */
+  id: string;
+  /** The pinned image version id. */
+  imageVersionId: string;
+  /**
+     * The memory in MiB.
+     * @minimum 0
+     */
+  memoryMib: number;
+  /** The template name. */
+  name: string;
+  /**
+     * The published version this draft descends from, when any.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /**
+     * The SSH probe command, when pinned.
+     * @nullable
+     */
+  readinessCommand?: string | null;
+  /**
+     * The readiness deadline in seconds.
+     * @minimum 0
+     */
+  readinessDeadlineSeconds: number;
+  /** The readiness probe. */
+  readinessProbe: string;
+  /**
+     * The default TTL in seconds, beginning at ready.
+     * @minimum 0
+     */
+  ttlSeconds: number;
+  /** When the draft was last edited. */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabTemplateDto {
+  /** One template draft. */
+  data: ResourceLabTemplateDtoData;
+}
+
+/**
+ * One published template version.
+ */
+export type ResourceLabTemplateVersionDtoData = {
+  /** The frozen content. */
+  content: LabTemplateContentDto;
+  /** The version's identity. */
+  id: string;
+  /** The pinned image version's digest at publication time. */
+  imageDigest: string;
+  /** The template name at publication time. */
+  name: string;
+  /** When the version was published. */
+  publishedAt: number;
+  /** Who published the version. */
+  publishedBy: string;
+  /** The template the version came from. */
+  templateId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabTemplateVersionDto {
+  /** One published template version. */
+  data: ResourceLabTemplateVersionDtoData;
 }
 
 /**
@@ -2257,6 +2656,54 @@ export interface ResourceProjectDto {
 }
 
 /**
+ * One provisioning record.
+ */
+export type ResourceProvisionRecordDtoData = {
+  /** When the record was created. */
+  createdAt: number;
+  /**
+     * The guest's IPv4 address, once reported.
+     * @nullable
+     */
+  guestIpv4?: string | null;
+  /** The record's identity. */
+  id: string;
+  /**
+     * The PVE node the guest landed on, once cloned.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * When the guest reached ready, when it did.
+     * @nullable
+     */
+  readyAt?: number | null;
+  /** The guest's current state. */
+  state: string;
+  /** The template version the guest was provisioned from. */
+  templateVersionId: string;
+  /** When the record was last updated. */
+  updatedAt: number;
+  /**
+     * The guest's VMID, once cloned.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProvisionRecordDto {
+  /** One provisioning record. */
+  data: ResourceProvisionRecordDtoData;
+}
+
+/**
  * One configured Proxmox account. The token secret is never here.
  */
 export type ResourceProxmoxAccountDtoData = {
@@ -2544,6 +2991,57 @@ export interface ReviewProxmoxOperationRequest {
      * target id/name, and so on).
      */
   params?: unknown;
+}
+
+/**
+ * The create/update request.
+ */
+export interface SaveLabTemplateRequest {
+  /**
+     * The bootstrap profile reference, when pinned.
+     * @nullable
+     */
+  bootstrapProjectId?: string | null;
+  /** The cleanup strategy. */
+  cleanup: string;
+  /**
+     * The vCPU count.
+     * @minimum 0
+     */
+  cores: number;
+  /** The template description. */
+  description: string;
+  /**
+     * The disk size in GiB.
+     * @minimum 0
+     */
+  diskGib: number;
+  /** The pinned image version id. */
+  imageVersionId: string;
+  /**
+     * The memory in MiB.
+     * @minimum 0
+     */
+  memoryMib: number;
+  /** The template name. */
+  name: string;
+  /**
+     * The SSH probe command, when pinned.
+     * @nullable
+     */
+  readinessCommand?: string | null;
+  /**
+     * The readiness deadline in seconds.
+     * @minimum 0
+     */
+  readinessDeadlineSeconds: number;
+  /** The readiness probe. */
+  readinessProbe: string;
+  /**
+     * The default TTL in seconds.
+     * @minimum 0
+     */
+  ttlSeconds: number;
 }
 
 /**
@@ -3566,6 +4064,478 @@ export const promoteImageVersion = async (versionId: string, options?: RequestIn
 
   const data: promoteImageVersionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as promoteImageVersionResponse
+}
+
+
+
+export type listLabProvisionsResponse200 = {
+  data: PageProvisionRecordDto
+  status: 200
+}
+
+export type listLabProvisionsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabProvisionsResponseSuccess = (listLabProvisionsResponse200) & {
+  headers: Headers;
+};
+export type listLabProvisionsResponseError = (listLabProvisionsResponse403) & {
+  headers: Headers;
+};
+
+export type listLabProvisionsResponse = (listLabProvisionsResponseSuccess | listLabProvisionsResponseError)
+
+export const getListLabProvisionsUrl = () => {
+
+
+
+
+  return `/api/v1/lab/provisions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the provisioning records.
+ */
+export const listLabProvisions = async ( options?: RequestInit): Promise<listLabProvisionsResponse> => {
+
+  const res = await fetch(getListLabProvisionsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabProvisionsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabProvisionsResponse
+}
+
+
+
+export type listLabTemplatesResponse200 = {
+  data: PageLabTemplateDto
+  status: 200
+}
+
+export type listLabTemplatesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabTemplatesResponseSuccess = (listLabTemplatesResponse200) & {
+  headers: Headers;
+};
+export type listLabTemplatesResponseError = (listLabTemplatesResponse403) & {
+  headers: Headers;
+};
+
+export type listLabTemplatesResponse = (listLabTemplatesResponseSuccess | listLabTemplatesResponseError)
+
+export const getListLabTemplatesUrl = () => {
+
+
+
+
+  return `/api/v1/lab/templates`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the template drafts.
+ */
+export const listLabTemplates = async ( options?: RequestInit): Promise<listLabTemplatesResponse> => {
+
+  const res = await fetch(getListLabTemplatesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabTemplatesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabTemplatesResponse
+}
+
+
+
+export type createLabTemplateResponse201 = {
+  data: ResourceLabTemplateDto
+  status: 201
+}
+
+export type createLabTemplateResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createLabTemplateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createLabTemplateResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createLabTemplateResponseSuccess = (createLabTemplateResponse201) & {
+  headers: Headers;
+};
+export type createLabTemplateResponseError = (createLabTemplateResponse400 | createLabTemplateResponse403 | createLabTemplateResponse409) & {
+  headers: Headers;
+};
+
+export type createLabTemplateResponse = (createLabTemplateResponseSuccess | createLabTemplateResponseError)
+
+export const getCreateLabTemplateUrl = () => {
+
+
+
+
+  return `/api/v1/lab/templates`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, conflict, refused pin,
+ * or malformed request.
+ * @summary Creates a template draft.
+ */
+export const createLabTemplate = async (saveLabTemplateRequest: SaveLabTemplateRequest, options?: RequestInit): Promise<createLabTemplateResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateLabTemplateUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(saveLabTemplateRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createLabTemplateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createLabTemplateResponse
+}
+
+
+
+export type getLabTemplateResponse200 = {
+  data: ResourceLabTemplateDto
+  status: 200
+}
+
+export type getLabTemplateResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabTemplateResponseSuccess = (getLabTemplateResponse200) & {
+  headers: Headers;
+};
+export type getLabTemplateResponseError = (getLabTemplateResponse404) & {
+  headers: Headers;
+};
+
+export type getLabTemplateResponse = (getLabTemplateResponseSuccess | getLabTemplateResponseError)
+
+export const getGetLabTemplateUrl = (templateId: string,) => {
+
+
+
+
+  return `/api/v1/lab/templates/${templateId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown template.
+ * @summary Reads one draft.
+ */
+export const getLabTemplate = async (templateId: string, options?: RequestInit): Promise<getLabTemplateResponse> => {
+
+  const res = await fetch(getGetLabTemplateUrl(templateId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabTemplateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabTemplateResponse
+}
+
+
+
+export type updateLabTemplateResponse200 = {
+  data: ResourceLabTemplateDto
+  status: 200
+}
+
+export type updateLabTemplateResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type updateLabTemplateResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type updateLabTemplateResponseSuccess = (updateLabTemplateResponse200) & {
+  headers: Headers;
+};
+export type updateLabTemplateResponseError = (updateLabTemplateResponse404 | updateLabTemplateResponse409) & {
+  headers: Headers;
+};
+
+export type updateLabTemplateResponse = (updateLabTemplateResponseSuccess | updateLabTemplateResponseError)
+
+export const getUpdateLabTemplateUrl = (templateId: string,) => {
+
+
+
+
+  return `/api/v1/lab/templates/${templateId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, refused pin, or unknown
+ * template.
+ * @summary Updates a draft.
+ */
+export const updateLabTemplate = async (templateId: string,
+    saveLabTemplateRequest: SaveLabTemplateRequest, options?: RequestInit): Promise<updateLabTemplateResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateLabTemplateUrl(templateId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(saveLabTemplateRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateLabTemplateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateLabTemplateResponse
+}
+
+
+
+export type deleteLabTemplateResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteLabTemplateResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteLabTemplateResponseSuccess = (deleteLabTemplateResponse204) & {
+  headers: Headers;
+};
+export type deleteLabTemplateResponseError = (deleteLabTemplateResponse404) & {
+  headers: Headers;
+};
+
+export type deleteLabTemplateResponse = (deleteLabTemplateResponseSuccess | deleteLabTemplateResponseError)
+
+export const getDeleteLabTemplateUrl = (templateId: string,) => {
+
+
+
+
+  return `/api/v1/lab/templates/${templateId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown template.
+ * @summary Removes a draft. Published versions stay.
+ */
+export const deleteLabTemplate = async (templateId: string, options?: RequestInit): Promise<deleteLabTemplateResponse> => {
+
+  const res = await fetch(getDeleteLabTemplateUrl(templateId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteLabTemplateResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteLabTemplateResponse
+}
+
+
+
+export type publishLabTemplateResponse201 = {
+  data: ResourceLabTemplateVersionDto
+  status: 201
+}
+
+export type publishLabTemplateResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type publishLabTemplateResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type publishLabTemplateResponseSuccess = (publishLabTemplateResponse201) & {
+  headers: Headers;
+};
+export type publishLabTemplateResponseError = (publishLabTemplateResponse404 | publishLabTemplateResponse409) & {
+  headers: Headers;
+};
+
+export type publishLabTemplateResponse = (publishLabTemplateResponseSuccess | publishLabTemplateResponseError)
+
+export const getPublishLabTemplateUrl = (templateId: string,) => {
+
+
+
+
+  return `/api/v1/lab/templates/${templateId}/publish`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, refused pin, or unknown
+ * template.
+ * @summary Publishes a draft: freezes an immutable version with provenance. The
+pin is re-validated at publish time.
+ */
+export const publishLabTemplate = async (templateId: string, options?: RequestInit): Promise<publishLabTemplateResponse> => {
+
+  const res = await fetch(getPublishLabTemplateUrl(templateId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: publishLabTemplateResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as publishLabTemplateResponse
+}
+
+
+
+export type startLabProvisionResponse201 = {
+  data: ResourceProvisionRecordDto
+  status: 201
+}
+
+export type startLabProvisionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startLabProvisionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startLabProvisionResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type startLabProvisionResponseSuccess = (startLabProvisionResponse201) & {
+  headers: Headers;
+};
+export type startLabProvisionResponseError = (startLabProvisionResponse403 | startLabProvisionResponse404 | startLabProvisionResponse409) & {
+  headers: Headers;
+};
+
+export type startLabProvisionResponse = (startLabProvisionResponseSuccess | startLabProvisionResponseError)
+
+export const getStartLabProvisionUrl = (versionId: string,) => {
+
+
+
+
+  return `/api/v1/lab/versions/${versionId}/provision`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, refused pin, or unknown
+ * version.
+ * @summary Starts provisioning a published template version.
+ */
+export const startLabProvision = async (versionId: string, options?: RequestInit): Promise<startLabProvisionResponse> => {
+
+  const res = await fetch(getStartLabProvisionUrl(versionId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startLabProvisionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startLabProvisionResponse
 }
 
 

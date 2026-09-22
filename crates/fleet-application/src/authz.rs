@@ -149,6 +149,14 @@ pub enum Permission {
     /// Create, edit, publish, or remove an image recipe, and run builds.
     /// A mutation: it changes build inputs or produces images.
     ImagesConfig,
+    /// List and read Lab templates, versions, and provisioning records. A
+    /// read, but a build-infrastructure-revealing one.
+    LabRead,
+    /// Create, edit, publish, or remove a Lab template.
+    LabConfig,
+    /// Provision a guest from a published Lab template. A mutation: it
+    /// clones a VM and consumes host resources.
+    LabProvision,
 }
 
 impl Permission {
@@ -198,6 +206,9 @@ impl Permission {
         Permission::ProxmoxDestructive,
         Permission::ImagesRead,
         Permission::ImagesConfig,
+        Permission::LabRead,
+        Permission::LabConfig,
+        Permission::LabProvision,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -246,6 +257,9 @@ impl Permission {
             Permission::ProxmoxDestructive => "proxmox.destructive",
             Permission::ImagesRead => "images.read",
             Permission::ImagesConfig => "images.config",
+            Permission::LabRead => "lab.read",
+            Permission::LabConfig => "lab.config",
+            Permission::LabProvision => "lab.provision",
         }
     }
 
@@ -261,7 +275,9 @@ impl Permission {
             | Permission::AuditRead
             | Permission::MachineRead
             | Permission::NodeRead
-            | Permission::ProjectsRead => false,
+            | Permission::ProjectsRead
+            | Permission::ImagesRead
+            | Permission::LabRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -296,7 +312,8 @@ impl Permission {
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
             | Permission::ImagesConfig
-            | Permission::ImagesRead => true,
+            | Permission::LabConfig
+            | Permission::LabProvision => true,
         }
     }
 
@@ -325,7 +342,10 @@ impl Permission {
             | Permission::ProxmoxOperate
             | Permission::ProxmoxDestructive
             | Permission::ImagesRead
-            | Permission::ImagesConfig => false,
+            | Permission::ImagesConfig
+            | Permission::LabRead
+            | Permission::LabConfig
+            | Permission::LabProvision => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead

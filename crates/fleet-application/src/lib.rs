@@ -9,6 +9,7 @@ pub mod audit;
 pub mod authz;
 pub mod composition;
 pub mod images;
+pub mod lab;
 pub mod machine;
 pub mod node;
 pub mod observed;

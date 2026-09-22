@@ -60,6 +60,7 @@ async fn spawn(
             None,
             None,
             None,
+            None,
             async {
                 let _ = shutdown_rx.await;
             },
@@ -164,6 +165,7 @@ async fn graceful_shutdown_stops_the_server_and_releases_the_listener() {
         serve_on(
             listener,
             settings(dist.path()),
+            None,
             None,
             None,
             None,
