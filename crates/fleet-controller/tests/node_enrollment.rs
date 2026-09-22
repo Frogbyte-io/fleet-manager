@@ -85,6 +85,7 @@ async fn controller() -> TestController {
         None,
         None,
         None,
+        None,
     );
     TestController {
         _dist: dist,

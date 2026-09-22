@@ -16,6 +16,7 @@ mod correlation;
 mod envelope;
 mod error;
 pub mod frogenv;
+pub mod images;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -133,6 +134,10 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox::ProxmoxReviewDto,
         proxmox::ReviewProxmoxOperationRequest,
         proxmox::StartReviewedProxmoxOperationRequest,
+        images::BuildImageRequest,
+        images::RecipeDto,
+        images::RecipeVersionDto,
+        images::SaveRecipeRequest,
         proxmox::ProviderAgentDto,
         proxmox::ProviderInterfaceDto,
         node::CreateEnrollmentTokenRequest,
@@ -161,6 +166,14 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (
             name = "tailnet",
             description = "Optional Tailscale discovery: correlated tailnet devices and the import handoff into the onboarding flow. Correlation is evidence only; Fleet identity never derives from Tailscale."
+        ),
+        (
+            name = "images",
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+        ),
+        (
+            name = "images",
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
         ),
         (
             name = "proxmox",
@@ -240,6 +253,16 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::observe_proxmox_guest))
                 .routes(routes!(proxmox::start_proxmox_lifecycle))
                 .routes(routes!(proxmox::review_proxmox_operation))
+                .routes(routes!(
+                    images::list_image_recipes,
+                    images::create_image_recipe
+                ))
+                .routes(routes!(images::get_image_recipe))
+                .routes(routes!(images::update_image_recipe))
+                .routes(routes!(images::delete_image_recipe))
+                .routes(routes!(images::publish_image_recipe))
+                .routes(routes!(images::list_image_recipe_versions))
+                .routes(routes!(images::start_image_build))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )

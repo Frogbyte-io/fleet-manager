@@ -336,6 +336,19 @@ export interface AssociatedGuestDto {
 }
 
 /**
+ * The build request: which version to build and the deadline.
+ */
+export interface BuildImageRequest {
+  /**
+     * The deadline, in seconds. Bounded by the executor.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /** The published recipe version to build. */
+  versionId: string;
+}
+
+/**
  * How a checkout action's endpoint authenticates.
  */
 export type CheckoutAuthDto = {
@@ -1432,6 +1445,85 @@ export interface PageProxmoxAccountDto {
 }
 
 /**
+ * One recipe draft.
+ */
+export type PageRecipeDtoItemsItem = {
+  /** The raw Packer template content, verbatim. */
+  content: string;
+  /** When the draft was created. */
+  createdAt: number;
+  /** The recipe description. */
+  description: string;
+  /** The draft's identity. */
+  id: string;
+  /** The recipe name. */
+  name: string;
+  /** The PVE node the recipe builds on. */
+  node: string;
+  /**
+     * The published version this draft descends from, when any.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /** What the recipe builds from: `iso` or `clone`. */
+  source: string;
+  /** The PVE storage pool the build writes to. */
+  storagePool: string;
+  /** When the draft was last edited. */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageRecipeDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageRecipeDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One published recipe version.
+ */
+export type PageRecipeVersionDtoItemsItem = {
+  /** The frozen content. */
+  content: string;
+  /** The frozen content digest. */
+  contentDigest: string;
+  /** The version's identity. */
+  id: string;
+  /** The recipe name at publication time. */
+  name: string;
+  /** The node at publication time. */
+  node: string;
+  /** When the version was published. */
+  publishedAt: number;
+  /** The recipe the version came from. */
+  recipeId: string;
+  /** What the version builds from. */
+  source: string;
+  /** The storage pool at publication time. */
+  storagePool: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageRecipeVersionDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageRecipeVersionDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * A project as the detail view displays it.
  */
 export interface ProjectDto {
@@ -1618,6 +1710,59 @@ export interface ReadyToolDto {
   tool: string;
   /** The pinned version. */
   version: string;
+}
+
+/**
+ * One recipe draft.
+ */
+export interface RecipeDto {
+  /** The raw Packer template content, verbatim. */
+  content: string;
+  /** When the draft was created. */
+  createdAt: number;
+  /** The recipe description. */
+  description: string;
+  /** The draft's identity. */
+  id: string;
+  /** The recipe name. */
+  name: string;
+  /** The PVE node the recipe builds on. */
+  node: string;
+  /**
+     * The published version this draft descends from, when any.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /** What the recipe builds from: `iso` or `clone`. */
+  source: string;
+  /** The PVE storage pool the build writes to. */
+  storagePool: string;
+  /** When the draft was last edited. */
+  updatedAt: number;
+}
+
+/**
+ * One published recipe version.
+ */
+export interface RecipeVersionDto {
+  /** The frozen content. */
+  content: string;
+  /** The frozen content digest. */
+  contentDigest: string;
+  /** The version's identity. */
+  id: string;
+  /** The recipe name at publication time. */
+  name: string;
+  /** The node at publication time. */
+  node: string;
+  /** When the version was published. */
+  publishedAt: number;
+  /** The recipe the version came from. */
+  recipeId: string;
+  /** What the version builds from. */
+  source: string;
+  /** The storage pool at publication time. */
+  storagePool: string;
 }
 
 /**
@@ -2186,6 +2331,81 @@ export interface ResourceReadyPlanDto {
 }
 
 /**
+ * One recipe draft.
+ */
+export type ResourceRecipeDtoData = {
+  /** The raw Packer template content, verbatim. */
+  content: string;
+  /** When the draft was created. */
+  createdAt: number;
+  /** The recipe description. */
+  description: string;
+  /** The draft's identity. */
+  id: string;
+  /** The recipe name. */
+  name: string;
+  /** The PVE node the recipe builds on. */
+  node: string;
+  /**
+     * The published version this draft descends from, when any.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /** What the recipe builds from: `iso` or `clone`. */
+  source: string;
+  /** The PVE storage pool the build writes to. */
+  storagePool: string;
+  /** When the draft was last edited. */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceRecipeDto {
+  /** One recipe draft. */
+  data: ResourceRecipeDtoData;
+}
+
+/**
+ * One published recipe version.
+ */
+export type ResourceRecipeVersionDtoData = {
+  /** The frozen content. */
+  content: string;
+  /** The frozen content digest. */
+  contentDigest: string;
+  /** The version's identity. */
+  id: string;
+  /** The recipe name at publication time. */
+  name: string;
+  /** The node at publication time. */
+  node: string;
+  /** When the version was published. */
+  publishedAt: number;
+  /** The recipe the version came from. */
+  recipeId: string;
+  /** What the version builds from. */
+  source: string;
+  /** The storage pool at publication time. */
+  storagePool: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceRecipeVersionDto {
+  /** One published recipe version. */
+  data: ResourceRecipeVersionDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -2226,6 +2446,24 @@ export interface ReviewProxmoxOperationRequest {
      * target id/name, and so on).
      */
   params?: unknown;
+}
+
+/**
+ * The create/update request. The content passes through verbatim.
+ */
+export interface SaveRecipeRequest {
+  /** The raw Packer template content, verbatim. */
+  content: string;
+  /** The recipe description. */
+  description: string;
+  /** The recipe name. */
+  name: string;
+  /** The PVE node the recipe builds on. */
+  node: string;
+  /** What the recipe builds from: `iso` or `clone`. */
+  source: string;
+  /** The PVE storage pool the build writes to. */
+  storagePool: string;
 }
 
 /**
@@ -2517,6 +2755,18 @@ export interface UpdateProjectRequest {
   name: string;
 }
 
+export type ListImageRecipesParams = {
+/**
+ * The maximum number of recipes to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last recipe id of the previous page.
+ */
+cursor?: string;
+};
+
 export type ListMachinesParams = {
 /**
  * Only machines carrying this tag.
@@ -2612,6 +2862,491 @@ limit?: number;
  */
 cursor?: string;
 };
+
+export type startImageBuildResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startImageBuildResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startImageBuildResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startImageBuildResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startImageBuildResponseSuccess = (startImageBuildResponse202) & {
+  headers: Headers;
+};
+export type startImageBuildResponseError = (startImageBuildResponse400 | startImageBuildResponse403 | startImageBuildResponse404) & {
+  headers: Headers;
+};
+
+export type startImageBuildResponse = (startImageBuildResponseSuccess | startImageBuildResponseError)
+
+export const getStartImageBuildUrl = () => {
+
+
+
+
+  return `/api/v1/images/builds`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed request.
+ * @summary Starts a build of one published version as a durable operation. The
+executor verifies the CLI version, validates the recipe, and runs the
+build over the operator-installed Packer CLI.
+ */
+export const startImageBuild = async (buildImageRequest: BuildImageRequest, options?: RequestInit): Promise<startImageBuildResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartImageBuildUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(buildImageRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startImageBuildResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startImageBuildResponse
+}
+
+
+
+export type listImageRecipesResponse200 = {
+  data: PageRecipeDto
+  status: 200
+}
+
+export type listImageRecipesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageRecipesResponseSuccess = (listImageRecipesResponse200) & {
+  headers: Headers;
+};
+export type listImageRecipesResponseError = (listImageRecipesResponse403) & {
+  headers: Headers;
+};
+
+export type listImageRecipesResponse = (listImageRecipesResponseSuccess | listImageRecipesResponseError)
+
+export const getListImageRecipesUrl = (params?: ListImageRecipesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/images/recipes?${stringifiedParams}` : `/api/v1/images/recipes`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the recipe drafts.
+ */
+export const listImageRecipes = async (params?: ListImageRecipesParams, options?: RequestInit): Promise<listImageRecipesResponse> => {
+
+  const res = await fetch(getListImageRecipesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageRecipesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageRecipesResponse
+}
+
+
+
+export type createImageRecipeResponse201 = {
+  data: ResourceRecipeDto
+  status: 201
+}
+
+export type createImageRecipeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createImageRecipeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createImageRecipeResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createImageRecipeResponseSuccess = (createImageRecipeResponse201) & {
+  headers: Headers;
+};
+export type createImageRecipeResponseError = (createImageRecipeResponse400 | createImageRecipeResponse403 | createImageRecipeResponse409) & {
+  headers: Headers;
+};
+
+export type createImageRecipeResponse = (createImageRecipeResponseSuccess | createImageRecipeResponseError)
+
+export const getCreateImageRecipeUrl = () => {
+
+
+
+
+  return `/api/v1/images/recipes`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, conflict, or malformed
+ * request.
+ * @summary Creates a recipe draft.
+ */
+export const createImageRecipe = async (saveRecipeRequest: SaveRecipeRequest, options?: RequestInit): Promise<createImageRecipeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateImageRecipeUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(saveRecipeRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createImageRecipeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createImageRecipeResponse
+}
+
+
+
+export type getImageRecipeResponse200 = {
+  data: ResourceRecipeDto
+  status: 200
+}
+
+export type getImageRecipeResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getImageRecipeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getImageRecipeResponseSuccess = (getImageRecipeResponse200) & {
+  headers: Headers;
+};
+export type getImageRecipeResponseError = (getImageRecipeResponse403 | getImageRecipeResponse404) & {
+  headers: Headers;
+};
+
+export type getImageRecipeResponse = (getImageRecipeResponseSuccess | getImageRecipeResponseError)
+
+export const getGetImageRecipeUrl = (recipeId: string,) => {
+
+
+
+
+  return `/api/v1/images/recipes/${recipeId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown recipe.
+ * @summary Reads one draft.
+ */
+export const getImageRecipe = async (recipeId: string, options?: RequestInit): Promise<getImageRecipeResponse> => {
+
+  const res = await fetch(getGetImageRecipeUrl(recipeId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getImageRecipeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getImageRecipeResponse
+}
+
+
+
+export type updateImageRecipeResponse200 = {
+  data: ResourceRecipeDto
+  status: 200
+}
+
+export type updateImageRecipeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type updateImageRecipeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type updateImageRecipeResponseSuccess = (updateImageRecipeResponse200) & {
+  headers: Headers;
+};
+export type updateImageRecipeResponseError = (updateImageRecipeResponse400 | updateImageRecipeResponse404) & {
+  headers: Headers;
+};
+
+export type updateImageRecipeResponse = (updateImageRecipeResponseSuccess | updateImageRecipeResponseError)
+
+export const getUpdateImageRecipeUrl = (recipeId: string,) => {
+
+
+
+
+  return `/api/v1/images/recipes/${recipeId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, malformed request, or
+ * unknown recipe.
+ * @summary Replaces a draft's content.
+ */
+export const updateImageRecipe = async (recipeId: string,
+    saveRecipeRequest: SaveRecipeRequest, options?: RequestInit): Promise<updateImageRecipeResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateImageRecipeUrl(recipeId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(saveRecipeRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateImageRecipeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateImageRecipeResponse
+}
+
+
+
+export type deleteImageRecipeResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteImageRecipeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteImageRecipeResponseSuccess = (deleteImageRecipeResponse204) & {
+  headers: Headers;
+};
+export type deleteImageRecipeResponseError = (deleteImageRecipeResponse404) & {
+  headers: Headers;
+};
+
+export type deleteImageRecipeResponse = (deleteImageRecipeResponseSuccess | deleteImageRecipeResponseError)
+
+export const getDeleteImageRecipeUrl = (recipeId: string,) => {
+
+
+
+
+  return `/api/v1/images/recipes/${recipeId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown recipe.
+ * @summary Removes a draft. Published versions are immutable and stay.
+ */
+export const deleteImageRecipe = async (recipeId: string, options?: RequestInit): Promise<deleteImageRecipeResponse> => {
+
+  const res = await fetch(getDeleteImageRecipeUrl(recipeId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteImageRecipeResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteImageRecipeResponse
+}
+
+
+
+export type publishImageRecipeResponse201 = {
+  data: ResourceRecipeVersionDto
+  status: 201
+}
+
+export type publishImageRecipeResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type publishImageRecipeResponseSuccess = (publishImageRecipeResponse201) & {
+  headers: Headers;
+};
+export type publishImageRecipeResponseError = (publishImageRecipeResponse404) & {
+  headers: Headers;
+};
+
+export type publishImageRecipeResponse = (publishImageRecipeResponseSuccess | publishImageRecipeResponseError)
+
+export const getPublishImageRecipeUrl = (recipeId: string,) => {
+
+
+
+
+  return `/api/v1/images/recipes/${recipeId}/publish`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown recipe.
+ * @summary Publishes a draft: freezes an immutable version identified by its
+content digest. Idempotent by construction.
+ */
+export const publishImageRecipe = async (recipeId: string, options?: RequestInit): Promise<publishImageRecipeResponse> => {
+
+  const res = await fetch(getPublishImageRecipeUrl(recipeId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: publishImageRecipeResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as publishImageRecipeResponse
+}
+
+
+
+export type listImageRecipeVersionsResponse200 = {
+  data: PageRecipeVersionDto
+  status: 200
+}
+
+export type listImageRecipeVersionsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageRecipeVersionsResponseSuccess = (listImageRecipeVersionsResponse200) & {
+  headers: Headers;
+};
+export type listImageRecipeVersionsResponseError = (listImageRecipeVersionsResponse403) & {
+  headers: Headers;
+};
+
+export type listImageRecipeVersionsResponse = (listImageRecipeVersionsResponseSuccess | listImageRecipeVersionsResponseError)
+
+export const getListImageRecipeVersionsUrl = (recipeId: string,) => {
+
+
+
+
+  return `/api/v1/images/recipes/${recipeId}/versions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown recipe.
+ * @summary Lists a recipe's published versions.
+ */
+export const listImageRecipeVersions = async (recipeId: string, options?: RequestInit): Promise<listImageRecipeVersionsResponse> => {
+
+  const res = await fetch(getListImageRecipeVersionsUrl(recipeId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageRecipeVersionsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageRecipeVersionsResponse
+}
+
+
 
 export type listMachinesResponse200 = {
   data: PageMachineDto

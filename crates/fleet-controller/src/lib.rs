@@ -16,6 +16,7 @@ pub mod checkout;
 pub mod exec;
 pub mod frogenv;
 pub mod gateway;
+pub mod images_exec;
 pub mod install;
 pub mod mise;
 pub mod node_crypto;
@@ -136,6 +137,7 @@ fn api_state(
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<Arc<fleet_application::project::Projects>>,
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<Arc<fleet_application::images::Images>>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
@@ -159,6 +161,7 @@ fn api_state(
             tailnet,
             projects,
             proxmox,
+            images,
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -175,6 +178,7 @@ fn api_state(
         tailnet: None,
         projects: None,
         proxmox: None,
+        images: None,
     }
 }
 
@@ -271,6 +275,7 @@ fn shell(settings: &Settings) -> ServeDir {
 /// this router resolves to the trusted-LAN principal with its request
 /// evidence (see `fleet_auth`); the service must be made with connection
 /// info for that evidence to include the peer address.
+#[allow(clippy::too_many_arguments)]
 pub fn build_router(
     settings: &Settings,
     db: Option<SqlitePool>,
@@ -279,6 +284,7 @@ pub fn build_router(
     tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<&Arc<fleet_application::project::Projects>>,
     proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<&Arc<fleet_application::images::Images>>,
 ) -> Router {
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
@@ -291,6 +297,7 @@ pub fn build_router(
         tailnet.cloned(),
         projects.cloned(),
         proxmox.cloned(),
+        images.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
     let mut router = Router::new()
@@ -377,11 +384,12 @@ pub async fn serve(
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<Arc<fleet_application::project::Projects>>,
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<Arc<fleet_application::images::Images>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind(settings.listen).await?;
     serve_on(
-        listener, settings, db, services, onboarding, tailnet, projects, proxmox, shutdown,
+        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, shutdown,
     )
     .await
 }
@@ -403,6 +411,7 @@ pub async fn serve_on(
     tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
     projects: Option<Arc<fleet_application::project::Projects>>,
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<Arc<fleet_application::images::Images>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -440,6 +449,7 @@ pub async fn serve_on(
             tailnet.as_ref(),
             projects.as_ref(),
             proxmox.as_ref(),
+            images.as_ref(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
     )

@@ -263,6 +263,7 @@ fn fleetctl_talks_to_a_real_controller() {
             None,
             None,
             None,
+            None,
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -354,6 +355,7 @@ fn fleetctl_machines_read_a_real_controller() {
         let router = fleet_controller::build_router(
             &settings,
             Some(store.pool().clone()),
+            None,
             None,
             None,
             None,
@@ -518,6 +520,7 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
     let router = fleet_controller::build_router(
         &settings,
         Some(store.pool().clone()),
+        None,
         None,
         None,
         None,
@@ -810,6 +813,7 @@ fn fleetctl_onboards_a_real_controller() {
             Some(store.pool().clone()),
             None,
             Some(&onboarding),
+            None,
             None,
             None,
             None,
@@ -2267,4 +2271,89 @@ fn parsing_destructive_flags_and_vmid_validation() {
     .collect();
     let error = fleetctl::parse(&args).unwrap_err();
     assert!(error.message.contains("unknown flag"), "{error}");
+}
+
+#[test]
+fn text_output_renders_image_recipes() {
+    let page = json!({
+        "items": [
+            {"id": "rcp-1", "name": "ubuntu-base", "description": "the base",
+             "node": "pve", "storagePool": "local-lvm", "source": "iso",
+             "content": "{}", "publishedFrom": null, "createdAt": 1, "updatedAt": 2}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_images_for_test(&page);
+    assert!(text.contains("ubuntu-base"), "{text}");
+    assert!(text.contains("iso"), "{text}");
+
+    let empty = json!({"items": [], "page": {"limit": 50, "nextCursor": null}});
+    let text = fleetctl::render_images_for_test(&empty);
+    assert!(text.contains("(no image recipes)"), "{text}");
+}
+
+#[test]
+fn parsing_walks_the_images_forms() {
+    let args: Vec<String> = ["images", "recipes"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesRecipes
+    ));
+    let args: Vec<String> = [
+        "images",
+        "create",
+        "--name",
+        "ubuntu-base",
+        "--description",
+        "base",
+        "--node",
+        "pve",
+        "--storage-pool",
+        "local-lvm",
+        "--source",
+        "iso",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesCreate { .. }
+    ));
+    let args: Vec<String> = ["images", "publish", "rcp-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesPublish { .. }
+    ));
+    let args: Vec<String> = ["images", "versions", "rcp-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesVersions { .. }
+    ));
+    let args: Vec<String> = ["images", "build", "rcp-1@abc", "--wait"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesBuild { wait: true, .. }
+    ));
+    let args: Vec<String> = ["images", "create", "--name", "x"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(
+        error.message.contains("Usage") || error.message.contains("required"),
+        "{error}"
+    );
 }
