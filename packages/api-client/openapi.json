@@ -420,6 +420,59 @@
         }
       }
     },
+    "/api/v1/images/versions/{versionId}": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Reads one published version with its structured view.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown version.",
+        "operationId": "getImageVersion",
+        "parameters": [
+          {
+            "name": "versionId",
+            "in": "path",
+            "description": "The version's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version with its structured view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RecipeVersionDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/versions/{versionId}/promote": {
       "post": {
         "tags": [

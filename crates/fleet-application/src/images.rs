@@ -423,7 +423,7 @@ impl Images {
             content: recipe.content.content.clone(),
             source: recipe.content.source,
             node: recipe.content.node.clone(),
-            storage_pool: recipe.content.storage_pool.clone(),
+            storage_pool: recipe.content.storage_pool.clone().unwrap_or_default(),
             published_at: now,
             promoted_at: None,
             promoted_by: None,
@@ -529,6 +529,9 @@ impl Images {
                 context: "versions",
                 detail,
             })?;
+        // The completion audit follows the committed promotion: an audit
+        // failure here is surfaced as a backend error naming the committed
+        // promotion, never as a rollback that did not happen.
         self.audit_event(
             principal,
             Permission::ImagesConfig,
@@ -536,7 +539,14 @@ impl Images {
             "image_version_promoted",
             Some(("digest", version.content_digest.as_str())),
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            RecipeUseCaseError::Backend { context, detail } => RecipeUseCaseError::Backend {
+                context,
+                detail: format!("the promotion committed but its audit failed: {detail}"),
+            },
+            other => other,
+        })?;
         Ok(promoted)
     }
 

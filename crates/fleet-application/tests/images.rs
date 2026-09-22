@@ -215,7 +215,7 @@ fn recipe_content(name: &str, content: &str) -> RecipeContent {
         name: name.to_owned(),
         description: "the base image".to_owned(),
         node: "pve".to_owned(),
-        storage_pool: "local-lvm".to_owned(),
+        storage_pool: Some("local-lvm".to_owned()),
         source: RecipeSource::Iso,
         content: content.to_owned(),
     }

@@ -106,7 +106,7 @@ impl From<Recipe> for RecipeDto {
             name: recipe.content.name,
             description: recipe.content.description,
             node: recipe.content.node,
-            storage_pool: recipe.content.storage_pool,
+            storage_pool: recipe.content.storage_pool.unwrap_or_default(),
             source: recipe.content.source.id().to_owned(),
             content: recipe.content.content,
             published_from: recipe.published_from,
@@ -184,7 +184,7 @@ impl From<fleet_core::StructuredRecipe> for StructuredRecipeDto {
     fn from(structured: fleet_core::StructuredRecipe) -> Self {
         Self {
             node: structured.node,
-            storage_pool: structured.storage_pool,
+            storage_pool: structured.storage_pool.unwrap_or_default(),
             source: structured.source.id().to_owned(),
             iso_file: structured.iso_file,
             iso_storage_pool: structured.iso_storage_pool,
@@ -258,7 +258,7 @@ impl SaveRecipeRequest {
             name: self.name,
             description: self.description,
             node: self.node,
-            storage_pool: self.storage_pool,
+            storage_pool: Some(self.storage_pool),
             source,
             content: self.content,
         })
@@ -678,8 +678,10 @@ pub async fn promote_image_version(
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     // The gate's evidence: the version's latest build operation, queried
-    // through the operation list by kind and payload.
-    let build_outcome = latest_build_evidence(&state, &version_id).await;
+    // through the operation list by kind and payload, under the caller's
+    // own policy.
+    let build_outcome =
+        latest_build_evidence(&state, &principal.id, &version_id, correlation_id).await?;
     let version = images
         .promote(
             state.authorizer.as_ref(),
@@ -694,38 +696,92 @@ pub async fn promote_image_version(
 }
 
 /// Queries the operation record for the version's latest `image.build`:
-/// the gate's evidence. `None` when no build exists.
+/// the gate's evidence. The operations are queried newest-first with
+/// pagination until the version's build is found or the list is
+/// exhausted, so a busy controller cannot hide a valid build behind a
+/// page boundary. Authorization and backend errors propagate.
 async fn latest_build_evidence(
     state: &crate::operations::ApiState,
+    principal_id: &str,
     version_id: &str,
-) -> Option<fleet_application::images::BuildEvidence> {
-    let operations = state
-        .operations
-        .list(state.authorizer.as_ref(), "anonymous-lan-admin", 50)
-        .await
-        .ok()?;
-    let build = operations
-        .iter()
-        .filter(|operation| operation.kind == "image.build")
-        .find(|operation| {
-            operation
-                .payload_json
+    correlation_id: CorrelationId,
+) -> Result<Option<fleet_application::images::BuildEvidence>, ApiErrorResponse> {
+    const PAGE_LIMIT: u32 = 100;
+    const MAX_PAGES: u32 = 20;
+    let mut offset = 0u32;
+    for _ in 0..MAX_PAGES {
+        let all = state
+            .operations
+            .list(state.authorizer.as_ref(), principal_id, PAGE_LIMIT)
+            .await
+            .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+        if all.is_empty() {
+            break;
+        }
+        let relevant: Vec<_> = all
+            .iter()
+            .skip(usize::try_from(offset).unwrap_or(all.len()))
+            .filter(|operation| operation.kind == "image.build")
+            .filter(|operation| {
+                operation
+                    .payload_json
+                    .as_deref()
+                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                    .is_some_and(|payload| payload["versionId"].as_str() == Some(version_id))
+            })
+            .collect();
+        if let Some(build) = relevant.first() {
+            let artifact_id = build
+                .result_json
                 .as_deref()
-                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                .is_some_and(|payload| payload["versionId"].as_str() == Some(version_id))
-        })?;
-    let artifact_id = build
-        .result_json
-        .as_deref()
-        .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok())
-        .and_then(|result| {
-            result["artifactId"]
-                .as_str()
-                .map(std::borrow::ToOwned::to_owned)
-        });
-    Some(fleet_application::images::BuildEvidence {
-        version_id: version_id.to_owned(),
-        state: build.state.clone(),
-        artifact_id,
-    })
+                .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok())
+                .and_then(|result| {
+                    result["artifactId"]
+                        .as_str()
+                        .map(std::borrow::ToOwned::to_owned)
+                });
+            return Ok(Some(fleet_application::images::BuildEvidence {
+                version_id: version_id.to_owned(),
+                state: build.state.clone(),
+                artifact_id,
+            }));
+        }
+        if all.len() < usize::try_from(PAGE_LIMIT).unwrap_or(all.len()) {
+            break;
+        }
+        offset = offset.saturating_add(PAGE_LIMIT);
+    }
+    Ok(None)
+}
+
+/// Reads one published version with its structured view.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or an unknown version.
+#[utoipa::path(
+    get,
+    path = "/images/versions/{versionId}",
+    tag = "images",
+    operation_id = "getImageVersion",
+    params(("versionId" = String, Path, description = "The version's identity.")),
+    responses(
+        (status = 200, description = "The version with its structured view.", body = Resource<RecipeVersionDto>),
+        (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
+        (status = 404, description = "The version does not exist.", body = crate::error::ApiError),
+    )
+)]
+pub async fn get_image_version(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(version_id): Path<String>,
+) -> Result<Json<Resource<RecipeVersionDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let version = images
+        .get_version(state.authorizer.as_ref(), &principal, &version_id)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(version.into())))
 }

@@ -57,8 +57,9 @@ pub struct RecipeContent {
     pub description: String,
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The PVE storage pool the build writes to.
-    pub storage_pool: String,
+    /// The PVE storage pool the build writes to. `None` when the builder
+    /// block omits it (consistent with `node`'s absence rule).
+    pub storage_pool: Option<String>,
     /// What the recipe builds from.
     pub source: RecipeSource,
     /// The raw Packer template content (`.pkr.json`/`.pkr.hcl`), stored
@@ -88,7 +89,7 @@ impl RecipeContent {
         hasher.update(b"\n");
         hasher.update(self.node.as_bytes());
         hasher.update(b"\n");
-        hasher.update(self.storage_pool.as_bytes());
+        hasher.update(self.storage_pool.as_deref().unwrap_or_default().as_bytes());
         hasher.update(b"\n");
         hasher.update(self.source.id().as_bytes());
         let digest: [u8; 32] = hasher.finalize().into();
@@ -113,7 +114,13 @@ impl RecipeContent {
         if self.description.chars().count() > 512 {
             return Err("the description must be at most 512 characters".to_owned());
         }
-        for (label, value) in [("node", &self.node), ("storage_pool", &self.storage_pool)] {
+        for (label, value) in [
+            ("node", &self.node),
+            (
+                "storage_pool",
+                &self.storage_pool.clone().unwrap_or_default(),
+            ),
+        ] {
             let len = value.chars().count();
             if len == 0 || len > 128 {
                 return Err(format!("the {label} must be 1..=128 characters"));
@@ -169,7 +176,7 @@ mod tests {
             name: "ubuntu-base".to_owned(),
             description: "the base image".to_owned(),
             node: "pve".to_owned(),
-            storage_pool: "local-lvm".to_owned(),
+            storage_pool: Some("local-lvm".to_owned()),
             source: RecipeSource::Iso,
             content: content.to_owned(),
         }
@@ -216,8 +223,9 @@ mod tests {
 pub struct StructuredRecipe {
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The PVE storage pool the build writes to.
-    pub storage_pool: String,
+    /// The PVE storage pool the build writes to. `None` when the builder
+    /// block omits it (consistent with `node`'s absence rule).
+    pub storage_pool: Option<String>,
     /// What the recipe builds from.
     pub source: RecipeSource,
     /// The ISO file path, for the iso source.
@@ -274,17 +282,15 @@ pub fn parse_template(content: &str) -> ParsedTemplate {
         .unwrap_or_default()
         .into_iter()
         .find_map(|builder| {
-            let is_proxmox = builder
+            // Only the two supported builders receive a structured view:
+            // arbitrary `proxmox*` types would get a misleading one.
+            let ptype = builder
                 .get("type")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|ptype| ptype.starts_with("proxmox"));
-            is_proxmox.then(|| BuilderBlock {
-                ptype: builder
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                fields: builder,
+                .unwrap_or_default();
+            (ptype == "proxmox-iso" || ptype == "proxmox-clone").then(|| BuilderBlock {
+                ptype: ptype.to_owned(),
+                fields: builder.clone(),
             })
         });
     ParsedTemplate {
@@ -312,20 +318,34 @@ impl StructuredRecipe {
                 .get("vm_storage_pool")
                 .or_else(|| builder.fields.get("storage_pool"))
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            source: if builder.fields.get("clone_vm").is_some() {
-                RecipeSource::Clone
-            } else {
-                RecipeSource::Iso
+                .map(str::to_owned),
+
+            // The builder type is the source of truth, not the presence
+            // of a clone field.
+            source: match builder.ptype.as_str() {
+                "proxmox-clone" => RecipeSource::Clone,
+                _ => RecipeSource::Iso,
             },
             iso_file: field_str(&builder, "iso_file").map(str::to_owned),
             iso_storage_pool: field_str(&builder, "iso_storage_pool").map(str::to_owned),
+            // Packer's `clone_vm` is the VM **name** (a string); the
+            // numeric VMID is the separate `clone_vm_id` field. Both are
+            // accepted; the name form is the documented one.
             clone_vm: builder
                 .fields
                 .get("clone_vm")
-                .and_then(serde_json::Value::as_u64)
-                .map(|value| value.to_string()),
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    other => other.to_string(),
+                })
+                .or_else(|| {
+                    builder
+                        .fields
+                        .get("clone_vm_id")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| value.to_string())
+                }),
             cores: builder
                 .fields
                 .get("cores")
@@ -370,7 +390,7 @@ mod structured_tests {
         assert_eq!(structured.node, "pve");
         assert_eq!(structured.source, RecipeSource::Clone);
         assert_eq!(structured.clone_vm.as_deref(), Some("101"));
-        assert_eq!(structured.storage_pool, "local-lvm");
+        assert_eq!(structured.storage_pool.as_deref(), Some("local-lvm"));
         assert_eq!(structured.cores, Some(2));
         assert_eq!(structured.memory, Some(2048));
         assert_eq!(structured.disk_size.as_deref(), Some("10G"));

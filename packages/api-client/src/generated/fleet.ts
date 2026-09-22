@@ -3446,6 +3446,64 @@ export const listImageRecipeVersions = async (recipeId: string, options?: Reques
 
 
 
+export type getImageVersionResponse200 = {
+  data: ResourceRecipeVersionDto
+  status: 200
+}
+
+export type getImageVersionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getImageVersionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getImageVersionResponseSuccess = (getImageVersionResponse200) & {
+  headers: Headers;
+};
+export type getImageVersionResponseError = (getImageVersionResponse403 | getImageVersionResponse404) & {
+  headers: Headers;
+};
+
+export type getImageVersionResponse = (getImageVersionResponseSuccess | getImageVersionResponseError)
+
+export const getGetImageVersionUrl = (versionId: string,) => {
+
+
+
+
+  return `/api/v1/images/versions/${versionId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown version.
+ * @summary Reads one published version with its structured view.
+ */
+export const getImageVersion = async (versionId: string, options?: RequestInit): Promise<getImageVersionResponse> => {
+
+  const res = await fetch(getGetImageVersionUrl(versionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getImageVersionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getImageVersionResponse
+}
+
+
+
 export type promoteImageVersionResponse200 = {
   data: ResourceRecipeVersionDto
   status: 200
