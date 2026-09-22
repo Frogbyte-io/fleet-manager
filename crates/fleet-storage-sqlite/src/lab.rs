@@ -379,13 +379,14 @@ impl LeasePort for LeaseRepository {
         let id = Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', 'destroy', ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7)",
         )
         .bind(&id)
         .bind(&lease.template_version_id)
         .bind(owner)
         .bind(&lease.purpose)
         .bind(&lease.project_id)
+        .bind(lease.cleanup.id())
         .bind(now)
         .execute(&self.pool)
         .await
@@ -440,5 +441,18 @@ impl LeasePort for LeaseRepository {
         .await
         .map_err(|error| format!("expired failed: {error}"))?;
         rows.iter().map(Self::row_to_lease).collect()
+    }
+
+    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String> {
+        // The compare-and-set: only the writer whose UPDATE lands while
+        // the row is still in the observed state wins the claim.
+        let claimed =
+            sqlx::query("UPDATE lab_leases SET state = 'releasing' WHERE id = ?1 AND state = ?2")
+                .bind(id)
+                .bind(observed.id())
+                .execute(&self.pool)
+                .await
+                .map_err(|error| format!("claim failed: {error}"))?;
+        Ok(claimed.rows_affected() == 1)
     }
 }

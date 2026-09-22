@@ -688,6 +688,7 @@ pub struct CreateLeaseRequest {
         (status = 400, description = "The request is malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
         (status = 404, description = "The version does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn create_lab_lease(
@@ -706,6 +707,8 @@ pub async fn create_lab_lease(
                 template_version_id: request.template_version_id,
                 purpose: request.purpose,
                 project_id: request.project_id,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
             },
             fleet_core::SystemClock::now_unix_millis(),
         )
@@ -727,6 +730,7 @@ pub async fn create_lab_lease(
     responses(
         (status = 200, description = "The leases, newest first.", body = Page<LeaseDto>),
         (status = 403, description = "The caller may not read the Lab surface.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn list_lab_leases(
@@ -767,6 +771,7 @@ pub async fn list_lab_leases(
         (status = 400, description = "The lease is already terminal.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not release (or keep) the lease.", body = crate::error::ApiError),
         (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn release_lab_lease(
@@ -815,6 +820,7 @@ pub struct ReleaseLeaseRequest {
     responses(
         (status = 200, description = "The leases transitioned into releasing.", body = Page<LeaseDto>),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn sweep_lab_leases(

@@ -9,8 +9,8 @@ CREATE TABLE lab_leases (
     project_id     TEXT,
     state          TEXT NOT NULL CHECK (state IN (
                        'requested', 'queued', 'reserving', 'provisioning',
-                       'booting', 'ready', 'releasing', 'released',
-                       'failed', 'cleanup_failed')),
+                       'booting', 'bootstrapping', 'ready', 'releasing',
+                       'released', 'failed', 'cleanup_failed')),
     provision_id   TEXT,
     cleanup        TEXT NOT NULL CHECK (cleanup IN ('destroy', 'revert', 'keep')),
     created_at     INTEGER NOT NULL,

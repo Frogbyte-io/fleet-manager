@@ -4245,10 +4245,15 @@ export type listLabLeasesResponse403 = {
   status: 403
 }
 
+export type listLabLeasesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type listLabLeasesResponseSuccess = (listLabLeasesResponse200) & {
   headers: Headers;
 };
-export type listLabLeasesResponseError = (listLabLeasesResponse403) & {
+export type listLabLeasesResponseError = (listLabLeasesResponse403 | listLabLeasesResponse500) & {
   headers: Headers;
 };
 
@@ -4308,10 +4313,15 @@ export type createLabLeaseResponse404 = {
   status: 404
 }
 
+export type createLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type createLabLeaseResponseSuccess = (createLabLeaseResponse201) & {
   headers: Headers;
 };
-export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404) & {
+export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404 | createLabLeaseResponse500) & {
   headers: Headers;
 };
 
@@ -4367,10 +4377,15 @@ export type sweepLabLeasesResponse403 = {
   status: 403
 }
 
+export type sweepLabLeasesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type sweepLabLeasesResponseSuccess = (sweepLabLeasesResponse200) & {
   headers: Headers;
 };
-export type sweepLabLeasesResponseError = (sweepLabLeasesResponse403) & {
+export type sweepLabLeasesResponseError = (sweepLabLeasesResponse403 | sweepLabLeasesResponse500) & {
   headers: Headers;
 };
 
@@ -4432,10 +4447,15 @@ export type releaseLabLeaseResponse404 = {
   status: 404
 }
 
+export type releaseLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type releaseLabLeaseResponseSuccess = (releaseLabLeaseResponse200) & {
   headers: Headers;
 };
-export type releaseLabLeaseResponseError = (releaseLabLeaseResponse400 | releaseLabLeaseResponse403 | releaseLabLeaseResponse404) & {
+export type releaseLabLeaseResponseError = (releaseLabLeaseResponse400 | releaseLabLeaseResponse403 | releaseLabLeaseResponse404 | releaseLabLeaseResponse500) & {
   headers: Headers;
 };
 

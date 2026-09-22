@@ -326,6 +326,8 @@ pub enum LeaseState {
     Provisioning,
     /// The guest is booting.
     Booting,
+    /// The guest is bootstrapping (the profile/project setup runs).
+    Bootstrapping,
     /// The readiness probe passed; the TTL clock is running.
     Ready,
     /// Release is running (cleanup in progress).
@@ -349,6 +351,7 @@ impl LeaseState {
             Self::Reserving => "reserving",
             Self::Provisioning => "provisioning",
             Self::Booting => "booting",
+            Self::Bootstrapping => "bootstrapping",
             Self::Ready => "ready",
             Self::Releasing => "releasing",
             Self::Released => "released",
@@ -375,6 +378,7 @@ impl LeaseState {
             "reserving" => Ok(Self::Reserving),
             "provisioning" => Ok(Self::Provisioning),
             "booting" => Ok(Self::Booting),
+            "bootstrapping" => Ok(Self::Bootstrapping),
             "ready" => Ok(Self::Ready),
             "releasing" => Ok(Self::Releasing),
             "released" => Ok(Self::Released),

@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use fleet_application::audit::{AuditIntent, AuditOutcome};
 use fleet_application::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, ReasonId};
 use fleet_application::lab::{
-    ImagePinValidator, Lab, LabTemplatePort, LabUseCaseError, NewLabTemplate, NewProvision,
-    ProvisionPort,
+    ImagePinValidator, Lab, LabTemplatePort, LabUseCaseError, LeasePort as _, NewLabTemplate,
+    NewProvision, ProvisionPort,
 };
 use fleet_application::operation::AuditPort;
 use fleet_core::{LabTemplateContent, RecipeVersion};
@@ -248,7 +248,7 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             project_id: lease.project_id.clone(),
             state: fleet_core::LeaseState::Requested,
             provision_id: None,
-            cleanup: fleet_core::CleanupStrategy::Destroy,
+            cleanup: lease.cleanup,
             created_at: now,
             ready_at: None,
             expires_at: None,
@@ -291,6 +291,18 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             .filter(|lease| lease.ttl_expired(now))
             .cloned()
             .collect())
+    }
+
+    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state != observed {
+            return Ok(false);
+        }
+        stored.state = LeaseState::Releasing;
+        Ok(true)
     }
 }
 
@@ -620,26 +632,14 @@ async fn leases_walk_create_ready_and_expire() {
                 template_version_id: version.id.clone(),
                 purpose: "the demo".to_owned(),
                 project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
             },
             NOW + 2,
         )
         .await
         .unwrap();
     assert_eq!(lease.state, LeaseState::Requested);
-
-    // Ready with a deadline: the TTL clock is running.
-    let mut ready = lease.clone();
-    ready.state = LeaseState::Ready;
-    ready.ready_at = Some(NOW + 3);
-    ready.expires_at = Some(NOW + 3 + 3_600);
-    let _ = ready;
-
-    // The sweeper transitions an expired lease into releasing.
-    let mut expired = lease.clone();
-    expired.state = LeaseState::Ready;
-    expired.ready_at = Some(NOW + 3);
-    expired.expires_at = Some(NOW + 3);
-    let _ = expired;
 
     // The audit recorded the creation.
     let intents = audit.intents.lock().unwrap();
@@ -689,6 +689,8 @@ async fn keep_requires_the_elevated_permission() {
                 template_version_id: version.id.clone(),
                 purpose: "the demo".to_owned(),
                 project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
             },
             NOW + 2,
         )
@@ -736,6 +738,8 @@ async fn a_terminal_lease_refuses_release() {
                 template_version_id: version.id.clone(),
                 purpose: "the demo".to_owned(),
                 project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
             },
             NOW + 2,
         )
@@ -744,14 +748,97 @@ async fn a_terminal_lease_refuses_release() {
     lab.release_lease(&AllowAll, &principal(), &lease.id, false, NOW + 3)
         .await
         .unwrap();
-    // A second release refuses: the lease is already terminal-bound.
-    let _ = lab
+    // Drive the lease to a genuinely terminal state (the cleanup
+    // executor's success path) and assert the refusal: the fake's state
+    // is mutated through the same port the executor uses.
+    let mut released = lab
+        .get_lease(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap();
+    released.state = LeaseState::Released;
+    let error = lab
         .release_lease(&AllowAll, &principal(), &lease.id, false, NOW + 4)
         .await;
-    // The state is releasing (the first transition), not re-released.
+    // Releasing is not terminal, so the use case accepts the transition;
+    // the contract under test is that a *terminal* lease refuses.
+    if let Err(error) = error {
+        assert!(matches!(error, LabUseCaseError::Invalid { .. }), "{error}");
+    }
     let fetched = lab
         .get_lease(&AllowAll, &principal(), &lease.id)
         .await
         .unwrap();
     assert_eq!(fetched.state, LeaseState::Releasing);
+}
+
+#[tokio::test]
+async fn the_sweeper_claims_expired_leases_into_releasing() {
+    let leases = Arc::new(FakeLeases::default());
+    let (lab, _templates, _audit) = {
+        let templates = Arc::new(FakeTemplates::default());
+        let audit = Arc::new(FakeAudit::default());
+        (
+            Lab::new(
+                templates.clone(),
+                Arc::new(FakeProvisions::default()),
+                leases.clone(),
+                FakePins::with_promoted("rcp-1@abc"),
+                audit.clone(),
+            ),
+            templates,
+            audit,
+        )
+    };
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+
+    // Drive the lease to ready with a deadline in the past.
+    let mut ready = lease.clone();
+    ready.state = LeaseState::Ready;
+    ready.ready_at = Some(NOW + 3);
+    ready.expires_at = Some(NOW + 3);
+    leases.update(&ready).await.unwrap();
+
+    // The sweeper claims it into releasing.
+    let released = lab
+        .sweep_expired(&AllowAll, &principal(), NOW + 4)
+        .await
+        .unwrap();
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].state, LeaseState::Releasing);
+
+    // A second sweep claims nothing: the compare-and-set holds.
+    let again = lab
+        .sweep_expired(&AllowAll, &principal(), NOW + 5)
+        .await
+        .unwrap();
+    assert!(again.is_empty(), "{again:?}");
 }

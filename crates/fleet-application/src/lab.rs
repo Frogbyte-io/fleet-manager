@@ -222,6 +222,10 @@ pub struct NewLease {
     pub purpose: String,
     /// The project the lease is scoped to, when any.
     pub project_id: Option<String>,
+    /// The cleanup strategy inherited from the template.
+    pub cleanup: CleanupStrategy,
+    /// The TTL seconds inherited from the template.
+    pub ttl_seconds: u32,
 }
 
 /// The lease storage port.
@@ -257,6 +261,14 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn expired(&self, now: i64) -> Result<Vec<Lease>, String>;
+    /// Claims one lease for release, conditional on its observed state:
+    /// the compare-and-set that keeps concurrent sweeps from
+    /// double-claiming. Returns whether this caller won the claim.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String>;
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -352,6 +364,8 @@ impl Lab {
         new: NewLease,
         now: i64,
     ) -> Result<Lease, LabUseCaseError> {
+        // The authorization precedes the read: a denied caller cannot
+        // probe lease existence through NotFound versus Denied.
         authorize(
             authorizer,
             AccessRequest {
@@ -382,16 +396,24 @@ impl Lab {
                 detail: "the purpose must be 1..=512 characters".to_owned(),
             });
         }
+        // The lease inherits the template's frozen cleanup strategy and
+        // TTL: destroy/revert/keep behavior and the expiry deadline are
+        // data on the lease, not scattered constants.
+        let inherited = NewLease {
+            cleanup: version.content.cleanup,
+            ttl_seconds: version.content.ttl_seconds,
+            ..new
+        };
         self.audit_event(
             principal,
             Permission::LabLease,
             Some(&version.id),
             "lab_lease_creating",
-            Some(("purpose", new.purpose.as_str())),
+            Some(("purpose", inherited.purpose.as_str())),
         )
         .await?;
         self.leases
-            .create(&new, &principal.id, now)
+            .create(&inherited, &principal.id, now)
             .await
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "leases",
@@ -478,21 +500,9 @@ impl Lab {
         keep: bool,
         _now: i64,
     ) -> Result<Lease, LabUseCaseError> {
-        let lease = self.leases.get(id).await.map_err(|detail| {
-            if detail.contains("not found") {
-                LabUseCaseError::NotFound {
-                    what: format!("lease {id}"),
-                }
-            } else {
-                LabUseCaseError::Backend {
-                    context: "leases",
-                    detail,
-                }
-            }
-        })?;
         // `keep` is the elevated path: a different catalog entry governs
         // it, so a caller allowed to lease is not automatically allowed
-        // to keep.
+        // to keep. The authorization precedes the read.
         let action = if keep {
             Permission::LabKeep
         } else {
@@ -507,6 +517,18 @@ impl Lab {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
         if lease.state.is_terminal() {
             return Err(LabUseCaseError::Invalid {
                 detail: format!("the lease {id} is already {}", lease.state.id()),
@@ -526,6 +548,12 @@ impl Lab {
         .await?;
         let mut updated = lease.clone();
         updated.state = LeaseState::Releasing;
+        if keep {
+            // The keep decision is persisted: the cleanup executor sees
+            // Keep and detaches the VM from automatic cleanup instead of
+            // destroying it.
+            updated.cleanup = CleanupStrategy::Keep;
+        }
         self.leases
             .update(&updated)
             .await
@@ -577,16 +605,22 @@ impl Lab {
                 None,
             )
             .await?;
-            let mut updated = lease.clone();
-            updated.state = LeaseState::Releasing;
-            self.leases
-                .update(&updated)
+            // The claim is conditional on the observed ready state: a
+            // concurrent sweep or cleanup completion cannot double-claim
+            // or regress the state.
+            let mut claimed = lease.clone();
+            claimed.state = LeaseState::Releasing;
+            let claimed_ok = self
+                .leases
+                .claim_for_release(&lease.id, LeaseState::Ready)
                 .await
                 .map_err(|detail| LabUseCaseError::Backend {
                     context: "leases",
                     detail,
                 })?;
-            released.push(updated);
+            if claimed_ok {
+                released.push(claimed);
+            }
         }
         Ok(released)
     }

@@ -564,6 +564,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       },
@@ -624,6 +634,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -649,6 +669,16 @@
           },
           "403": {
             "description": "The caller may not lease Lab guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -722,6 +752,16 @@
           },
           "404": {
             "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
             "content": {
               "application/json": {
                 "schema": {
