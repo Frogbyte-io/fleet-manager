@@ -2357,3 +2357,23 @@ fn parsing_walks_the_images_forms() {
         "{error}"
     );
 }
+
+#[test]
+fn parsing_walks_the_promotion_forms() {
+    let args: Vec<String> = ["images", "promote", "rcp-1@abc"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesPromote { .. }
+    ));
+    let args: Vec<String> = ["images", "version", "rcp-1@abc"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesVersion { .. }
+    ));
+}

@@ -139,6 +139,44 @@ impl RecipePort for FakeRecipes {
             .ok_or_else(|| format!("version {id} not found"))
     }
 
+    async fn promote(
+        &self,
+        version_id: &str,
+        promoted_by: &str,
+        promoted_at: i64,
+    ) -> Result<RecipeVersion, String> {
+        let mut versions = self.versions.lock().unwrap();
+        let recipe_id = versions
+            .iter()
+            .find(|version| version.id == version_id)
+            .ok_or_else(|| format!("version {version_id} not found"))?
+            .recipe_id
+            .clone();
+        for version in versions.iter_mut() {
+            if version.recipe_id == recipe_id {
+                version.promoted_at = None;
+                version.promoted_by = None;
+            }
+        }
+        let version = versions
+            .iter_mut()
+            .find(|version| version.id == version_id)
+            .ok_or_else(|| format!("version {version_id} not found"))?;
+        version.promoted_at = Some(promoted_at);
+        version.promoted_by = Some(promoted_by.to_owned());
+        Ok(version.clone())
+    }
+
+    async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String> {
+        Ok(self
+            .versions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|version| version.recipe_id == recipe_id && version.promoted_at.is_some())
+            .cloned())
+    }
+
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String> {
         Ok(self
             .versions
@@ -371,4 +409,173 @@ async fn deleting_a_draft_leaves_its_published_versions() {
         .await
         .unwrap();
     assert_eq!(kept.id, version.id);
+}
+
+// ---- FM-701: promotion gate ----
+
+use fleet_application::images::BuildEvidence;
+
+#[tokio::test]
+async fn promotion_requires_a_successful_build_with_an_artifact() {
+    let (images, _recipes, audit) = service();
+    let recipe = images
+        .create(
+            &AllowAll,
+            &principal(),
+            NewRecipe {
+                content: recipe_content("ubuntu-base", r#"{"builders":[]}"#),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = images
+        .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
+        .await
+        .unwrap();
+
+    // No build: refused.
+    let error = images
+        .promote(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RecipeUseCaseError::Invalid { .. }),
+        "{error}"
+    );
+
+    // A failed build: refused.
+    let error = images
+        .promote(
+            &AllowAll,
+            &principal(),
+            &version.id,
+            Some(BuildEvidence {
+                version_id: version.id.clone(),
+                state: "failed".to_owned(),
+                artifact_id: None,
+            }),
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RecipeUseCaseError::Invalid { .. }),
+        "{error}"
+    );
+
+    // A successful build without an artifact: refused.
+    let error = images
+        .promote(
+            &AllowAll,
+            &principal(),
+            &version.id,
+            Some(BuildEvidence {
+                version_id: version.id.clone(),
+                state: "succeeded".to_owned(),
+                artifact_id: None,
+            }),
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RecipeUseCaseError::Invalid { .. }),
+        "{error}"
+    );
+
+    // A successful build with an artifact: promoted, with the evidence
+    // recorded.
+    let promoted = images
+        .promote(
+            &AllowAll,
+            &principal(),
+            &version.id,
+            Some(BuildEvidence {
+                version_id: version.id.clone(),
+                state: "succeeded".to_owned(),
+                artifact_id: Some("pve:102".to_owned()),
+            }),
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(promoted.promoted_at, Some(NOW + 2));
+    assert_eq!(promoted.promoted_by.as_deref(), Some("anonymous-lan-admin"));
+
+    // The promotion is audited twice (intent + completion).
+    let intents = audit.intents.lock().unwrap();
+    assert!(
+        intents.iter().any(|intent| intent
+            .metadata
+            .entries()
+            .any(|(k, v)| k == "event" && v == "image_version_promoted")),
+        "{intents:?}"
+    );
+}
+
+#[tokio::test]
+async fn promoting_a_second_version_demotes_the_first_explicitly() {
+    let (images, _recipes, _audit) = service();
+    let recipe = images
+        .create(
+            &AllowAll,
+            &principal(),
+            NewRecipe {
+                content: recipe_content("ubuntu-base", r#"{"builders":[]}"#),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let v1 = images
+        .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
+        .await
+        .unwrap();
+    let evidence = || BuildEvidence {
+        version_id: v1.id.clone(),
+        state: "succeeded".to_owned(),
+        artifact_id: Some("pve:102".to_owned()),
+    };
+    images
+        .promote(&AllowAll, &principal(), &v1.id, Some(evidence()), NOW + 2)
+        .await
+        .unwrap();
+
+    // A different content publishes a second version; promoting it
+    // demotes the first.
+    images
+        .update(
+            &AllowAll,
+            &principal(),
+            &recipe.id,
+            recipe_content("ubuntu-base", r#"{"builders":[{}]}"#),
+            NOW + 3,
+        )
+        .await
+        .unwrap();
+    let v2 = images
+        .publish(&AllowAll, &principal(), &recipe.id, NOW + 4)
+        .await
+        .unwrap();
+    let evidence2 = BuildEvidence {
+        version_id: v2.id.clone(),
+        state: "succeeded".to_owned(),
+        artifact_id: Some("pve:103".to_owned()),
+    };
+    images
+        .promote(&AllowAll, &principal(), &v2.id, Some(evidence2), NOW + 5)
+        .await
+        .unwrap();
+
+    let demoted = images
+        .get_version(&AllowAll, &principal(), &v1.id)
+        .await
+        .unwrap();
+    assert_eq!(demoted.promoted_at, None, "the first version was demoted");
+    let promoted = images
+        .get_version(&AllowAll, &principal(), &v2.id)
+        .await
+        .unwrap();
+    assert_eq!(promoted.promoted_at, Some(NOW + 5));
 }

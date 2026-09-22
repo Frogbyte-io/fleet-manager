@@ -420,6 +420,69 @@
         }
       }
     },
+    "/api/v1/images/versions/{versionId}/promote": {
+      "post": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Promotes one version as the recipe's built image. The gate verifies\nthe version's build operation completed successfully with a recorded\nartifact, queried from the operation record — never assumed.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown version, or a\ngate refusal.",
+        "operationId": "promoteImageVersion",
+        "parameters": [
+          {
+            "name": "versionId",
+            "in": "path",
+            "description": "The version's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version was promoted; the recipe's previous promotion was demoted explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_RecipeVersionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The promotion gate refused: no successful build or no artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -6107,6 +6170,7 @@
                 "id",
                 "recipeId",
                 "name",
+                "description",
                 "contentDigest",
                 "content",
                 "source",
@@ -6123,6 +6187,10 @@
                   "type": "string",
                   "description": "The frozen content digest."
                 },
+                "description": {
+                  "type": "string",
+                  "description": "The frozen description."
+                },
                 "id": {
                   "type": "string",
                   "description": "The version's identity."
@@ -6134,6 +6202,21 @@
                 "node": {
                   "type": "string",
                   "description": "The node at publication time."
+                },
+                "promotedAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When the version was promoted, when any."
+                },
+                "promotedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Who promoted the version, when any."
                 },
                 "publishedAt": {
                   "type": "integer",
@@ -6151,6 +6234,17 @@
                 "storagePool": {
                   "type": "string",
                   "description": "The storage pool at publication time."
+                },
+                "structured": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StructuredRecipeDto",
+                      "description": "The structured view of the version's content, when it carries a\nProxmox builder block. `None` for non-JSON templates or builders\noutside the Proxmox family."
+                    }
+                  ]
                 }
               }
             },
@@ -6681,6 +6775,7 @@
           "id",
           "recipeId",
           "name",
+          "description",
           "contentDigest",
           "content",
           "source",
@@ -6697,6 +6792,10 @@
             "type": "string",
             "description": "The frozen content digest."
           },
+          "description": {
+            "type": "string",
+            "description": "The frozen description."
+          },
           "id": {
             "type": "string",
             "description": "The version's identity."
@@ -6708,6 +6807,21 @@
           "node": {
             "type": "string",
             "description": "The node at publication time."
+          },
+          "promotedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the version was promoted, when any."
+          },
+          "promotedBy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who promoted the version, when any."
           },
           "publishedAt": {
             "type": "integer",
@@ -6725,6 +6839,17 @@
           "storagePool": {
             "type": "string",
             "description": "The storage pool at publication time."
+          },
+          "structured": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StructuredRecipeDto",
+                "description": "The structured view of the version's content, when it carries a\nProxmox builder block. `None` for non-JSON templates or builders\noutside the Proxmox family."
+              }
+            ]
           }
         }
       },
@@ -7733,6 +7858,7 @@
               "id",
               "recipeId",
               "name",
+              "description",
               "contentDigest",
               "content",
               "source",
@@ -7749,6 +7875,10 @@
                 "type": "string",
                 "description": "The frozen content digest."
               },
+              "description": {
+                "type": "string",
+                "description": "The frozen description."
+              },
               "id": {
                 "type": "string",
                 "description": "The version's identity."
@@ -7760,6 +7890,21 @@
               "node": {
                 "type": "string",
                 "description": "The node at publication time."
+              },
+              "promotedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the version was promoted, when any."
+              },
+              "promotedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Who promoted the version, when any."
               },
               "publishedAt": {
                 "type": "integer",
@@ -7777,6 +7922,17 @@
               "storagePool": {
                 "type": "string",
                 "description": "The storage pool at publication time."
+              },
+              "structured": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/StructuredRecipeDto",
+                    "description": "The structured view of the version's content, when it carries a\nProxmox builder block. `None` for non-JSON templates or builders\noutside the Proxmox family."
+                  }
+                ]
               }
             }
           }
@@ -8309,6 +8465,96 @@
             "format": "int64",
             "description": "The deadline, in seconds. Bounded by the executor.",
             "minimum": 0
+          }
+        }
+      },
+      "StructuredRecipeDto": {
+        "type": "object",
+        "description": "The structured view: exactly the supported Proxmox field subset.",
+        "required": [
+          "node",
+          "storagePool",
+          "source"
+        ],
+        "properties": {
+          "bridge": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The network bridge."
+          },
+          "cloneVm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest to clone, for the clone source."
+          },
+          "cloudInitUser": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cloud-init user."
+          },
+          "cores": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The vCPU count.",
+            "minimum": 0
+          },
+          "diskSize": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The disk size."
+          },
+          "isoFile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ISO file path, for the iso source."
+          },
+          "isoStoragePool": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ISO's storage pool, for the iso source."
+          },
+          "memory": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The memory in MiB.",
+            "minimum": 0
+          },
+          "node": {
+            "type": "string",
+            "description": "The PVE node the recipe builds on."
+          },
+          "source": {
+            "type": "string",
+            "description": "What the recipe builds from: `iso` or `clone`."
+          },
+          "sshKeys": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cloud-init SSH keys."
+          },
+          "storagePool": {
+            "type": "string",
+            "description": "The PVE storage pool the build writes to."
           }
         }
       },

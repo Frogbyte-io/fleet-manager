@@ -263,6 +263,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::publish_image_recipe))
                 .routes(routes!(images::list_image_recipe_versions))
                 .routes(routes!(images::start_image_build))
+                .routes(routes!(images::promote_image_version))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )
