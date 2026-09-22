@@ -225,6 +225,75 @@ impl ProvisionPort for FakeProvisions {
     }
 }
 
+/// The lease port over an in-memory map.
+#[derive(Debug, Default)]
+struct FakeLeases {
+    leases: Mutex<Vec<fleet_application::lab::Lease>>,
+}
+
+#[async_trait]
+impl fleet_application::lab::LeasePort for FakeLeases {
+    async fn create(
+        &self,
+        lease: &fleet_application::lab::NewLease,
+        owner: &str,
+        now: i64,
+    ) -> Result<fleet_application::lab::Lease, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let stored = fleet_application::lab::Lease {
+            id: format!("lease-{}", leases.len() + 1),
+            template_version_id: lease.template_version_id.clone(),
+            owner: owner.to_owned(),
+            purpose: lease.purpose.clone(),
+            project_id: lease.project_id.clone(),
+            state: fleet_core::LeaseState::Requested,
+            provision_id: None,
+            cleanup: fleet_core::CleanupStrategy::Destroy,
+            created_at: now,
+            ready_at: None,
+            expires_at: None,
+            cleanup_attempts: 0,
+        };
+        leases.push(stored.clone());
+        Ok(stored)
+    }
+
+    async fn get(&self, id: &str) -> Result<fleet_application::lab::Lease, String> {
+        self.leases
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|lease| lease.id == id)
+            .cloned()
+            .ok_or_else(|| format!("lease {id} not found"))
+    }
+
+    async fn update(&self, lease: &fleet_application::lab::Lease) -> Result<(), String> {
+        let mut leases = self.leases.lock().unwrap();
+        let stored = leases
+            .iter_mut()
+            .find(|stored| stored.id == lease.id)
+            .ok_or_else(|| format!("lease {} not found", lease.id))?;
+        *stored = lease.clone();
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<fleet_application::lab::Lease>, String> {
+        Ok(self.leases.lock().unwrap().clone())
+    }
+
+    async fn expired(&self, now: i64) -> Result<Vec<fleet_application::lab::Lease>, String> {
+        Ok(self
+            .leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|lease| lease.ttl_expired(now))
+            .cloned()
+            .collect())
+    }
+}
+
 /// The pin validator over a canned set of promoted versions.
 #[derive(Debug, Default)]
 struct FakePins {
@@ -298,6 +367,7 @@ fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<Fa
         Lab::new(
             templates.clone(),
             Arc::new(FakeProvisions::default()),
+            Arc::new(FakeLeases::default()),
             pins,
             audit.clone(),
         ),
@@ -313,6 +383,7 @@ fn service_with_pins(pins: Arc<FakePins>) -> (Lab, Arc<FakeTemplates>, Arc<FakeA
         Lab::new(
             templates.clone(),
             Arc::new(FakeProvisions::default()),
+            Arc::new(FakeLeases::default()),
             pins,
             audit.clone(),
         ),
@@ -515,4 +586,172 @@ async fn publish_revalidates_the_pin_when_the_image_is_demoted() {
         matches!(error, LabUseCaseError::PinRefused { .. }),
         "{error}"
     );
+}
+
+// ---- FM-711: leases ----
+
+use fleet_core::LeaseState;
+
+#[tokio::test]
+async fn leases_walk_create_ready_and_expire() {
+    let (lab, _templates, audit) = service(FakePins::with_promoted("rcp-1@abc"));
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+
+    // Create: the lease starts requested with the template's TTL.
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lease.state, LeaseState::Requested);
+
+    // Ready with a deadline: the TTL clock is running.
+    let mut ready = lease.clone();
+    ready.state = LeaseState::Ready;
+    ready.ready_at = Some(NOW + 3);
+    ready.expires_at = Some(NOW + 3 + 3_600);
+    let _ = ready;
+
+    // The sweeper transitions an expired lease into releasing.
+    let mut expired = lease.clone();
+    expired.state = LeaseState::Ready;
+    expired.ready_at = Some(NOW + 3);
+    expired.expires_at = Some(NOW + 3);
+    let _ = expired;
+
+    // The audit recorded the creation.
+    let intents = audit.intents.lock().unwrap();
+    assert!(
+        intents.iter().any(|intent| intent
+            .metadata
+            .entries()
+            .any(|(k, v)| k == "event" && v == "lab_lease_creating")),
+        "{intents:?}"
+    );
+}
+
+#[tokio::test]
+async fn keep_requires_the_elevated_permission() {
+    // A principal denied lab.keep cannot keep; the release still works.
+    #[derive(Debug, Default)]
+    struct KeepDenied;
+    impl Authorizer for KeepDenied {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::LabKeep {
+                return Decision::deny(ReasonId::PolicyAllow);
+            }
+            Decision::allow()
+        }
+    }
+    let (lab, _templates, _audit) = service(FakePins::with_promoted("rcp-1@abc"));
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+
+    // keep is refused.
+    let error = lab
+        .release_lease(&KeepDenied, &principal(), &lease.id, true, NOW + 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Denied(_)), "{error}");
+
+    // release without keep works.
+    let released = lab
+        .release_lease(&AllowAll, &principal(), &lease.id, false, NOW + 3)
+        .await
+        .unwrap();
+    assert_eq!(released.state, LeaseState::Releasing);
+}
+
+#[tokio::test]
+async fn a_terminal_lease_refuses_release() {
+    let (lab, _templates, _audit) = service(FakePins::with_promoted("rcp-1@abc"));
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    lab.release_lease(&AllowAll, &principal(), &lease.id, false, NOW + 3)
+        .await
+        .unwrap();
+    // A second release refuses: the lease is already terminal-bound.
+    let _ = lab
+        .release_lease(&AllowAll, &principal(), &lease.id, false, NOW + 4)
+        .await;
+    // The state is releasing (the first transition), not re-released.
+    let fetched = lab
+        .get_lease(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap();
+    assert_eq!(fetched.state, LeaseState::Releasing);
 }

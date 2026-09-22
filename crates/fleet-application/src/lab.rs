@@ -24,6 +24,7 @@ use crate::operation::AuditPort;
 pub use fleet_core::{
     CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe, RecipeVersion,
 };
+pub use fleet_core::{Lease, LeaseState};
 
 /// A stored template draft.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -212,6 +213,52 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     async fn list(&self) -> Result<Vec<ProvisionRecord>, String>;
 }
 
+/// A lease creation request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewLease {
+    /// The template version to lease from.
+    pub template_version_id: String,
+    /// The purpose the lease records.
+    pub purpose: String,
+    /// The project the lease is scoped to, when any.
+    pub project_id: Option<String>,
+}
+
+/// The lease storage port.
+#[async_trait]
+pub trait LeasePort: fmt::Debug + Send + Sync {
+    /// Creates a lease, minting its identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn create(&self, lease: &NewLease, owner: &str, now: i64) -> Result<Lease, String>;
+    /// Reads one lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn get(&self, id: &str) -> Result<Lease, String>;
+    /// Updates the lease's mutable state.
+    ///
+    /// # Errors
+    ///
+    /// Fails when unknown or the backend errors.
+    async fn update(&self, lease: &Lease) -> Result<(), String>;
+    /// Lists leases, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn list(&self) -> Result<Vec<Lease>, String>;
+    /// Lists the leases whose TTL has expired at `now`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn expired(&self, now: i64) -> Result<Vec<Lease>, String>;
+}
+
 /// A use-case rejection, mapped onto public API errors by the adapter.
 #[derive(Debug)]
 pub enum LabUseCaseError {
@@ -266,6 +313,7 @@ impl std::error::Error for LabUseCaseError {}
 pub struct Lab {
     templates: Arc<dyn LabTemplatePort>,
     provisions: Arc<dyn ProvisionPort>,
+    leases: Arc<dyn LeasePort>,
     image_pins: Arc<dyn ImagePinValidator>,
     audit: Arc<dyn AuditPort>,
 }
@@ -276,15 +324,271 @@ impl Lab {
     pub fn new(
         templates: Arc<dyn LabTemplatePort>,
         provisions: Arc<dyn ProvisionPort>,
+        leases: Arc<dyn LeasePort>,
         image_pins: Arc<dyn ImagePinValidator>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
             templates,
             provisions,
+            leases,
             image_pins,
             audit,
         }
+    }
+
+    /// Creates a lease from a published template version: the lease
+    /// inherits the template's cleanup strategy and TTL, starts in
+    /// `requested`, and is audited. The provisioning saga is started by
+    /// the caller (the executor composes them).
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown version, or a backend failure.
+    pub async fn create_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        new: NewLease,
+        now: i64,
+    ) -> Result<Lease, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabLease,
+                resource: Some(&new.template_version_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let version = self
+            .templates
+            .get_version(&new.template_version_id)
+            .await
+            .map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("version {}", new.template_version_id),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "versions",
+                        detail,
+                    }
+                }
+            })?;
+        if new.purpose.is_empty() || new.purpose.chars().count() > 512 {
+            return Err(LabUseCaseError::Invalid {
+                detail: "the purpose must be 1..=512 characters".to_owned(),
+            });
+        }
+        self.audit_event(
+            principal,
+            Permission::LabLease,
+            Some(&version.id),
+            "lab_lease_creating",
+            Some(("purpose", new.purpose.as_str())),
+        )
+        .await?;
+        self.leases
+            .create(&new, &principal.id, now)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })
+    }
+
+    /// Lists the caller's leases (all leases in the trusted-LAN mode).
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn list_leases(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+    ) -> Result<Vec<Lease>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.leases
+            .list()
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })
+    }
+
+    /// Reads one lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, or a backend failure.
+    pub async fn get_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<Lease, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })
+    }
+
+    /// Releases a lease: transitions it into `releasing` and records the
+    /// intent. The executor performs the cleanup (destroy/revert through
+    /// the destructive gate) and completes the release. A `keep` request
+    /// requires the elevated `lab.keep` permission and transfers the VM
+    /// out of automatic cleanup instead.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, or a backend failure.
+    pub async fn release_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+        keep: bool,
+        _now: i64,
+    ) -> Result<Lease, LabUseCaseError> {
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        // `keep` is the elevated path: a different catalog entry governs
+        // it, so a caller allowed to lease is not automatically allowed
+        // to keep.
+        let action = if keep {
+            Permission::LabKeep
+        } else {
+            Permission::LabLease
+        };
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if lease.state.is_terminal() {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!("the lease {id} is already {}", lease.state.id()),
+            });
+        }
+        self.audit_event(
+            principal,
+            action,
+            Some(id),
+            if keep {
+                "lab_lease_keeping"
+            } else {
+                "lab_lease_releasing"
+            },
+            None,
+        )
+        .await?;
+        let mut updated = lease.clone();
+        updated.state = LeaseState::Releasing;
+        self.leases
+            .update(&updated)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        Ok(updated)
+    }
+
+    /// The expiry sweeper's transition: every lease whose TTL has expired
+    /// at `now` moves into `releasing` with the release intent recorded.
+    /// The sweeper survives restart because the deadlines live in the
+    /// rows; the caller recomputes on startup.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn sweep_expired(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        now: i64,
+    ) -> Result<Vec<Lease>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabLease,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let expired =
+            self.leases
+                .expired(now)
+                .await
+                .map_err(|detail| LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                })?;
+        let mut released = Vec::new();
+        for lease in expired {
+            self.audit_event(
+                principal,
+                Permission::LabLease,
+                Some(&lease.id),
+                "lab_lease_expiring",
+                None,
+            )
+            .await?;
+            let mut updated = lease.clone();
+            updated.state = LeaseState::Releasing;
+            self.leases
+                .update(&updated)
+                .await
+                .map_err(|detail| LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                })?;
+            released.push(updated);
+        }
+        Ok(released)
     }
 
     /// Lists the template drafts.

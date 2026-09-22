@@ -536,6 +536,203 @@
         }
       }
     },
+    "/api/v1/lab/leases": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Lists the leases.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listLabLeases",
+        "responses": {
+          "200": {
+            "description": "The leases, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_LeaseDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Creates a lease from a published template version.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown version.",
+        "operationId": "createLabLease",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The lease was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LeaseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not lease Lab guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/leases/sweep": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Runs the expiry sweeper: every lease whose TTL has expired moves into\nreleasing. The controller's background sweeper calls this on its tick;\nexposing it lets an operator sweep manually.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "sweepLabLeases",
+        "responses": {
+          "200": {
+            "description": "The leases transitioned into releasing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_LeaseDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not lease Lab guests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/leases/{leaseId}/release": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Releases a lease (or keeps its VM with the elevated permission).",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown lease.",
+        "operationId": "releaseLabLease",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The lease entered releasing (or keeping).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LeaseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is already terminal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not release (or keep) the lease.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/provisions": {
       "get": {
         "tags": [
@@ -4614,6 +4811,31 @@
           }
         }
       },
+      "CreateLeaseRequest": {
+        "type": "object",
+        "description": "The lease creation request.",
+        "required": [
+          "templateVersionId",
+          "purpose"
+        ],
+        "properties": {
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project the lease is scoped to, when any."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "The purpose the lease records."
+          },
+          "templateVersionId": {
+            "type": "string",
+            "description": "The template version to lease from."
+          }
+        }
+      },
       "CreateOnboardingDraftRequest": {
         "type": "object",
         "description": "The body of the create-draft request.",
@@ -5369,6 +5591,73 @@
           "templateId": {
             "type": "string",
             "description": "The template the version came from."
+          }
+        }
+      },
+      "LeaseDto": {
+        "type": "object",
+        "description": "One lease.",
+        "required": [
+          "id",
+          "templateVersionId",
+          "owner",
+          "purpose",
+          "state",
+          "cleanup",
+          "createdAt"
+        ],
+        "properties": {
+          "cleanup": {
+            "type": "string",
+            "description": "The cleanup strategy."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the lease was created."
+          },
+          "expiresAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the lease's TTL expires, once ready."
+          },
+          "id": {
+            "type": "string",
+            "description": "The lease's identity."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The owner's principal id."
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project the lease is scoped to, when any."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "The purpose the lease records."
+          },
+          "readyAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the lease reached ready, when it did."
+          },
+          "state": {
+            "type": "string",
+            "description": "The current state."
+          },
+          "templateVersionId": {
+            "type": "string",
+            "description": "The template version the lease was created from."
           }
         }
       },
@@ -6479,6 +6768,91 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "When the draft was last edited."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_LeaseDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One lease.",
+              "required": [
+                "id",
+                "templateVersionId",
+                "owner",
+                "purpose",
+                "state",
+                "cleanup",
+                "createdAt"
+              ],
+              "properties": {
+                "cleanup": {
+                  "type": "string",
+                  "description": "The cleanup strategy."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the lease was created."
+                },
+                "expiresAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When the lease's TTL expires, once ready."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The lease's identity."
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "The owner's principal id."
+                },
+                "projectId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The project the lease is scoped to, when any."
+                },
+                "purpose": {
+                  "type": "string",
+                  "description": "The purpose the lease records."
+                },
+                "readyAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When the lease reached ready, when it did."
+                },
+                "state": {
+                  "type": "string",
+                  "description": "The current state."
+                },
+                "templateVersionId": {
+                  "type": "string",
+                  "description": "The template version the lease was created from."
                 }
               }
             },
@@ -7905,6 +8279,16 @@
           }
         }
       },
+      "ReleaseLeaseRequest": {
+        "type": "object",
+        "description": "The release request.",
+        "properties": {
+          "keep": {
+            "type": "boolean",
+            "description": "Whether to keep the VM out of automatic cleanup (elevated)."
+          }
+        }
+      },
       "Resource_AddedMachineDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -8136,6 +8520,82 @@
               "templateId": {
                 "type": "string",
                 "description": "The template the version came from."
+              }
+            }
+          }
+        }
+      },
+      "Resource_LeaseDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One lease.",
+            "required": [
+              "id",
+              "templateVersionId",
+              "owner",
+              "purpose",
+              "state",
+              "cleanup",
+              "createdAt"
+            ],
+            "properties": {
+              "cleanup": {
+                "type": "string",
+                "description": "The cleanup strategy."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the lease was created."
+              },
+              "expiresAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the lease's TTL expires, once ready."
+              },
+              "id": {
+                "type": "string",
+                "description": "The lease's identity."
+              },
+              "owner": {
+                "type": "string",
+                "description": "The owner's principal id."
+              },
+              "projectId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The project the lease is scoped to, when any."
+              },
+              "purpose": {
+                "type": "string",
+                "description": "The purpose the lease records."
+              },
+              "readyAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the lease reached ready, when it did."
+              },
+              "state": {
+                "type": "string",
+                "description": "The current state."
+              },
+              "templateVersionId": {
+                "type": "string",
+                "description": "The template version the lease was created from."
               }
             }
           }

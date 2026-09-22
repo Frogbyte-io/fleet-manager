@@ -157,6 +157,12 @@ pub enum Permission {
     /// Provision a guest from a published Lab template. A mutation: it
     /// clones a VM and consumes host resources.
     LabProvision,
+    /// Create, release, or sweep Lab leases. A mutation: it consumes or
+    /// frees host resources.
+    LabLease,
+    /// Keep a Lab lease's VM out of automatic cleanup. An elevated
+    /// mutation: it transfers a VM out of automatic cleanup.
+    LabKeep,
 }
 
 impl Permission {
@@ -209,6 +215,8 @@ impl Permission {
         Permission::LabRead,
         Permission::LabConfig,
         Permission::LabProvision,
+        Permission::LabLease,
+        Permission::LabKeep,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -260,6 +268,8 @@ impl Permission {
             Permission::LabRead => "lab.read",
             Permission::LabConfig => "lab.config",
             Permission::LabProvision => "lab.provision",
+            Permission::LabLease => "lab.lease",
+            Permission::LabKeep => "lab.keep",
         }
     }
 
@@ -313,7 +323,9 @@ impl Permission {
             | Permission::ProxmoxDestructive
             | Permission::ImagesConfig
             | Permission::LabConfig
-            | Permission::LabProvision => true,
+            | Permission::LabProvision
+            | Permission::LabLease
+            | Permission::LabKeep => true,
         }
     }
 
@@ -344,7 +356,8 @@ impl Permission {
             | Permission::ImagesRead
             | Permission::ImagesConfig
             | Permission::LabRead
-            | Permission::LabConfig => false,
+            | Permission::LabConfig
+            | Permission::LabLease => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -367,7 +380,8 @@ impl Permission {
             | Permission::MiseOperate
             | Permission::ProjectsReady
             | Permission::ApplyExecute
-            | Permission::LabProvision => true,
+            | Permission::LabProvision
+            | Permission::LabKeep => true,
         }
     }
 }

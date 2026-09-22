@@ -7,10 +7,10 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use fleet_application::lab::{
-    LabTemplate, LabTemplateContent, LabTemplatePort, LabTemplateVersion, NewLabTemplate,
-    NewProvision, ProvisionPort, ProvisionRecord,
+    LabTemplate, LabTemplateContent, LabTemplatePort, LabTemplateVersion, Lease, LeasePort,
+    NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
 };
-use fleet_core::{CleanupStrategy, GuestState, ReadinessProbe};
+use fleet_core::{CleanupStrategy, GuestState, LeaseState, ReadinessProbe};
 
 /// The Lab repository over a pool.
 #[derive(Debug)]
@@ -337,4 +337,108 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
             .map(sqlx::error::DatabaseError::kind),
         Some(sqlx::error::ErrorKind::UniqueViolation)
     )
+}
+
+/// The lease repository: the SQLite implementation of the application's
+/// [`LeasePort`](fleet_application::lab::LeasePort).
+#[derive(Debug)]
+pub struct LeaseRepository {
+    pool: SqlitePool,
+}
+
+impl LeaseRepository {
+    /// Creates a repository over the store's pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, String> {
+        let state: String = row.get("state");
+        let cleanup: String = row.get("cleanup");
+        Ok(Lease {
+            id: row.get("id"),
+            template_version_id: row.get("template_version_id"),
+            owner: row.get("owner"),
+            purpose: row.get("purpose"),
+            project_id: row.get("project_id"),
+            state: LeaseState::from_id(&state)?,
+            provision_id: row.get("provision_id"),
+            cleanup: CleanupStrategy::from_id(&cleanup)?,
+            created_at: row.get("created_at"),
+            ready_at: row.get("ready_at"),
+            expires_at: row.get("expires_at"),
+            cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
+        })
+    }
+}
+
+#[async_trait]
+impl LeasePort for LeaseRepository {
+    async fn create(&self, lease: &NewLease, owner: &str, now: i64) -> Result<Lease, String> {
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', 'destroy', ?6)",
+        )
+        .bind(&id)
+        .bind(&lease.template_version_id)
+        .bind(owner)
+        .bind(&lease.purpose)
+        .bind(&lease.project_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("create failed: {error}"))?;
+        <Self as fleet_application::lab::LeasePort>::get(self, &id).await
+    }
+
+    async fn get(&self, id: &str) -> Result<Lease, String> {
+        sqlx::query("SELECT * FROM lab_leases WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("get failed: {error}"))?
+            .map(|row| Self::row_to_lease(&row))
+            .transpose()?
+            .ok_or_else(|| format!("lease {id} not found"))
+    }
+
+    async fn update(&self, lease: &Lease) -> Result<(), String> {
+        let updated = sqlx::query(
+            "UPDATE lab_leases SET state = ?2, provision_id = ?3, ready_at = ?4, expires_at = ?5, cleanup_attempts = ?6 WHERE id = ?1",
+        )
+        .bind(&lease.id)
+        .bind(lease.state.id())
+        .bind(&lease.provision_id)
+        .bind(lease.ready_at)
+        .bind(lease.expires_at)
+        .bind(i64::from(lease.cleanup_attempts))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("update failed: {error}"))?;
+        if updated.rows_affected() == 0 {
+            return Err(format!("lease {} not found", lease.id));
+        }
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<Lease>, String> {
+        let rows = sqlx::query("SELECT * FROM lab_leases ORDER BY created_at DESC, id DESC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("list failed: {error}"))?;
+        rows.iter().map(Self::row_to_lease).collect()
+    }
+
+    async fn expired(&self, now: i64) -> Result<Vec<Lease>, String> {
+        let rows = sqlx::query(
+            "SELECT * FROM lab_leases WHERE state = 'ready' AND expires_at IS NOT NULL AND expires_at <= ?1",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("expired failed: {error}"))?;
+        rows.iter().map(Self::row_to_lease).collect()
+    }
 }
