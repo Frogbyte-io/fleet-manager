@@ -139,7 +139,10 @@ impl ImagesExecutor {
         let dir = self.work_root.join(operation_id);
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("the work directory cannot be prepared: {error}"))?;
-        let path = dir.join("recipe.pkr.json");
+        // Packer auto-detects the format from the extension: `.pkr.json`
+        // is HCL2, a bare `.json` is the legacy JSON template. The recipe
+        // content is JSON, so the file is named accordingly.
+        let path = dir.join("recipe.json");
         std::fs::write(&path, content)
             .map_err(|error| format!("the recipe cannot be written: {error}"))?;
         Ok(path)

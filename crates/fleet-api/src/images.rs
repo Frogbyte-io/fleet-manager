@@ -562,6 +562,20 @@ pub struct BuildImageRequest {
     pub version_id: String,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
+    /// The secret-backed build variables, as name/reference pairs. The
+    /// values never enter argv, logs, or audit metadata.
+    #[serde(default)]
+    pub secret_vars: Vec<SecretVarDto>,
+}
+
+/// One secret-backed build variable.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretVarDto {
+    /// The Packer variable name.
+    pub name: String,
+    /// The secret reference id.
+    pub reference: String,
 }
 
 /// Starts a build of one published version as a durable operation. The
@@ -619,6 +633,7 @@ pub async fn start_image_build(
     let payload = serde_json::json!({
         "versionId": request.version_id,
         "timeoutSeconds": request.timeout_seconds,
+        "secretVars": request.secret_vars,
     });
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)

@@ -4539,6 +4539,13 @@
           "timeoutSeconds"
         ],
         "properties": {
+          "secretVars": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SecretVarDto"
+            },
+            "description": "The secret-backed build variables, as name/reference pairs. The\nvalues never enter argv, logs, or audit metadata."
+          },
           "timeoutSeconds": {
             "type": "integer",
             "format": "int64",
@@ -9895,6 +9902,24 @@
           "storagePool": {
             "type": "string",
             "description": "The PVE storage pool the build writes to."
+          }
+        }
+      },
+      "SecretVarDto": {
+        "type": "object",
+        "description": "One secret-backed build variable.",
+        "required": [
+          "name",
+          "reference"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The Packer variable name."
+          },
+          "reference": {
+            "type": "string",
+            "description": "The secret reference id."
           }
         }
       },

@@ -336,9 +336,24 @@ export interface AssociatedGuestDto {
 }
 
 /**
+ * One secret-backed build variable.
+ */
+export interface SecretVarDto {
+  /** The Packer variable name. */
+  name: string;
+  /** The secret reference id. */
+  reference: string;
+}
+
+/**
  * The build request: which version to build and the deadline.
  */
 export interface BuildImageRequest {
+  /**
+     * The secret-backed build variables, as name/reference pairs. The
+     * values never enter argv, logs, or audit metadata.
+     */
+  secretVars?: SecretVarDto[];
   /**
      * The deadline, in seconds. Bounded by the executor.
      * @minimum 0
