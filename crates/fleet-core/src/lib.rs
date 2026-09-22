@@ -22,7 +22,9 @@ mod value;
 pub use difference::{DifferenceSet, DifferenceState, FieldDifference, compare_field};
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
-pub use image::{MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion};
+pub use image::{
+    MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe,
+};
 pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,

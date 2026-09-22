@@ -103,6 +103,36 @@ pub trait RecipePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String>;
+    /// Records the promotion, demoting the recipe's other promoted
+    /// version explicitly (the demotion is part of the same commit).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the version is unknown or the backend errors.
+    async fn promote(
+        &self,
+        version_id: &str,
+        promoted_by: &str,
+        promoted_at: i64,
+    ) -> Result<RecipeVersion, String>;
+    /// The recipe's currently promoted version, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String>;
+}
+
+/// The gate's evidence: the terminal state and artifact of a version's
+/// latest build operation, queried by the adapter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildEvidence {
+    /// The version the build built.
+    pub version_id: String,
+    /// The build operation's terminal state.
+    pub state: String,
+    /// The recorded artifact id, when the build produced one.
+    pub artifact_id: Option<String>,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -393,8 +423,10 @@ impl Images {
             content: recipe.content.content.clone(),
             source: recipe.content.source,
             node: recipe.content.node.clone(),
-            storage_pool: recipe.content.storage_pool.clone(),
+            storage_pool: recipe.content.storage_pool.clone().unwrap_or_default(),
             published_at: now,
+            promoted_at: None,
+            promoted_by: None,
         };
         self.audit_event(
             principal,
@@ -411,6 +443,111 @@ impl Images {
                 context: "versions",
                 detail,
             })
+    }
+
+    /// Promotes one version as the recipe's built image, after the gate:
+    /// the version's build operation must have completed successfully
+    /// with a recorded artifact, verified against the operation record —
+    /// never assumed from the version row. At most one promoted version
+    /// per recipe; promoting a second demotes the first explicitly.
+    ///
+    /// `build_outcome` is the gate's evidence: the caller (the adapter)
+    /// queries the operation record for the version's latest build and
+    /// passes its terminal state and artifact id here.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown version, a gate refusal, or a backend
+    /// failure.
+    pub async fn promote(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        version_id: &str,
+        build_outcome: Option<BuildEvidence>,
+        now: i64,
+    ) -> Result<RecipeVersion, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesConfig,
+                resource: Some(version_id),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        let version = self
+            .recipes
+            .get_version(version_id)
+            .await
+            .map_err(|detail| {
+                if detail.contains("not found") {
+                    RecipeUseCaseError::NotFound {
+                        what: format!("version {version_id}"),
+                    }
+                } else {
+                    RecipeUseCaseError::Backend {
+                        context: "versions",
+                        detail,
+                    }
+                }
+            })?;
+        // The gate: a build that completed successfully with a recorded
+        // artifact. Without it, promotion refuses with the reason.
+        let Some(evidence) = build_outcome else {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: "the version has no build operation; build it before promoting".to_owned(),
+            });
+        };
+        if evidence.version_id != version_id || evidence.state != "succeeded" {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: format!(
+                    "the version's latest build is {} ({}); only a successful build can be promoted",
+                    evidence.version_id, evidence.state
+                ),
+            });
+        }
+        if evidence.artifact_id.is_none() {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: "the version's build recorded no artifact; promotion requires one"
+                    .to_owned(),
+            });
+        }
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(version_id),
+            "image_version_promoting",
+            Some(("digest", version.content_digest.as_str())),
+        )
+        .await?;
+        let promoted = self
+            .recipes
+            .promote(version_id, &principal.id, now)
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "versions",
+                detail,
+            })?;
+        // The completion audit follows the committed promotion: an audit
+        // failure here is surfaced as a backend error naming the committed
+        // promotion, never as a rollback that did not happen.
+        self.audit_event(
+            principal,
+            Permission::ImagesConfig,
+            Some(version_id),
+            "image_version_promoted",
+            Some(("digest", version.content_digest.as_str())),
+        )
+        .await
+        .map_err(|error| match error {
+            RecipeUseCaseError::Backend { context, detail } => RecipeUseCaseError::Backend {
+                context,
+                detail: format!("the promotion committed but its audit failed: {detail}"),
+            },
+            other => other,
+        })?;
+        Ok(promoted)
     }
 
     /// Reads one published version.

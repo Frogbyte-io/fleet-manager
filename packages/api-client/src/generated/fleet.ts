@@ -1487,6 +1487,65 @@ export interface PageRecipeDto {
 }
 
 /**
+ * The structured view: exactly the supported Proxmox field subset.
+ */
+export interface StructuredRecipeDto {
+  /**
+     * The network bridge.
+     * @nullable
+     */
+  bridge?: string | null;
+  /**
+     * The guest to clone, for the clone source.
+     * @nullable
+     */
+  cloneVm?: string | null;
+  /**
+     * The cloud-init user.
+     * @nullable
+     */
+  cloudInitUser?: string | null;
+  /**
+     * The vCPU count.
+     * @minimum 0
+     * @nullable
+     */
+  cores?: number | null;
+  /**
+     * The disk size.
+     * @nullable
+     */
+  diskSize?: string | null;
+  /**
+     * The ISO file path, for the iso source.
+     * @nullable
+     */
+  isoFile?: string | null;
+  /**
+     * The ISO's storage pool, for the iso source.
+     * @nullable
+     */
+  isoStoragePool?: string | null;
+  /**
+     * The memory in MiB.
+     * @minimum 0
+     * @nullable
+     */
+  memory?: number | null;
+  /** The PVE node the recipe builds on. */
+  node: string;
+  /** What the recipe builds from: `iso` or `clone`. */
+  source: string;
+  /**
+     * The cloud-init SSH keys.
+     * @nullable
+     */
+  sshKeys?: string | null;
+  /** The PVE storage pool the build writes to. */
+  storagePool: string;
+}
+
+/**
  * One published recipe version.
  */
 export type PageRecipeVersionDtoItemsItem = {
@@ -1494,12 +1553,24 @@ export type PageRecipeVersionDtoItemsItem = {
   content: string;
   /** The frozen content digest. */
   contentDigest: string;
+  /** The frozen description. */
+  description: string;
   /** The version's identity. */
   id: string;
   /** The recipe name at publication time. */
   name: string;
   /** The node at publication time. */
   node: string;
+  /**
+     * When the version was promoted, when any.
+     * @nullable
+     */
+  promotedAt?: number | null;
+  /**
+     * Who promoted the version, when any.
+     * @nullable
+     */
+  promotedBy?: string | null;
   /** When the version was published. */
   publishedAt: number;
   /** The recipe the version came from. */
@@ -1508,6 +1579,7 @@ export type PageRecipeVersionDtoItemsItem = {
   source: string;
   /** The storage pool at publication time. */
   storagePool: string;
+  structured?: null | StructuredRecipeDto;
 };
 
 /**
@@ -1749,12 +1821,24 @@ export interface RecipeVersionDto {
   content: string;
   /** The frozen content digest. */
   contentDigest: string;
+  /** The frozen description. */
+  description: string;
   /** The version's identity. */
   id: string;
   /** The recipe name at publication time. */
   name: string;
   /** The node at publication time. */
   node: string;
+  /**
+     * When the version was promoted, when any.
+     * @nullable
+     */
+  promotedAt?: number | null;
+  /**
+     * Who promoted the version, when any.
+     * @nullable
+     */
+  promotedBy?: string | null;
   /** When the version was published. */
   publishedAt: number;
   /** The recipe the version came from. */
@@ -1763,6 +1847,7 @@ export interface RecipeVersionDto {
   source: string;
   /** The storage pool at publication time. */
   storagePool: string;
+  structured?: null | StructuredRecipeDto;
 }
 
 /**
@@ -2378,12 +2463,24 @@ export type ResourceRecipeVersionDtoData = {
   content: string;
   /** The frozen content digest. */
   contentDigest: string;
+  /** The frozen description. */
+  description: string;
   /** The version's identity. */
   id: string;
   /** The recipe name at publication time. */
   name: string;
   /** The node at publication time. */
   node: string;
+  /**
+     * When the version was promoted, when any.
+     * @nullable
+     */
+  promotedAt?: number | null;
+  /**
+     * Who promoted the version, when any.
+     * @nullable
+     */
+  promotedBy?: string | null;
   /** When the version was published. */
   publishedAt: number;
   /** The recipe the version came from. */
@@ -2392,6 +2489,7 @@ export type ResourceRecipeVersionDtoData = {
   source: string;
   /** The storage pool at publication time. */
   storagePool: string;
+  structured?: null | StructuredRecipeDto;
 };
 
 /**
@@ -3344,6 +3442,130 @@ export const listImageRecipeVersions = async (recipeId: string, options?: Reques
 
   const data: listImageRecipeVersionsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listImageRecipeVersionsResponse
+}
+
+
+
+export type getImageVersionResponse200 = {
+  data: ResourceRecipeVersionDto
+  status: 200
+}
+
+export type getImageVersionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getImageVersionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getImageVersionResponseSuccess = (getImageVersionResponse200) & {
+  headers: Headers;
+};
+export type getImageVersionResponseError = (getImageVersionResponse403 | getImageVersionResponse404) & {
+  headers: Headers;
+};
+
+export type getImageVersionResponse = (getImageVersionResponseSuccess | getImageVersionResponseError)
+
+export const getGetImageVersionUrl = (versionId: string,) => {
+
+
+
+
+  return `/api/v1/images/versions/${versionId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown version.
+ * @summary Reads one published version with its structured view.
+ */
+export const getImageVersion = async (versionId: string, options?: RequestInit): Promise<getImageVersionResponse> => {
+
+  const res = await fetch(getGetImageVersionUrl(versionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getImageVersionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getImageVersionResponse
+}
+
+
+
+export type promoteImageVersionResponse200 = {
+  data: ResourceRecipeVersionDto
+  status: 200
+}
+
+export type promoteImageVersionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type promoteImageVersionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type promoteImageVersionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type promoteImageVersionResponseSuccess = (promoteImageVersionResponse200) & {
+  headers: Headers;
+};
+export type promoteImageVersionResponseError = (promoteImageVersionResponse400 | promoteImageVersionResponse403 | promoteImageVersionResponse404) & {
+  headers: Headers;
+};
+
+export type promoteImageVersionResponse = (promoteImageVersionResponseSuccess | promoteImageVersionResponseError)
+
+export const getPromoteImageVersionUrl = (versionId: string,) => {
+
+
+
+
+  return `/api/v1/images/versions/${versionId}/promote`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown version, or a
+ * gate refusal.
+ * @summary Promotes one version as the recipe's built image. The gate verifies
+the version's build operation completed successfully with a recorded
+artifact, queried from the operation record — never assumed.
+ */
+export const promoteImageVersion = async (versionId: string, options?: RequestInit): Promise<promoteImageVersionResponse> => {
+
+  const res = await fetch(getPromoteImageVersionUrl(versionId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: promoteImageVersionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as promoteImageVersionResponse
 }
 
 

@@ -57,8 +57,9 @@ pub struct RecipeContent {
     pub description: String,
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The PVE storage pool the build writes to.
-    pub storage_pool: String,
+    /// The PVE storage pool the build writes to. `None` when the builder
+    /// block omits it (consistent with `node`'s absence rule).
+    pub storage_pool: Option<String>,
     /// What the recipe builds from.
     pub source: RecipeSource,
     /// The raw Packer template content (`.pkr.json`/`.pkr.hcl`), stored
@@ -88,7 +89,7 @@ impl RecipeContent {
         hasher.update(b"\n");
         hasher.update(self.node.as_bytes());
         hasher.update(b"\n");
-        hasher.update(self.storage_pool.as_bytes());
+        hasher.update(self.storage_pool.as_deref().unwrap_or_default().as_bytes());
         hasher.update(b"\n");
         hasher.update(self.source.id().as_bytes());
         let digest: [u8; 32] = hasher.finalize().into();
@@ -113,7 +114,13 @@ impl RecipeContent {
         if self.description.chars().count() > 512 {
             return Err("the description must be at most 512 characters".to_owned());
         }
-        for (label, value) in [("node", &self.node), ("storage_pool", &self.storage_pool)] {
+        for (label, value) in [
+            ("node", &self.node),
+            (
+                "storage_pool",
+                &self.storage_pool.clone().unwrap_or_default(),
+            ),
+        ] {
             let len = value.chars().count();
             if len == 0 || len > 128 {
                 return Err(format!("the {label} must be 1..=128 characters"));
@@ -152,6 +159,12 @@ pub struct RecipeVersion {
     pub storage_pool: String,
     /// When the version was published (epoch millis).
     pub published_at: i64,
+    /// When the version was promoted (epoch millis), when any. At most
+    /// one version per recipe is promoted; the latest promotion demotes
+    /// the previous one explicitly.
+    pub promoted_at: Option<i64>,
+    /// Who promoted the version.
+    pub promoted_by: Option<String>,
 }
 
 #[cfg(test)]
@@ -163,7 +176,7 @@ mod tests {
             name: "ubuntu-base".to_owned(),
             description: "the base image".to_owned(),
             node: "pve".to_owned(),
-            storage_pool: "local-lvm".to_owned(),
+            storage_pool: Some("local-lvm".to_owned()),
             source: RecipeSource::Iso,
             content: content.to_owned(),
         }
@@ -199,5 +212,198 @@ mod tests {
             assert_eq!(source.id(), id);
         }
         assert!(RecipeSource::from_id("mystery").is_err());
+    }
+}
+
+/// The structured recipe: exactly the supported Proxmox field subset,
+/// mapped onto a canonical `.pkr.json` skeleton. Fields outside the
+/// subset live only in the raw content and survive every round-trip.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredRecipe {
+    /// The PVE node the recipe builds on.
+    pub node: String,
+    /// The PVE storage pool the build writes to. `None` when the builder
+    /// block omits it (consistent with `node`'s absence rule).
+    pub storage_pool: Option<String>,
+    /// What the recipe builds from.
+    pub source: RecipeSource,
+    /// The ISO file path, for the iso source.
+    pub iso_file: Option<String>,
+    /// The ISO's storage pool, for the iso source.
+    pub iso_storage_pool: Option<String>,
+    /// The guest to clone, for the clone source.
+    pub clone_vm: Option<String>,
+    /// The vCPU count.
+    pub cores: Option<u32>,
+    /// The memory in MiB.
+    pub memory: Option<u32>,
+    /// The disk size, as Packer's `Gb`-suffixed string.
+    pub disk_size: Option<String>,
+    /// The network bridge.
+    pub bridge: Option<String>,
+    /// The cloud-init user.
+    pub cloud_init_user: Option<String>,
+    /// The cloud-init SSH keys (URL-encoded text, the FM-211 shape).
+    pub ssh_keys: Option<String>,
+}
+
+/// A parsed `.pkr.json`'s shape, as the structured view needs: the
+/// builders' `proxmox-*` block and whether the content parsed as JSON.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParsedTemplate {
+    /// Whether the content parsed as JSON at all.
+    pub is_json: bool,
+    /// The first `proxmox-*` builder block, when the content carries one.
+    pub builder: Option<BuilderBlock>,
+}
+
+/// One builder block's fields, as the structured view reads them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BuilderBlock {
+    /// The builder's `type`, e.g. `proxmox-clone`.
+    pub ptype: String,
+    /// The block's fields, as raw JSON.
+    pub fields: serde_json::Value,
+}
+
+/// Extracts the parsed template shape from raw content. Tolerant: a
+/// non-JSON template (`.pkr.hcl`) reports `is_json: false` and no
+/// structured view is offered.
+#[must_use]
+pub fn parse_template(content: &str) -> ParsedTemplate {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return ParsedTemplate::default();
+    };
+    let builder = value
+        .get("builders")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|builder| {
+            // Only the two supported builders receive a structured view:
+            // arbitrary `proxmox*` types would get a misleading one.
+            let ptype = builder
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            (ptype == "proxmox-iso" || ptype == "proxmox-clone").then(|| BuilderBlock {
+                ptype: ptype.to_owned(),
+                fields: builder.clone(),
+            })
+        });
+    ParsedTemplate {
+        is_json: true,
+        builder,
+    }
+}
+
+fn field_str<'a>(builder: &'a BuilderBlock, key: &str) -> Option<&'a str> {
+    builder.fields.get(key).and_then(serde_json::Value::as_str)
+}
+
+impl StructuredRecipe {
+    /// The structured view of raw content, when it carries a Proxmox
+    /// builder block. `None` means the content has no structured view (a
+    /// non-JSON template or no Proxmox builder).
+    #[must_use]
+    pub fn from_raw(content: &str) -> Option<Self> {
+        let parsed = parse_template(content);
+        let builder = parsed.builder?;
+        Some(Self {
+            node: field_str(&builder, "node")?.to_owned(),
+            storage_pool: builder
+                .fields
+                .get("vm_storage_pool")
+                .or_else(|| builder.fields.get("storage_pool"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+
+            // The builder type is the source of truth, not the presence
+            // of a clone field.
+            source: match builder.ptype.as_str() {
+                "proxmox-clone" => RecipeSource::Clone,
+                _ => RecipeSource::Iso,
+            },
+            iso_file: field_str(&builder, "iso_file").map(str::to_owned),
+            iso_storage_pool: field_str(&builder, "iso_storage_pool").map(str::to_owned),
+            // Packer's `clone_vm` is the VM **name** (a string); the
+            // numeric VMID is the separate `clone_vm_id` field. Both are
+            // accepted; the name form is the documented one.
+            clone_vm: builder
+                .fields
+                .get("clone_vm")
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    other => other.to_string(),
+                })
+                .or_else(|| {
+                    builder
+                        .fields
+                        .get("clone_vm_id")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| value.to_string())
+                }),
+            cores: builder
+                .fields
+                .get("cores")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
+            memory: builder
+                .fields
+                .get("memory")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok()),
+            disk_size: field_str(&builder, "disk_size").map(str::to_owned),
+            bridge: field_str(&builder, "bridge").map(str::to_owned),
+            cloud_init_user: field_str(&builder, "ciuser").map(str::to_owned),
+            ssh_keys: field_str(&builder, "sshkeys").map(str::to_owned),
+        })
+    }
+}
+
+#[cfg(test)]
+mod structured_tests {
+    use super::*;
+
+    #[test]
+    fn the_structured_view_parses_a_proxmox_builder() {
+        let content = r#"{
+            "builders": [{
+                "type": "proxmox-clone",
+                "node": "pve",
+                "clone_vm": 101,
+                "vm_storage_pool": "local-lvm",
+                "cores": 2,
+                "memory": 2048,
+                "disk_size": "10G",
+                "bridge": "vmbr0",
+                "ciuser": "dev",
+                "sshkeys": "ssh-ed25519%20AAA",
+                "unknown_field": {"nested": true}
+            }],
+            "variables": {"x": 1}
+        }"#;
+        let structured = StructuredRecipe::from_raw(content).expect("a structured view");
+        assert_eq!(structured.node, "pve");
+        assert_eq!(structured.source, RecipeSource::Clone);
+        assert_eq!(structured.clone_vm.as_deref(), Some("101"));
+        assert_eq!(structured.storage_pool.as_deref(), Some("local-lvm"));
+        assert_eq!(structured.cores, Some(2));
+        assert_eq!(structured.memory, Some(2048));
+        assert_eq!(structured.disk_size.as_deref(), Some("10G"));
+        assert_eq!(structured.bridge.as_deref(), Some("vmbr0"));
+        assert_eq!(structured.cloud_init_user.as_deref(), Some("dev"));
+        assert_eq!(structured.ssh_keys.as_deref(), Some("ssh-ed25519%20AAA"));
+    }
+
+    #[test]
+    fn non_json_templates_have_no_structured_view() {
+        // HCL2 content: honest absence, not a guess.
+        assert!(StructuredRecipe::from_raw("source \"proxmox-clone\" {} {}").is_none());
+        // JSON without a Proxmox builder: no structured view.
+        assert!(StructuredRecipe::from_raw(r#"{"builders":[{"type":"docker"}]}"#).is_none());
     }
 }

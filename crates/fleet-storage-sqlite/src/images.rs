@@ -60,6 +60,8 @@ impl RecipeRepository {
             node: row.get("node"),
             storage_pool: row.get("storage_pool"),
             published_at: row.get("published_at"),
+            promoted_at: row.get::<Option<i64>, _>("promoted_at"),
+            promoted_by: row.get::<Option<String>, _>("promoted_by"),
         })
     }
 }
@@ -194,7 +196,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn get_version(&self, id: &str) -> Result<RecipeVersion, String> {
-        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at FROM image_recipe_versions WHERE id = ?1")
+        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE id = ?1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -205,12 +207,71 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String> {
-        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
+        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
             .bind(recipe_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| format!("list_versions failed: {error}"))?;
         rows.iter().map(Self::row_to_version).collect()
+    }
+
+    async fn promote(
+        &self,
+        version_id: &str,
+        promoted_by: &str,
+        promoted_at: i64,
+    ) -> Result<RecipeVersion, String> {
+        // The demotion of the recipe's other promoted version is part of
+        // the same commit: at most one promoted version per recipe.
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("promote failed: {error}"))?;
+        let version = sqlx::query("SELECT recipe_id FROM image_recipe_versions WHERE id = ?1")
+            .bind(version_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| format!("promote failed: {error}"))?
+            .ok_or_else(|| format!("version {version_id} not found"))?;
+        let recipe_id: String = version.get("recipe_id");
+        sqlx::query(
+            "UPDATE image_recipe_versions SET promoted_at = NULL, promoted_by = NULL              WHERE recipe_id = ?1 AND promoted_at IS NOT NULL AND id != ?2",
+        )
+        .bind(&recipe_id)
+        .bind(version_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("promote failed: {error}"))?;
+        sqlx::query(
+            "UPDATE image_recipe_versions SET promoted_at = ?3, promoted_by = ?2 WHERE id = ?1",
+        )
+        .bind(version_id)
+        .bind(promoted_by)
+        .bind(promoted_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("promote failed: {error}"))?;
+        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE id = ?1")
+            .bind(version_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| format!("promote failed: {error}"))?;
+        let promoted = Self::row_to_version(&row)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("promote failed: {error}"))?;
+        Ok(promoted)
+    }
+
+    async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String> {
+        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE recipe_id = ?1 AND promoted_at IS NOT NULL LIMIT 1")
+            .bind(recipe_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("promoted_version failed: {error}"))?;
+        row.map(|row| Self::row_to_version(&row)).transpose()
     }
 }
 
