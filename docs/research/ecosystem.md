@@ -230,6 +230,22 @@ Source: [current Model Context Protocol authorization specification](https://mod
 
 Decision: use the maintained Rust MCP SDK/server stack available during M8, not a handwritten JSON-RPC implementation copied from Purple. HTTP MCP must use protected-resource metadata and OAuth discovery/PKCE requirements current at implementation. Fleet authorization still decides each tool/resource; MCP authorization is transport authentication/delegation, not the domain policy.
 
+### Image building: Packer and the Proxmox plugin
+
+Sources: [Packer releases](https://github.com/hashicorp/packer/releases), [packer-plugin-proxmox](https://github.com/hashicorp/packer-plugin-proxmox), [the BUSL license text](https://www.hashicorp.com/bsl), the plugin's builder sources and cleanup step, and a live probe against the integration PVE 9.2 host (Packer 1.16.1, plugin 1.2.4).
+
+Findings:
+
+- Packer 1.16.1 (2026-09-18) is the current stable; releases are steady (1.16.0 2026-07, 1.15.4 2026-06). HCL2 `.pkr.json`/`.pkr.hcl` is the standard format; `packer validate` and `packer build -machine-readable` work as documented.
+- The Proxmox plugin (`packer-plugin-proxmox` v1.2.4, MPL-2.0, actively maintained by HashiCorp — pushed 2026-09-07) covers both `proxmox-iso` and `proxmox-clone` builders with every field Fleet needs: node, VMID ranges, storage pools, network bridge, cloud-init (`ciuser`, `sshkeys` as URL-encoded key text — the FM-211 lesson holds: the API path for `sshkeys` rejects values, but Packer's builder injects them through the VM config where they work), additional ISO files, and template conversion.
+- Machine-readable output is a line-oriented `timestamp,target,type,data…` format on stdout with `ui`/`artifact`/`version` message types and `%!(PACKER_COMMA)` escaping — stable, documented, and awk-friendly. Verified live: `packer -machine-readable version` emits the documented `version`/`version-prelease`/`version-commit` lines.
+- **Cancellation and cleanup are the plugin's job and it does them**: `stepStartVM.Cleanup` stops and deletes the VM it created on any failure path (with an explicit "delete it manually" error if the delete itself fails). Verified live: a `proxmox-clone` build that timed out waiting for SSH stopped and deleted its VM; the host's resource list showed no orphan.
+- **Licensing**: Packer is BUSL 1.1 with a four-year change date to MPL 2.0. The Additional Use Grant permits production use unless Fleet is offered to third parties as a hosted or embedded *competitive offering* — a self-hosted infrastructure controller invoking an operator-installed Packer binary is squarely inside the grant. Fleet must not bundle or redistribute the Packer binary (that would be embedding); the operator installs it, exactly as the recorded fallback says. The plugin is MPL-2.0 and enters the allowed inbound set.
+- **One integration trap, found live**: `proxmox_url` must include `/api2/json` (the plugin does not append it). Without it the Telmate client requests `/cluster/resources` instead of `/api2/json/cluster/resources` and PVE answers `500 no such file '/cluster/resources'` — a confusing error that looks like a permission problem but is a path problem. Fleet's recipe editor must always render the full URL, and its probe must check this shape.
+- The plugin's Telmate client is pinned to an Oct-2024 commit while upstream `proxmox-api-go` is active (Sept 2026) and carries open PVE-9 issues; the plugin works on PVE 9.2 for the paths it exercises (verified live through clone/create/start/cleanup), but the pin is a supply-chain fact to re-verify when PVE 10 arrives.
+
+Decision (2026-09-22): **fallback confirmed — Fleet requires an operator-installed Packer CLI and never bundles it.** The image-build provider invokes `packer` through the documented CLI with `-machine-readable` output, pins `packer >= 1.15 < 2` and `proxmox >= 1.2.4 < 2` with checksum verification, and keeps the image-build port available for another implementation. The version range and the `/api2/json` URL contract are the pinned integration facts; the BUSL review is recorded with no bundling. Scope: like FM-S08, this spike exercised only PVE 9.2 live; PVE 8.x must be validated on a real host before Fleet claims 8.x support for the image-build provider.
+
 ## Approaches explicitly rejected
 
 - Portainer-like Docker management or direct unauthenticated Docker TCP
