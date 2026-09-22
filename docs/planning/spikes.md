@@ -45,6 +45,21 @@ Spike outcomes:
 | FM-S08 | Does the experimental `proxmox-client` crate satisfy authentication, UPID task polling, custom TLS trust and pinning, unknown-field tolerance, and cancellation against PVE 8.x and 9.x? | M6 | ADR-0005 | M6 Proxmox epic | Small `reqwest` transport plus typed provider DTOs, borrowing Purple's parsing patterns |
 | FM-S09 | Which Packer/Proxmox-plugin version range supports modern `.pkr.json`, required template builds, stable machine-readable diagnostics, cancellation, and acceptable redistribution/deployment terms? | M7 | ADR-0005 | Image recipe/build/version epic | Require an operator-installed supported CLI and keep the image-build port available for another implementation |
 
+- **FM-S09 (resolved 2026-09-22, fallback confirmed).** Packer 1.16.1 with the
+  MPL-2.0 `packer-plugin-proxmox` v1.2.4 covers everything Fleet needs — modern
+  HCL2 templates, every builder field the recipes require, stable
+  `-machine-readable` output, and self-cleaning interrupted builds (verified
+  live: a timed-out clone build stopped and deleted its own VM, no orphan on
+  the host). Packer is BUSL 1.1: production use is granted to a self-hosted
+  controller invoking an operator-installed binary, but Fleet must never
+  bundle or redistribute the binary — that would be embedding. The fallback is
+  therefore confirmed, not merely chosen: **operator-installed Packer, pinned
+  `packer >= 1.15 < 2` and `proxmox >= 1.2.4 < 2`, checksum-verified, and the
+  image-build port kept open.** One integration trap recorded: `proxmox_url`
+  must include `/api2/json`, or the Telmate client paths break with a
+  misleading `500 no such file` error. Evidence and the rejected options:
+  [research/ecosystem.md](../research/ecosystem.md#image-building-packer-and-the-proxmox-plugin).
+
 - **FM-S08 (resolved 2026-09-20, fallback chosen).** The typed
   `proxmox-client` crate (crates.io, `landrzejewski`, 0.9.2) failed the
   spike's security gate: its entire TLS surface is
