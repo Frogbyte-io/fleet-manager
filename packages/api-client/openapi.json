@@ -596,6 +596,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       },
@@ -741,6 +751,26 @@
               }
             }
           },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "404": {
             "description": "The template does not exist.",
             "content": {
@@ -752,7 +782,17 @@
             }
           },
           "409": {
-            "description": "The image pin was refused.",
+            "description": "The name is taken or the image pin was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -785,8 +825,28 @@
           "204": {
             "description": "The draft was removed."
           },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "404": {
             "description": "The template does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -828,6 +888,16 @@
               }
             }
           },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "404": {
             "description": "The template does not exist.",
             "content": {
@@ -840,6 +910,16 @@
           },
           "409": {
             "description": "The image pin was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6810,6 +6890,13 @@
                 "updatedAt"
               ],
               "properties": {
+                "cloneUpid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The clone task's UPID, while running."
+                },
                 "createdAt": {
                   "type": "integer",
                   "format": "int64",
@@ -7256,6 +7343,13 @@
           "updatedAt"
         ],
         "properties": {
+          "cloneUpid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The clone task's UPID, while running."
+          },
           "createdAt": {
             "type": "integer",
             "format": "int64",
@@ -8659,6 +8753,13 @@
               "updatedAt"
             ],
             "properties": {
+              "cloneUpid": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The clone task's UPID, while running."
+              },
               "createdAt": {
                 "type": "integer",
                 "format": "int64",

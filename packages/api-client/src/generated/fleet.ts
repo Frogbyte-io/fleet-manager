@@ -1615,6 +1615,11 @@ export interface PageProjectDto {
  * One provisioning record.
  */
 export type PageProvisionRecordDtoItemsItem = {
+  /**
+     * The clone task's UPID, while running.
+     * @nullable
+     */
+  cloneUpid?: string | null;
   /** When the record was created. */
   createdAt: number;
   /**
@@ -1877,6 +1882,11 @@ export interface ProjectDto {
  * One provisioning record.
  */
 export interface ProvisionRecordDto {
+  /**
+     * The clone task's UPID, while running.
+     * @nullable
+     */
+  cloneUpid?: string | null;
   /** When the record was created. */
   createdAt: number;
   /**
@@ -2659,6 +2669,11 @@ export interface ResourceProjectDto {
  * One provisioning record.
  */
 export type ResourceProvisionRecordDtoData = {
+  /**
+     * The clone task's UPID, while running.
+     * @nullable
+     */
+  cloneUpid?: string | null;
   /** When the record was created. */
   createdAt: number;
   /**
@@ -4131,10 +4146,15 @@ export type listLabTemplatesResponse403 = {
   status: 403
 }
 
+export type listLabTemplatesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type listLabTemplatesResponseSuccess = (listLabTemplatesResponse200) & {
   headers: Headers;
 };
-export type listLabTemplatesResponseError = (listLabTemplatesResponse403) & {
+export type listLabTemplatesResponseError = (listLabTemplatesResponse403 | listLabTemplatesResponse500) & {
   headers: Headers;
 };
 
@@ -4302,6 +4322,16 @@ export type updateLabTemplateResponse200 = {
   status: 200
 }
 
+export type updateLabTemplateResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type updateLabTemplateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
 export type updateLabTemplateResponse404 = {
   data: ApiError
   status: 404
@@ -4312,10 +4342,15 @@ export type updateLabTemplateResponse409 = {
   status: 409
 }
 
+export type updateLabTemplateResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type updateLabTemplateResponseSuccess = (updateLabTemplateResponse200) & {
   headers: Headers;
 };
-export type updateLabTemplateResponseError = (updateLabTemplateResponse404 | updateLabTemplateResponse409) & {
+export type updateLabTemplateResponseError = (updateLabTemplateResponse400 | updateLabTemplateResponse403 | updateLabTemplateResponse404 | updateLabTemplateResponse409 | updateLabTemplateResponse500) & {
   headers: Headers;
 };
 
@@ -4368,15 +4403,25 @@ export type deleteLabTemplateResponse204 = {
   status: 204
 }
 
+export type deleteLabTemplateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
 export type deleteLabTemplateResponse404 = {
   data: ApiError
   status: 404
 }
 
+export type deleteLabTemplateResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type deleteLabTemplateResponseSuccess = (deleteLabTemplateResponse204) & {
   headers: Headers;
 };
-export type deleteLabTemplateResponseError = (deleteLabTemplateResponse404) & {
+export type deleteLabTemplateResponseError = (deleteLabTemplateResponse403 | deleteLabTemplateResponse404 | deleteLabTemplateResponse500) & {
   headers: Headers;
 };
 
@@ -4421,6 +4466,11 @@ export type publishLabTemplateResponse201 = {
   status: 201
 }
 
+export type publishLabTemplateResponse403 = {
+  data: ApiError
+  status: 403
+}
+
 export type publishLabTemplateResponse404 = {
   data: ApiError
   status: 404
@@ -4431,10 +4481,15 @@ export type publishLabTemplateResponse409 = {
   status: 409
 }
 
+export type publishLabTemplateResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type publishLabTemplateResponseSuccess = (publishLabTemplateResponse201) & {
   headers: Headers;
 };
-export type publishLabTemplateResponseError = (publishLabTemplateResponse404 | publishLabTemplateResponse409) & {
+export type publishLabTemplateResponseError = (publishLabTemplateResponse403 | publishLabTemplateResponse404 | publishLabTemplateResponse409 | publishLabTemplateResponse500) & {
   headers: Headers;
 };
 

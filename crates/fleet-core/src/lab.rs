@@ -250,6 +250,40 @@ mod tests {
     }
 
     #[test]
+    fn upper_bounds_and_empty_fields_are_enforced() {
+        let mut bad = content();
+        bad.name = "x".repeat(129);
+        assert!(bad.validate().is_err());
+        bad.name = String::new();
+        assert!(bad.validate().is_err());
+        bad.name = "ok".to_owned();
+        bad.description = "x".repeat(513);
+        assert!(bad.validate().is_err());
+        bad.description = String::new();
+        bad.image_version_id = "x".repeat(129);
+        assert!(bad.validate().is_err());
+        bad.image_version_id = String::new();
+        bad.cores = 65;
+        assert!(bad.validate().is_err());
+        bad.cores = 2;
+        bad.memory_mib = 262_145;
+        assert!(bad.validate().is_err());
+        bad.memory_mib = 2048;
+        bad.disk_gib = 4097;
+        assert!(bad.validate().is_err());
+        bad.disk_gib = 20;
+        bad.readiness_deadline_seconds = 3601;
+        assert!(bad.validate().is_err());
+        bad.readiness_deadline_seconds = 300;
+        bad.ttl_seconds = 2_592_001;
+        assert!(bad.validate().is_err());
+        bad.ttl_seconds = 3_600;
+        bad.readiness_command = Some("   ".to_owned());
+        bad.readiness_probe = ReadinessProbe::SshExec;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
     fn the_ssh_probe_requires_a_command() {
         let mut bad = content();
         bad.readiness_probe = ReadinessProbe::SshExec;

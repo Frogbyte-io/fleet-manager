@@ -60,6 +60,7 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
 struct FakeTemplates {
     templates: Mutex<Vec<fleet_application::lab::LabTemplate>>,
     versions: Mutex<Vec<fleet_application::lab::LabTemplateVersion>>,
+    port_calls: Mutex<Vec<&'static str>>,
 }
 
 #[async_trait]
@@ -69,6 +70,7 @@ impl LabTemplatePort for FakeTemplates {
         template: &NewLabTemplate,
         now: i64,
     ) -> Result<fleet_application::lab::LabTemplate, String> {
+        self.port_calls.lock().unwrap().push("create");
         let mut templates = self.templates.lock().unwrap();
         if templates
             .iter()
@@ -101,6 +103,7 @@ impl LabTemplatePort for FakeTemplates {
     }
 
     async fn list(&self) -> Result<Vec<fleet_application::lab::LabTemplate>, String> {
+        self.port_calls.lock().unwrap().push("list");
         Ok(self.templates.lock().unwrap().clone())
     }
 
@@ -176,6 +179,7 @@ impl ProvisionPort for FakeProvisions {
             clone_upid: None,
             guest_ipv4: None,
             ready_at: None,
+            idempotency_key: new.idempotency_key.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -205,6 +209,19 @@ impl ProvisionPort for FakeProvisions {
 
     async fn list(&self) -> Result<Vec<fleet_application::lab::ProvisionRecord>, String> {
         Ok(self.records.lock().unwrap().clone())
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<fleet_application::lab::ProvisionRecord>, String> {
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.idempotency_key.as_deref() == Some(key))
+            .cloned())
     }
 }
 
@@ -394,7 +411,7 @@ async fn provisioning_starts_with_a_record_in_provisioning_state() {
         .unwrap();
 
     let record = lab
-        .start_provision(&AllowAll, &principal(), &version.id, NOW + 2)
+        .start_provision(&AllowAll, &principal(), &version.id, None, NOW + 2)
         .await
         .unwrap();
     assert_eq!(record.state, fleet_core::GuestState::Provisioning);
@@ -433,7 +450,7 @@ async fn provisioning_refuses_an_unpromoted_pin_at_start() {
     // The image is demoted after publish: provisioning refuses.
     pins.promoted.lock().unwrap().clear();
     let error = lab
-        .start_provision(&AllowAll, &principal(), &version.id, NOW + 2)
+        .start_provision(&AllowAll, &principal(), &version.id, None, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -465,5 +482,37 @@ async fn a_denied_caller_never_reaches_the_ports() {
     assert!(
         templates.templates.lock().unwrap().is_empty(),
         "the ports were reached despite the denial"
+    );
+    assert!(
+        templates.port_calls.lock().unwrap().is_empty(),
+        "the ports were reached despite the denial"
+    );
+}
+
+#[tokio::test]
+async fn publish_revalidates_the_pin_when_the_image_is_demoted() {
+    let pins = FakePins::with_promoted("rcp-1@abc");
+    let (lab, _templates, _audit) = service_with_pins(pins.clone());
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+
+    // The image is demoted after create: publish refuses.
+    pins.promoted.lock().unwrap().clear();
+    let error = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, LabUseCaseError::PinRefused { .. }),
+        "{error}"
     );
 }

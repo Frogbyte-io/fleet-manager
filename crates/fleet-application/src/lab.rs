@@ -157,6 +157,8 @@ pub struct ProvisionRecord {
     pub clone_upid: Option<String>,
     /// The guest's IPv4 address, once the agent reported one.
     pub guest_ipv4: Option<String>,
+    /// The caller-scoped idempotency key, when one was supplied.
+    pub idempotency_key: Option<String>,
     /// When the guest reached ready (epoch millis), when it did — the TTL
     /// clock's start.
     pub ready_at: Option<i64>,
@@ -171,6 +173,8 @@ pub struct ProvisionRecord {
 pub struct NewProvision {
     /// The template version being provisioned.
     pub template_version_id: String,
+    /// The caller-scoped idempotency key, when one was supplied.
+    pub idempotency_key: Option<String>,
 }
 
 /// The provisioning storage port.
@@ -182,6 +186,12 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn create(&self, new: &NewProvision, now: i64) -> Result<ProvisionRecord, String>;
+    /// The record carrying this caller-scoped idempotency key, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<ProvisionRecord>, String>;
     /// Reads one record.
     ///
     /// # Errors
@@ -418,6 +428,8 @@ impl Lab {
                     LabUseCaseError::NotFound {
                         what: format!("template {id}"),
                     }
+                } else if detail.contains("taken") || detail.contains("UNIQUE") {
+                    LabUseCaseError::Conflict { detail }
                 } else {
                     LabUseCaseError::Backend {
                         context: "templates",
@@ -562,9 +574,10 @@ impl Lab {
     }
 
     /// Starts provisioning a published template version: creates the
-    /// record and returns it in `provisioning`. The saga's external-ID
-    /// steps are driven by the executor; this use case is the durable
-    /// entry point.
+    /// record and returns it in `provisioning`. An idempotency key scoped
+    /// to the caller makes a retry return the in-flight record instead of
+    /// creating a second guest saga. The saga's external-ID steps are
+    /// driven by the executor; this use case is the durable entry point.
     ///
     /// # Errors
     ///
@@ -574,6 +587,7 @@ impl Lab {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         version_id: &str,
+        idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<ProvisionRecord, LabUseCaseError> {
         authorize(
@@ -612,10 +626,26 @@ impl Lab {
             Some(("digest", version.image_digest.as_str())),
         )
         .await?;
+        // Idempotent replay: the caller-scoped key returns the in-flight
+        // record instead of creating a second guest saga.
+        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        if let Some(key) = &scoped_key
+            && let Some(existing) =
+                self.provisions
+                    .find_by_idempotency_key(key)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "provisions",
+                        detail,
+                    })?
+        {
+            return Ok(existing);
+        }
         self.provisions
             .create(
                 &NewProvision {
                     template_version_id: version_id.to_owned(),
+                    idempotency_key: scoped_key,
                 },
                 now,
             )
@@ -693,9 +723,21 @@ impl Lab {
             .image_pins
             .promoted_version(version_id)
             .await
-            .map_err(|detail| LabUseCaseError::Backend {
-                context: "image_pins",
-                detail,
+            .map_err(|detail| {
+                // An unknown version is a pin refusal, not a backend
+                // failure: the caller named an image that does not exist.
+                if detail.contains("not found") {
+                    LabUseCaseError::PinRefused {
+                        detail: format!(
+                            "the image version {version_id} does not exist; only promoted versions can be pinned"
+                        ),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "image_pins",
+                        detail,
+                    }
+                }
             })?;
         promoted.ok_or_else(|| LabUseCaseError::PinRefused {
             detail: format!(

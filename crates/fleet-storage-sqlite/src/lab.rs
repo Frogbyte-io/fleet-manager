@@ -84,6 +84,7 @@ impl LabRepository {
             clone_upid: row.get("clone_upid"),
             guest_ipv4: row.get("guest_ipv4"),
             ready_at: row.get("ready_at"),
+            idempotency_key: row.get("idempotency_key"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -197,17 +198,21 @@ impl LabTemplatePort for LabRepository {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| format!("publish failed: {error}"))?;
-        sqlx::query("UPDATE lab_templates SET published_from = ?2 WHERE id = ?1")
+        let pointer = sqlx::query("UPDATE lab_templates SET published_from = ?2 WHERE id = ?1")
             .bind(template_id)
             .bind(&version.id)
             .execute(&mut *transaction)
             .await
             .map_err(|error| format!("publish failed: {error}"))?;
+        if pointer.rows_affected() == 0 {
+            return Err(format!("template {template_id} not found"));
+        }
         let content_text = serde_json::to_string(&version.content)
             .map_err(|error| format!("the version content cannot be serialized: {error}"))?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO lab_template_versions (id, template_id, name, content, image_digest, published_by, published_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(&version.id)
         .bind(&version.template_id)
@@ -223,6 +228,11 @@ impl LabTemplatePort for LabRepository {
             .commit()
             .await
             .map_err(|error| format!("publish failed: {error}"))?;
+        if inserted.rows_affected() == 0 {
+            // An exact retry: return the stored version, which is the
+            // idempotent answer.
+            return self.get_version(&version.id).await;
+        }
         Ok(version.clone())
     }
 
@@ -242,17 +252,44 @@ impl LabTemplatePort for LabRepository {
 impl ProvisionPort for LabRepository {
     async fn create(&self, new: &NewProvision, now: i64) -> Result<ProvisionRecord, String> {
         let id = Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO lab_provisions (id, template_version_id, state, created_at, updated_at) \
-             VALUES (?1, ?2, 'provisioning', ?3, ?3)",
+        let result = sqlx::query(
+            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at) \
+             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4)",
         )
         .bind(&id)
         .bind(&new.template_version_id)
+        .bind(&new.idempotency_key)
         .bind(now)
         .execute(&self.pool)
-        .await
-        .map_err(|error| format!("create failed: {error}"))?;
-        <Self as ProvisionPort>::get(self, &id).await
+        .await;
+        match result {
+            Ok(_) => <Self as ProvisionPort>::get(self, &id).await,
+            Err(error) if is_unique_violation(&error) => {
+                // A concurrent retry with the same key: return the winner's
+                // record, which is the idempotent answer.
+                let key = new
+                    .idempotency_key
+                    .clone()
+                    .ok_or_else(|| format!("create failed: {error}"))?;
+                <Self as ProvisionPort>::find_by_idempotency_key(self, &key)
+                    .await?
+                    .ok_or_else(|| format!("create failed: {error}"))
+            }
+            Err(error) => Err(format!("create failed: {error}")),
+        }
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<fleet_application::lab::ProvisionRecord>, String> {
+        sqlx::query("SELECT * FROM lab_provisions WHERE idempotency_key = ?1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("find_by_idempotency_key failed: {error}"))?
+            .map(|row| Self::row_to_provision(&row))
+            .transpose()
     }
 
     async fn get(&self, id: &str) -> Result<ProvisionRecord, String> {

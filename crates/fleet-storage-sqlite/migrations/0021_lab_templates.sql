@@ -11,11 +11,11 @@ CREATE TABLE lab_templates (
     memory_mib     INTEGER NOT NULL,
     disk_gib       INTEGER NOT NULL,
     bootstrap_project_id TEXT,
-    readiness_probe TEXT NOT NULL,
+    readiness_probe TEXT NOT NULL CHECK (readiness_probe IN ('guest_agent', 'ssh_exec', 'project_ready')),
     readiness_command TEXT,
     readiness_deadline_seconds INTEGER NOT NULL,
     ttl_seconds    INTEGER NOT NULL,
-    cleanup        TEXT NOT NULL,
+    cleanup        TEXT NOT NULL CHECK (cleanup IN ('destroy', 'revert', 'keep')),
     published_from TEXT,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
@@ -37,14 +37,18 @@ CREATE INDEX lab_template_versions_template
 CREATE TABLE lab_provisions (
     id             TEXT PRIMARY KEY,
     template_version_id TEXT NOT NULL,
-    state          TEXT NOT NULL,
+    state          TEXT NOT NULL CHECK (state IN ('provisioning', 'provisioned', 'ready', 'never_ready')),
     node           TEXT,
     vmid           INTEGER,
     clone_upid     TEXT,
     guest_ipv4     TEXT,
     ready_at       INTEGER,
+    idempotency_key TEXT,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX lab_provisions_created ON lab_provisions (created_at DESC);
+CREATE UNIQUE INDEX lab_provisions_idempotency
+    ON lab_provisions (idempotency_key)
+    WHERE idempotency_key IS NOT NULL;

@@ -2402,7 +2402,7 @@ fn text_output_renders_lab_templates_and_provisions() {
         ],
         "page": {"limit": 50, "nextCursor": null}
     });
-    let text = fleetctl::render_lab_for_test(&provisions);
+    let text = fleetctl::render_lab_provisions_for_test(&provisions);
     assert!(text.contains("provisioning"), "{text}");
 }
 

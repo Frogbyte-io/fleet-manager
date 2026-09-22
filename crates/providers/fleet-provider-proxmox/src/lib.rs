@@ -885,6 +885,20 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
     /// Fails with [`PveApiError`].
     async fn stop_task(&self, request: PveHttpRequest, upid: &Upid) -> Result<(), PveApiError>;
 
+    /// Probes one guest's agent: the guest answers `agent/info` when the
+    /// QEMU Guest Agent is installed and reachable. The readiness probe
+    /// for the Lab saga (FM-710).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`].
+    async fn guest_agent_info(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<serde_json::Value, PveApiError>;
+
     /// Lists one guest's snapshots, normalized.
     ///
     /// # Errors
@@ -1358,6 +1372,22 @@ impl ProxmoxSource for ProxmoxClient {
                 urlencode(&upid.raw)
             ),
         )
+        .await
+    }
+
+    async fn guest_agent_info(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<serde_json::Value, PveApiError> {
+        self.call(PveHttpRequest {
+            path: format!(
+                "/api2/json/nodes/{}/qemu/{vmid}/agent/info",
+                urlencode(node)
+            ),
+            ..request.clone()
+        })
         .await
     }
 

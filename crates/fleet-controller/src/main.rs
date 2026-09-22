@@ -221,6 +221,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             };
             // The mise executor handles the FM-304 kinds over the same
             // SSH work directory and limiter.
+            // The shared PVE transport: every Proxmox composition (the
+            // surfaces, the lifecycle executor, the Lab provision
+            // executor) uses the same pinned-fingerprint transport.
+            let pve_transport: std::sync::Arc<dyn fleet_provider_proxmox::PveTransport> =
+                std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new());
             let with_mise: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
@@ -290,9 +295,8 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             // use; it composes after the source dispatch so its kinds
             // reach it and everything else falls through.
             let with_proxmox: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
-                let proxmox_client = fleet_provider_proxmox::ProxmoxClient::new(
-                    std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
-                );
+                let proxmox_client =
+                    fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
                 let accounts: std::sync::Arc<dyn fleet_application::proxmox::ProxmoxAccountPort> =
                     std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
                         store.pool().clone(),
@@ -346,6 +350,45 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     )),
                 ))
             };
+            // The Lab provision executor drives the FM-710 saga's external
+            // steps over the same Proxmox composition.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
+                let lab_versions: std::sync::Arc<dyn fleet_application::lab::LabTemplatePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                        store.pool().clone(),
+                    ));
+                let lab_provisions: std::sync::Arc<dyn fleet_application::lab::ProvisionPort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                        store.pool().clone(),
+                    ));
+                let lab_accounts: std::sync::Arc<
+                    dyn fleet_application::proxmox::ProxmoxAccountPort,
+                > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                    store.pool().clone(),
+                ));
+                let lab_credentials: std::sync::Arc<
+                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
+                > = match &secrets {
+                    Some(secrets) => std::sync::Arc::new(
+                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                            secrets.clone(),
+                        ),
+                    ),
+                    None => std::sync::Arc::new(
+                        fleet_controller::proxmox_store::AbsentProxmoxCredentials,
+                    ),
+                };
+                std::sync::Arc::new(fleet_controller::proxmox_exec::LabDispatch::new(
+                    with_images.clone(),
+                    std::sync::Arc::new(fleet_controller::proxmox_exec::ProvisionExecutor::new(
+                        lab_accounts,
+                        lab_credentials,
+                        lab_provisions,
+                        lab_versions,
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    )),
+                ))
+            };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -356,11 +399,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_controller::gateway::NodeCommandExecutor::new(
                             services.gateway.clone(),
                             node_machines,
-                            with_images.clone(),
+                            with_lab.clone(),
                         ));
                     executor
                 }
-                None => with_images.clone(),
+                None => with_lab.clone(),
             }
         };
         let worker_host = WorkerHost::new(worker_operations, executor, 4);
@@ -435,11 +478,13 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         // The Proxmox surface composes over the store, the secret store,
         // and the provider's pinned-fingerprint transport. Without a secret
         // store it serves the standard "unavailable" envelope.
+        let pve_transport: std::sync::Arc<dyn fleet_provider_proxmox::PveTransport> =
+            std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new());
         let proxmox = secrets.as_ref().map(|secrets| {
             std::sync::Arc::new(fleet_controller::proxmox_store::compose_proxmox(
                 store.pool().clone(),
                 secrets.clone(),
-                std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
+                pve_transport.clone(),
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ))
         });

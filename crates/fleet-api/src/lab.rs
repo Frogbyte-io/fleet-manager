@@ -225,6 +225,8 @@ pub struct ProvisionRecordDto {
     pub vmid: Option<u32>,
     /// The guest's IPv4 address, once reported.
     pub guest_ipv4: Option<String>,
+    /// The clone task's UPID, while running.
+    pub clone_upid: Option<String>,
     /// When the guest reached ready, when it did.
     pub ready_at: Option<i64>,
     /// When the record was created.
@@ -241,6 +243,7 @@ impl From<ProvisionRecord> for ProvisionRecordDto {
             state: record.state.id().to_owned(),
             node: record.node,
             vmid: record.vmid,
+            clone_upid: record.clone_upid,
             guest_ipv4: record.guest_ipv4,
             ready_at: record.ready_at,
             created_at: record.created_at,
@@ -318,6 +321,7 @@ impl SaveLabTemplateRequest {
     responses(
         (status = 200, description = "The template drafts, newest first.", body = Page<LabTemplateDto>),
         (status = 403, description = "The caller may not read the Lab surface.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn list_lab_templates(
@@ -427,8 +431,11 @@ pub async fn get_lab_template(
     request_body = SaveLabTemplateRequest,
     responses(
         (status = 200, description = "The draft was updated.", body = Resource<LabTemplateDto>),
+        (status = 400, description = "The request is malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the Lab surface.", body = crate::error::ApiError),
         (status = 404, description = "The template does not exist.", body = crate::error::ApiError),
-        (status = 409, description = "The image pin was refused.", body = crate::error::ApiError),
+        (status = 409, description = "The name is taken or the image pin was refused.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn update_lab_template(
@@ -467,7 +474,9 @@ pub async fn update_lab_template(
     params(("templateId" = String, Path, description = "The template's identity.")),
     responses(
         (status = 204, description = "The draft was removed."),
+        (status = 403, description = "The caller may not configure the Lab surface.", body = crate::error::ApiError),
         (status = 404, description = "The template does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn delete_lab_template(
@@ -499,8 +508,10 @@ pub async fn delete_lab_template(
     params(("templateId" = String, Path, description = "The template's identity.")),
     responses(
         (status = 201, description = "The version was published.", body = Resource<LabTemplateVersionDto>),
-        (status = 409, description = "The image pin was refused.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the Lab surface.", body = crate::error::ApiError),
         (status = 404, description = "The template does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The image pin was refused.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
 pub async fn publish_lab_template(
@@ -546,15 +557,23 @@ pub async fn start_lab_provision(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Path(version_id): Path<String>,
 ) -> Result<(StatusCode, Json<Resource<ProvisionRecordDto>>), ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // A caller-scoped idempotency key makes a retry return the in-flight
+    // record instead of creating a second guest saga.
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:{key}", principal.id));
     let record = lab
         .start_provision(
             state.authorizer.as_ref(),
             &principal,
             &version_id,
+            idempotency_key.as_deref(),
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await

@@ -604,6 +604,8 @@ pub enum Command {
         disk_gib: u32,
         /// The readiness probe.
         readiness_probe: String,
+        /// The SSH probe command, for the `ssh_exec` probe.
+        readiness_command: Option<String>,
         /// The readiness deadline in seconds.
         readiness_deadline_seconds: u32,
         /// The default TTL in seconds.
@@ -1220,6 +1222,7 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
             let mut memory_mib = None;
             let mut disk_gib = None;
             let mut readiness_probe = None;
+            let readiness_command = None;
             let mut readiness_deadline_seconds = None;
             let mut ttl_seconds = None;
             let mut cleanup = None;
@@ -1350,6 +1353,7 @@ fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
                 readiness_probe: readiness_probe.ok_or_else(|| CliError {
                     message: "--probe is required".to_owned(),
                 })?,
+                readiness_command,
                 readiness_deadline_seconds: readiness_deadline_seconds.ok_or_else(|| CliError {
                     message: "--readiness-deadline is required".to_owned(),
                 })?,
@@ -2879,14 +2883,12 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             memory_mib,
             disk_gib,
             readiness_probe,
+            readiness_command,
             readiness_deadline_seconds,
             ttl_seconds,
             cleanup,
-        } => (
-            reqwest::Method::POST,
-            "/api/v1/lab/templates".to_owned(),
-            Vec::new(),
-            Some(serde_json::json!({
+        } => {
+            let mut body = serde_json::json!({
                 "name": name,
                 "description": description,
                 "imageVersionId": image_version_id,
@@ -2897,8 +2899,17 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 "readinessDeadlineSeconds": readiness_deadline_seconds,
                 "ttlSeconds": ttl_seconds,
                 "cleanup": cleanup,
-            })),
-        ),
+            });
+            if let Some(command) = &readiness_command {
+                body["readinessCommand"] = serde_json::json!(command);
+            }
+            (
+                reqwest::Method::POST,
+                "/api/v1/lab/templates".to_owned(),
+                Vec::new(),
+                Some(body),
+            )
+        }
         Command::LabPublish { template_id } => (
             reqwest::Method::POST,
             format!("/api/v1/lab/templates/{template_id}/publish"),
@@ -3557,14 +3568,32 @@ fn render_project_deleted() -> String {
     "project removed".to_owned()
 }
 
+/// Which Lab surface a payload belongs to: the lists share the page
+/// envelope, so the renderer is scoped by command rather than guessing
+/// from the payload.
+#[derive(Clone, Copy, Debug)]
+enum LabSurface {
+    /// The template drafts.
+    Templates,
+    /// The provisioning records.
+    Provisions,
+}
+
 /// Renders the Lab surface as human text; exposed for contract tests.
 #[doc(hidden)]
 #[must_use]
 pub fn render_lab_for_test(value: &Value) -> String {
-    render_lab(Some(value))
+    render_lab(Some(value), LabSurface::Templates)
 }
 
-fn render_lab(value: Option<&Value>) -> String {
+/// The provisions renderer for contract tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_lab_provisions_for_test(value: &Value) -> String {
+    render_lab(Some(value), LabSurface::Provisions)
+}
+
+fn render_lab(value: Option<&Value>, _surface: LabSurface) -> String {
     let Some(value) = value else {
         return String::new();
     };

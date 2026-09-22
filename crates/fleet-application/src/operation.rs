@@ -43,7 +43,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 42] = [
+pub const CREATABLE_KINDS: [&str; 43] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -86,6 +86,7 @@ pub const CREATABLE_KINDS: [&str; 42] = [
     "proxmox.guest.template",
     "proxmox.task-cancel",
     "image.build",
+    "lab.provision",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.

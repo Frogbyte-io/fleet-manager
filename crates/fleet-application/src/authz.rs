@@ -344,8 +344,7 @@ impl Permission {
             | Permission::ImagesRead
             | Permission::ImagesConfig
             | Permission::LabRead
-            | Permission::LabConfig
-            | Permission::LabProvision => false,
+            | Permission::LabConfig => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -367,7 +366,8 @@ impl Permission {
             | Permission::ToolsRead
             | Permission::MiseOperate
             | Permission::ProjectsReady
-            | Permission::ApplyExecute => true,
+            | Permission::ApplyExecute
+            | Permission::LabProvision => true,
         }
     }
 }
