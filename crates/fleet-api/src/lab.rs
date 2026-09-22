@@ -616,3 +616,234 @@ pub async fn list_lab_provisions(
         items,
     }))
 }
+
+/// One lease.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseDto {
+    /// The lease's identity.
+    pub id: String,
+    /// The template version the lease was created from.
+    pub template_version_id: String,
+    /// The owner's principal id.
+    pub owner: String,
+    /// The purpose the lease records.
+    pub purpose: String,
+    /// The project the lease is scoped to, when any.
+    pub project_id: Option<String>,
+    /// The current state.
+    pub state: String,
+    /// The cleanup strategy.
+    pub cleanup: String,
+    /// When the lease was created.
+    pub created_at: i64,
+    /// When the lease reached ready, when it did.
+    pub ready_at: Option<i64>,
+    /// When the lease's TTL expires, once ready.
+    pub expires_at: Option<i64>,
+}
+
+impl From<fleet_application::lab::Lease> for LeaseDto {
+    fn from(lease: fleet_application::lab::Lease) -> Self {
+        Self {
+            id: lease.id,
+            template_version_id: lease.template_version_id,
+            owner: lease.owner,
+            purpose: lease.purpose,
+            project_id: lease.project_id,
+            state: lease.state.id().to_owned(),
+            cleanup: lease.cleanup.id().to_owned(),
+            created_at: lease.created_at,
+            ready_at: lease.ready_at,
+            expires_at: lease.expires_at,
+        }
+    }
+}
+
+/// The lease creation request.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateLeaseRequest {
+    /// The template version to lease from.
+    pub template_version_id: String,
+    /// The purpose the lease records.
+    pub purpose: String,
+    /// The project the lease is scoped to, when any.
+    pub project_id: Option<String>,
+}
+
+/// Creates a lease from a published template version.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or an unknown version.
+#[utoipa::path(
+    post,
+    path = "/lab/leases",
+    tag = "lab",
+    operation_id = "createLabLease",
+    request_body = CreateLeaseRequest,
+    responses(
+        (status = 201, description = "The lease was created.", body = Resource<LeaseDto>),
+        (status = 400, description = "The request is malformed.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
+        (status = 404, description = "The version does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn create_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Json(request): Json<CreateLeaseRequest>,
+) -> Result<(StatusCode, Json<Resource<LeaseDto>>), ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let lease = lab
+        .create_lease(
+            state.authorizer.as_ref(),
+            &principal,
+            fleet_application::lab::NewLease {
+                template_version_id: request.template_version_id,
+                purpose: request.purpose,
+                project_id: request.project_id,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok((StatusCode::CREATED, Json(Resource::new(lease.into()))))
+}
+
+/// Lists the leases.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    get,
+    path = "/lab/leases",
+    tag = "lab",
+    operation_id = "listLabLeases",
+    responses(
+        (status = 200, description = "The leases, newest first.", body = Page<LeaseDto>),
+        (status = 403, description = "The caller may not read the Lab surface.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn list_lab_leases(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let leases = lab
+        .list_leases(state.authorizer.as_ref(), &principal)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    let items: Vec<LeaseDto> = leases.into_iter().map(Into::into).collect();
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit: items.len().try_into().unwrap_or(u32::MAX),
+        },
+        items,
+    }))
+}
+
+/// Releases a lease (or keeps its VM with the elevated permission).
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or an unknown lease.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/release",
+    tag = "lab",
+    operation_id = "releaseLabLease",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    request_body = ReleaseLeaseRequest,
+    responses(
+        (status = 200, description = "The lease entered releasing (or keeping).", body = Resource<LeaseDto>),
+        (status = 400, description = "The lease is already terminal.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not release (or keep) the lease.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn release_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+    Json(request): Json<ReleaseLeaseRequest>,
+) -> Result<Json<Resource<LeaseDto>>, ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let lease = lab
+        .release_lease(
+            state.authorizer.as_ref(),
+            &principal,
+            &lease_id,
+            request.keep,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(lease.into())))
+}
+
+/// The release request.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseLeaseRequest {
+    /// Whether to keep the VM out of automatic cleanup (elevated).
+    #[serde(default)]
+    pub keep: bool,
+}
+
+/// Runs the expiry sweeper: every lease whose TTL has expired moves into
+/// releasing. The controller's background sweeper calls this on its tick;
+/// exposing it lets an operator sweep manually.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/sweep",
+    tag = "lab",
+    operation_id = "sweepLabLeases",
+    responses(
+        (status = 200, description = "The leases transitioned into releasing.", body = Page<LeaseDto>),
+        (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn sweep_lab_leases(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let released = lab
+        .sweep_expired(
+            state.authorizer.as_ref(),
+            &principal,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    let items: Vec<LeaseDto> = released.into_iter().map(Into::into).collect();
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit: items.len().try_into().unwrap_or(u32::MAX),
+        },
+        items,
+    }))
+}

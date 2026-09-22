@@ -2502,3 +2502,49 @@ fn parsing_walks_the_lab_forms() {
     let error = fleetctl::parse(&args).unwrap_err();
     assert!(error.message.contains("must be a number"), "{error}");
 }
+
+#[test]
+fn text_output_renders_lab_leases() {
+    let page = json!({
+        "items": [
+            {"id": "lease-1", "templateVersionId": "tpl-1@abc", "owner": "tester",
+             "purpose": "the demo", "state": "ready", "cleanup": "destroy",
+             "createdAt": 1, "readyAt": 2, "expiresAt": 3600}
+        ],
+        "page": {"limit": 50, "nextCursor": null}
+    });
+    let text = fleetctl::render_lab_leases_for_test(&page);
+    assert!(text.contains("lease-1"), "{text}");
+    assert!(text.contains("ready"), "{text}");
+    assert!(text.contains("tester"), "{text}");
+}
+
+#[test]
+fn parsing_walks_the_lease_forms() {
+    let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases
+    ));
+    let args: Vec<String> = ["lab", "lease", "tpl-1@abc", "--purpose", "the demo"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeaseCreate { .. }
+    ));
+    let args: Vec<String> = ["lab", "release", "lease-1", "--keep"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeaseRelease { keep: true, .. }
+    ));
+    let args: Vec<String> = ["lab", "sweep"].iter().map(ToString::to_string).collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabSweep
+    ));
+}

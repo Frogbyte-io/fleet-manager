@@ -25,7 +25,7 @@ pub mod source;
 
 pub use audit::{AuditLedger, AuditSink};
 pub use images::RecipeRepository;
-pub use lab::LabRepository;
+pub use lab::{LabRepository, LeaseRepository};
 pub use machines::MachineRepository;
 pub use nodes::NodeRepository;
 pub use onboarding::OnboardingRepository;

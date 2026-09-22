@@ -26,7 +26,7 @@ pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generat
 pub use image::{
     MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe,
 };
-pub use lab::{CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe};
+pub use lab::{CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState, ReadinessProbe};
 pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,

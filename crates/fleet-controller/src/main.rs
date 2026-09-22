@@ -470,6 +470,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                 store.pool().clone(),
             )),
+            std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                store.pool().clone(),
+            )),
             std::sync::Arc::new(
                 fleet_controller::proxmox_store::RecipeImagePinValidator::new(recipe_versions),
             ),

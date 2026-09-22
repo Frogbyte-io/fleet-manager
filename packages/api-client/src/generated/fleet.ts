@@ -484,6 +484,21 @@ export interface CreateEnrollmentTokenRequest {
 }
 
 /**
+ * The lease creation request.
+ */
+export interface CreateLeaseRequest {
+  /**
+     * The project the lease is scoped to, when any.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** The purpose the lease records. */
+  purpose: string;
+  /** The template version to lease from. */
+  templateVersionId: string;
+}
+
+/**
  * How the controller would authenticate to a draft's endpoint.
  */
 export type OnboardAuthDto = {
@@ -855,6 +870,41 @@ export interface LabTemplateVersionDto {
   publishedBy: string;
   /** The template the version came from. */
   templateId: string;
+}
+
+/**
+ * One lease.
+ */
+export interface LeaseDto {
+  /** The cleanup strategy. */
+  cleanup: string;
+  /** When the lease was created. */
+  createdAt: number;
+  /**
+     * When the lease's TTL expires, once ready.
+     * @nullable
+     */
+  expiresAt?: number | null;
+  /** The lease's identity. */
+  id: string;
+  /** The owner's principal id. */
+  owner: string;
+  /**
+     * The project the lease is scoped to, when any.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** The purpose the lease records. */
+  purpose: string;
+  /**
+     * When the lease reached ready, when it did.
+     * @nullable
+     */
+  readyAt?: number | null;
+  /** The current state. */
+  state: string;
+  /** The template version the lease was created from. */
+  templateVersionId: string;
 }
 
 /**
@@ -1400,6 +1450,54 @@ export type PageLabTemplateDtoItemsItem = {
 export interface PageLabTemplateDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageLabTemplateDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One lease.
+ */
+export type PageLeaseDtoItemsItem = {
+  /** The cleanup strategy. */
+  cleanup: string;
+  /** When the lease was created. */
+  createdAt: number;
+  /**
+     * When the lease's TTL expires, once ready.
+     * @nullable
+     */
+  expiresAt?: number | null;
+  /** The lease's identity. */
+  id: string;
+  /** The owner's principal id. */
+  owner: string;
+  /**
+     * The project the lease is scoped to, when any.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** The purpose the lease records. */
+  purpose: string;
+  /**
+     * When the lease reached ready, when it did.
+     * @nullable
+     */
+  readyAt?: number | null;
+  /** The current state. */
+  state: string;
+  /** The template version the lease was created from. */
+  templateVersionId: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageLeaseDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageLeaseDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -2167,6 +2265,14 @@ export interface RecordCheckoutsRequest {
 }
 
 /**
+ * The release request.
+ */
+export interface ReleaseLeaseRequest {
+  /** Whether to keep the VM out of automatic cleanup (elevated). */
+  keep?: boolean;
+}
+
+/**
  * The outcome of an add: the new machine plus the duplicates that were
  * warned about.
  */
@@ -2325,6 +2431,52 @@ export type ResourceLabTemplateVersionDtoData = {
 export interface ResourceLabTemplateVersionDto {
   /** One published template version. */
   data: ResourceLabTemplateVersionDtoData;
+}
+
+/**
+ * One lease.
+ */
+export type ResourceLeaseDtoData = {
+  /** The cleanup strategy. */
+  cleanup: string;
+  /** When the lease was created. */
+  createdAt: number;
+  /**
+     * When the lease's TTL expires, once ready.
+     * @nullable
+     */
+  expiresAt?: number | null;
+  /** The lease's identity. */
+  id: string;
+  /** The owner's principal id. */
+  owner: string;
+  /**
+     * The project the lease is scoped to, when any.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** The purpose the lease records. */
+  purpose: string;
+  /**
+     * When the lease reached ready, when it did.
+     * @nullable
+     */
+  readyAt?: number | null;
+  /** The current state. */
+  state: string;
+  /** The template version the lease was created from. */
+  templateVersionId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLeaseDto {
+  /** One lease. */
+  data: ResourceLeaseDtoData;
 }
 
 /**
@@ -4079,6 +4231,273 @@ export const promoteImageVersion = async (versionId: string, options?: RequestIn
 
   const data: promoteImageVersionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as promoteImageVersionResponse
+}
+
+
+
+export type listLabLeasesResponse200 = {
+  data: PageLeaseDto
+  status: 200
+}
+
+export type listLabLeasesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabLeasesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listLabLeasesResponseSuccess = (listLabLeasesResponse200) & {
+  headers: Headers;
+};
+export type listLabLeasesResponseError = (listLabLeasesResponse403 | listLabLeasesResponse500) & {
+  headers: Headers;
+};
+
+export type listLabLeasesResponse = (listLabLeasesResponseSuccess | listLabLeasesResponseError)
+
+export const getListLabLeasesUrl = () => {
+
+
+
+
+  return `/api/v1/lab/leases`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the leases.
+ */
+export const listLabLeases = async ( options?: RequestInit): Promise<listLabLeasesResponse> => {
+
+  const res = await fetch(getListLabLeasesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabLeasesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabLeasesResponse
+}
+
+
+
+export type createLabLeaseResponse201 = {
+  data: ResourceLeaseDto
+  status: 201
+}
+
+export type createLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type createLabLeaseResponseSuccess = (createLabLeaseResponse201) & {
+  headers: Headers;
+};
+export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404 | createLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type createLabLeaseResponse = (createLabLeaseResponseSuccess | createLabLeaseResponseError)
+
+export const getCreateLabLeaseUrl = () => {
+
+
+
+
+  return `/api/v1/lab/leases`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown version.
+ * @summary Creates a lease from a published template version.
+ */
+export const createLabLease = async (createLeaseRequest: CreateLeaseRequest, options?: RequestInit): Promise<createLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateLabLeaseUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createLeaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createLabLeaseResponse
+}
+
+
+
+export type sweepLabLeasesResponse200 = {
+  data: PageLeaseDto
+  status: 200
+}
+
+export type sweepLabLeasesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type sweepLabLeasesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type sweepLabLeasesResponseSuccess = (sweepLabLeasesResponse200) & {
+  headers: Headers;
+};
+export type sweepLabLeasesResponseError = (sweepLabLeasesResponse403 | sweepLabLeasesResponse500) & {
+  headers: Headers;
+};
+
+export type sweepLabLeasesResponse = (sweepLabLeasesResponseSuccess | sweepLabLeasesResponseError)
+
+export const getSweepLabLeasesUrl = () => {
+
+
+
+
+  return `/api/v1/lab/leases/sweep`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Runs the expiry sweeper: every lease whose TTL has expired moves into
+releasing. The controller's background sweeper calls this on its tick;
+exposing it lets an operator sweep manually.
+ */
+export const sweepLabLeases = async ( options?: RequestInit): Promise<sweepLabLeasesResponse> => {
+
+  const res = await fetch(getSweepLabLeasesUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: sweepLabLeasesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as sweepLabLeasesResponse
+}
+
+
+
+export type releaseLabLeaseResponse200 = {
+  data: ResourceLeaseDto
+  status: 200
+}
+
+export type releaseLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type releaseLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type releaseLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type releaseLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type releaseLabLeaseResponseSuccess = (releaseLabLeaseResponse200) & {
+  headers: Headers;
+};
+export type releaseLabLeaseResponseError = (releaseLabLeaseResponse400 | releaseLabLeaseResponse403 | releaseLabLeaseResponse404 | releaseLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type releaseLabLeaseResponse = (releaseLabLeaseResponseSuccess | releaseLabLeaseResponseError)
+
+export const getReleaseLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/release`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown lease.
+ * @summary Releases a lease (or keeps its VM with the elevated permission).
+ */
+export const releaseLabLease = async (leaseId: string,
+    releaseLeaseRequest: ReleaseLeaseRequest, options?: RequestInit): Promise<releaseLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getReleaseLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(releaseLeaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: releaseLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as releaseLabLeaseResponse
 }
 
 
