@@ -2,3 +2,9 @@ node_modules/
 target/
 .agents-registry-machine
 .env
+
+# tailscale serve certificates
+dev.tail5b493.ts.net.crt
+dev.tail5b493.ts.net.key
+*.ts.net.crt
+*.ts.net.key
