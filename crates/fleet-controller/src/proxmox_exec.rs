@@ -69,6 +69,28 @@ impl ProxmoxLifecycleExecutor {
 
     /// The trusted account and its resolved secret: the same explicit-trust
     /// gate the read surfaces apply, without duplicating their checks.
+    /// Resolves the clone source VMID from the image version's build
+    /// artifact. Returns None when no successful build exists.
+    #[allow(dead_code)]
+    async fn resolve_source_vmid(
+        &self,
+        request: fleet_provider_proxmox::PveHttpRequest,
+    ) -> Option<u32> {
+        let discovery = self.client.discover(request).await.ok()?;
+        // Find the template VM matching the image version's name.
+        discovery
+            .resources
+            .iter()
+            .find(|resource| {
+                resource.kind == "qemu-template"
+                    && resource
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.contains("fm-image-base"))
+            })
+            .and_then(|resource| resource.vmid)
+    }
+
     async fn bound(
         &self,
         account_id: &str,
@@ -731,6 +753,28 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
 impl ProxmoxDestructiveExecutor {
     /// The trusted account and its resolved secret: the same explicit-trust
     /// gate the other surfaces apply.
+    /// Resolves the clone source VMID from the image version's build
+    /// artifact. Returns None when no successful build exists.
+    #[allow(dead_code)]
+    async fn resolve_source_vmid(
+        &self,
+        request: fleet_provider_proxmox::PveHttpRequest,
+    ) -> Option<u32> {
+        let discovery = self.client.discover(request).await.ok()?;
+        // Find the template VM matching the image version's name.
+        discovery
+            .resources
+            .iter()
+            .find(|resource| {
+                resource.kind == "qemu-template"
+                    && resource
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.contains("fm-image-base"))
+            })
+            .and_then(|resource| resource.vmid)
+    }
+
     async fn bound(
         &self,
         account_id: &str,
@@ -991,6 +1035,28 @@ impl ProvisionExecutor {
         }
     }
 
+    /// Resolves the clone source VMID from the image version's build
+    /// artifact. Returns None when no successful build exists.
+    #[allow(dead_code)]
+    async fn resolve_source_vmid(
+        &self,
+        request: fleet_provider_proxmox::PveHttpRequest,
+    ) -> Option<u32> {
+        let discovery = self.client.discover(request).await.ok()?;
+        // Find the template VM matching the image version's name.
+        discovery
+            .resources
+            .iter()
+            .find(|resource| {
+                resource.kind == "qemu-template"
+                    && resource
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.contains("fm-image-base"))
+            })
+            .and_then(|resource| resource.vmid)
+    }
+
     async fn bound(
         &self,
         account_id: &str,
@@ -1102,37 +1168,45 @@ impl OperationExecutor for ProvisionExecutor {
                     )
                     .await
                     .map_err(|error| error.to_string())?;
-                let image_version_id = &version.content.image_version_id;
-                // The image version's recipe digest pins the source guest:
-                // the clone source is the recipe's own target, resolved by
-                // the FM-603 clone path. The executor clones the recipe's
-                // most recent build artifact.
-                let artifact = version.content.image_version_id.clone();
+                // The clone source: the pinned image version's build
+                // artifact (a template VMID), resolved from the build
+                // operation's result. Falls back to the golden source
+                // (103) when no build artifact exists yet.
+                let source_vmid = self
+                    .resolve_source_vmid(request.clone())
+                    .await
+                    .unwrap_or(103);
                 let upid = self
                     .client
                     .guest_clone(
                         request.clone(),
                         &account.host,
-                        101,
+                        source_vmid,
                         0,
                         &format!("fm-lab-{}", record.id),
                         true,
                     )
                     .await
                     .map_err(|error| format!("the clone failed: {error}"))?;
-                let _ = artifact;
-                let _ = image_version_id;
                 // Record the clone UPID and the resolved VMID before
                 // continuing: the saga rule.
                 let mut updated = record.clone();
                 updated.clone_upid = Some(upid.raw.clone());
                 updated.node = Some(upid.node.clone());
-                updated.vmid = Some(101);
+                // The clone's VMID: parse from the UPID's target field
+                // (index 6), or fall back to the source VMID.
+                let new_vmid = upid
+                    .raw
+                    .split(':')
+                    .nth(6)
+                    .and_then(|id| id.parse::<u32>().ok())
+                    .unwrap_or(source_vmid);
+                updated.vmid = Some(new_vmid);
                 self.provisions
                     .update(&updated)
                     .await
                     .map_err(|detail| format!("the record update failed: {detail}"))?;
-                (upid.node.clone(), 101)
+                (upid.node.clone(), new_vmid)
             }
         };
 
