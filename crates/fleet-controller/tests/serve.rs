@@ -179,8 +179,14 @@ async fn missing_assets_and_downloads_stay_not_found() {
     for path in [
         "/assets",
         "/assets/missing.js",
+        "/asset%73/missing.js",
+        "/Assets/missing.js",
+        "//assets/missing.js",
         "/downloads",
         "/downloads/missing.tar.gz",
+        "/download%73/missing.tar.gz",
+        "/Downloads/missing.tar.gz",
+        "//downloads/missing.tar.gz",
     ] {
         let (status, _, body) =
             request_details_with_accept(address, "GET", path, Some("text/html")).await;

@@ -410,10 +410,13 @@ fn accepts_html(headers: &HeaderMap) -> bool {
 }
 
 fn is_reserved_path(path: &str) -> bool {
-    ["/api", "/downloads", "/assets"].contains(&path)
-        || ["/api/", "/downloads/", "/assets/"]
+    let decoded_path = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+    let first_segment = decoded_path.trim_start_matches('/').split('/').next();
+    first_segment.is_some_and(|segment| {
+        ["api", "downloads", "assets"]
             .iter()
-            .any(|prefix| path.starts_with(prefix))
+            .any(|namespace| segment.eq_ignore_ascii_case(namespace))
+    })
 }
 
 async fn healthz() -> &'static str {
