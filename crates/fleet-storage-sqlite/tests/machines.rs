@@ -221,6 +221,62 @@ async fn filters_narrow_and_delete_cascades() {
 }
 
 #[tokio::test]
+async fn machine_pages_keep_creation_order_and_apply_filters_after_the_cursor() {
+    let (_dir, repo, pool) = repository_with_pool().await;
+    let first = repo.register(&registration("first")).await.unwrap();
+    let middle = repo.register(&registration("middle")).await.unwrap();
+    let last = repo.register(&registration("last")).await.unwrap();
+
+    // Equal timestamps exercise the id tie-breaker in the stable order.
+    for machine in [&first, &middle, &last] {
+        sqlx::query("UPDATE machines SET created_at = 10 WHERE id = ?1")
+            .bind(&machine.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // The machine between the two matching rows must not disrupt the
+    // filtered continuation.
+    repo.remove_tag(&middle.id, "workshop").await.unwrap();
+
+    let filter = MachineFilter {
+        tag: Some("workshop".to_owned()),
+        ..MachineFilter::default()
+    };
+    let page_one = repo.list(&filter, 1).await.unwrap();
+    assert_eq!(page_one.len(), 1);
+    assert_eq!(page_one[0].id, last.id);
+
+    let page_two = repo
+        .list(
+            &MachineFilter {
+                cursor: Some(page_one[0].id.clone()),
+                ..filter
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page_two.len(), 1);
+    assert_eq!(page_two[0].id, first.id);
+
+    let stale_cursor = repo
+        .list(
+            &MachineFilter {
+                cursor: Some("deleted-machine".to_owned()),
+                ..MachineFilter::default()
+            },
+            1,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale_cursor,
+        fleet_application::operation::PortFailure::NotFound { .. }
+    ));
+}
+
+#[tokio::test]
 async fn tag_membership_can_be_removed() {
     let (_dir, repo) = repository().await;
     let machine = repo.register(&registration("machine-c")).await.unwrap();

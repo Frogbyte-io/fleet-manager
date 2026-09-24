@@ -109,6 +109,20 @@ impl MachinePort for MachineRepository {
     async fn list(&self, filter: &MachineFilter, limit: u32) -> Result<Vec<Machine>, PortFailure> {
         let limit = limit.clamp(1, 200);
         let status = filter.status.as_ref().map(|status| status.id());
+        let cursor_created_at = if let Some(cursor) = filter.cursor.as_deref() {
+            Some(
+                sqlx::query_scalar::<_, i64>("SELECT created_at FROM machines WHERE id = ?1")
+                    .bind(cursor)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|error| backend("list_cursor", &error))?
+                    .ok_or_else(|| PortFailure::NotFound {
+                        what: format!("machine {cursor:?}"),
+                    })?,
+            )
+        } else {
+            None
+        };
         let rows = sqlx::query(
             "SELECT DISTINCT m.* FROM machines m \
              LEFT JOIN machine_tags mt ON mt.machine_id = m.id \
@@ -121,7 +135,8 @@ impl MachinePort for MachineRepository {
                AND (?3 IS NULL OR (mc.namespace = ?3 AND mc.name = ?4)) \
                AND (?5 IS NULL OR (?5 = 'agentless' AND ni.machine_id IS NULL) \
                     OR (?5 <> 'agentless' AND ni.gateway_state = ?6)) \
-             ORDER BY m.created_at DESC, m.id DESC LIMIT ?7",
+               AND (?7 IS NULL OR m.created_at < ?8 OR (m.created_at = ?8 AND m.id < ?7)) \
+             ORDER BY m.created_at DESC, m.id DESC LIMIT ?9",
         )
         .bind(&filter.tag)
         .bind(&filter.group)
@@ -129,6 +144,8 @@ impl MachinePort for MachineRepository {
         .bind(filter.capability.as_ref().map(|(_, name)| name))
         .bind(status)
         .bind(status)
+        .bind(filter.cursor.as_deref())
+        .bind(cursor_created_at)
         .bind(limit)
         .fetch_all(&self.pool)
         .await

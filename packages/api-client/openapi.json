@@ -1236,7 +1236,7 @@
         "tags": [
           "machines"
         ],
-        "summary": "Lists machines, newest first, narrowed by the filters.",
+        "summary": "Lists machines, newest first, narrowed by the filters and optional cursor.",
         "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
         "operationId": "listMachines",
         "parameters": [
@@ -1277,6 +1277,15 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor from a previous page (the last machine's id).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "The maximum number of machines to return.",
@@ -1300,7 +1309,7 @@
             }
           },
           "400": {
-            "description": "A filter is malformed.",
+            "description": "A filter is malformed or the cursor names no machine.",
             "content": {
               "application/json": {
                 "schema": {

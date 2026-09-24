@@ -320,6 +320,9 @@ pub struct MachineFilter {
     /// Only machines in this derived connectivity state. `agentless` means
     /// "no node identity", so it cannot be combined with the other values.
     pub status: Option<MachineStatus>,
+    /// The machine id from the previous page. The repository uses the
+    /// machine's immutable creation time and id to resume newest-first order.
+    pub cursor: Option<String>,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -380,11 +383,11 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn get(&self, id: &str) -> Result<Machine, PortFailure>;
-    /// Lists machines, newest first, narrowed by the filter.
+    /// Lists machines, newest first, narrowed by the filter and cursor.
     ///
     /// # Errors
     ///
-    /// Fails when the backend errors.
+    /// Fails when the cursor is unknown or the backend errors.
     async fn list(&self, filter: &MachineFilter, limit: u32) -> Result<Vec<Machine>, PortFailure>;
     /// Renames or re-describes a machine.
     ///
@@ -601,7 +604,13 @@ impl Machines {
             .port
             .list(filter, limit)
             .await
-            .map_err(|failure| map_port("list", failure))?;
+            .map_err(|failure| match failure {
+                // The list port uses NotFound only for an unknown page cursor.
+                PortFailure::NotFound { .. } => MachineUseCaseError::Invalid {
+                    detail: "the cursor names no machine".to_owned(),
+                },
+                failure => map_port("list", failure),
+            })?;
         Ok(machines
             .into_iter()
             .map(|machine| {
