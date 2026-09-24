@@ -275,11 +275,10 @@ impl Probe for HardwareProbe {
 
 impl HardwareProbe {
     fn virtualization() -> CapabilityFact {
+        // The bare-metal answer is exit 1 with "none" on stdout, so judge
+        // the text, not the status (matching the agentless probe).
         match std::process::Command::new("systemd-detect-virt").output() {
-            Ok(output)
-                if output.status.success()
-                    && !String::from_utf8_lossy(&output.stdout).trim().is_empty() =>
-            {
+            Ok(output) if !String::from_utf8_lossy(&output.stdout).trim().is_empty() => {
                 let kind = String::from_utf8_lossy(&output.stdout).trim().to_owned();
                 fact("host", "virtualization", Some(kind))
             }
@@ -325,24 +324,27 @@ impl HardwareProbe {
         match std::process::Command::new("df").args(["-kP", "/"]).output() {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout);
-                let total_kb = text
-                    .lines()
-                    .last()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .and_then(|field| field.parse::<u64>().ok())
-                    .filter(|kb| *kb > 0);
-                match total_kb {
-                    Some(kb) => fact(
-                        "hardware",
-                        "disk_total_bytes",
-                        Some((kb * 1024).to_string()),
-                    ),
+                match root_disk_total_bytes(&text) {
+                    Some(bytes) => fact("hardware", "disk_total_bytes", Some(bytes.to_string())),
                     None => unavailable("hardware", "disk_total_bytes"),
                 }
             }
             _ => unavailable("hardware", "disk_total_bytes"),
         }
     }
+}
+
+/// The root filesystem's total size in bytes from POSIX `df -kP` output:
+/// the last line's second field, in 1 KiB blocks; a missing, malformed, or
+/// zero total is no fact (unavailable, not an invented zero).
+fn root_disk_total_bytes(df_output: &str) -> Option<u64> {
+    df_output
+        .lines()
+        .last()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|field| field.parse::<u64>().ok())
+        .filter(|kb| *kb > 0)
+        .map(|kb| kb * 1024)
 }
 
 fn unavailable(namespace: &str, name: &str) -> CapabilityFact {
@@ -663,6 +665,24 @@ mod tests {
                 "the cpu model is the bare string, got {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_zero_or_malformed_df_total_is_not_a_fact() {
+        let header = "Filesystem 1024-blocks Used Available Capacity Mounted on\n";
+        assert_eq!(
+            root_disk_total_bytes(&format!("{header}/dev/sda1 500000000 100 200 1% /")),
+            Some(500_000_000 * 1024)
+        );
+        assert_eq!(
+            root_disk_total_bytes(&format!("{header}/dev/sda1 0 0 0 0% /")),
+            None
+        );
+        assert_eq!(
+            root_disk_total_bytes(&format!("{header}/dev/sda1 junk 0 0 0% /")),
+            None
+        );
+        assert_eq!(root_disk_total_bytes(""), None);
     }
 
     #[test]
