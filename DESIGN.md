@@ -48,26 +48,29 @@ section H2 14px uppercase · card title 15px · nav 13.5px · data/chip labels
 Dark-first. Light theme is a full citizen, not an afterthought — define both
 via `data-theme` on `<html>`.
 
+All Fleet tokens carry the `--fc-` prefix in code (see §4); prose below may
+drop the prefix for readability only where the full name was given first.
+
 Dark tokens (light values in parentheses):
 
-- `--bg` `#0b0e14` (`#f2f4f7`) — page ground
-- `--nav` `#0d1219` (`#ffffff`) — sidebar
-- `--panel` `#11161f` (`#ffffff`) — cards, tables
-- `--inset` `#0d1219` (`#eef0f4`) — icon wells, inputs, chart wells
-- `--line` `#1f2733` (`#dde1e8`) · `--line2` `#2a3442` (`#c9cfd9`)
-- `--ink` `#eef1f6` (`#161a21`) · `--muted` `#98a2b3` (`#5c6672`) · `--faint` `#5f6a7c` (`#8b95a3`)
-- `--ok` `#2fd28c` · `--info` `#57a8ff` · `--warn` `#f5a524` (`#b7791f`) · `--err` `#ff5c5c`
+- `--fc-bg` `#0b0e14` (`#f2f4f7`) — page ground
+- `--fc-nav` `#0d1219` (`#ffffff`) — sidebar
+- `--fc-panel` `#11161f` (`#ffffff`) — cards, tables
+- `--fc-inset` `#0d1219` (`#eef0f4`) — icon wells, inputs, chart wells
+- `--fc-line` `#1f2733` (`#dde1e8`) · `--fc-line2` `#2a3442` (`#c9cfd9`)
+- `--fc-ink` `#eef1f6` (`#161a21`) · `--fc-muted` `#98a2b3` (`#5c6672`) · `--fc-faint` `#5f6a7c` (`#8b95a3`)
+- `--fc-ok` `#2fd28c` · `--fc-info` `#57a8ff` · `--fc-warn` `#f5a524` (`#b7791f`) · `--fc-err` `#ff5c5c`
 
-`--warn` is the single new status token: "needs attention but not failed"
-(stale machines, blocked approvals). It is distinct from `--err`, which
+`--fc-warn` is the single new status token: "needs attention but not failed"
+(stale machines, blocked approvals). It is distinct from `--fc-err`, which
 means the state is already bad.
 
 **The gradient** — the single brand gesture, shared with Filaments.gg:
 
 ```css
---g1:#ff8a00; --g2:#ff3d77;                 /* dark theme */
---g1:#e06d00; --g2:#e01e5a;                 /* light theme */
---grad: linear-gradient(100deg,var(--g1),var(--g2));
+--fc-g1:#ff8a00; --fc-g2:#ff3d77;                 /* dark theme */
+--fc-g1:#e06d00; --fc-g2:#e01e5a;                 /* light theme */
+--fc-grad: linear-gradient(100deg,var(--fc-g1),var(--fc-g2));
 ```
 
 Allowed uses, nowhere else: key words in the H1 (via `background-clip:text`),
@@ -83,35 +86,48 @@ word (uppercase); color never carries meaning alone.
 
 | Source | API state | Token | Chip label |
 |---|---|---|---|
-| Machine | `connected` | `--ok` | `CONNECTED` |
-| Machine | `agentless` | `--info` | `AGENTLESS` |
-| Machine | `stale` | `--warn` | `STALE` |
-| Machine | `offline` | `--err` | `OFFLINE` |
-| Proxmox guest | `running` | `--ok` | `RUNNING` |
-| Proxmox guest | `stopped` | `--muted` | `STOPPED` |
-| Proxmox guest | `paused` | `--info` | `PAUSED` |
-| Proxmox guest | unknown/other | `--faint` | (API word) |
-| Lab lease | `requested`,`queued`,`reserving`,`provisioning`,`booting`,`bootstrapping` | `--info` | (API word) |
-| Lab lease | `ready` | `--ok` | `READY` |
-| Lab lease | `releasing`,`released` | `--muted` | (API word) |
-| Lab lease | `failed`,`cleanup_failed` | `--err` | (API word) |
-| Operation | `pending`,`running`,`cancelling` | `--info` | (API word) |
-| Operation | `succeeded` | `--ok` | `SUCCEEDED` |
-| Operation | `failed`,`timed_out` | `--err` | (API word) |
-| Operation | `cancelled` | `--muted` | `CANCELLED` |
-| Operation | `blocked_manual_approval` | `--warn` | `BLOCKED APPROVAL` |
-| Connection badge (SSH / FLEETD / GUEST AGENT / TAILSCALE / PVE API) | reachable | dot `--ok` | label |
-| Connection badge | not reachable / unknown | dot `--faint` | label |
-| Connection badge | failing | dot `--err` | label |
+| Machine | `connected` | `--fc-ok` | `CONNECTED` |
+| Machine | `agentless` | `--fc-info` | `AGENTLESS` |
+| Machine | `stale` | `--fc-warn` | `STALE` |
+| Machine | `offline` | `--fc-err` | `OFFLINE` |
+| Proxmox guest | `running` | `--fc-ok` | `RUNNING` |
+| Proxmox guest | `stopped` | `--fc-muted` | `STOPPED` |
+| Proxmox guest | `paused` | `--fc-info` | `PAUSED` |
+| Proxmox guest | unknown/other | `--fc-faint` | (API word) |
+| Lab lease | `requested`,`queued`,`reserving`,`provisioning`,`booting`,`bootstrapping` | `--fc-info` | (API word) |
+| Lab lease | `ready` | `--fc-ok` | `READY` |
+| Lab lease | `releasing`,`released` | `--fc-muted` | (API word) |
+| Lab lease | `failed`,`cleanup_failed` | `--fc-err` | (API word) |
+| Operation | `pending`,`running`,`cancelling` | `--fc-info` | (API word) |
+| Operation | `succeeded` | `--fc-ok` | `SUCCEEDED` |
+| Operation | `failed`,`timed_out` | `--fc-err` | (API word) |
+| Operation | `cancelled` | `--fc-muted` | `CANCELLED` |
+| Operation | `blocked_manual_approval` | `--fc-warn` | `BLOCKED APPROVAL` |
+
+### Connection badges
+
+Badges are inset pills with a mono label and a 5px status dot, grounded in
+API fields. A badge whose source has no field for reachability shows a
+neutral dot; the console never invents a reachability state.
+
+| Badge | Shown when | Dot |
+|---|---|---|
+| `FLEETD` | machine has a `fleetd` endpoint | from `machineStatus`: `connected`→`--fc-ok`, `stale`→`--fc-warn`, `offline`→`--fc-err` |
+| `SSH` | machine has an `ssh` endpoint | `--fc-faint` (the API reports no per-endpoint SSH reachability today) |
+| `GUEST AGENT` | machine is linked to a Proxmox guest | guest `agent` data present→`--fc-ok`; absent (agent offline or LXC)→`--fc-faint` |
+| `TAILSCALE` | a tailnet device correlates to the machine | device `online`: `true`→`--fc-ok`, `false` or absent→`--fc-faint` |
+| `PVE API` | Proxmox node/account card | account fingerprint confirmed→`--fc-ok`; observed but unconfirmed→`--fc-warn`; changed certificate or discovery failure→`--fc-err` |
 
 ### Kind color coding
 
 Kind colors (used on tags, icon strokes, swatches), replacing the old
-role-family names:
+role-family names, are theme-independent tokens and are not mapped to
+shadcn-vue variables:
 
-`proxmox node`/`vm` `#1c7ed6` (compute) · `lxc`/`storage` `#2f9e44` ·
-`board` (Raspberry Pi etc.) `#e8590c` · `desktop`/`laptop` `#9c36b5` ·
-`lab vm` (ephemeral) `#495057`. Unknown kinds fall back to `--faint`.
+`--fc-c-compute` `#1c7ed6` (proxmox node, vm) · `--fc-c-storage` `#2f9e44`
+(lxc, storage) · `--fc-c-board` `#e8590c` (board: Raspberry Pi etc.) ·
+`--fc-c-desktop` `#9c36b5` (desktop, laptop) · `--fc-c-lab` `#495057`
+(lab vm). Unknown kinds fall back to `--fc-faint`.
 
 ## 4. Implementation tokens
 
@@ -149,7 +165,13 @@ shadcn-vue variables map onto Fleet tokens:
 | `--sidebar-accent` | `--fc-panel` |
 | `--sidebar-accent-foreground` | `--fc-ink` |
 | `--sidebar-border` | `--fc-line` |
-| `--chart-1..5` | gradient stops and status colors |
+| `--sidebar-primary-foreground` | `#ffffff` |
+| `--sidebar-ring` | `--fc-g1` |
+| `--chart-1` | `--fc-g1` |
+| `--chart-2` | `--fc-g2` |
+| `--chart-3` | `--fc-ok` |
+| `--chart-4` | `--fc-info` |
+| `--chart-5` | `--fc-err` |
 
 Theme: dark is the default. `data-theme="dark|light"` on `<html>` plus
 Tailwind's `.dark` class kept in sync; persisted to
@@ -174,7 +196,7 @@ The old sticky nav + hero is gone. The shell is sidebar + topbar + page.
 - **Page**: max-width 1320px (tables/pipelines may use 1500px), padding
   24px. Page header = mono kicker (counts/context) + H1 + right-aligned
   actions/view toggle.
-- **Section header**: uppercase H2 + 2px bottom rule in `--ink` + right
+- **Section header**: uppercase H2 + 2px bottom rule in `--fc-ink` + right
   mono note.
 - Breakpoints: 1020px (sidebar collapses to rail), 760px (sidebar becomes
   a sheet).
@@ -194,13 +216,13 @@ The old sticky nav + hero is gone. The shell is sidebar + topbar + page.
   showing blast radius; a 380px right drawer opens details without leaving
   the list.
 - **KPI tile**: mono kicker + large number + optional bar or mono note.
-- **Needs-attention row**: 2px `--err`/`--warn` left border, mono kicker,
+- **Needs-attention row**: 2px `--fc-err`/`--fc-warn` left border, mono kicker,
   one-line explanation, action link.
-- **Lifecycle stepper**: thin segments — done `--muted`, current gradient,
-  failed `--err`; labels mono 9px. Used for lab leases and operations.
+- **Lifecycle stepper**: thin segments — done `--fc-muted`, current gradient,
+  failed `--fc-err`; labels mono 9px. Used for lab leases and operations.
 - **TTL bar**: gradient fill + mono remaining/max.
 - **Connection badge**: inset pill, mono label, 5px status dot per the §3
-  connection-badge rule.
+  connection-badge rules.
 - **Status chip**: panel background, 1px border tinted with the status
   token, mono uppercase 9.5px label.
 - **Tag**: mono 10px, kind-colored 1px border.
@@ -220,9 +242,9 @@ The old sticky nav + hero is gone. The shell is sidebar + topbar + page.
 ## 7. Imagery & data-viz
 
 - Machine imagery = parameterized inline-SVG icon (CSS var `--c` for kind
-  color; well/vent details adapt to theme via `--inset`). Never hotlink or
+  color; well/vent details adapt to theme via `--fc-inset`). Never hotlink or
   stock photos.
-- Charts = inline SVG, bars/lines filled with `--grad`, labels in `--chart`.
+- Charts = inline SVG, bars/lines filled with `--fc-grad`, labels in `--chart`.
   Always label units and the time window.
 - Spec units always match the API (cores, bytes shown as GB/TB with
   explicit rounding) — the UI never invents a unit the API doesn't have.
@@ -232,7 +254,8 @@ The old sticky nav + hero is gone. The shell is sidebar + topbar + page.
 - Motion is rare and functional: hover lifts (≤2px), border swaps, drawer
   transitions. No parallax, no autoplay loops. Honor
   `prefers-reduced-motion`.
-- Focus states on all interactive elements, rings via `--ring`;
+- Focus states on all interactive elements, rings via `--fc-g1` (mapped to
+  shadcn's `--ring`);
   `aria-pressed` on toggles, `aria-expanded` on disclosures; skip link
   first in body.
 - Dialogs and drawers trap focus (Reka UI handles this).

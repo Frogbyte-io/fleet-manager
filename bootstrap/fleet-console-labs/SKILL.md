@@ -8,10 +8,12 @@ description: Apply the Fleet Console v2 design system (dark-first app shell with
 Before designing or editing Fleet Console (the fleet-manager web app), read
 `DESIGN.md` (repo root). Then apply:
 
-1. **Tokens first.** Fleet tokens are declared with an `--fc-` prefix
-   (`--fc-bg/--fc-panel/--fc-inset/--fc-line/--fc-ink/--fc-muted/--fc-faint`,
-   `--fc-g1/--fc-g2/--fc-grad`, `--fc-ok/--fc-info/--fc-warn/--fc-err`, kind
-   colors) and mapped onto shadcn-vue variables per DESIGN.md §4. Never
+1. **Tokens first.** Fleet tokens are declared with an `--fc-` prefix:
+   `--fc-bg/--fc-nav/--fc-panel/--fc-inset/--fc-line/--fc-line2/--fc-ink/--fc-muted/--fc-faint`,
+   `--fc-g1/--fc-g2/--fc-grad`, `--fc-ok/--fc-info/--fc-warn/--fc-err`,
+   mapped onto shadcn-vue variables per DESIGN.md §4. Kind colors are the
+   theme-independent `--fc-c-*` tokens in DESIGN.md §3 and are not mapped to
+   shadcn-vue variables. Connection-badge rules are in DESIGN.md §3. Never
    invent new hex values.
 2. **Dark default, dual-theme.** Dark is the default; light is a full
    citizen. `data-theme="dark|light"` on `<html>` plus Tailwind's `.dark`
