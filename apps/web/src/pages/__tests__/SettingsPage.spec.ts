@@ -12,7 +12,8 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
       service: 'fleet-controller',
       version: '0.1.0',
       trustMode: 'trusted-lan',
-      trustWarning: 'Every client that can reach this controller can read and mutate.',
+      trustWarning:
+        'TRUSTED-LAN MODE: the controller has no accounts or login. Every client that can reach this controller can read and mutate.',
       storageOk: true,
       queuePending: 1,
       queueRunning: 2,
@@ -117,6 +118,9 @@ describe('SettingsPage', () => {
     wrapper = await mountAt({ section: 'security' })
     expect(wrapper.text()).toContain('Trusted-LAN mode.')
     expect(wrapper.text()).toContain('anonymous-lan-admin')
+    // The API's own prefix is stripped so it is not duplicated next to the
+    // static heading.
+    expect(wrapper.text()).not.toContain('TRUSTED-LAN MODE:')
   })
 
   it('shows diagnostics from /system and /meta', async () => {
@@ -142,5 +146,39 @@ describe('SettingsPage', () => {
   it('rejects an unknown section back to the default', async () => {
     wrapper = await mountAt({ section: 'not-a-section' })
     expect(wrapper.text()).toContain('Proxmox VE')
+  })
+
+  it('distinguishes an unavailable integration source from an empty one', async () => {
+    const { listProxmoxAccounts, getTailnetStatus } = vi.mocked(
+      await import('@frogbyte-io/fleet-api-client'),
+    )
+    listProxmoxAccounts.mockImplementationOnce(async () => ({
+      status: 403,
+      data: { code: 'forbidden', message: 'no' },
+    }))
+    getTailnetStatus.mockImplementationOnce(async () => {
+      throw new Error('refused')
+    })
+    wrapper = await mountAt()
+    expect(wrapper.text()).toContain('unavailable')
+    expect(wrapper.text()).toContain('could not be read')
+  })
+
+  it('renders the failure state when every source answers non-200', async () => {
+    const client = await import('@frogbyte-io/fleet-api-client')
+    for (const fn of [
+      client.getSystemInfo,
+      client.getMeta,
+      client.listMachines,
+      client.listProxmoxAccounts,
+      client.getTailnetStatus,
+    ]) {
+      vi.mocked(fn).mockImplementationOnce(async () => ({
+        status: 503,
+        data: { code: 'unavailable', message: 'down' },
+      }) as never)
+    }
+    wrapper = await mountAt()
+    expect(wrapper.text()).toContain('every settings source refused the request')
   })
 })
