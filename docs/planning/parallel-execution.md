@@ -88,6 +88,34 @@ Handoff guarantees a fresh agent can rely on:
 
 M0's waves below are historical evidence of that milestone's execution, kept because the path-ownership rules are still the operating rules.
 
+## M9 execution waves and path ownership
+
+M9 (Fleet Console v2 and fleet-wide skills) is planned in [web-console.md](web-console.md). FM-900 and FM-901 are serial because they establish the design tokens and the app shell. After them, the web work splits by route directory so console issues can run in parallel.
+
+| Wave | Issues | Notes |
+|---|---|---|
+| 1 | FM-900 → FM-901; FM-S10 | FM-S10 is independent research |
+| 2 | FM-902, FM-910, FM-920, FM-930 | FM-910/930 use existing APIs; FM-920 is backend-first |
+| 3 | FM-911, FM-912, FM-916, FM-921, FM-922, FM-932 | |
+| 4 | FM-913, FM-914, FM-915, FM-923, FM-924, FM-925, FM-931 | FM-923 needs FM-922; FM-925 needs FM-920–923 |
+| 5 | FM-940, FM-941, FM-942, FM-943, FM-944 | FM-944 is ADR-first |
+
+Web path ownership once FM-901 lands:
+
+| Owned path | Owner |
+|---|---|
+| `DESIGN.md`, `bootstrap/fleet-console-labs/**` | FM-900 |
+| `apps/web/package.json`, `apps/web/src/{main.ts,App.vue,style.css}`, `apps/web/src/components/ui/**`, `apps/web/src/shell/**` | FM-901 (afterwards: shared, append-only) |
+| `apps/web/src/pages/fleet/**` | FM-910, then FM-911/FM-912 by subdirectory |
+| `apps/web/src/pages/overview/**`, `apps/web/src/pages/operations/**` | FM-916 |
+| `apps/web/src/pages/skills/**` | FM-925 |
+| `apps/web/src/pages/lab/**` | FM-930 |
+| `apps/web/src/pages/images/**` | FM-932 |
+| `apps/web/src/pages/{settings,proxmox,projects,audit}/**` | FM-940, FM-941, FM-942, FM-943 |
+| `skills/fleet/**` (official skill), removal of `bootstrap/fleet-bootstrap/**` | FM-924 |
+
+The route table (`apps/web/src/router.ts`) and the sidebar navigation list (`apps/web/src/shell/nav.ts`) join the shared-file list below: **append your own entry, change nothing else.**
+
 ## Path ownership
 
 Every issue declares the paths it owns. Only the owning issue creates or edits files under them while it is in flight.

@@ -1,0 +1,117 @@
+<!doctype html>
+<!-- Skills — fleet-wide view over Skills Manager. The matrix answers "which
+     skill is on which machine, for which agent, at which version"; global
+     skills (Fleet-managed, assigned to every machine) sit on top with drift
+     visible. The drawer edits a Fleet-authored skill: drafts, immutable
+     versions, and an explicit rollout — Fleet never writes into Skills
+     Manager's library or database; it stages the source and calls the CLI. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Skills</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.tabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin-top:16px}
+.tabs a{padding:9px 0;color:var(--muted);font:600 13px var(--body)}
+.tabs a.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--g1)}
+.tabs a .cnt{font:10px var(--chart);color:var(--faint);margin-left:4px}
+.lay{display:grid;grid-template-columns:1fr 430px;gap:18px;margin-top:16px}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}
+th{font:600 9.5px var(--chart);letter-spacing:.12em;text-transform:uppercase;color:var(--faint);padding:8px;border-bottom:1px solid var(--line2);background:var(--nav);text-align:center;white-space:nowrap}
+th:first-child{text-align:left}
+th small{display:block;font-size:9px;letter-spacing:.06em;color:var(--faint);text-transform:none}
+td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:center;font-size:12.5px}
+td:first-child{text-align:left}
+td .n{font:700 13px var(--head)} td .s{font:10px var(--chart);color:var(--faint);letter-spacing:.05em}
+tr.sel td{background:color-mix(in srgb,var(--g1) 7%,var(--panel))}
+tr.grp td{background:var(--nav);font:600 10px var(--chart);letter-spacing:.14em;color:var(--faint);text-align:left;text-transform:uppercase}
+.ag{display:inline-flex;gap:2px}
+.ag i{font:700 9px var(--chart);font-style:normal;padding:1px 3px;border:1px solid var(--line2);border-radius:var(--r);color:var(--muted)}
+.ag i.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+.ag i.miss{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,transparent);border-style:dashed}
+.ag i.upd{color:var(--info);border-color:color-mix(in srgb,var(--info) 45%,transparent)}
+.none{color:var(--faint)}
+.legend{display:flex;gap:14px;font:10px var(--chart);color:var(--faint);letter-spacing:.06em;margin-top:8px;flex-wrap:wrap}
+.ed{padding:16px;display:flex;flex-direction:column;gap:12px;position:sticky;top:72px}
+.ed h3{font:800 17px var(--head);margin:0}
+label{display:block;font:10px var(--chart);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:0 0 5px}
+pre{margin:0;background:var(--inset);border:1px solid var(--line);border-radius:var(--r);padding:10px;font:11.5px/1.6 var(--chart);color:var(--muted);white-space:pre-wrap;max-height:220px;overflow:auto}
+pre .k{color:var(--info)} pre .h{color:var(--ink);font-weight:700}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.pick{border:1px solid var(--line2);border-radius:var(--r);padding:4px 8px;font-size:12px;color:var(--muted)}
+.pick.on{border-color:var(--g1);color:var(--ink)}
+.ver{display:flex;gap:8px;align-items:center;font:11px var(--chart);color:var(--muted);padding:5px 0;border-bottom:1px solid var(--line)}
+.plan{background:var(--inset);border:1px solid var(--line);border-radius:var(--r);padding:10px;font:11px/1.8 var(--chart);color:var(--muted)}
+.plan b{color:var(--ink);font-weight:400}
+</style></head>
+<body data-active="skills" data-crumb="Work / <b>Skills</b>">
+<main class="main"><div class="page" style="max-width:1500px">
+
+<div style="display:flex;align-items:flex-end;gap:16px">
+  <div><div class="kick">via skills-manager-cli --json · 7 machines · 5 with skills manager</div><h1>Skills</h1></div>
+  <div style="margin-left:auto" class="toolbar"><a class="btn">Check updates</a><a class="btn">Install from source…</a><a class="btn pri">+ New skill</a></div>
+</div>
+<div class="tabs"><a class="on">Fleet matrix</a><a>Catalog<span class="cnt">4 fleet-authored</span></a><a>Presets<span class="cnt">3</span></a><a>Search skills.sh</a></div>
+
+<div class="lay">
+<div>
+  <div class="toolbar" style="margin:0 0 10px"><span class="filter">Agent <b>All</b></span><span class="filter">Machine group <b>Any</b></span><span class="filter">State <b>Any</b></span><span class="filter" style="border-color:var(--err);color:var(--err)">Drift only</span></div>
+  <table>
+    <thead><tr><th>Skill</th><th>workstation<small>fleetd</small></th><th>dev-ubuntu-01<small>fleetd</small></th><th>laptop-fw13<small>stale</small></th><th>docker-host<small>ssh</small></th><th>lab-7f3a<small>lease</small></th><th>rpi-kitchen<small>aarch64</small></th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="7">Global · assigned to every machine by Fleet</td></tr>
+      <tr class="sel"><td><div class="n">fleet <span class="chip grad">Global</span></div><div class="s">FLEET-AUTHORED · V7 · HOW TO USE FLEETCTL</div></td>
+        <td><span class="ag"><i class="on">CC</i><i class="on">CX</i><i class="on">OC</i></span></td>
+        <td><span class="ag"><i class="on">CC</i><i class="on">CX</i><i class="on">OC</i></span></td>
+        <td><span class="ag"><i class="upd">CC v6</i><i class="upd">CX v6</i></span></td>
+        <td><span class="ag"><i class="on">CC</i></span></td>
+        <td><span class="ag"><i class="on">CC</i></span></td>
+        <td><span class="chip off">no CLI</span></td></tr>
+      <tr><td><div class="n">git-conventions <span class="chip grad">Global</span></div><div class="s">FLEET-AUTHORED · V3</div></td>
+        <td><span class="ag"><i class="on">CC</i><i class="on">CX</i><i class="on">OC</i></span></td>
+        <td><span class="ag"><i class="on">CC</i><i class="miss">CX</i><i class="on">OC</i></span></td>
+        <td><span class="ag"><i class="on">CC</i><i class="on">CX</i></span></td>
+        <td><span class="ag"><i class="on">CC</i></span></td>
+        <td><span class="ag"><i class="on">CC</i></span></td>
+        <td><span class="chip off">no CLI</span></td></tr>
+      <tr class="grp"><td colspan="7">Group: dev</td></tr>
+      <tr><td><div class="n">react-best-practices</div><div class="s">SKILLS.SH · VERCEL-LABS · UPDATE AVAILABLE</div></td>
+        <td><span class="ag"><i class="upd">CC</i><i class="upd">CX</i></span></td><td><span class="ag"><i class="upd">CC</i></span></td><td><span class="ag"><i class="upd">CC</i></span></td><td class="none">—</td><td class="none">—</td><td class="none">—</td></tr>
+      <tr><td><div class="n">rust-review</div><div class="s">GIT · FROGBYTE-IO/SKILLS@MAIN</div></td>
+        <td><span class="ag"><i class="on">CC</i></span></td><td><span class="ag"><i class="on">CC</i><i class="on">CX</i></span></td><td class="none">—</td><td class="none">—</td><td><span class="ag"><i class="on">CC</i></span></td><td class="none">—</td></tr>
+      <tr class="grp"><td colspan="7">Machine-local · not managed by Fleet</td></tr>
+      <tr><td><div class="n">home-notes</div><div class="s">LOCAL · ONLY ON WORKSTATION</div></td>
+        <td><span class="ag"><i class="on">CC</i></span></td><td class="none">—</td><td class="none">—</td><td class="none">—</td><td class="none">—</td><td class="none">—</td></tr>
+      <tr><td><div class="n">db</div><div class="s">UNMANAGED DIR IN ~/.CLAUDE/SKILLS · ADOPT?</div></td>
+        <td class="none">—</td><td><span class="chip info">adopt</span></td><td class="none">—</td><td class="none">—</td><td class="none">—</td><td class="none">—</td></tr>
+    </tbody>
+  </table>
+  <div class="legend"><span><span class="ag"><i class="on">CC</i></span> deployed (CC Claude Code · CX Codex · OC OpenCode)</span><span><span class="ag"><i class="miss">CX</i></span> assigned, missing = drift</span><span><span class="ag"><i class="upd">CC</i></span> older version / update</span><span>— not installed</span></div>
+</div>
+
+<aside class="card ed">
+  <div style="display:flex;align-items:center;gap:8px"><span class="kick">Fleet-authored skill</span><span style="margin-left:auto" class="faint">✕</span></div>
+  <div style="display:flex;align-items:center;gap:10px"><h3>fleet</h3><span class="chip">v8 draft</span><span class="chip grad">Global</span></div>
+  <div><label>SKILL.md</label>
+<pre><span class="k">---
+name: fleet
+description: Operate this Fleet Manager controller through
+  fleetctl --output json — machines, projects, Lab leases…
+---</span>
+<span class="h"># Fleet</span>
+Always pass `--output json`. Find the controller with
+`fleetctl status` (local fleetd socket first)…
+<span class="h">## Lab</span>
+`fleetctl lab create --template ubuntu-dev@3 --ttl 2h`…</pre></div>
+  <div><label>Assigned to</label><div class="chips"><span class="pick on">All machines</span><span class="pick">Group…</span><span class="pick">Tag…</span><span class="pick">Machines…</span></div></div>
+  <div><label>Agents</label><div class="chips"><span class="pick on">Claude Code</span><span class="pick on">Codex</span><span class="pick on">OpenCode</span><span class="pick">Cursor</span><span class="pick">Gemini CLI</span></div></div>
+  <div><label>Versions</label>
+    <div class="ver"><span class="chip">v8</span>draft · edited 2m ago<span style="margin-left:auto">diff ↗</span></div>
+    <div class="ver"><span class="chip ok">v7</span>on 5 machines · 2026-09-20</div>
+    <div class="ver"><span class="chip off">v6</span>on laptop-fw13 (stale)</div></div>
+  <div class="plan">ROLLOUT PLAN · V8<br>
+    <b>update</b> on 4 machines · <b>install</b> on 0 · <b>deploy</b> codex on dev-ubuntu-01<br>
+    <b>skip</b> rpi-kitchen — skills-manager-cli not available (aarch64)<br>
+    <b>queued</b> laptop-fw13 — stale, runs when it reconnects</div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px"><a class="btn">Save draft</a><a class="btn ghost">Copy as fleetctl</a><a class="btn pri" style="margin-left:auto">Publish v8 &amp; roll out →</a></div>
+</aside>
+</div>
+
+</div></main></body></html>

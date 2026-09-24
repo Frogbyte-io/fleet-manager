@@ -1,0 +1,111 @@
+<!doctype html>
+<!-- Option B — topology. The layout *is* the relationship: each Proxmox host is a
+     rack panel with its capacity and its guests nested inside; bare-metal devices
+     sit on their own shelf; the tailnet is a lane on the right showing how
+     everything is reached. Answers "what runs where" at a glance. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Fleet — Option B: topology</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.lay{display:grid;grid-template-columns:1fr 280px;gap:16px;margin-top:18px}
+.host{padding:0;margin-bottom:14px}
+.host .hh{display:flex;align-items:center;gap:14px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.host .well{width:40px;height:40px}.host .well svg{width:22px;height:22px}
+.host .name{font:800 16px var(--head)}
+.cap{display:grid;grid-template-columns:repeat(3,130px);gap:14px;margin-left:auto}
+.cap .l{display:flex;justify-content:space-between;font:10px var(--chart);letter-spacing:.08em;color:var(--faint);margin-bottom:3px}
+.cap .l b{color:var(--muted);font-weight:400}
+.guests{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;padding:12px 14px}
+.g{border:1px solid var(--line);background:var(--inset);border-radius:var(--r);padding:9px 10px;display:flex;flex-direction:column;gap:5px;border-left:2px solid var(--c,var(--line2))}
+.g .t{display:flex;align-items:center;gap:6px;font:700 13px var(--head)}
+.g .t .chip{margin-left:auto}
+.g .spec{font-size:9.5px}
+.g.ghost{opacity:.6;border-style:dashed}
+.g.lab{--c:var(--g2)}
+.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;padding:12px 14px}
+.lane .card{padding:12px}
+.lane .row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.lane .row:last-child{border:0}
+.lane .row .mono{font-size:10.5px;color:var(--faint);margin-left:auto}
+.link{font:9.5px var(--chart);letter-spacing:.08em;color:var(--info)}
+</style></head>
+<body data-active="fleet" data-crumb="Infrastructure / <b>Fleet</b>">
+<main class="main"><div class="page" style="max-width:1400px">
+
+<div style="display:flex;align-items:flex-end;gap:16px">
+  <div><div class="kick">what runs where</div><h1>Fleet <span class="gtext">topology</span></h1></div>
+  <div style="margin-left:auto" class="toolbar">
+    <div class="seg"><button onclick="location='overview-a-cards.html'">Cards</button><button class="on">Topology</button><button onclick="location='overview-c-table.html'">Table</button></div>
+  </div>
+</div>
+
+<div class="lay">
+<div>
+  <div class="card host" style="--c:var(--c-compute)">
+    <div class="hh"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6"/><rect x="3" y="14" width="18" height="6"/><path d="M7 7h.01M7 17h.01"/></svg></div>
+      <div><div class="name">pve-01 <span class="chip ok"><span class="dot"></span>Online</span></div><div class="spec">PROXMOX VE 9.2.2 · RYZEN 9 5950X · 16C · 64GB · TLS PINNED</div></div>
+      <div class="cap">
+        <div><div class="l">CPU<b>38%</b></div><div class="bar"><i style="width:38%"></i></div></div>
+        <div><div class="l">MEM<b>45 / 64 GB</b></div><div class="bar"><i style="width:71%"></i></div></div>
+        <div><div class="l">LOCAL-LVM<b>1.2 / 2 TB</b></div><div class="bar"><i style="width:60%"></i></div></div>
+      </div></div>
+    <div class="guests">
+      <div class="g" style="--c:var(--ok)"><div class="t">dev-ubuntu-01 <span class="chip ok">Connected</span></div><div class="spec">QEMU 101 · 8C 16G · FLEETD</div><span class="link">⇄ MACHINE · 4 PROJECTS</span></div>
+      <div class="g" style="--c:var(--ok)"><div class="t">win11-test <span class="chip ok">Running</span></div><div class="spec">QEMU 104 · 4C 8G · GUEST AGENT</div><span class="link">⇄ MACHINE (PVE-ONLY)</span></div>
+      <div class="g" style="--c:var(--info)"><div class="t">docker-host <span class="chip info">Agentless</span></div><div class="spec">LXC 200 · 4C 8G · SSH</div><span class="link">⇄ MACHINE · DOCKER 27.3</span></div>
+      <div class="g" style="--c:var(--err)"><div class="t">lab-9c21 <span class="chip err">Cleanup failed</span></div><div class="spec">QEMU 912 · LEASE RELEASED 1H AGO</div><span class="link" style="color:var(--err)">RETRY CLEANUP →</span></div>
+      <div class="g ghost"><div class="t">ubuntu-24-tpl <span class="chip off">Template</span></div><div class="spec">QEMU 9000 · IMAGE UBUNTU-DEV V3 · PROMOTED</div></div>
+      <div class="g ghost"><div class="t">haos <span class="chip ok">Running</span></div><div class="spec">QEMU 110 · NOT IN FLEET</div><span class="link">ADOPT →</span></div>
+      <div class="g ghost"><div class="t">old-builder <span class="chip off">Stopped</span></div><div class="spec">QEMU 120 · NOT IN FLEET</div><span class="link">ADOPT →</span></div>
+    </div>
+  </div>
+
+  <div class="card host" style="--c:var(--c-compute)">
+    <div class="hh"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6"/><rect x="3" y="14" width="18" height="6"/><path d="M7 7h.01M7 17h.01"/></svg></div>
+      <div><div class="name">pve-02 <span class="chip ok"><span class="dot"></span>Online</span></div><div class="spec">PROXMOX VE 9.2.2 · I5-12500 · 8C · 32GB · LAB TARGET</div></div>
+      <div class="cap">
+        <div><div class="l">CPU<b>12%</b></div><div class="bar"><i style="width:12%"></i></div></div>
+        <div><div class="l">MEM<b>13 / 32 GB</b></div><div class="bar"><i style="width:40%"></i></div></div>
+        <div><div class="l">LAB RESERVED<b>8 / 24 GB</b></div><div class="bar"><i style="width:33%"></i></div></div>
+      </div></div>
+    <div class="guests">
+      <div class="g lab"><div class="t">lab-7f3a <span class="chip grad">Ready</span></div><div class="spec">QEMU 910 · UBUNTU-DEV@3 · TTL 42M</div><div class="bar"><i style="width:30%"></i></div></div>
+      <div class="g lab"><div class="t">lab-a01e <span class="chip info">Bootstrapping</span></div><div class="spec">QEMU 911 · UBUNTU-DEV@3 · STEP 8/10</div><div class="bar plain"><i style="width:80%"></i></div></div>
+      <div class="g ghost"><div class="t">pbs <span class="chip off">Stopped</span></div><div class="spec">QEMU 150 · NOT IN FLEET</div><span class="link">ADOPT →</span></div>
+    </div>
+  </div>
+
+  <div class="card host">
+    <div class="hh"><div><div class="name">Bare metal &amp; devices</div><div class="spec">NOT HOSTED BY A HYPERVISOR FLEET KNOWS</div></div></div>
+    <div class="shelf">
+      <div class="g" style="--c:var(--ok)"><div class="t">workstation <span class="chip ok">Connected</span></div><div class="spec">DESKTOP · 24C 64G · RTX 4080 · FLEETD</div></div>
+      <div class="g" style="--c:var(--info)"><div class="t">rpi-kitchen <span class="chip info">Agentless</span></div><div class="spec">RPI 4B · AARCH64 · 4C 8G · SSH/TS</div></div>
+      <div class="g" style="--c:var(--err)"><div class="t">rpi-garage <span class="chip err">Offline</span></div><div class="spec">RPI 5 · AARCH64 · LAST SEEN 2D</div></div>
+      <div class="g" style="--c:var(--faint)"><div class="t">laptop-fw13 <span class="chip off">Stale</span></div><div class="spec">LAPTOP · 12C 32G · FLEETD RECONNECTING</div></div>
+    </div>
+  </div>
+</div>
+
+<aside class="lane">
+  <div class="h2" style="margin-top:0"><h2>Tailnet</h2><span class="note">8 devices</span></div>
+  <div class="card">
+    <div class="kick" style="margin-bottom:4px">In Fleet</div>
+    <div class="row"><span class="dot"></span>dev-ubuntu-01<span class="mono">100.64.0.11</span></div>
+    <div class="row"><span class="dot"></span>pve-01<span class="mono">100.64.0.2</span></div>
+    <div class="row"><span class="dot"></span>rpi-kitchen<span class="mono">100.64.0.31</span></div>
+    <div class="row"><span class="dot off"></span>rpi-garage<span class="mono">2D AGO</span></div>
+    <div class="row"><span class="dot"></span>workstation<span class="mono">100.64.0.5</span></div>
+    <div class="kick" style="margin:12px 0 4px">Not in Fleet</div>
+    <div class="row"><span class="dot"></span>nas-01<a class="btn sm" style="margin-left:auto">Add</a></div>
+    <div class="row"><span class="dot off"></span>mbp-work<a class="btn sm" style="margin-left:auto">Add</a></div>
+    <div class="row"><span class="dot"></span>pixel-8<span class="mono">HIDDEN</span></div>
+  </div>
+  <div class="h2"><h2>Activity</h2><span class="note">live</span></div>
+  <div class="card">
+    <div class="row"><span class="mono" style="margin:0 8px 0 0">12:04</span>lab.provision lab-a01e<span class="chip info" style="margin-left:auto">run</span></div>
+    <div class="row"><span class="mono" style="margin:0 8px 0 0">11:58</span>probe rpi-kitchen<span class="chip ok" style="margin-left:auto">ok</span></div>
+    <div class="row"><span class="mono" style="margin:0 8px 0 0">11:02</span>lab.cleanup lab-9c21<span class="chip err" style="margin-left:auto">fail</span></div>
+  </div>
+</aside>
+</div>
+
+</div></main></body></html>

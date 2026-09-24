@@ -1,0 +1,102 @@
+<!doctype html>
+<!-- Lab option A — "environments first". The page is about the leases you have
+     right now: each lease is a card with its lifecycle stepper and TTL; a request
+     drawer is always one click away and shows the equivalent fleetctl command.
+     Templates and images live on sub-tabs, since most visits are "give me a
+     box" or "is my box still alive". -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Lab — Option A</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.tabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin-top:16px}
+.tabs a{padding:9px 0;color:var(--muted);font:600 13px var(--body)}
+.tabs a.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--g1)}
+.tabs a .cnt{font:10px var(--chart);color:var(--faint);margin-left:4px}
+.lay{display:grid;grid-template-columns:1fr 360px;gap:18px;margin-top:18px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.stats .card{padding:12px 14px}
+.stats .n{font:800 22px var(--head)}
+.lease{padding:14px;margin-bottom:10px;display:grid;grid-template-columns:1fr auto;gap:10px}
+.lease .name{font:800 16px var(--head)}
+.steps{display:flex;gap:3px;margin-top:10px;grid-column:1/-1}
+.steps div{flex:1}
+.steps i{display:block;height:3px;background:var(--line2);border-radius:var(--r)}
+.steps .d i{background:var(--muted)} .steps .c i{background:var(--grad)} .steps .x i{background:var(--err)}
+.steps span{display:block;font:9px var(--chart);letter-spacing:.08em;color:var(--faint);margin-top:4px;text-transform:uppercase}
+.steps .c span{color:var(--ink)}
+.acts{display:flex;gap:6px;align-items:flex-start}
+.meta{display:flex;gap:16px;font:10.5px var(--chart);color:var(--muted);letter-spacing:.06em;margin-top:6px;flex-wrap:wrap}
+.meta b{color:var(--ink);font-weight:400}
+.ttl{grid-column:1/-1;display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;font:10.5px var(--chart);color:var(--faint)}
+.req{padding:16px;position:sticky;top:72px}
+.req h3{font:800 15px var(--head);margin:0 0 12px;text-transform:uppercase;letter-spacing:.02em}
+label{display:block;font:10px var(--chart);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:12px 0 5px}
+.in{border:1px solid var(--line2);background:var(--inset);border-radius:var(--r);padding:8px 10px;font-size:13px;display:flex;justify-content:space-between}
+.tpl{border:1px solid var(--line2);border-radius:var(--r);padding:9px 10px;margin-bottom:6px;display:flex;gap:10px;align-items:center;font-size:13px}
+.tpl.on{border-color:var(--g1);background:color-mix(in srgb,var(--g1) 6%,transparent)}
+.tpl .spec{margin-left:auto;font-size:9.5px}
+pre{background:var(--inset);border:1px solid var(--line);border-radius:var(--r);padding:10px;font:11px/1.6 var(--chart);color:var(--muted);white-space:pre-wrap;margin:12px 0}
+.log{font:11px/1.7 var(--chart);color:var(--muted);background:var(--inset);border:1px solid var(--line);padding:8px 10px;grid-column:1/-1;border-radius:var(--r)}
+</style></head>
+<body data-active="lab" data-crumb="Work / <b>Lab</b>">
+<main class="main"><div class="page" style="max-width:1400px">
+
+<div style="display:flex;align-items:flex-end;gap:16px">
+  <div><div class="kick">disposable environments · destroy by default</div><h1>Lab</h1></div>
+  <div style="margin-left:auto" class="toolbar"><a class="btn">Sweep expired</a><a class="btn pri">+ New environment</a></div>
+</div>
+<div class="tabs"><a class="on">Environments<span class="cnt">3</span></a><a>Templates<span class="cnt">4</span></a><a href="lab-b-pipeline.html">Images<span class="cnt">2 promoted</span></a><a>Builds</a><a>Capacity</a><a>History</a></div>
+
+<div class="lay">
+<div>
+  <div class="stats">
+    <div class="card"><div class="kick">Ready</div><div class="n">1</div></div>
+    <div class="card"><div class="kick">Provisioning</div><div class="n">1</div></div>
+    <div class="card"><div class="kick">Cleanup failed</div><div class="n" style="color:var(--err)">1</div></div>
+    <div class="card"><div class="kick">Lab capacity (pve-02)</div><div class="n" style="font-size:16px;margin-top:4px">8 / 24 GB</div><div class="bar" style="margin-top:6px"><i style="width:33%"></i></div></div>
+  </div>
+
+  <div class="h2"><h2>Active</h2><span class="note">sorted by expiry</span></div>
+
+  <div class="card lease">
+    <div><div style="display:flex;gap:10px;align-items:center"><span class="name">lab-7f3a</span><span class="chip grad">Ready</span><span class="tag">ci-flake-hunt</span></div>
+      <div class="meta"><span>TEMPLATE <b>ubuntu-dev@3</b></span><span>IMAGE <b>ubuntu-24-dev v3</b></span><span>PVE-02 · QEMU <b>910</b></span><span>OWNER <b>agent:claude</b></span><span>PROJECT <b>fleet-manager</b></span><span>CLEANUP <b>destroy</b></span></div></div>
+    <div class="acts"><a class="btn sm">Exec…</a><a class="btn sm">Copy ssh</a><a class="btn sm">Extend</a><a class="btn sm">Keep…</a><a class="btn sm">Release</a></div>
+    <div class="steps"><div class="d"><i></i><span>Requested</span></div><div class="d"><i></i><span>Reserving</span></div><div class="d"><i></i><span>Provisioning</span></div><div class="d"><i></i><span>Booting</span></div><div class="d"><i></i><span>Bootstrap</span></div><div class="c"><i></i><span>Ready</span></div><div><i></i><span>Released</span></div></div>
+    <div class="ttl"><span>TTL</span><div class="bar"><i style="width:30%"></i></div><span style="color:var(--ink)">00:42:10 LEFT · MAX LIFETIME 23:10:00</span></div>
+  </div>
+
+  <div class="card lease">
+    <div><div style="display:flex;gap:10px;align-items:center"><span class="name">lab-a01e</span><span class="chip info">Bootstrapping</span><span class="tag">try-new-mise</span></div>
+      <div class="meta"><span>TEMPLATE <b>ubuntu-dev@3</b></span><span>PVE-02 · QEMU <b>911</b></span><span>OWNER <b>anonymous-lan-admin</b></span><span>REQUESTED <b>3M AGO</b></span></div></div>
+    <div class="acts"><a class="btn sm">Cancel</a></div>
+    <div class="steps"><div class="d"><i></i><span>Requested</span></div><div class="d"><i></i><span>Reserving</span></div><div class="d"><i></i><span>Provisioning</span></div><div class="d"><i></i><span>Booting</span></div><div class="c"><i></i><span>Bootstrap</span></div><div><i></i><span>Ready</span></div><div><i></i><span>Released</span></div></div>
+    <div class="log">12:04:31 guest agent reports 192.168.1.231<br>12:04:40 waiting for readiness probe <b>ssh</b> (attempt 3, deadline 12:14:00)<span style="float:right">LIVE ▸</span></div>
+  </div>
+
+  <div class="card lease" style="border-left:2px solid var(--err)">
+    <div><div style="display:flex;gap:10px;align-items:center"><span class="name">lab-9c21</span><span class="chip err">Cleanup failed</span></div>
+      <div class="meta"><span>PVE-01 · QEMU <b>912</b> STILL EXISTS</span><span>3 RETRIES · LAST: <b>VM LOCKED (BACKUP)</b></span></div></div>
+    <div class="acts"><a class="btn sm">Retry cleanup</a><a class="btn sm">Open op</a></div>
+    <div class="steps"><div class="d"><i></i><span>Requested</span></div><div class="d"><i></i><span>…</span></div><div class="d"><i></i><span>Ready</span></div><div class="d"><i></i><span>Releasing</span></div><div class="x"><i></i><span>Cleanup failed</span></div></div>
+  </div>
+</div>
+
+<aside class="card req">
+  <h3>New environment</h3>
+  <label>Template</label>
+  <div class="tpl on"><b>ubuntu-dev</b><span class="faint">v3</span><span class="spec">2C · 4G · 40G · TTL 2H</span></div>
+  <div class="tpl"><b>debian-min</b><span class="faint">v1</span><span class="spec">1C · 1G · 10G · TTL 1H</span></div>
+  <div class="tpl" style="opacity:.55"><b>win11-eval</b><span class="faint">v1</span><span class="spec">LATER · WINDOWS READINESS</span></div>
+  <label>Prepare project (optional)</label><div class="in">fleet-manager <span class="faint">▾</span></div>
+  <label>Purpose</label><div class="in">try-new-mise</div>
+  <label>TTL after ready</label><div class="seg"><button>30m</button><button class="on">2h</button><button>8h</button><button>24h</button></div>
+  <label>When done</label><div class="seg"><button class="on">Destroy</button><button>Keep (elevated)</button></div>
+  <pre>fleetctl lab create --template ubuntu-dev@3 \
+  --project fleet-manager --purpose try-new-mise \
+  --ttl 2h --output json</pre>
+  <a class="btn pri" style="width:100%;justify-content:center">Request environment →</a>
+  <div class="kick" style="margin-top:10px;text-align:center">fits on pve-02 · 16 GB free</div>
+</aside>
+</div>
+
+</div></main></body></html>

@@ -1,0 +1,163 @@
+<!doctype html>
+<!-- Option A — grouped card grid ("Coolify-like"). Everything Fleet knows is a
+     card, grouped by what it physically is: Proxmox hosts, guests, devices, and
+     tailnet devices that aren't in Fleet yet. Each card answers: what is it,
+     where does it run, how is Fleet connected to it, and is it healthy. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Fleet — Option A: cards</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.attn{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
+.kpi{padding:14px 16px}
+.kpi .n{font:800 26px var(--head);letter-spacing:-.02em}
+.kpi .n small{font:11px var(--chart);color:var(--faint);letter-spacing:.08em;margin-left:6px}
+.alert{display:flex;gap:10px;align-items:center;padding:10px 14px;margin-top:12px;border-left:2px solid var(--err)}
+.alert .kick{color:var(--err)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}
+.m{padding:14px;display:flex;flex-direction:column;gap:10px;cursor:pointer;transition:transform .12s}
+.m:hover{transform:translateY(-2px)}
+.m .hd{display:flex;gap:12px;align-items:flex-start}
+.m .well{width:44px;height:44px;flex:none}
+.m .well svg{width:24px;height:24px}
+.m .name{font:700 15px var(--head);letter-spacing:-.01em}
+.m .sub{font:10.5px var(--chart);letter-spacing:.06em;color:var(--faint);text-transform:uppercase;margin-top:1px}
+.m .st{margin-left:auto}
+.m .conns{display:flex;gap:5px;flex-wrap:wrap}
+.m .ft{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);padding-top:9px;font:10.5px var(--chart);color:var(--faint);letter-spacing:.05em}
+.m .ft .act{margin-left:auto;display:flex;gap:6px}
+.util{display:grid;grid-template-columns:34px 1fr 52px;gap:8px;align-items:center;font:10px var(--chart);color:var(--faint);letter-spacing:.08em}
+.util span:last-child{text-align:right;color:var(--muted)}
+.m.ts{border-style:dashed;background:transparent}
+.m.add{border-style:dashed;background:transparent;align-items:center;justify-content:center;color:var(--faint);min-height:150px;font:700 12px var(--head)}
+</style></head>
+<body data-active="fleet" data-crumb="Infrastructure / <b>Fleet</b>">
+<main class="main"><div class="page">
+
+<div style="display:flex;align-items:flex-end;gap:16px">
+  <div><div class="kick">14 machines · 2 hosts · 3 unmanaged tailnet devices</div><h1>Your <span class="gtext">fleet</span>, observed.</h1></div>
+  <div style="margin-left:auto" class="toolbar">
+    <div class="seg"><button class="on">Cards</button><button onclick="location='overview-b-topology.html'">Topology</button><button onclick="location='overview-c-table.html'">Table</button></div>
+  </div>
+</div>
+
+<div class="attn">
+  <div class="card kpi"><div class="kick">Connected</div><div class="n">9<small>/ 14</small></div><div class="bar" style="margin-top:8px"><i style="width:64%"></i></div></div>
+  <div class="card kpi"><div class="kick">Agentless (SSH)</div><div class="n">3</div><div class="spec" style="margin-top:6px">UPGRADE TO FLEETD →</div></div>
+  <div class="card kpi"><div class="kick">Offline / stale</div><div class="n" style="color:var(--err)">2</div><div class="spec" style="margin-top:6px">LAPTOP-FW13 · RPI-GARAGE</div></div>
+  <div class="card kpi"><div class="kick">Lab leases</div><div class="n">3<small>1 PROVISIONING</small></div><div class="spec" style="margin-top:6px">NEXT EXPIRY 00:42:10</div></div>
+</div>
+<div class="card alert"><span class="kick">Needs attention · 2</span><span>Lease <b class="mono">lab-9c21</b> is <b>cleanup_failed</b> — VM 912 still exists on pve-01.</span><span class="muted">·</span><span>Operation <b class="mono">op_7Q2…</b> is blocked on manual Frogenv approval.</span><a class="btn sm" style="margin-left:auto">Review →</a></div>
+
+<div class="toolbar" style="margin-top:22px">
+  <span class="filter">Kind <b>All</b></span><span class="filter">Status <b>Any</b></span><span class="filter">Host <b>Any</b></span><span class="filter">Group <b>homelab</b> ✕</span><span class="filter">+ Tag</span>
+  <span style="margin-left:auto" class="kick">Group by</span><div class="seg"><button class="on">Kind</button><button>Host</button><button>Group</button><button>None</button></div>
+</div>
+
+<div class="h2"><h2>Proxmox hosts</h2><span class="note">2 nodes · 1 account · PVE 9.2.2</span></div>
+<div class="grid">
+  <div class="card m" style="--c:var(--c-compute)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6"/><rect x="3" y="14" width="18" height="6"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg></div>
+      <div><div class="name">pve-01</div><div class="sub">Physical · Proxmox node · x86_64</div></div><span class="chip ok st"><span class="dot"></span>Online</span></div>
+    <div class="spec">CPU 16C · MEM 64GB · DISK 2TB · 7 GUESTS</div>
+    <div><div class="util"><span>CPU</span><div class="bar"><i style="width:38%"></i></div><span>38%</span></div>
+      <div class="util"><span>MEM</span><div class="bar"><i style="width:71%"></i></div><span>45/64G</span></div></div>
+    <div class="conns"><span class="conn on">PVE API · PINNED</span><span class="conn on">SSH</span><span class="conn on">TAILSCALE</span></div>
+    <div class="ft"><span>SEEN 12S AGO</span><div class="act"><a class="btn sm ghost">Open in PVE ↗</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-compute)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6"/><rect x="3" y="14" width="18" height="6"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg></div>
+      <div><div class="name">pve-02</div><div class="sub">Physical · Proxmox node · x86_64</div></div><span class="chip ok st"><span class="dot"></span>Online</span></div>
+    <div class="spec">CPU 8C · MEM 32GB · DISK 1TB · 3 GUESTS</div>
+    <div><div class="util"><span>CPU</span><div class="bar"><i style="width:12%"></i></div><span>12%</span></div>
+      <div class="util"><span>MEM</span><div class="bar"><i style="width:40%"></i></div><span>13/32G</span></div></div>
+    <div class="conns"><span class="conn on">PVE API · PINNED</span><span class="conn off">SSH</span><span class="conn on">TAILSCALE</span></div>
+    <div class="ft"><span>SEEN 12S AGO</span><div class="act"><a class="btn sm ghost">Open in PVE ↗</a></div></div>
+  </div>
+</div>
+
+<div class="h2"><h2>Virtual machines &amp; containers</h2><span class="note">10 guests · 3 in Fleet as machines</span></div>
+<div class="grid">
+  <div class="card m" style="--c:var(--c-compute)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13"/><path d="M8 21h8M12 17v4"/><path d="M7 8h10M7 12h6"/></svg></div>
+      <div><div class="name">dev-ubuntu-01</div><div class="sub">VM · QEMU 101 · on pve-01</div></div><span class="chip ok st"><span class="dot"></span>Connected</span></div>
+    <div class="spec">UBUNTU 24.04 · 8C · 16GB · 180GB FREE</div>
+    <div class="conns"><span class="conn on">FLEETD 0.7.0</span><span class="conn on">GUEST AGENT</span><span class="conn on">TAILSCALE</span></div>
+    <div style="display:flex;gap:5px"><span class="tag" style="--c:var(--c-desktop)">dev</span><span class="tag">homelab</span><span class="tag">4 projects</span></div>
+    <div class="ft"><span>SEEN 3S AGO</span><div class="act"><a class="btn sm">Power ▾</a><a class="btn sm">Open →</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-compute)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13"/><path d="M8 21h8M12 17v4"/><path d="M7 8h10M7 12h6"/></svg></div>
+      <div><div class="name">win11-test</div><div class="sub">VM · QEMU 104 · on pve-01</div></div><span class="chip ok st"><span class="dot"></span>Running</span></div>
+    <div class="spec">WINDOWS 11 · 4C · 8GB · IP 192.168.1.140</div>
+    <div class="conns"><span class="conn on">GUEST AGENT</span><span class="conn off">NO FLEETD (WINDOWS)</span></div>
+    <div style="display:flex;gap:5px"><span class="tag">test</span></div>
+    <div class="ft"><span>PVE TASK OK 4M AGO</span><div class="act"><a class="btn sm">Power ▾</a><a class="btn sm">Open →</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-ephemeral)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-6 11h16L14 9V3"/></svg></div>
+      <div><div class="name">lab-7f3a</div><div class="sub">Lab VM · QEMU 910 · on pve-02</div></div><span class="chip grad st">Ready</span></div>
+    <div class="spec">TEMPLATE UBUNTU-DEV@3 · TTL 00:42:10 LEFT</div>
+    <div class="bar"><i style="width:30%"></i></div>
+    <div class="conns"><span class="conn on">SSH</span><span class="conn on">GUEST AGENT</span></div>
+    <div class="ft"><span>LEASE BY AGENT · CI-FLAKE-HUNT</span><div class="act"><a class="btn sm">Release</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-storage)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg></div>
+      <div><div class="name">docker-host</div><div class="sub">LXC 200 · on pve-01</div></div><span class="chip info st">Agentless</span></div>
+    <div class="spec">DEBIAN 12 · 4C · 8GB · DOCKER 27.3</div>
+    <div class="conns"><span class="conn on">SSH</span><span class="conn off">GUEST AGENT N/A</span></div>
+    <div style="display:flex;gap:5px"><span class="tag" style="--c:var(--c-storage)">services</span></div>
+    <div class="ft"><span>PROBED 6M AGO</span><div class="act"><a class="btn sm">Install fleetd</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--faint)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13"/><path d="M8 21h8M12 17v4"/></svg></div>
+      <div><div class="name">pbs</div><div class="sub">VM · QEMU 150 · on pve-02 · not in Fleet</div></div><span class="chip off st">Stopped</span></div>
+    <div class="spec">DISCOVERED BY PROXMOX · NO MACHINE LINKED</div>
+    <div class="ft"><span>+ 5 MORE GUESTS</span><div class="act"><a class="btn sm">Adopt →</a></div></div>
+  </div>
+</div>
+
+<div class="h2"><h2>Devices</h2><span class="note">bare metal · boards · laptops</span></div>
+<div class="grid">
+  <div class="card m" style="--c:var(--c-network)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14"/><rect x="8" y="9" width="5" height="5"/><path d="M4 8H2M4 12H2M4 16H2M22 8h-2M22 12h-2M22 16h-2"/></svg></div>
+      <div><div class="name">rpi-kitchen</div><div class="sub">Board · Raspberry Pi 4 Model B · aarch64</div></div><span class="chip info st">Agentless</span></div>
+    <div class="spec">DEBIAN 12 · 4C · 8GB · 22GB FREE</div>
+    <div class="conns"><span class="conn on">SSH VIA TAILSCALE</span><span class="conn on">TAILSCALE</span></div>
+    <div style="display:flex;gap:5px"><span class="tag" style="--c:var(--c-network)">home-assistant</span></div>
+    <div class="ft"><span>PROBED 2M AGO</span><div class="act"><a class="btn sm">Open →</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-network)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14"/><rect x="8" y="9" width="5" height="5"/><path d="M4 8H2M4 12H2M4 16H2M22 8h-2M22 12h-2M22 16h-2"/></svg></div>
+      <div><div class="name">rpi-garage</div><div class="sub">Board · Raspberry Pi 5 · aarch64</div></div><span class="chip err st">Offline</span></div>
+    <div class="spec">DEBIAN 12 · 4C · 4GB</div>
+    <div class="conns"><span class="conn warn">SSH TIMEOUT</span><span class="conn off">TAILSCALE · SEEN 2D AGO</span></div>
+    <div class="ft"><span>LAST SEEN 2D AGO</span><div class="act"><a class="btn sm">Wake (WoL)</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-desktop)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11"/><path d="M2 19h20"/></svg></div>
+      <div><div class="name">laptop-fw13</div><div class="sub">Laptop · Framework 13 · x86_64</div></div><span class="chip off st">Stale</span></div>
+    <div class="spec">FEDORA 42 · 12C · 32GB</div>
+    <div class="conns"><span class="conn off">FLEETD · RECONNECTING</span><span class="conn on">TAILSCALE</span></div>
+    <div class="ft"><span>SEEN 3H AGO</span><div class="act"><a class="btn sm">Open →</a></div></div>
+  </div>
+  <div class="card m" style="--c:var(--c-desktop)">
+    <div class="hd"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12"/><path d="M8 20h8M12 16v4"/></svg></div>
+      <div><div class="name">workstation</div><div class="sub">Desktop · custom build · x86_64</div></div><span class="chip ok st"><span class="dot"></span>Connected</span></div>
+    <div class="spec">UBUNTU 24.04 · 24C · 64GB · RTX 4080</div>
+    <div class="conns"><span class="conn on">FLEETD 0.7.0</span><span class="conn on">TAILSCALE</span></div>
+    <div class="ft"><span>SEEN 1S AGO · THIS CONTROLLER</span><div class="act"><a class="btn sm">Open →</a></div></div>
+  </div>
+</div>
+
+<div class="h2"><h2>On your tailnet, not in Fleet</h2><span class="note">tailscale oauth · devices:core:read</span></div>
+<div class="grid">
+  <div class="card m ts"><div class="hd"><div><div class="name">nas-01</div><div class="sub">Linux · 100.101.4.12 · tag:server</div></div><span class="chip ok st">Online</span></div>
+    <div class="ft"><span>MATCHES NO MACHINE</span><div class="act"><a class="btn sm pri">Add to Fleet →</a></div></div></div>
+  <div class="card m ts"><div class="hd"><div><div class="name">mbp-work</div><div class="sub">macOS · 100.88.1.3</div></div><span class="chip off st">Offline</span></div>
+    <div class="ft"><span>MACOS · DEFERRED PLATFORM</span><div class="act"><a class="btn sm">Add (SSH only)</a></div></div></div>
+  <div class="card m ts"><div class="hd"><div><div class="name">pixel-8</div><div class="sub">Android · 100.77.9.40</div></div><span class="chip ok st">Online</span></div>
+    <div class="ft"><span>NOT MANAGEABLE</span><div class="act"><a class="btn sm ghost">Hide</a></div></div></div>
+  <div class="card m add">+ ADD MACHINE, SERVER, OR VM</div>
+</div>
+
+</div></main></body></html>

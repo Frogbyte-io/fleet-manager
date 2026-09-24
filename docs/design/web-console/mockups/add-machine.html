@@ -1,0 +1,99 @@
+<!doctype html>
+<!-- Add flow — one "+ Add" entry point, then a guided dialog whose steps adapt
+     to the source. Every path lands in the existing onboarding-draft API
+     (create → test → confirm host key → discover → add), so the wizard is a view
+     over durable drafts: closing the tab never loses progress. Frames 1–3 show
+     the Tailscale path; the same rail serves SSH, Proxmox host and Proxmox guest. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Add machine — guided flow</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.frames{display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));gap:22px;margin-top:18px}
+.dlg{background:var(--nav);border:1px solid var(--line2);border-radius:var(--r);display:grid;grid-template-columns:170px minmax(0,1fr);min-height:470px}
+.rail{border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:2px}
+.rail div{display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--faint);padding:6px 4px}
+.rail i{width:18px;height:18px;border:1px solid var(--line2);border-radius:50%;display:grid;place-items:center;font:10px var(--chart);font-style:normal}
+.rail .done{color:var(--muted)} .rail .done i{background:var(--muted);color:var(--bg);border:0}
+.rail .cur{color:var(--ink);font-weight:600} .rail .cur i{background:var(--grad);border:0;color:#fff}
+.dc{padding:18px;display:flex;flex-direction:column;min-width:0}
+.dc h3{font:800 17px var(--head);margin:0}
+.dc .sub{color:var(--muted);font-size:12.5px;margin:3px 0 14px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.tile{border:1px solid var(--line2);border-radius:var(--r);padding:11px;display:flex;gap:10px;cursor:pointer}
+.tile:hover,.tile.on{border-color:var(--g1)}
+.tile .well{width:34px;height:34px;flex:none}.tile .well svg{width:18px;height:18px}
+.tile b{font:700 13px var(--head);display:block}
+.tile span{font-size:11.5px;color:var(--muted);line-height:1.4}
+.dev{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:var(--r);padding:9px 10px;margin-bottom:6px;font-size:13px}
+.dev.on{border-color:var(--g1);background:color-mix(in srgb,var(--g1) 6%,transparent)}
+.dev .s{font:10px var(--chart);color:var(--faint);letter-spacing:.05em}
+.warnbox{border:1px solid color-mix(in srgb,var(--info) 40%,transparent);background:color-mix(in srgb,var(--info) 7%,transparent);padding:9px 11px;border-radius:var(--r);font-size:12px;margin-top:6px}
+.fp{font:12px var(--chart);background:var(--inset);border:1px solid var(--line);padding:10px;border-radius:var(--r);word-break:break-all;margin:8px 0}
+.ft{margin-top:auto;padding-top:14px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--line)}
+.ft .mono{font-size:10.5px;color:var(--faint)}
+label{display:block;font:10px var(--chart);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:10px 0 5px}
+.in{border:1px solid var(--line2);background:var(--inset);border-radius:var(--r);padding:7px 10px;font-size:13px}
+.facts{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;font:11.5px var(--chart);color:var(--muted)}
+.facts b{color:var(--ink);font-weight:400}
+</style></head>
+<body data-active="fleet" data-crumb="Infrastructure / Fleet / <b>Add</b>">
+<main class="main"><div class="page" style="max-width:1500px">
+<div class="kick">guided flow · three frames of one dialog</div><h1>Add to <span class="gtext">fleet</span></h1>
+
+<div class="frames">
+
+<!-- frame 1 -->
+<div class="dlg">
+  <div class="rail"><div class="cur"><i>1</i>Source</div><div><i>2</i>Pick / connect</div><div><i>3</i>Verify identity</div><div><i>4</i>Discover</div><div><i>5</i>Name &amp; manage</div></div>
+  <div class="dc">
+    <h3>What are you adding?</h3><div class="sub">Every path creates a resumable onboarding draft.</div>
+    <div class="tiles">
+      <div class="tile on"><div class="well" style="--c:var(--info)"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M8 6h8M7 8l4 8M17 8l-4 8"/></svg></div><div><b>From Tailscale</b><span>Pick a device on your tailnet. 3 not in Fleet.</span></div></div>
+      <div class="tile"><div class="well"><svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5M12 19h8"/></svg></div><div><b>Machine over SSH</b><span>Any Linux host, laptop or Raspberry Pi by IP or name.</span></div></div>
+      <div class="tile"><div class="well" style="--c:var(--c-compute)"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6"/><rect x="3" y="14" width="18" height="6"/></svg></div><div><b>Proxmox server</b><span>Connect a PVE cluster: API token + pinned TLS.</span></div></div>
+      <div class="tile"><div class="well" style="--c:var(--c-compute)"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13"/><path d="M8 21h8M12 17v4"/></svg></div><div><b>Existing VM / LXC</b><span>Adopt a discovered guest and link it to a machine.</span></div></div>
+      <div class="tile"><div class="well" style="--c:var(--g2)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div><div><b>New VM</b><span>Clone a promoted image onto a host (persistent, not Lab).</span></div></div>
+      <div class="tile"><div class="well" style="--c:var(--g1)"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-6 11h16L14 9V3"/></svg></div><div><b>Lab environment</b><span>Disposable, TTL-bound. Opens the Lab request.</span></div></div>
+    </div>
+    <div class="ft"><span class="mono">ESC TO CLOSE · DRAFTS RESUME FROM FLEET → DRAFTS</span><a class="btn pri" style="margin-left:auto">Continue →</a></div>
+  </div>
+</div>
+
+<!-- frame 2 -->
+<div class="dlg">
+  <div class="rail"><div class="done"><i>✓</i>Source</div><div class="cur"><i>2</i>Pick device</div><div><i>3</i>Verify identity</div><div><i>4</i>Discover</div><div><i>5</i>Name &amp; manage</div></div>
+  <div class="dc">
+    <h3>Pick a tailnet device</h3><div class="sub">Read-only OAuth (<span class="mono">devices:core:read</span>). Fleet identity stays independent of Tailscale.</div>
+    <div class="dev on"><input type="radio" checked><div><b>nas-01</b><div class="s">LINUX · 100.101.4.12 · NAS-01.EXAMPLE.TS.NET · TAG:SERVER</div></div><span class="chip ok">Online</span></div>
+    <div class="dev"><input type="radio"><div><b>mbp-work</b><div class="s">MACOS · 100.88.1.3 · SSH-ONLY (FLEETD DEFERRED)</div></div><span class="chip off">Offline</span></div>
+    <div class="dev"><input type="radio"><div><b>dev-ubuntu-01</b><div class="s">LINUX · 100.64.0.11</div></div><span class="chip info">In Fleet</span></div>
+    <div class="warnbox"><b>Connect via</b> &nbsp; <span class="seg"><button class="on">MagicDNS name</button><button>100.x address</button><button>LAN IP</button></span><br><span class="muted" style="font-size:11.5px">MagicDNS survives re-IP; the LAN IP works when the controller is not on the tailnet.</span></div>
+    <label>SSH user</label><div class="in">dev</div>
+    <label>Auth</label><div class="seg"><button class="on">SSH agent</button><button>Identity file</button></div>
+    <div class="ft"><span class="mono">POST /machines/onboarding/drafts (source: tailnet)</span><a class="btn ghost" style="margin-left:auto">← Back</a><a class="btn pri">Test connection →</a></div>
+  </div>
+</div>
+
+<!-- frame 3 -->
+<div class="dlg">
+  <div class="rail"><div class="done"><i>✓</i>Source</div><div class="done"><i>✓</i>Pick device</div><div class="done"><i>✓</i>Verify identity</div><div class="cur"><i>4</i>Discover</div><div><i>5</i>Name &amp; manage</div></div>
+  <div class="dc">
+    <h3>nas-01 — what we found</h3><div class="sub">Host key confirmed <span class="mono" style="font-size:11px">SHA256:q3Vt…9fA</span> · inventory probe <span class="mono">agentless/1</span></div>
+    <div class="facts">
+      <span>KIND <b>Physical</b></span><span>BOARD <b>ASRock N100DC-ITX</b></span>
+      <span>OS <b>Debian 12</b></span><span>ARCH <b>x86_64</b></span>
+      <span>CPU <b>4 cores</b></span><span>MEMORY <b>16 GB</b></span>
+      <span>DISK FREE <b>3.1 TB</b></span><span>TOOLS <b>git · docker · tailscale</b></span>
+    </div>
+    <label>Name</label><div class="in">nas-01</div>
+    <label>Groups / tags</label><div class="in"><span class="tag" style="--c:var(--c-storage)">storage</span> <span class="tag">homelab</span> <span class="faint">+ from tailnet tag:server</span></div>
+    <label>Management level</label>
+    <div class="tiles">
+      <div class="tile on"><div><b>Agentless (SSH)</b><span>Probe and run operations over SSH. Nothing installed.</span></div></div>
+      <div class="tile"><div><b>Install fleetd</b><span>Live status, heartbeats, local broker. Linux x86_64.</span></div></div>
+    </div>
+    <div class="ft"><span class="mono">AUDITED AS ANONYMOUS-LAN-ADMIN</span><a class="btn ghost" style="margin-left:auto">Copy as fleetctl</a><a class="btn pri">Add to fleet →</a></div>
+  </div>
+</div>
+
+</div>
+</div></main></body></html>

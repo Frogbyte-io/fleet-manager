@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- Lab option B — "pipeline". Lab is a supply chain: recipe → built image
+     version → promoted → pinned by a template → leased as an environment. Four
+     columns make every hand-off visible (what's built but unpromoted, which
+     templates pin a stale image, which leases run on what). Selecting any item
+     highlights its lineage across columns. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Lab — Option B</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.cols{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:18px;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.col{border-right:1px solid var(--line);background:var(--nav);display:flex;flex-direction:column;min-height:560px}
+.col:last-child{border-right:0}
+.col .ch{padding:12px 12px 10px;border-bottom:2px solid var(--ink);display:flex;align-items:baseline;gap:8px}
+.col .ch b{font:800 13px var(--head);text-transform:uppercase;letter-spacing:.02em}
+.col .ch .kick{margin-left:auto}
+.col .body{padding:10px;display:flex;flex-direction:column;gap:8px;flex:1}
+.it{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:10px;position:relative}
+.it .t{display:flex;align-items:center;gap:6px;font:700 13.5px var(--head)}
+.it .t .chip{margin-left:auto}
+.it .spec{margin-top:4px;font-size:9.5px}
+.it.hl{border-color:var(--g1);box-shadow:inset 2px 0 0 var(--g1)}
+.it.hl::after{content:"→";position:absolute;right:-17px;top:50%;transform:translateY(-50%);color:var(--g1);font:700 14px var(--head);z-index:2}
+.col:last-child .it.hl::after{display:none}
+.it.dim{opacity:.5}
+.col .foot{padding:10px;border-top:1px solid var(--line)}
+.build{font:10.5px/1.7 var(--chart);color:var(--muted)}
+.editor{margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.editor .card{padding:14px}
+.fld{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;font-size:12.5px;align-items:center}
+.fld span:nth-child(odd){font:10px var(--chart);letter-spacing:.1em;color:var(--faint);text-transform:uppercase}
+.fld .v{border:1px solid var(--line2);background:var(--inset);padding:5px 8px;border-radius:var(--r)}
+pre{margin:0;background:var(--inset);border:1px solid var(--line);border-radius:var(--r);padding:10px;font:11px/1.6 var(--chart);color:var(--muted);overflow:auto;max-height:230px}
+pre .k{color:var(--info)} pre .s{color:var(--ok)}
+</style></head>
+<body data-active="lab" data-crumb="Work / <b>Lab</b> / Pipeline">
+<main class="main"><div class="page" style="max-width:1500px">
+
+<div style="display:flex;align-items:flex-end;gap:16px">
+  <div><div class="kick">recipe → image → template → environment</div><h1>Lab <span class="gtext">pipeline</span></h1></div>
+  <div style="margin-left:auto" class="toolbar"><div class="seg"><button onclick="location='lab-a-dashboard.html'">Environments</button><button class="on">Pipeline</button></div><a class="btn pri">+ New environment</a></div>
+</div>
+
+<div class="cols">
+  <div class="col">
+    <div class="ch"><b>Recipes</b><span class="kick">packer .pkr.json</span></div>
+    <div class="body">
+      <div class="it hl"><div class="t">ubuntu-24-dev <span class="chip">v4 draft</span></div><div class="spec">PROXMOX-CLONE · 3 PROVISIONERS · EDITED 1H AGO</div></div>
+      <div class="it"><div class="t">debian-12-min <span class="chip">v1</span></div><div class="spec">PROXMOX-ISO · PUBLISHED</div></div>
+      <div class="it"><div class="t">win11-eval <span class="chip">v1</span></div><div class="spec">PROXMOX-ISO · ISO OPERATOR-SUPPLIED</div></div>
+    </div>
+    <div class="foot"><a class="btn sm">+ Recipe</a> <a class="btn sm ghost">Import .pkr.json</a></div>
+  </div>
+  <div class="col">
+    <div class="ch"><b>Image versions</b><span class="kick">builds</span></div>
+    <div class="body">
+      <div class="it hl"><div class="t">ubuntu-24-dev v3 <span class="chip grad">Promoted</span></div><div class="spec">TEMPLATE QEMU 9000 · PVE-01 · BUILT 2026-09-20 · 11M 42S</div></div>
+      <div class="it"><div class="t">ubuntu-24-dev v4 <span class="chip info">Building</span></div><div class="build">▸ proxmox-clone: waiting for SSH…<br>▸ 04:12 elapsed · packer 1.15.2</div><div class="bar plain" style="margin-top:6px"><i style="width:45%"></i></div></div>
+      <div class="it dim"><div class="t">ubuntu-24-dev v2 <span class="chip off">Superseded</span></div><div class="spec">TEMPLATE QEMU 8999 · 0 TEMPLATES PIN IT</div></div>
+      <div class="it"><div class="t">debian-12-min v1 <span class="chip grad">Promoted</span></div><div class="spec">TEMPLATE QEMU 9010 · PVE-02</div></div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="ch"><b>Lab templates</b><span class="kick">pinned</span></div>
+    <div class="body">
+      <div class="it hl"><div class="t">ubuntu-dev <span class="chip">v3</span></div><div class="spec">PINS UBUNTU-24-DEV V3 · 2C 4G 40G · SSH READINESS · TTL 2H · DESTROY</div></div>
+      <div class="it"><div class="t">debian-min <span class="chip">v1</span></div><div class="spec">PINS DEBIAN-12-MIN V1 · 1C 1G · TTL 1H</div></div>
+      <div class="it" style="border-left:2px solid var(--err)"><div class="t">ubuntu-dev-gpu <span class="chip err">Stale pin</span></div><div class="spec">PINS UBUNTU-24-DEV V2 (SUPERSEDED) · USB/GPU LATER</div></div>
+    </div>
+    <div class="foot"><a class="btn sm">+ Template</a></div>
+  </div>
+  <div class="col">
+    <div class="ch"><b>Environments</b><span class="kick">leases</span></div>
+    <div class="body">
+      <div class="it hl"><div class="t">lab-7f3a <span class="chip grad">Ready</span></div><div class="spec">UBUNTU-DEV@3 · AGENT:CLAUDE · 42M LEFT</div><div class="bar" style="margin-top:6px"><i style="width:30%"></i></div></div>
+      <div class="it hl"><div class="t">lab-a01e <span class="chip info">Bootstrapping</span></div><div class="spec">UBUNTU-DEV@3 · STEP 8/10</div></div>
+      <div class="it" style="border-left:2px solid var(--err)"><div class="t">lab-9c21 <span class="chip err">Cleanup failed</span></div><div class="spec">QEMU 912 STILL EXISTS · RETRY →</div></div>
+    </div>
+    <div class="foot"><a class="btn sm">History (38)</a></div>
+  </div>
+</div>
+
+<div class="h2"><h2>ubuntu-24-dev · v4 draft</h2><span class="note">structured ⇄ raw json · unknown fields preserved</span></div>
+<div class="editor">
+  <div class="card">
+    <div class="kick" style="margin-bottom:10px">Structured (proxmox-clone subset)</div>
+    <div class="fld">
+      <span>Proxmox account</span><span class="v">homelab-pve (pinned)</span>
+      <span>Node</span><span class="v">pve-01</span>
+      <span>Clone from</span><span class="v">ubuntu-24-cloud (QEMU 8000)</span>
+      <span>Cores / memory</span><span class="v">2 · 4096 MB</span>
+      <span>Disk</span><span class="v">local-lvm · 40G</span>
+      <span>Provisioners</span><span class="v">shell ×2 · file ×1</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px"><a class="btn">Save draft</a><a class="btn">Publish v4</a><a class="btn pri">Build →</a></div>
+  </div>
+  <div class="card">
+    <div class="kick" style="margin-bottom:10px">Raw .pkr.json</div>
+<pre>{
+  <span class="k">"builders"</span>: [{
+    <span class="k">"type"</span>: <span class="s">"proxmox-clone"</span>,
+    <span class="k">"proxmox_url"</span>: <span class="s">"{{user `pve_url`}}/api2/json"</span>,
+    <span class="k">"node"</span>: <span class="s">"pve-01"</span>,
+    <span class="k">"clone_vm_id"</span>: 8000,
+    <span class="k">"cores"</span>: 2, <span class="k">"memory"</span>: 4096,
+    <span class="k">"template_name"</span>: <span class="s">"ubuntu-24-dev-v4"</span>
+  }],
+  <span class="k">"provisioners"</span>: [ … ]
+}</pre>
+  </div>
+</div>
+
+</div></main></body></html>

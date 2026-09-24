@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- Option C — dense table + detail drawer. Built for scale and bulk actions:
+     one row per machine/guest/device with host nesting, sortable columns,
+     multi-select with a bulk-action bar, and a right drawer that opens the
+     selected machine without leaving the list. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Fleet — Option C: table</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.wrap{display:grid;grid-template-columns:1fr 380px;gap:0;margin-top:16px;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+table{width:100%;border-collapse:collapse;background:var(--panel)}
+th{font:600 10px var(--chart);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);text-align:left;padding:9px 10px;border-bottom:1px solid var(--line2);background:var(--nav)}
+td{padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:middle}
+tr:hover td{background:var(--inset)}
+tr.sel td{background:color-mix(in srgb,var(--g1) 7%,var(--panel))}
+td .n{font:700 13.5px var(--head)}
+td .s{font:10px var(--chart);color:var(--faint);letter-spacing:.06em}
+td.mono{font-size:11.5px;color:var(--muted)}
+.indent{padding-left:28px;position:relative}
+.indent::before{content:"└";position:absolute;left:12px;color:var(--faint)}
+.hostrow td{background:var(--nav);font-weight:600}
+.bulk{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--inset);border-bottom:1px solid var(--line2);font-size:12.5px}
+.drawer{background:var(--nav);border-left:1px solid var(--line2);padding:16px;display:flex;flex-direction:column;gap:14px}
+.drawer h3{font:800 18px var(--head);margin:0}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:5px 10px;font-size:12.5px}
+.kv dt{font:10px var(--chart);letter-spacing:.1em;color:var(--faint);text-transform:uppercase;padding-top:2px}
+.kv dd{margin:0}
+.tabs{display:flex;gap:14px;border-bottom:1px solid var(--line);font-size:12.5px}
+.tabs span{padding:6px 0;color:var(--muted)} .tabs span.on{color:var(--ink);border-bottom:2px solid var(--g1)}
+input[type=checkbox]{accent-color:var(--g2)}
+</style></head>
+<body data-active="fleet" data-crumb="Infrastructure / <b>Fleet</b>">
+<main class="main"><div class="page" style="max-width:1500px">
+
+<div style="display:flex;align-items:flex-end;gap:16px">
+  <div><div class="kick">14 machines · 10 guests · 3 tailnet-only</div><h1>Fleet</h1></div>
+  <div style="margin-left:auto" class="toolbar">
+    <div class="seg"><button onclick="location='overview-a-cards.html'">Cards</button><button onclick="location='overview-b-topology.html'">Topology</button><button class="on">Table</button></div>
+  </div>
+</div>
+<div class="toolbar" style="margin-top:16px">
+  <span class="filter">Kind <b>All</b></span><span class="filter">Status <b>Any</b></span><span class="filter">Connection <b>Any</b></span><span class="filter">+ Tag</span>
+  <span class="kick" style="margin-left:auto">Saved views</span><div class="seg"><button class="on">All</button><button>Needs attention</button><button>Lab</button><button>+ Save</button></div>
+</div>
+
+<div class="wrap">
+<div>
+  <div class="bulk"><b>2 selected</b><span class="muted">·</span><a class="btn sm">Probe inventory</a><a class="btn sm">Install fleetd</a><a class="btn sm">Add tag</a><a class="btn sm">Apply profile…</a><span class="kick" style="margin-left:auto">blast radius: 2 machines · 0 production</span></div>
+  <table>
+    <thead><tr><th style="width:28px"></th><th>Name</th><th>Kind</th><th>Status</th><th>Connections</th><th>OS / Arch</th><th>Resources</th><th>Seen</th></tr></thead>
+    <tbody>
+      <tr class="hostrow"><td></td><td><div class="n">pve-01</div></td><td><span class="tag" style="--c:var(--c-compute)">PVE node</span></td><td><span class="chip ok">Online</span></td><td><span class="conn on">API</span> <span class="conn on">TS</span></td><td class="mono">PVE 9.2.2 · x86_64</td><td class="mono">16C · 45/64G</td><td class="mono">12s</td></tr>
+      <tr class="sel"><td><input type="checkbox" checked></td><td class="indent"><div class="n">dev-ubuntu-01</div><div class="s">QEMU 101</div></td><td><span class="tag" style="--c:var(--c-compute)">VM</span></td><td><span class="chip ok">Connected</span></td><td><span class="conn on">FLEETD</span> <span class="conn on">QGA</span> <span class="conn on">TS</span></td><td class="mono">Ubuntu 24.04 · x86_64</td><td class="mono">8C · 16G</td><td class="mono">3s</td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">win11-test</div><div class="s">QEMU 104</div></td><td><span class="tag" style="--c:var(--c-compute)">VM</span></td><td><span class="chip ok">Running</span></td><td><span class="conn on">QGA</span></td><td class="mono">Windows 11 · x86_64</td><td class="mono">4C · 8G</td><td class="mono">4m</td></tr>
+      <tr class="sel"><td><input type="checkbox" checked></td><td class="indent"><div class="n">docker-host</div><div class="s">LXC 200</div></td><td><span class="tag" style="--c:var(--c-storage)">LXC</span></td><td><span class="chip info">Agentless</span></td><td><span class="conn on">SSH</span></td><td class="mono">Debian 12 · x86_64</td><td class="mono">4C · 8G</td><td class="mono">6m</td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">lab-9c21</div><div class="s">QEMU 912 · lease</div></td><td><span class="tag" style="--c:var(--c-ephemeral)">Lab VM</span></td><td><span class="chip err">Cleanup failed</span></td><td>—</td><td class="mono">Ubuntu 24.04</td><td class="mono">2C · 4G</td><td class="mono">1h</td></tr>
+      <tr class="hostrow"><td></td><td><div class="n">pve-02</div></td><td><span class="tag" style="--c:var(--c-compute)">PVE node</span></td><td><span class="chip ok">Online</span></td><td><span class="conn on">API</span> <span class="conn on">TS</span></td><td class="mono">PVE 9.2.2 · x86_64</td><td class="mono">8C · 13/32G</td><td class="mono">12s</td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">lab-7f3a</div><div class="s">QEMU 910 · lease</div></td><td><span class="tag" style="--c:var(--c-ephemeral)">Lab VM</span></td><td><span class="chip grad">Ready</span></td><td><span class="conn on">SSH</span> <span class="conn on">QGA</span></td><td class="mono">Ubuntu 24.04</td><td class="mono">2C · 4G</td><td class="mono">5s</td></tr>
+      <tr class="hostrow"><td></td><td><div class="n">Bare metal &amp; devices</div></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">workstation</div><div class="s">Desktop</div></td><td><span class="tag" style="--c:var(--c-desktop)">Desktop</span></td><td><span class="chip ok">Connected</span></td><td><span class="conn on">FLEETD</span> <span class="conn on">TS</span></td><td class="mono">Ubuntu 24.04 · x86_64</td><td class="mono">24C · 64G</td><td class="mono">1s</td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">rpi-kitchen</div><div class="s">Raspberry Pi 4 Model B</div></td><td><span class="tag" style="--c:var(--c-network)">Board</span></td><td><span class="chip info">Agentless</span></td><td><span class="conn on">SSH</span> <span class="conn on">TS</span></td><td class="mono">Debian 12 · aarch64</td><td class="mono">4C · 8G</td><td class="mono">2m</td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">rpi-garage</div><div class="s">Raspberry Pi 5</div></td><td><span class="tag" style="--c:var(--c-network)">Board</span></td><td><span class="chip err">Offline</span></td><td><span class="conn warn">SSH</span> <span class="conn off">TS</span></td><td class="mono">Debian 12 · aarch64</td><td class="mono">4C · 4G</td><td class="mono">2d</td></tr>
+      <tr><td><input type="checkbox"></td><td class="indent"><div class="n">laptop-fw13</div><div class="s">Framework 13</div></td><td><span class="tag" style="--c:var(--c-desktop)">Laptop</span></td><td><span class="chip off">Stale</span></td><td><span class="conn off">FLEETD</span> <span class="conn on">TS</span></td><td class="mono">Fedora 42 · x86_64</td><td class="mono">12C · 32G</td><td class="mono">3h</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<aside class="drawer">
+  <div style="display:flex;align-items:center;gap:8px"><span class="kick">VM · QEMU 101 · pve-01</span><span style="margin-left:auto" class="faint">✕</span></div>
+  <div style="display:flex;align-items:center;gap:10px"><h3>dev-ubuntu-01</h3><span class="chip ok"><span class="dot"></span>Connected</span></div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap"><a class="btn sm">Shutdown</a><a class="btn sm">Reboot</a><a class="btn sm">Snapshot…</a><a class="btn sm">Copy ssh</a><a class="btn sm">VS Code ↗</a></div>
+  <div class="tabs"><span class="on">Overview</span><span>Inventory</span><span>Projects</span><span>Ops</span><span>Audit</span></div>
+  <dl class="kv">
+    <dt>Hardware</dt><dd>8 vCPU · 16 GB · 180 GB free</dd>
+    <dt>OS</dt><dd>Ubuntu 24.04 · 6.8.0-45 · x86_64</dd>
+    <dt>Runs on</dt><dd>pve-01 → QEMU 101 <span class="faint">(linked)</span></dd>
+    <dt>Endpoints</dt><dd><span class="conn on">FLEETD 0.7.0</span> <span class="conn on">SSH</span><br><span class="mono faint" style="font-size:11px">dev-ubuntu-01.example.ts.net</span></dd>
+    <dt>Tailscale</dt><dd>online · 100.64.0.11 · tag:dev</dd>
+    <dt>Tools</dt><dd class="mono" style="font-size:11px">git 2.43 · docker 27.3 · mise 2026.9 · claude 2.1 · codex —</dd>
+    <dt>Projects</dt><dd>fleet-manager <span class="chip ok">ready</span><br>filaments <span class="chip off">dirty</span></dd>
+    <dt>Groups</dt><dd><span class="tag">homelab</span> <span class="tag">dev</span></dd>
+  </dl>
+  <div class="kick">Last operations</div>
+  <div class="mono" style="font-size:11px;line-height:1.9"><span class="faint">11:40</span> project.ready fleet-manager <span style="color:var(--ok)">OK</span><br><span class="faint">09:12</span> skills.deploy preset:dev <span style="color:var(--ok)">OK</span></div>
+</aside>
+</div>
+
+</div></main></body></html>

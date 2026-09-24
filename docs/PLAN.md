@@ -314,10 +314,31 @@ Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymou
 
 Exit gate: authenticated deployment no longer relies on LAN trust; a restricted agent identity can create and destroy an allowed Lab lease but cannot execute on production, administer Fleet, read secrets, or retain a VM.
 
+### M9 — Fleet Console v2 and fleet-wide skills
+
+Status: planned (2026-09-24). Detailed plan, decisions, and issue breakdown: [planning/web-console.md](planning/web-console.md); mockups in `docs/design/web-console/mockups/`.
+
+Outcome: the web app is a complete fleet console, and skills are managed across the whole fleet rather than one machine at a time.
+
+- Replace the single-column panel shell with a routed shadcn-vue app (sidebar, dark by default, DESIGN.md v2 tokens, sharp 2px surfaces) that remains a pure adapter over the public API.
+- One fleet inventory joining Fleet machines, Proxmox nodes/guests, and tailnet devices. It shows kind, hosting relation, connections, hardware, and health, and uses a cards default with a table/drawer toggle. A unified guided "Add" flow runs over onboarding drafts, tailnet import, Proxmox accounts, and guest adoption.
+- A fleet-wide event stream for live views; an overview with a needs-attention queue; operations and audit pages (audit query API).
+- Fleet-wide skills over the public `skills-manager-cli --json` contract:
+  - a fleet skill matrix and per-machine library/deployment CRUD;
+  - Fleet-authored skills with drafts/immutable versions, rolled out through a Fleet-owned staging directory plus the CLI;
+  - assignments (global/group/tag/machine × agents) reconciled by the M4 planner with drift;
+  - the official `fleet` skill as a built-in global skill.
+- Lab environments and image-pipeline pages over the M7 APIs (absorbing #15's web item and #109's web editor slice); lease TTL extension.
+- Settings, Proxmox, and Projects pages; tailnet identity as an optional principal (ADR first).
+
+Exit gate: every Developer Fleet, Proxmox, and Lab workflow available in `fleetctl` is operable from the console, with the same authorization and audit. A new global skill version reaches every reachable machine with Skills Manager through one reviewed rollout; drift is shown for the rest. Fleet never reads or writes Skills Manager's database or library files directly.
+
+M9 depends only on landed M1–M4, M6, and M7 contracts and may run in parallel with M6/M7 real-host acceptance.
+
 ### Later — scale, convenience, and additional providers
 
 - Optional native desktop shell that consumes the public API and offers local editor/terminal handoff; no core logic.
-- Command palette over discoverable authorized API actions.
+- Command palette over discoverable authorized API actions (navigation/search lands in M9; action execution stays here).
 - Bulk plans/actions across tags/groups with blast-radius preview, concurrency limits, partial-result reporting, and per-target authorization/audit.
 - Rich Frogenv machine/group/status administration after its public machine-readable contract supports it; key private material remains outside Fleet.
 - Compose-aware container grouping/actions, never a full Compose authoring platform.
@@ -339,6 +360,7 @@ M0 Foundation
        M1 operations/audit -------------------------+-> M7 image builds + Lab -> M8 auth hardening
        M3 project readiness ------------------------+
        minimal profile/template contracts ----------+
+  M1-M4 + M6 + M7 APIs -> M9 Fleet Console v2 + fleet-wide skills
 ```
 
 The critical path is M0 → M1 → M2 → M3 for the complete Developer Fleet release, then M6 plus the Packer/image-version slice of M7 for the first Lab release. Full M4 GitOps and Docker are not Lab prerequisites. Tailscale discovery is optional. Agents use skills and `fleetctl`; MCP is not on the roadmap.
@@ -358,6 +380,7 @@ Use the milestone names M0–M8 above. Each epic should be a tracking issue cont
 | M6 | Proxmox accounts and discovery; VM/LXC associations and guest data; lifecycle/task operations; template/clone/snapshot operations |
 | M7 | Packer recipe editor/build/version/promotion; minimal Lab templates/readiness; leases and cleanup; Lab CLI/skills/project workflow; later Windows guest and hardware slices |
 | M8 | Optional authenticated deployment; agent/CI identity hardening and delegation; autonomous Lab/CI workflows; policy/audit administration |
+| M9 | Console foundation; fleet inventory console; fleet-wide skills; Lab and images console; settings/Proxmox/projects/audit/access |
 
 Issue-ready work for M0–M2 is in [planning/initial-issues.md](planning/initial-issues.md). Use its issue template for later milestones.
 

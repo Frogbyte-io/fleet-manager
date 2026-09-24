@@ -1,0 +1,38 @@
+<!doctype html>
+<!-- Settings — a left sub-nav of sections; each integration shows its honest
+     status (configured / verified / version) and never displays a secret, only
+     that one exists and when it was set. -->
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><title>Settings</title>
+<link rel="stylesheet" href="shared.css"><script src="shared.js"></script>
+<style>
+.lay{display:grid;grid-template-columns:200px 1fr;gap:26px;margin-top:18px}
+.sub a{display:block;padding:6px 10px;font-size:13px;color:var(--muted);border-radius:var(--r)}
+.sub a.on{background:var(--panel);color:var(--ink);box-shadow:inset 2px 0 0 var(--g1)}
+.sub .kick{margin:14px 10px 4px}
+.int{display:grid;grid-template-columns:40px 1fr auto;gap:14px;align-items:center;padding:14px;margin-bottom:10px}
+.int .well{width:40px;height:40px}.int .well svg{width:20px;height:20px}
+.int b{font:700 14px var(--head)}
+.int .spec{margin-top:3px}
+.warn{border-left:2px solid var(--err);padding:12px 14px;margin-bottom:16px;font-size:13px}
+</style></head>
+<body data-active="settings" data-crumb="Control / <b>Settings</b>">
+<main class="main"><div class="page">
+<div class="kick">controller configuration</div><h1>Settings</h1>
+<div class="lay">
+  <nav class="sub">
+    <div class="kick">Controller</div><a>General</a><a>Appearance</a><a>Security &amp; access</a><a>Backups</a><a>Diagnostics</a>
+    <div class="kick">Connect</div><a class="on">Integrations</a><a>Credentials</a><a>SSH &amp; host keys</a><a>fleetd &amp; enrollment</a>
+    <div class="kick">Behaviour</div><a>Lab defaults</a><a>Desired state (Git)</a><a>Notifications</a>
+  </nav>
+  <div>
+    <div class="card warn"><b>Trusted-LAN mode.</b> <span class="muted">Every client that can reach this controller can read and mutate. All actions are audited as <span class="mono">anonymous-lan-admin</span>. You are reaching it through <span class="mono">tailscale serve</span> — tailnet identity can become the login later.</span></div>
+    <div class="h2" style="margin-top:0"><h2>Integrations</h2><span class="note">secrets are write-only</span></div>
+    <div class="card int"><div class="well" style="--c:var(--c-compute)"><svg viewBox="0 0 24 24"><path d="M4 6l8-3 8 3v6c0 5-4 8-8 9-4-1-8-4-8-9z"/></svg></div><div><b>Proxmox VE</b> <span class="chip ok">1 account · pinned</span><div class="spec">HOMELAB-PVE · PVE 9.2.2 · TOKEN FLEET@PVE!CTRL · SET 2026-09-12</div></div><div><a class="btn sm">Manage</a> <a class="btn sm">+ Account</a></div></div>
+    <div class="card int"><div class="well" style="--c:var(--info)"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/></svg></div><div><b>Tailscale</b> <span class="chip ok">configured</span><div class="spec">OAUTH CLIENT K7x…Q · SCOPE DEVICES:CORE:READ · 8 DEVICES</div></div><div><a class="btn sm">Rotate secret</a> <a class="btn sm ghost">Disconnect</a></div></div>
+    <div class="card int"><div class="well"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18"/><path d="M3 15l5-5 5 5 3-3 5 5"/></svg></div><div><b>Packer</b> <span class="chip ok">1.15.2</span><div class="spec">OPERATOR-INSTALLED · PLUGIN PROXMOX 1.2.4 · RANGE &gt;=1.15 &lt;2</div></div><div><a class="btn sm">Re-probe</a></div></div>
+    <div class="card int"><div class="well"><svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></svg></div><div><b>GitHub</b> <span class="chip off">not configured</span><div class="spec">PROJECT REMOTES · PRIVATE CLONE VIA MACHINE CREDENTIALS</div></div><div><a class="btn sm">Connect</a></div></div>
+    <div class="card int"><div class="well"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/></svg></div><div><b>Skills Manager · Frogenv · mise</b> <span class="chip info">per machine</span><div class="spec">DETECTED ON 5 / 3 / 7 MACHINES · CONTRACT-TESTED CLI RANGES</div></div><div><a class="btn sm">View</a></div></div>
+    <div class="card int" style="opacity:.6"><div class="well"><svg viewBox="0 0 24 24"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/></svg></div><div><b>Docker</b> <span class="chip off">M5</span><div class="spec">VIA FLEETD OR SSH CONTEXT</div></div><div></div></div>
+  </div>
+</div>
+</div></main></body></html>

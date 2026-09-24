@@ -610,6 +610,16 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 
 FM-214 moves after the first Lab release. Initial Windows support in M6 is Proxmox lifecycle plus QEMU Guest Agent health/IP observations. The later issue retains the Windows service, protected node key, named-pipe broker, inventory/exec, project readiness, upgrade/rollback, and real-host test requirements described by FM-S04.
 
+## M9 — Fleet Console v2 and fleet-wide skills
+
+**Status: Planned (2026-09-24).** Plan, maintainer decisions, and full issue breakdown: [web-console.md](web-console.md). Mockups: `docs/design/web-console/mockups/`. Relationship to existing work:
+- #15's web leases item moves to FM-930.
+- #109's web editor slice moves to FM-932.
+- FM-302's deferred Markdown editing is superseded by FM-922 and FM-S10.
+- `bootstrap/fleet-bootstrap` is retired by FM-924.
+
+GitHub mapping (epics and issues) is recorded below once created.
+
 ## Creation and dependency hygiene
 
 - Put every issue under exactly one milestone and one epic.
