@@ -630,39 +630,36 @@ mod tests {
             assert!(
                 fact.status == CapabilityStatus::Known
                     || fact.status == CapabilityStatus::Unavailable,
-                "{:?} must be known or unavailable, not a guess",
-                fact
+                "{fact:?} must be known or unavailable, not a guess"
             );
         }
         // The disk total is a byte count when known.
         if let Some(disk) = facts
             .iter()
             .find(|fact| fact.namespace == "hardware" && fact.name == "disk_total_bytes")
+            .filter(|disk| disk.status == CapabilityStatus::Known)
         {
-            if disk.status == CapabilityStatus::Known {
-                let value = disk
-                    .value
-                    .as_deref()
-                    .expect("a known disk total has a value");
-                assert!(
-                    value.parse::<u64>().is_ok(),
-                    "the disk total is a byte count, got {value:?}"
-                );
-            }
+            let value = disk
+                .value
+                .as_deref()
+                .expect("a known disk total has a value");
+            assert!(
+                value.parse::<u64>().is_ok(),
+                "the disk total is a byte count, got {value:?}"
+            );
         }
         // The CPU model parses from "model name : ..." without the label
         // or the colon.
         if let Some(cpu) = facts
             .iter()
             .find(|fact| fact.namespace == "hardware" && fact.name == "cpu_model")
+            .filter(|cpu| cpu.status == CapabilityStatus::Known)
         {
-            if cpu.status == CapabilityStatus::Known {
-                let value = cpu.value.as_deref().expect("a known cpu model has a value");
-                assert!(
-                    !value.contains("model name") && !value.starts_with(':'),
-                    "the cpu model is the bare string, got {value:?}"
-                );
-            }
+            let value = cpu.value.as_deref().expect("a known cpu model has a value");
+            assert!(
+                !value.contains("model name") && !value.starts_with(':'),
+                "the cpu model is the bare string, got {value:?}"
+            );
         }
     }
 
