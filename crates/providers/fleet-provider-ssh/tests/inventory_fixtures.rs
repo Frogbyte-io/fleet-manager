@@ -25,6 +25,22 @@ fn a_linux_baseline_parses_into_facts() {
         line("os", "family", "Linux", "known", 1_000),
         line("os", "distribution", "ubuntu", "known", 1_000),
         line("os", "distribution_version", "24.04", "known", 1_000),
+        line("host", "virtualization", "kvm", "known", 1_000),
+        line(
+            "hardware",
+            "model",
+            "Raspberry Pi 4 Model B",
+            "known",
+            1_000,
+        ),
+        line(
+            "hardware",
+            "cpu_model",
+            "Intel(R) Xeon(R) CPU",
+            "known",
+            1_000,
+        ),
+        line("hardware", "disk_total_bytes", "1024", "known", 1_000),
         line("tool", "git", "git version 2.47.1", "known", 1_000),
         line("tool", "docker", "", "unavailable", 1_000),
     ]
@@ -32,7 +48,7 @@ fn a_linux_baseline_parses_into_facts() {
 
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
     let facts = parse_probe_output(&stdout, now);
-    assert_eq!(facts.len(), 6);
+    assert_eq!(facts.len(), 10);
     let family = facts.iter().find(|fact| fact.name == "family").unwrap();
     assert_eq!(family.value.as_deref(), Some("Linux"));
     assert_eq!(family.source, PROBE_SOURCE);
@@ -44,6 +60,82 @@ fn a_linux_baseline_parses_into_facts() {
     let docker = facts.iter().find(|fact| fact.name == "docker").unwrap();
     assert_eq!(docker.status, fleet_core::CapabilityStatus::Unavailable);
     assert_eq!(docker.value, None);
+}
+
+#[test]
+fn hardware_facts_carry_honest_states() {
+    // FM-914: virtualization, model, CPU model, and disk total parse with
+    // their availability states intact — a VM, an SBC, bare metal, and a
+    // host that cannot answer all stay distinct.
+    let stdout = [
+        line("host", "virtualization", "kvm", "known", 5_000),
+        line(
+            "hardware",
+            "model",
+            "Raspberry Pi 4 Model B",
+            "known",
+            5_000,
+        ),
+        line(
+            "hardware",
+            "cpu_model",
+            "Intel(R) Core(TM) i7",
+            "known",
+            5_000,
+        ),
+        line(
+            "hardware",
+            "disk_total_bytes",
+            "512110190592",
+            "known",
+            5_000,
+        ),
+        line("host", "virtualization", "", "unavailable", 5_000),
+        line("hardware", "model", "", "unavailable", 5_000),
+        line("hardware", "cpu_model", "", "unavailable", 5_000),
+        line("hardware", "disk_total_bytes", "", "unavailable", 5_000),
+    ]
+    .join("\n");
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+    let facts = parse_probe_output(&stdout, now);
+    assert_eq!(facts.len(), 8);
+    let virt = facts
+        .iter()
+        .find(|fact| fact.namespace == "host" && fact.name == "virtualization")
+        .unwrap();
+    assert_eq!(virt.value.as_deref(), Some("kvm"));
+    let model = facts
+        .iter()
+        .find(|fact| fact.namespace == "hardware" && fact.name == "model")
+        .unwrap();
+    assert_eq!(model.value.as_deref(), Some("Raspberry Pi 4 Model B"));
+    let cpu = facts
+        .iter()
+        .find(|fact| fact.namespace == "hardware" && fact.name == "cpu_model")
+        .unwrap();
+    assert_eq!(cpu.value.as_deref(), Some("Intel(R) Core(TM) i7"));
+    let disk = facts
+        .iter()
+        .find(|fact| fact.namespace == "hardware" && fact.name == "disk_total_bytes")
+        .unwrap();
+    assert_eq!(disk.value.as_deref(), Some("512110190592"));
+    // The four unavailable shapes stay honest: unavailable with no value,
+    // visibly distinct from the known half of the stream.
+    let unavailable = facts
+        .iter()
+        .filter(|fact| fact.status == fleet_core::CapabilityStatus::Unavailable)
+        .count();
+    assert_eq!(unavailable, 4, "the unavailable half of the stream");
+    for fact in facts.iter().filter(|fact| {
+        matches!(
+            (fact.namespace.as_str(), fact.name.as_str()),
+            ("host", "virtualization") | ("hardware", "model" | "cpu_model" | "disk_total_bytes")
+        )
+    }) {
+        if fact.status == fleet_core::CapabilityStatus::Unavailable {
+            assert_eq!(fact.value, None, "{fact:?} carries no invented value");
+        }
+    }
 }
 
 #[test]

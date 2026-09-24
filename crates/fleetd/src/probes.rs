@@ -175,13 +175,15 @@ fn run_isolated<T: Send + 'static>(
 }
 
 /// The standard node probe set: the platform, the hostname, this daemon,
-/// and the tools on PATH.
+/// the hardware facts (virtualization, model, CPU model, disk total), and
+/// the tools on PATH.
 #[must_use]
 pub fn standard_probes() -> Vec<Arc<dyn Probe>> {
     vec![
         Arc::new(OsProbe),
         Arc::new(HostProbe),
         Arc::new(AgentProbe),
+        Arc::new(HardwareProbe),
         Arc::new(ToolProbe::git()),
         Arc::new(ToolProbe::docker()),
         Arc::new(ToolProbe::tailscale()),
@@ -246,6 +248,125 @@ impl Probe for AgentProbe {
             "fleetd",
             Some(env!("CARGO_PKG_VERSION").to_owned()),
         )])
+    }
+}
+
+/// The hardware probe: virtualization kind, board or product model, CPU
+/// model, and the root disk's total size. Read-only file and command
+/// observation with honest unavailable states; serial numbers are never
+/// read (FM-914).
+#[derive(Debug)]
+pub struct HardwareProbe;
+
+impl Probe for HardwareProbe {
+    fn name(&self) -> &'static str {
+        "hardware"
+    }
+
+    fn collect(&self) -> Result<Vec<CapabilityFact>, String> {
+        Ok(vec![
+            Self::virtualization(),
+            Self::model(),
+            Self::cpu_model(),
+            Self::disk_total(),
+        ])
+    }
+}
+
+impl HardwareProbe {
+    fn virtualization() -> CapabilityFact {
+        // The bare-metal answer is exit 1 with "none" on stdout, so judge
+        // the text, not the status (matching the agentless probe).
+        match std::process::Command::new("systemd-detect-virt").output() {
+            Ok(output) => match virtualization_kind(&String::from_utf8_lossy(&output.stdout)) {
+                Some(kind) => fact("host", "virtualization", Some(kind)),
+                None => unavailable("host", "virtualization"),
+            },
+            Err(_) => unavailable("host", "virtualization"),
+        }
+    }
+
+    fn model() -> CapabilityFact {
+        if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
+            let model = model.trim_end_matches('\0').trim().to_owned();
+            if !model.is_empty() {
+                return fact("hardware", "model", Some(model));
+            }
+        }
+        if let Ok(model) = std::fs::read_to_string("/sys/class/dmi/id/product_name") {
+            let model = model.trim().to_owned();
+            if !model.is_empty() {
+                return fact("hardware", "model", Some(model));
+            }
+        }
+        unavailable("hardware", "model")
+    }
+
+    fn cpu_model() -> CapabilityFact {
+        match std::fs::read_to_string("/proc/cpuinfo") {
+            Ok(cpuinfo) => {
+                let model = cpuinfo
+                    .lines()
+                    .find_map(|line| line.strip_prefix("model name"))
+                    .and_then(|rest| rest.split_once(':'))
+                    .map(|(_, model)| model.trim().to_owned())
+                    .filter(|model| !model.is_empty());
+                match model {
+                    Some(model) => fact("hardware", "cpu_model", Some(model)),
+                    None => unavailable("hardware", "cpu_model"),
+                }
+            }
+            Err(_) => unavailable("hardware", "cpu_model"),
+        }
+    }
+
+    fn disk_total() -> CapabilityFact {
+        match std::process::Command::new("df").args(["-kP", "/"]).output() {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                match root_disk_total_bytes(&text) {
+                    Some(bytes) => fact("hardware", "disk_total_bytes", Some(bytes.to_string())),
+                    None => unavailable("hardware", "disk_total_bytes"),
+                }
+            }
+            _ => unavailable("hardware", "disk_total_bytes"),
+        }
+    }
+}
+
+/// The root filesystem's total size in bytes from POSIX `df -kP` output:
+/// the last line's second field, in 1 KiB blocks; a missing, malformed, or
+/// zero total is no fact (unavailable, not an invented zero).
+fn root_disk_total_bytes(df_output: &str) -> Option<u64> {
+    df_output
+        .lines()
+        .last()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|field| field.parse::<u64>().ok())
+        .filter(|kb| *kb > 0)
+        .map(|kb| kb * 1024)
+}
+
+/// The virtualization kind from `systemd-detect-virt` stdout: non-empty
+/// text is the answer ("none" for bare metal included); empty or missing
+/// output is no fact.
+fn virtualization_kind(stdout: &str) -> Option<String> {
+    let kind = stdout.trim();
+    if kind.is_empty() {
+        None
+    } else {
+        Some(kind.to_owned())
+    }
+}
+
+fn unavailable(namespace: &str, name: &str) -> CapabilityFact {
+    CapabilityFact {
+        namespace: namespace.to_owned(),
+        name: name.to_owned(),
+        value: None,
+        status: CapabilityStatus::Unavailable,
+        observed_at: fleet_core::Timestamp::from_unix_millis(0),
+        source: String::new(),
     }
 }
 
@@ -498,6 +619,96 @@ mod tests {
                 .find(|f| f.namespace == "tool" && f.name == tool);
             assert!(fact.is_some(), "the {tool} fact must exist");
         }
+    }
+
+    #[test]
+    fn the_hardware_probe_reports_its_facts_honestly() {
+        // FM-914: the four hardware facts always exist, with a value when
+        // this host can answer and an honest unavailable when it cannot.
+        let probe = HardwareProbe;
+        let facts = probe.collect().expect("the hardware probe collects");
+        let names: Vec<(&str, &str)> = facts
+            .iter()
+            .map(|fact| (fact.namespace.as_str(), fact.name.as_str()))
+            .collect();
+        for expected in [
+            ("host", "virtualization"),
+            ("hardware", "model"),
+            ("hardware", "cpu_model"),
+            ("hardware", "disk_total_bytes"),
+        ] {
+            assert!(
+                names.contains(&expected),
+                "missing {expected:?} in {names:?}"
+            );
+        }
+        for fact in &facts {
+            assert!(
+                fact.status == CapabilityStatus::Known
+                    || fact.status == CapabilityStatus::Unavailable,
+                "{fact:?} must be known or unavailable, not a guess"
+            );
+        }
+        // The disk total is a byte count when known.
+        if let Some(disk) = facts
+            .iter()
+            .find(|fact| fact.namespace == "hardware" && fact.name == "disk_total_bytes")
+            .filter(|disk| disk.status == CapabilityStatus::Known)
+        {
+            let value = disk
+                .value
+                .as_deref()
+                .expect("a known disk total has a value");
+            assert!(
+                value.parse::<u64>().is_ok(),
+                "the disk total is a byte count, got {value:?}"
+            );
+        }
+        // The CPU model parses from "model name : ..." without the label
+        // or the colon.
+        if let Some(cpu) = facts
+            .iter()
+            .find(|fact| fact.namespace == "hardware" && fact.name == "cpu_model")
+            .filter(|cpu| cpu.status == CapabilityStatus::Known)
+        {
+            let value = cpu.value.as_deref().expect("a known cpu model has a value");
+            assert!(
+                !value.contains("model name") && !value.starts_with(':'),
+                "the cpu model is the bare string, got {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bare_metal_none_output_is_a_known_fact() {
+        // systemd-detect-virt exits 1 on bare metal but still prints
+        // "none"; the text, not the exit status, is the answer.
+        assert_eq!(
+            virtualization_kind("none\n"),
+            Some("none".to_owned()),
+            "exit-1 bare metal is known, not unavailable"
+        );
+        assert_eq!(virtualization_kind("kvm\n"), Some("kvm".to_owned()));
+        assert_eq!(virtualization_kind(""), None);
+        assert_eq!(virtualization_kind("   \n"), None);
+    }
+
+    #[test]
+    fn a_zero_or_malformed_df_total_is_not_a_fact() {
+        let header = "Filesystem 1024-blocks Used Available Capacity Mounted on\n";
+        assert_eq!(
+            root_disk_total_bytes(&format!("{header}/dev/sda1 500000000 100 200 1% /")),
+            Some(500_000_000 * 1024)
+        );
+        assert_eq!(
+            root_disk_total_bytes(&format!("{header}/dev/sda1 0 0 0 0% /")),
+            None
+        );
+        assert_eq!(
+            root_disk_total_bytes(&format!("{header}/dev/sda1 junk 0 0 0% /")),
+            None
+        );
+        assert_eq!(root_disk_total_bytes(""), None);
     }
 
     #[test]
