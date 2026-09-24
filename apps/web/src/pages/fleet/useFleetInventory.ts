@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/vue-query'
-import { computed, type ComputedRef } from 'vue'
+import { computed, ref, type ComputedRef } from 'vue'
 
 import {
   discoverProxmoxCluster,
@@ -10,37 +10,79 @@ import {
   listTailnetDevices,
   type PageAssociatedGuestDtoItemsItem,
   type PageCorrelatedDeviceDtoItemsItem,
+  type PageProxmoxAccountDtoItemsItem,
   type ProxmoxDiscoveryDto,
 } from '@frogbyte-io/fleet-api-client'
 
 import { buildInventory, type Inventory, type ProxmoxSourceInput } from './inventory'
 
+const MAX_PAGES = 20
+
 function errorOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+interface Paged<T> {
+  items: T[]
+  page: { nextCursor?: string | null }
+}
+
+type PagedResponse<T> = { status: number, data: Paged<T> }
+
+async function fetchAllPages<T>(
+  fetchPage: (cursor?: string) => Promise<PagedResponse<T>>,
+): Promise<{ items: T[], truncated: boolean }> {
+  const items: T[] = []
+  let cursor: string | undefined
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const response = await fetchPage(cursor)
+    if (response.status !== 200)
+      throw new Error(`Request failed (${response.status})`)
+    items.push(...response.data.items)
+    const next = response.data.page?.nextCursor ?? null
+    if (!next)
+      return { items, truncated: false }
+    cursor = next
+  }
+  return { items, truncated: true }
+}
+
+const MACHINE_LIMIT = 1000
 
 export function useFleetInventory(): {
   inventory: ComputedRef<Inventory>
   isLoading: ComputedRef<boolean>
   refetchAll: () => Promise<void>
 } {
+  const paginationWarning = ref<string | null>(null)
+
+  function noteTruncation(message: string) {
+    paginationWarning.value = paginationWarning.value
+      ? `${paginationWarning.value} ${message}`
+      : message
+  }
+
   const machinesQuery = useQuery({
     queryKey: ['fleet', 'machines'],
     queryFn: async () => {
-      const response = await listMachines({ limit: 200 })
-      if (response.status === 200)
-        return response.data.items
-      throw new Error(`listMachines failed (${response.status})`)
+      // The machines endpoint takes no cursor (only `limit`), so one request
+      // with a generous limit is the whole list; a reported next cursor means
+      // the list was cut short, which is surfaced rather than hidden.
+      const response = await listMachines({ limit: MACHINE_LIMIT })
+      if (response.status !== 200)
+        throw new Error(`listMachines failed (${response.status})`)
+      if (response.data.page?.nextCursor)
+        noteTruncation(`More than ${MACHINE_LIMIT} machines — some are not shown.`)
+      return response.data.items
     },
   })
 
   const accountsQuery = useQuery({
     queryKey: ['fleet', 'proxmox-accounts'],
     queryFn: async () => {
-      const response = await listProxmoxAccounts()
-      if (response.status === 200)
-        return response.data.items
-      throw new Error(`listProxmoxAccounts failed (${response.status})`)
+      const { items } = await fetchAllPages(cursor =>
+        listProxmoxAccounts({ limit: 200, cursor }) as unknown as Promise<PagedResponse<PageProxmoxAccountDtoItemsItem>>)
+      return items
     },
   })
 
@@ -78,10 +120,11 @@ export function useFleetInventory(): {
       confirmedAccountIds.value.map(accountId => ({
         queryKey: ['fleet', 'proxmox-guests', accountId],
         queryFn: async () => {
-          const response = await listProxmoxGuests(accountId, { limit: 200 })
-          if (response.status === 200)
-            return response.data.items as PageAssociatedGuestDtoItemsItem[]
-          throw new Error(`listProxmoxGuests failed (${response.status})`)
+          const { items, truncated } = await fetchAllPages(cursor =>
+            listProxmoxGuests(accountId, { limit: 200, cursor }) as unknown as Promise<PagedResponse<PageAssociatedGuestDtoItemsItem>>)
+          if (truncated)
+            noteTruncation('Guests hit the 20-page safety cap — some guests may be missing.')
+          return items
         },
       })),
     ),
@@ -92,59 +135,92 @@ export function useFleetInventory(): {
   const tailnetDevicesQuery = useQuery({
     queryKey: ['fleet', 'tailnet-devices'],
     queryFn: async () => {
-      const response = await listTailnetDevices({ limit: 200 })
-      if (response.status === 200)
-        return response.data.items as PageCorrelatedDeviceDtoItemsItem[]
-      throw new Error(`listTailnetDevices failed (${response.status})`)
+      const { items, truncated } = await fetchAllPages(cursor =>
+        listTailnetDevices({ limit: 200, cursor }) as unknown as Promise<PagedResponse<PageCorrelatedDeviceDtoItemsItem>>)
+      if (truncated)
+        noteTruncation('Tailnet devices hit the 20-page safety cap — some devices may be missing.')
+      return items
     },
     enabled: tailnetConfigured,
   })
 
+  const discoveryQueryByAccount = computed(() => {
+    const map = new Map<string, (typeof discoveryQueries.value)[number]>()
+    confirmedAccountIds.value.forEach((accountId, index) => {
+      const query = discoveryQueries.value[index]
+      if (query)
+        map.set(accountId, query)
+    })
+    return map
+  })
+
+  const guestQueryByAccount = computed(() => {
+    const map = new Map<string, (typeof guestQueries.value)[number]>()
+    confirmedAccountIds.value.forEach((accountId, index) => {
+      const query = guestQueries.value[index]
+      if (query)
+        map.set(accountId, query)
+    })
+    return map
+  })
+
   const inventory = computed<Inventory>(() => {
-    const proxmox: ProxmoxSourceInput[] = accounts.value.map((account, index) => {
+    const proxmox: ProxmoxSourceInput[] = accounts.value.map((account) => {
       const confirmed = account.fingerprintState === 'confirmed'
-      const discoveryQuery = discoveryQueries.value[index]
-      const guestQuery = guestQueries.value[index]
+      const discoveryQuery = confirmed ? discoveryQueryByAccount.value.get(account.id) : undefined
+      const guestQuery = confirmed ? guestQueryByAccount.value.get(account.id) : undefined
       const discovery = confirmed ? discoveryQuery?.data ?? null : null
       const guests = confirmed ? guestQuery?.data ?? null : null
-      const error = confirmed
-        ? (discoveryQuery?.error
-          ? errorOf(discoveryQuery.error)
-          : guestQuery?.error
-            ? errorOf(guestQuery.error)
-            : null)
+      const discoveryError = confirmed && discoveryQuery?.error
+        ? errorOf(discoveryQuery.error)
+        : null
+      const guestsError = confirmed && guestQuery?.error
+        ? errorOf(guestQuery.error)
         : null
       return {
         accountId: account.id,
         accountName: account.name,
         confirmed,
-        loading: confirmed ? (discoveryQuery?.isLoading ?? false) : false,
+        loading: confirmed ? (discoveryQuery?.isLoading ?? false) || (guestQuery?.isLoading ?? false) : false,
         discovery,
         guests,
-        error,
+        discoveryError,
+        guestsError,
       }
     })
 
     return buildInventory({
       machines: machinesQuery.data.value ?? [],
       machinesError: machinesQuery.error.value ? errorOf(machinesQuery.error.value) : null,
+      proxmoxAccountsError: accountsQuery.error.value ? errorOf(accountsQuery.error.value) : null,
       proxmox,
       tailnet: {
         configured: tailnetConfigured.value,
+        loading: tailnetConfigured.value ? tailnetDevicesQuery.isLoading.value : false,
         devices: tailnetConfigured.value ? tailnetDevicesQuery.data.value ?? null : null,
-        error: tailnetConfigured.value && tailnetDevicesQuery.error.value
-          ? errorOf(tailnetDevicesQuery.error.value)
-          : null,
+        error: tailnetStatusQuery.error.value
+          ? `Tailnet status unavailable: ${errorOf(tailnetStatusQuery.error.value)}`
+          : tailnetConfigured.value
+            ? (tailnetDevicesQuery.error.value ? errorOf(tailnetDevicesQuery.error.value) : null)
+            : null,
       },
+      paginationWarning: paginationWarning.value,
     })
   })
 
   const discoveryPending = computed(() =>
-    confirmedAccountIds.value.some((accountId, index) => {
-      const query = discoveryQueries.value[index]
+    confirmedAccountIds.value.some((accountId) => {
+      const query = discoveryQueryByAccount.value.get(accountId)
       if (!query)
         return true
       return query.isLoading ?? false
+    }),
+  )
+
+  const guestsPending = computed(() =>
+    confirmedAccountIds.value.some((accountId) => {
+      const query = guestQueryByAccount.value.get(accountId)
+      return query ? (query.isLoading ?? false) : true
     }),
   )
 
@@ -152,7 +228,9 @@ export function useFleetInventory(): {
     machinesQuery.isLoading.value
     || accountsQuery.isLoading.value
     || tailnetStatusQuery.isLoading.value
-    || discoveryPending.value,
+    || (tailnetConfigured.value && tailnetDevicesQuery.isLoading.value)
+    || discoveryPending.value
+    || guestsPending.value,
   )
 
   async function refetchAll(): Promise<void> {

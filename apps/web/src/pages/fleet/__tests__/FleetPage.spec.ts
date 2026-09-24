@@ -1,11 +1,12 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type {
   MachineDto,
   PageAssociatedGuestDtoItemsItem,
+  PageCorrelatedDeviceDto,
   PageCorrelatedDeviceDtoItemsItem,
   PageMachineDto,
   PageProxmoxAccountDto,
@@ -111,8 +112,8 @@ function guest(): PageAssociatedGuestDtoItemsItem {
   }
 }
 
-function page<T>(items: T[]): { items: T[], page: { nextCursor: null, limit: number } } {
-  return { items, page: { nextCursor: null, limit: 200 } }
+function page<T>(items: T[], nextCursor: string | null = null): { items: T[], page: { nextCursor: string | null, limit: number } } {
+  return { items, page: { nextCursor, limit: 200 } }
 }
 
 function ok<T>(data: T) {
@@ -173,7 +174,10 @@ function makeRouter() {
   return createRouter({ history: createMemoryHistory(), routes })
 }
 
-function mountPage(router = makeRouter()) {
+async function mountPage() {
+  const router = makeRouter()
+  await router.push('/fleet')
+  await router.isReady()
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   })
@@ -183,6 +187,12 @@ function mountPage(router = makeRouter()) {
     },
   })
 }
+
+afterEach(() => {
+  document.body.innerHTML = ''
+})
+
+enableAutoUnmount(afterEach)
 
 beforeEach(() => {
   localStorage.clear()
@@ -197,10 +207,7 @@ beforeEach(() => {
 
 describe('FleetPage', () => {
   it('renders section headers, candidate evidence, and tailnet-only cards', async () => {
-    const router = makeRouter()
-    router.push('/fleet')
-    await router.isReady()
-    const wrapper = mountPage()
+    const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
@@ -213,26 +220,18 @@ describe('FleetPage', () => {
     expect(text).toContain('≈ build-host (aa:bb:cc:dd:ee:ff)')
     expect(text).toContain('spare.tailnet.xyz')
     expect(text).toContain('NOT LINKED TO A FLEET MACHINE')
-    wrapper.unmount()
   })
 
   it('excludes templates from the guest section', async () => {
-    const router = makeRouter()
-    router.push('/fleet')
-    await router.isReady()
-    const wrapper = mountPage()
+    const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('tpl')
-    wrapper.unmount()
   })
 
   it('switches to the table view and renders rows', async () => {
-    const router = makeRouter()
-    router.push('/fleet')
-    await router.isReady()
-    const wrapper = mountPage()
+    const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
@@ -240,15 +239,11 @@ describe('FleetPage', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="table-view"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('build-host')
-    wrapper.unmount()
   })
 
   it('shows an error banner and still renders machines when discovery fails', async () => {
     discoverProxmoxCluster.mockRejectedValue(new Error('connection refused'))
-    const router = makeRouter()
-    router.push('/fleet')
-    await router.isReady()
-    const wrapper = mountPage()
+    const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
@@ -256,26 +251,28 @@ describe('FleetPage', () => {
     expect(text).toContain('build-host')
     expect(text).toContain('connection refused')
     expect(text).toContain('Proxmox account homelab')
-    wrapper.unmount()
   })
 
   it('selects a machine via ?focus= and opens the table view', async () => {
     const router = makeRouter()
-    router.push('/fleet?focus=m1')
+    await router.push('/fleet?focus=m1')
     await router.isReady()
-    const wrapper = mountPage(router)
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    })
+    const wrapper = mount(FleetPage, {
+      global: {
+        plugins: [[VueQueryPlugin, { queryClient }], router],
+      },
+    })
     await flushPromises()
     await flushPromises()
 
     expect(wrapper.find('[data-testid="table-view"]').exists()).toBe(true)
-    wrapper.unmount()
   })
 
   it('opens a guest drawer with agent info when clicking a guest row', async () => {
-    const router = makeRouter()
-    router.push('/fleet')
-    await router.isReady()
-    const wrapper = mountPage(router)
+    const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
@@ -289,7 +286,6 @@ describe('FleetPage', () => {
     expect(document.body.textContent).toContain('Guest agent')
     expect(document.body.textContent).toContain('ONLINE')
     expect(document.body.textContent).not.toContain('Not observed yet')
-    wrapper.unmount()
   })
 
   it('shows "Not observed yet" in the machine drawer when no facts exist', async () => {
@@ -298,23 +294,26 @@ describe('FleetPage', () => {
       capabilities: [],
     }]) as PageMachineDto))
     const router = makeRouter()
-    router.push('/fleet?focus=m1')
+    await router.push('/fleet?focus=m1')
     await router.isReady()
-    const wrapper = mountPage(router)
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    })
+    await mount(FleetPage, {
+      global: {
+        plugins: [[VueQueryPlugin, { queryClient }], router],
+      },
+    })
     await flushPromises()
     await flushPromises()
 
     expect(document.body.textContent).toContain('Not observed yet')
     expect(document.body.textContent).not.toContain('—C')
-    wrapper.unmount()
   })
 
   it('shows the empty machines row in the table and cards view', async () => {
     listMachines.mockResolvedValue(ok(page([]) as PageMachineDto))
-    const router = makeRouter()
-    router.push('/fleet')
-    await router.isReady()
-    const wrapper = mountPage(router)
+    const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
@@ -324,6 +323,121 @@ describe('FleetPage', () => {
     await wrapper.get('[data-testid="view-table"]').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('No machines yet')
-    wrapper.unmount()
+  })
+
+  it('shows an error empty state when machines fail to load', async () => {
+    listMachines.mockRejectedValue(new Error('listMachines failed (500)'))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Machines could not be loaded')
+    expect(wrapper.text()).not.toContain('No machines yet')
+
+    await wrapper.get('[data-testid="view-table"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Machines could not be loaded')
+  })
+
+  it('fetches machines in one request and flags a truncated list', async () => {
+    // The machines endpoint has no cursor parameter: one request with a large
+    // limit is the whole list, and a reported next cursor means it was cut short.
+    listMachines.mockResolvedValueOnce(ok(page([machine()], 'more') as PageMachineDto))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('build-host')
+    expect(listMachines).toHaveBeenCalledTimes(1)
+    expect(listMachines.mock.calls[0]![0]).not.toHaveProperty('cursor')
+    expect(wrapper.text()).toContain('some are not shown')
+  })
+
+  it('paginates tailnet devices across nextCursor pages', async () => {
+    listTailnetDevices
+      .mockResolvedValueOnce(ok(page([{
+        nodeId: 'ts2',
+        name: 'spare.tailnet.xyz',
+        hostname: 'spare',
+        os: 'linux',
+        addresses: ['100.64.0.2'],
+        tags: [],
+        user: 'op',
+        online: true,
+        lastSeen: null,
+        candidates: [],
+      }], 'ts-cursor') as unknown as PageCorrelatedDeviceDto))
+      .mockResolvedValueOnce(ok(page([{
+        nodeId: 'ts3',
+        name: 'third.tailnet.xyz',
+        hostname: 'third',
+        os: 'linux',
+        addresses: ['100.64.0.3'],
+        tags: [],
+        user: 'op',
+        online: true,
+        lastSeen: null,
+        candidates: [],
+      }], null) as unknown as PageCorrelatedDeviceDto))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('spare.tailnet.xyz')
+    expect(wrapper.text()).toContain('third.tailnet.xyz')
+    expect(listTailnetDevices).toHaveBeenCalledTimes(2)
+    expect(listTailnetDevices.mock.calls[1]![0]).toMatchObject({ cursor: 'ts-cursor' })
+  })
+
+  it('keeps the host row visible as context when only a guest matches the search', async () => {
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="search"]').setValue('web')
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('web')
+    expect(text).toContain('pve')
+  })
+
+  it('renders UNKNOWN for a tailnet device with null online', async () => {
+    listTailnetDevices.mockResolvedValue(ok(page([{
+      nodeId: 'ts2',
+      name: 'spare.tailnet.xyz',
+      hostname: 'spare',
+      os: 'linux',
+      addresses: ['100.64.0.2'],
+      tags: [],
+      user: 'op',
+      online: null,
+      lastSeen: null,
+      candidates: [],
+    }] as unknown as PageCorrelatedDeviceDtoItemsItem[])))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('UNKNOWN')
+    expect(wrapper.text()).not.toContain('OFFLINE')
+  })
+
+  it('shows a tailnet status error banner when getTailnetStatus fails', async () => {
+    getTailnetStatus.mockRejectedValue(new Error('getTailnetStatus failed (503)'))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Tailnet status unavailable: getTailnetStatus failed (503)')
+  })
+
+  it('shows an accounts-unavailable banner when listProxmoxAccounts fails', async () => {
+    listProxmoxAccounts.mockRejectedValue(new Error('listProxmoxAccounts failed (503)'))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Proxmox accounts unavailable: listProxmoxAccounts failed (503)')
   })
 })

@@ -51,7 +51,7 @@ defineProps<{ machine: MachineItem }>()
       v-if="machine.guestCandidates.length > 0"
       class="font-mono text-[10px] text-fc-info"
     >
-      ≈ QEMU {{ machine.guestCandidates[0].vmid }} ON {{ machine.guestCandidates[0].node }} ({{ machine.guestCandidates[0].evidence }})
+      ≈ {{ machine.guestCandidates[0].kind === 'lxc' ? 'LXC' : 'QEMU' }} {{ machine.guestCandidates[0].vmid ?? '—' }} ON {{ machine.guestCandidates[0].node }} ({{ machine.guestCandidates[0].evidence }})
     </p>
 
     <div

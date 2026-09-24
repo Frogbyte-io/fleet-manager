@@ -7,11 +7,13 @@ import type {
 } from '@frogbyte-io/fleet-api-client'
 
 export type Tone = 'ok' | 'info' | 'warn' | 'err' | 'muted' | 'faint'
-export type SourceState = 'ok' | 'error' | 'unconfigured' | 'untrusted' | 'loading'
+export type SourceState = 'ok' | 'error' | 'unconfigured' | 'untrusted' | 'loading' | 'warn'
 
 export interface HostItem {
   key: string
+  accountId: string
   name: string
+  nodeKey: string
   accountName: string
   pveVersion: string
   status: string
@@ -48,7 +50,7 @@ export interface MachineItem {
   groups: string[]
   lastSeenAt: number | null
   lastObservation: { collectedAt: number, source: string } | null
-  guestCandidates: { accountName: string, node: string, vmid: number | null, evidence: string }[]
+  guestCandidates: { accountName: string, node: string, kind: 'vm' | 'lxc', vmid: number | null, evidence: string }[]
   tailnet: { online: boolean | null, name: string, addresses: string[] } | null
 }
 
@@ -86,14 +88,17 @@ export interface ProxmoxSourceInput {
   loading: boolean
   discovery: ProxmoxDiscoveryDto | null
   guests: PageAssociatedGuestDtoItemsItem[] | null
-  error: string | null
+  discoveryError: string | null
+  guestsError: string | null
 }
 
 export interface InventoryInput {
   machines: MachineDto[]
   machinesError: string | null
+  proxmoxAccountsError: string | null
   proxmox: ProxmoxSourceInput[]
-  tailnet: { configured: boolean, devices: PageCorrelatedDeviceDtoItemsItem[] | null, error: string | null }
+  tailnet: { configured: boolean, loading: boolean, devices: PageCorrelatedDeviceDtoItemsItem[] | null, error: string | null }
+  paginationWarning: string | null
 }
 
 export function formatBytes(n: number | null): string | null {
@@ -181,6 +186,32 @@ export function guestStatusTone(status: string): Tone {
   }
 }
 
+export function hostStatusTone(status: string): Tone {
+  if (status === 'online')
+    return 'ok'
+  if (status === 'offline')
+    return 'err'
+  return 'faint'
+}
+
+export function hostStatusLabel(status: string): string {
+  if (status === 'unknown')
+    return 'UNKNOWN'
+  return status.toUpperCase()
+}
+
+export function tailnetStatusLabel(online: boolean | null): string {
+  if (online === null)
+    return 'UNKNOWN'
+  return online ? 'ONLINE' : 'OFFLINE'
+}
+
+export function guestAgentCell(agentOnline: boolean | null): string {
+  if (agentOnline === null)
+    return '—'
+  return agentOnline ? 'ONLINE' : 'OFFLINE'
+}
+
 export function relativeTime(ms: number | null, now: number = Date.now()): string {
   if (ms === null || !Number.isFinite(ms))
     return 'NEVER'
@@ -202,14 +233,16 @@ function isGuestKind(kind: string): boolean {
   return kind === 'qemu' || kind === 'lxc'
 }
 
-function buildHosts(resources: ProxmoxResourceDto[], accountName: string): HostItem[] {
+function buildHosts(resources: ProxmoxResourceDto[], accountId: string, accountName: string): HostItem[] {
   const nodes = resources.filter(r => r.kind === 'node')
   return nodes.map((node) => {
     const nodeKey = node.node ?? node.name
     const onNode = resources.filter(r => r.node === nodeKey)
     return {
-      key: `${node.accountId}:${node.id}`,
+      key: `${accountId}:${node.id}`,
+      accountId,
       name: node.name ?? nodeKey ?? node.id,
+      nodeKey: nodeKey ?? node.id,
       accountName,
       pveVersion: node.pveVersion,
       status: node.status ?? 'unknown',
@@ -267,11 +300,13 @@ function buildMachines(
     if (!source.guests)
       continue
     for (const guest of source.guests) {
+      const kind: 'vm' | 'lxc' = guest.kind === 'lxc' ? 'lxc' : 'vm'
       for (const candidate of guest.candidates) {
         const list = guestCandidatesByMachine.get(candidate.machineId) ?? []
         list.push({
           accountName: source.accountName,
           node: guest.node ?? '—',
+          kind,
           vmid: guest.vmid ?? null,
           evidence: candidate.evidence,
         })
@@ -339,6 +374,15 @@ export function buildInventory(input: InventoryInput): Inventory {
     message: input.machinesError ?? '',
   })
 
+  if (input.proxmoxAccountsError) {
+    sources.push({
+      key: 'proxmox',
+      label: 'Proxmox',
+      state: 'error',
+      message: `Proxmox accounts unavailable: ${input.proxmoxAccountsError}`,
+    })
+  }
+
   for (const source of input.proxmox) {
     const key = `proxmox:${source.accountId}`
     const label = `Proxmox account ${source.accountName}`
@@ -351,26 +395,35 @@ export function buildInventory(input: InventoryInput): Inventory {
       })
       continue
     }
-    if (source.error) {
+    if (source.discovery) {
+      hosts.push(...buildHosts(source.discovery.resources, source.accountId, source.accountName))
+      guests.push(...buildGuests(source.discovery.resources, source.guests, source.accountId, source.accountName))
+      if (source.guestsError) {
+        sources.push({
+          key,
+          label,
+          state: 'error',
+          message: source.guestsError,
+        })
+      }
+      else {
+        sources.push({
+          key,
+          label,
+          state: 'ok',
+          message: '',
+        })
+      }
+    }
+    else if (source.discoveryError) {
       sources.push({
         key,
         label,
         state: 'error',
-        message: source.error,
-      })
-      continue
-    }
-    if (source.discovery) {
-      hosts.push(...buildHosts(source.discovery.resources, source.accountName))
-      guests.push(...buildGuests(source.discovery.resources, source.guests, source.accountId, source.accountName))
-      sources.push({
-        key,
-        label,
-        state: 'ok',
-        message: '',
+        message: source.discoveryError,
       })
     }
-    else {
+    else if (source.loading) {
       sources.push({
         key,
         label,
@@ -378,23 +431,31 @@ export function buildInventory(input: InventoryInput): Inventory {
         message: `Discovering ${source.accountName}…`,
       })
     }
+    else {
+      sources.push({
+        key,
+        label,
+        state: 'error',
+        message: 'No discovery data returned',
+      })
+    }
   }
 
   let tailnetOnly: TailnetItem[] = []
-  if (!input.tailnet.configured) {
-    sources.push({
-      key: 'tailnet',
-      label: 'Tailnet',
-      state: 'unconfigured',
-      message: 'Tailnet not configured — configure it in Settings to see tailnet devices.',
-    })
-  }
-  else if (input.tailnet.error) {
+  if (input.tailnet.error) {
     sources.push({
       key: 'tailnet',
       label: 'Tailnet',
       state: 'error',
       message: input.tailnet.error,
+    })
+  }
+  else if (!input.tailnet.configured) {
+    sources.push({
+      key: 'tailnet',
+      label: 'Tailnet',
+      state: 'unconfigured',
+      message: 'Tailnet not configured — configure it in Settings to see tailnet devices.',
     })
   }
   else if (input.tailnet.devices) {
@@ -415,6 +476,23 @@ export function buildInventory(input: InventoryInput): Inventory {
       label: 'Tailnet',
       state: 'ok',
       message: '',
+    })
+  }
+  else if (input.tailnet.loading) {
+    sources.push({
+      key: 'tailnet',
+      label: 'Tailnet',
+      state: 'loading',
+      message: 'Loading tailnet devices…',
+    })
+  }
+
+  if (input.paginationWarning) {
+    sources.push({
+      key: 'pagination',
+      label: 'Pagination',
+      state: 'warn' as SourceState,
+      message: input.paginationWarning,
     })
   }
 

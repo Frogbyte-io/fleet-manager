@@ -15,7 +15,7 @@ const stroke = computed(() => ({
 </script>
 
 <template>
-  <span class="inline-flex size-11 items-center justify-center rounded-sm border border-fc-line bg-fc-inset">
+  <span aria-hidden="true" class="inline-flex size-11 items-center justify-center rounded-sm border border-fc-line bg-fc-inset">
     <svg
       v-if="kind === 'host'"
       width="22"
@@ -72,7 +72,7 @@ const stroke = computed(() => ({
         height="12"
         rx="1"
       />
-      <path d="M8 21h8" />
+      <path d="M8 21h8M12 17v4" />
     </svg>
     <svg
       v-else-if="kind === 'lxc'"

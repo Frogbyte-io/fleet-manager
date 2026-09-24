@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { RouterLink } from 'vue-router'
-
 import KindIcon from '@/components/fleet/KindIcon.vue'
 import StatusChip from '@/components/fleet/StatusChip.vue'
-import type { TailnetItem } from '../inventory'
+import { toast } from 'vue-sonner'
+import { tailnetStatusLabel, type TailnetItem } from '../inventory'
 
-defineProps<{ device: TailnetItem }>()
+const props = defineProps<{ device: TailnetItem }>()
+
+async function copyImportCommand() {
+  try {
+    await navigator.clipboard.writeText(`fleetctl tailnet import ${props.device.nodeId} --user <ssh-user>`)
+    toast('Copied import command')
+  }
+  catch {
+    // clipboard unavailable — ignore
+  }
+}
 </script>
 
 <template>
@@ -21,18 +30,28 @@ defineProps<{ device: TailnetItem }>()
         </p>
       </div>
       <StatusChip
-        :label="device.online ? 'ONLINE' : 'OFFLINE'"
+        :label="tailnetStatusLabel(device.online)"
         :tone="device.online ? 'ok' : 'faint'"
       />
     </div>
 
     <div class="mt-auto flex items-center gap-2 border-t border-fc-line pt-2">
-      <RouterLink
-        :to="`/fleet/add?tailnetNode=${device.nodeId}`"
-        class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+      <button
+        type="button"
+        disabled
+        title="Guided tailnet import lands with FM-912"
+        class="cursor-not-allowed rounded-sm border border-fc-line px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-fc-faint opacity-60"
       >
-        Add to fleet →
-      </RouterLink>
+        Add to fleet
+      </button>
+      <button
+        type="button"
+        data-testid="copy-import"
+        class="rounded-sm border border-fc-line px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+        @click="copyImportCommand"
+      >
+        Copy fleetctl
+      </button>
       <slot name="hide" />
     </div>
   </article>

@@ -2,18 +2,20 @@
 import ConnectionBadge from '@/components/fleet/ConnectionBadge.vue'
 import KindIcon from '@/components/fleet/KindIcon.vue'
 import StatusChip from '@/components/fleet/StatusChip.vue'
-import { relativeTime, type GuestItem, type HostItem } from '../inventory'
+import { hostStatusLabel, hostStatusTone, relativeTime, type GuestItem, type HostItem } from '../inventory'
 
 defineProps<{
   host: HostItem
   guests: GuestItem[]
+  context?: boolean
 }>()
-
-const nodeTone = (status: string) => (status === 'online' ? 'ok' : status === 'offline' ? 'err' : 'faint')
 </script>
 
 <template>
-  <article class="fc-card rounded-sm border border-fc-line bg-fc-panel p-4">
+  <article
+    class="fc-card rounded-sm border border-fc-line bg-fc-panel p-4"
+    :class="{ 'opacity-60': context }"
+  >
     <div class="flex items-start gap-3">
       <KindIcon kind="host" />
       <div class="min-w-0 flex-1">
@@ -25,8 +27,8 @@ const nodeTone = (status: string) => (status === 'online' ? 'ok' : status === 'o
         </p>
       </div>
       <StatusChip
-        :label="host.status === 'online' ? 'ONLINE' : host.status.toUpperCase()"
-        :tone="nodeTone(host.status)"
+        :label="hostStatusLabel(host.status)"
+        :tone="hostStatusTone(host.status)"
       />
     </div>
 
@@ -50,7 +52,7 @@ const nodeTone = (status: string) => (status === 'online' ? 'ok' : status === 'o
         :key="guest.key"
         class="truncate font-mono text-[10px] text-fc-faint"
       >
-        └ {{ guest.kind === 'vm' ? 'VM' : 'LXC' }} {{ guest.vmid }} · {{ guest.name }} · {{ guest.status }}
+        └ {{ guest.kind === 'vm' ? 'VM' : 'LXC' }} {{ guest.vmid ?? '—' }} · {{ guest.name }} · {{ guest.status }}
       </p>
     </div>
 

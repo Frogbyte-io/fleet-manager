@@ -15,9 +15,7 @@ const toneClass = computed(() => ({
   faint: 'border-fc-line2 text-fc-faint',
 }[props.tone]))
 
-const dotClass = computed(() =>
-  props.tone === 'ok' ? 'bg-fc-ok' : 'bg-transparent',
-)
+const dotClass = computed(() => 'bg-fc-ok')
 </script>
 
 <template>
@@ -26,6 +24,7 @@ const dotClass = computed(() =>
     :class="toneClass"
   >
     <span
+      v-if="tone === 'ok'"
       class="size-1.5 rounded-full"
       :class="dotClass"
     />

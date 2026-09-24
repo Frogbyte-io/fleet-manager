@@ -17,7 +17,7 @@ import MachineDrawer from './components/MachineDrawer.vue'
 import FleetTable from './components/FleetTable.vue'
 import TailnetCard from './components/TailnetCard.vue'
 import { useFleetInventory } from './useFleetInventory'
-import type { MachineItem } from './inventory'
+import type { HostItem, MachineItem } from './inventory'
 const route = useRoute()
 
 const { inventory, isLoading, refetchAll } = useFleetInventory()
@@ -134,12 +134,12 @@ function matchesSearch(text: string, needle: string): boolean {
   return text.toLowerCase().includes(needle.toLowerCase())
 }
 
-const visibleTailnetOnly = computed(() =>
-  inventory.value.tailnetOnly.filter(d => !hiddenTailnet.value.includes(d.nodeId)),
+const visibleTailnet = computed(() =>
+  inventory.value.tailnetOnly.filter(d => !hiddenTailnet.value.includes(d.nodeId) || showHidden.value),
 )
 
-const hiddenTailnetDevices = computed(() =>
-  inventory.value.tailnetOnly.filter(d => hiddenTailnet.value.includes(d.nodeId)),
+const machinesSourceOk = computed(() =>
+  inventory.value.sources.find(s => s.key === 'machines')?.state === 'ok',
 )
 
 const filteredHosts = computed(() =>
@@ -150,6 +150,7 @@ const filteredHosts = computed(() =>
   }),
 )
 
+// Guests matched by search/kind keep their host row visible as context (finding 9).
 const filteredGuests = computed(() =>
   inventory.value.guests.filter((g) => {
     if (kindFilter.value !== 'all' && kindFilter.value !== 'guests')
@@ -159,6 +160,25 @@ const filteredGuests = computed(() =>
     return true
   }),
 )
+
+const contextHosts = computed(() => {
+  if (kindFilter.value !== 'all' && kindFilter.value !== 'guests')
+    return []
+  if (!search.value)
+    return []
+  const matchedGuests = filteredGuests.value
+  return inventory.value.hosts.filter((h) => {
+    if (filteredHosts.value.some(fh => fh.key === h.key))
+      return false
+    return matchedGuests.some(g => g.accountId === h.accountId && g.node === h.nodeKey)
+  })
+})
+
+const hostsWithContext = computed<HostItem[]>(() => {
+  return [...filteredHosts.value, ...contextHosts.value.filter(h => !filteredHosts.value.some(fh => fh.key === h.key))]
+})
+
+const contextHostKeys = computed(() => new Set(contextHosts.value.map(h => h.key)))
 
 const filteredMachines = computed(() =>
   inventory.value.machines.filter((m) => {
@@ -172,8 +192,8 @@ const filteredMachines = computed(() =>
   }),
 )
 
-const filteredTailnetOnly = computed(() =>
-  visibleTailnetOnly.value.filter((d) => {
+const filteredTailnet = computed(() =>
+  visibleTailnet.value.filter((d) => {
     if (kindFilter.value !== 'all' && kindFilter.value !== 'tailnet')
       return false
     if (search.value && !matchesSearch(`${d.name} ${d.hostname} ${d.tags.join(' ')}`, search.value))
@@ -182,26 +202,32 @@ const filteredTailnetOnly = computed(() =>
   }),
 )
 
-const machineGroups = computed(() => {
-  if (groupBy.value !== 'group')
-    return [{ name: '', machines: filteredMachines.value }]
-  const map = new Map<string, MachineItem[]>()
-  for (const machine of filteredMachines.value) {
-    const keys = machine.groups.length > 0 ? machine.groups : ['Ungrouped']
-    for (const key of keys) {
-      const list = map.get(key) ?? []
-      list.push(machine)
-      map.set(key, list)
+interface MachineGroup {
+  name: string
+  machines: MachineItem[]
+}
+
+const machineGroups = computed<MachineGroup[]>(() => {
+  if (groupBy.value === 'group') {
+    const map = new Map<string, MachineItem[]>()
+    for (const machine of filteredMachines.value) {
+      const keys = machine.groups.length > 0 ? machine.groups : ['Ungrouped']
+      for (const key of keys) {
+        const list = map.get(key) ?? []
+        list.push(machine)
+        map.set(key, list)
+      }
     }
+    return [...map.entries()].map(([name, machines]) => ({ name, machines }))
   }
-  return [...map.entries()].map(([name, machines]) => ({ name, machines }))
+  return [{ name: '', machines: filteredMachines.value }]
 })
 
 const counts = computed(() => ({
   machines: inventory.value.machines.length,
   hosts: inventory.value.hosts.length,
   guests: inventory.value.guests.length,
-  tailnetOnly: inventory.value.tailnetOnly.length,
+  tailnetOnly: visibleTailnet.value.length,
 }))
 
 const isEmpty = computed(() =>
@@ -412,7 +438,7 @@ function sourceBorder(state: string): string {
     </div>
 
     <div
-      v-else-if="isEmpty"
+      v-else-if="isEmpty && machinesSourceOk"
       class="mt-6 rounded-sm border border-fc-line bg-fc-panel p-10 text-center"
     >
       <p class="text-sm font-semibold text-fc-ink">
@@ -429,19 +455,81 @@ function sourceBorder(state: string): string {
       </RouterLink>
     </div>
 
+    <div
+      v-else-if="!machinesSourceOk"
+      class="mt-6 rounded-sm border border-fc-line bg-fc-panel p-10 text-center"
+      data-testid="empty-error"
+    >
+      <p class="text-sm font-semibold text-fc-ink">
+        Machines could not be loaded — see the banner above.
+      </p>
+    </div>
+
     <template v-else>
       <div
-        v-if="viewMode === 'cards'"
+        v-if="viewMode === 'cards' && groupBy === 'none'"
+        class="mt-6"
+        data-testid="flat-view"
+      >
+        <div
+          class="grid gap-3"
+          style="grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));"
+        >
+          <HostCard
+            v-for="host in filteredHosts"
+            :key="host.key"
+            :host="host"
+            :guests="[]"
+          />
+          <GuestCard
+            v-for="guest in filteredGuests"
+            :key="guest.key"
+            :guest="guest"
+          />
+          <MachineCard
+            v-for="machine in filteredMachines"
+            :key="machine.id"
+            :machine="machine"
+          >
+            <template #actions>
+              <button
+                class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+                data-testid="open-machine"
+                @click="openMachine(machine.id)"
+              >
+                Open →
+              </button>
+            </template>
+          </MachineCard>
+          <TailnetCard
+            v-for="device in filteredTailnet"
+            :key="device.nodeId"
+            :device="device"
+          >
+            <template #hide>
+              <button
+                class="font-mono text-[10px] uppercase tracking-wider text-fc-faint hover:text-fc-err"
+                @click="hideTailnet(device.nodeId)"
+              >
+                Hide
+              </button>
+            </template>
+          </TailnetCard>
+        </div>
+      </div>
+
+      <div
+        v-else-if="viewMode === 'cards'"
         class="mt-6 space-y-8"
       >
         <section
-          v-if="filteredHosts.length > 0"
+          v-if="hostsWithContext.length > 0"
           data-testid="section-hosts"
         >
           <div class="border-b-2 border-fc-line pb-1">
             <h2 class="font-head text-sm font-bold uppercase tracking-wide text-fc-ink">
               Proxmox hosts
-              <span class="float-right font-mono text-[9.5px] font-normal text-fc-faint">{{ filteredHosts.length }} NODES</span>
+              <span class="float-right font-mono text-[9.5px] font-normal text-fc-faint">{{ hostsWithContext.length }} NODES</span>
             </h2>
           </div>
           <div
@@ -449,10 +537,11 @@ function sourceBorder(state: string): string {
             style="grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));"
           >
             <HostCard
-              v-for="host in filteredHosts"
+              v-for="host in hostsWithContext"
               :key="host.key"
               :host="host"
-              :guests="filteredGuests.filter(g => g.node === host.name)"
+              :guests="filteredGuests.filter(g => g.accountId === host.accountId && g.node === host.nodeKey)"
+              :context="contextHostKeys.has(host.key)"
             />
           </div>
         </section>
@@ -489,7 +578,7 @@ function sourceBorder(state: string): string {
             </h2>
           </div>
           <p
-            v-if="filteredMachines.length === 0"
+            v-if="filteredMachines.length === 0 && machinesSourceOk"
             class="mt-3 text-xs text-fc-faint"
           >
             No machines yet —
@@ -534,13 +623,13 @@ function sourceBorder(state: string): string {
         </section>
 
         <section
-          v-if="filteredTailnetOnly.length > 0 || (showHidden && hiddenTailnetDevices.length > 0)"
+          v-if="filteredTailnet.length > 0"
           data-testid="section-tailnet"
         >
           <div class="border-b-2 border-fc-line pb-1">
             <h2 class="font-head text-sm font-bold uppercase tracking-wide text-fc-ink">
               On your tailnet — not in Fleet
-              <span class="float-right font-mono text-[9.5px] font-normal text-fc-faint">{{ filteredTailnetOnly.length }} DEVICES</span>
+              <span class="float-right font-mono text-[9.5px] font-normal text-fc-faint">{{ filteredTailnet.length }} DEVICES</span>
             </h2>
           </div>
           <div
@@ -548,7 +637,7 @@ function sourceBorder(state: string): string {
             style="grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));"
           >
             <TailnetCard
-              v-for="device in filteredTailnetOnly"
+              v-for="device in filteredTailnet"
               :key="device.nodeId"
               :device="device"
             >
@@ -561,22 +650,6 @@ function sourceBorder(state: string): string {
                 </button>
               </template>
             </TailnetCard>
-            <template v-if="showHidden">
-              <TailnetCard
-                v-for="device in hiddenTailnetDevices"
-                :key="device.nodeId"
-                :device="device"
-              >
-                <template #hide>
-                  <button
-                    class="font-mono text-[10px] uppercase tracking-wider text-fc-faint hover:text-fc-err"
-                    @click="hideTailnet(device.nodeId)"
-                  >
-                    Hide
-                  </button>
-                </template>
-              </TailnetCard>
-            </template>
           </div>
         </section>
       </div>
@@ -587,10 +660,12 @@ function sourceBorder(state: string): string {
         data-testid="table-view"
       >
         <FleetTable
-          :hosts="filteredHosts"
+          :hosts="hostsWithContext"
+          :context-host-keys="contextHostKeys"
           :guests="filteredGuests"
-          :machines="filteredMachines"
-          :tailnet-only="filteredTailnetOnly"
+          :machine-groups="machineGroups"
+          :tailnet-only="filteredTailnet"
+          :flat="groupBy === 'none'"
           @open-machine="openMachine"
           @open-guest="openGuest"
         />

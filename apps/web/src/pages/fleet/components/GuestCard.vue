@@ -23,7 +23,7 @@ defineProps<{ guest: GuestItem }>()
           {{ guest.name }}
         </p>
         <p class="fc-kicker mt-0.5">
-          {{ guest.kind === 'vm' ? `VM · QEMU ${guest.vmid}` : `LXC ${guest.vmid}` }} · ON {{ guest.node }}
+          {{ guest.kind === 'vm' ? `VM · QEMU ${guest.vmid ?? '—'}` : `LXC ${guest.vmid ?? '—'}` }} · ON {{ guest.node }}
         </p>
       </div>
       <StatusChip
@@ -46,19 +46,24 @@ defineProps<{ guest: GuestItem }>()
       />
     </div>
 
-    <p
+    <div
       v-if="guest.candidates.length > 0"
       class="mt-3 font-mono text-[10px] text-fc-info"
     >
-      ≈
-      <RouterLink
-        :to="`/fleet?focus=${guest.candidates[0].machineId}`"
-        class="underline decoration-dotted hover:text-fc-ink"
+      <p
+        v-for="candidate in guest.candidates"
+        :key="candidate.machineId"
       >
-        {{ guest.candidates[0].machineName }}
-      </RouterLink>
-      ({{ guest.candidates[0].evidence }})
-    </p>
+        ≈
+        <RouterLink
+          :to="`/fleet?focus=${candidate.machineId}`"
+          class="underline decoration-dotted hover:text-fc-ink"
+        >
+          {{ candidate.machineName }}
+        </RouterLink>
+        ({{ candidate.evidence }})
+      </p>
+    </div>
     <p
       v-else
       class="mt-3 border-t border-dashed border-fc-line pt-2 font-mono text-[10px] uppercase tracking-wide text-fc-faint"

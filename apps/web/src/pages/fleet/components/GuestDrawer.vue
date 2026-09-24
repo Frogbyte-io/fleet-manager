@@ -37,7 +37,7 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
           />
         </SheetTitle>
         <SheetDescription class="fc-kicker">
-          {{ guest.kind === 'vm' ? `VM · QEMU ${guest.vmid}` : `LXC ${guest.vmid}` }} · ON {{ guest.node }}
+          {{ guest.kind === 'vm' ? `QEMU ${guest.vmid ?? '—'}` : `LXC ${guest.vmid ?? '—'}` }} · ON {{ guest.node }}
         </SheetDescription>
       </SheetHeader>
 

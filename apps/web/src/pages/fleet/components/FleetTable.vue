@@ -10,12 +10,16 @@ import {
 } from '@/components/ui/table'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 import {
+  guestAgentCell,
   guestStatusTone,
+  hostStatusLabel,
+  hostStatusTone,
   machineStatusTone,
   osLine,
   relativeTime,
   resourcesLine,
   specLine,
+  tailnetStatusLabel,
   type GuestItem,
   type HostItem,
   type MachineItem,
@@ -24,9 +28,11 @@ import {
 
 defineProps<{
   hosts: HostItem[]
+  contextHostKeys: Set<string>
   guests: GuestItem[]
-  machines: MachineItem[]
+  machineGroups: { name: string, machines: MachineItem[] }[]
   tailnetOnly: TailnetItem[]
+  flat: boolean
 }>()
 
 const emit = defineEmits<{
@@ -37,7 +43,7 @@ const emit = defineEmits<{
 const headClass = 'font-mono text-[10px] uppercase font-semibold text-fc-faint [letter-spacing:.14em]'
 
 function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
-  return guests.filter(g => g.node === host.name)
+  return guests.filter(g => g.accountId === host.accountId && g.node === host.nodeKey)
 }
 </script>
 
@@ -73,7 +79,10 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
         v-for="host in hosts"
         :key="host.key"
       >
-        <TableRow class="border-fc-line bg-fc-inset hover:bg-fc-inset">
+        <TableRow
+          class="border-fc-line bg-fc-inset hover:bg-fc-inset"
+          :class="{ 'opacity-60': contextHostKeys.has(host.key) }"
+        >
           <TableCell class="font-semibold text-fc-ink">
             {{ host.name }}
           </TableCell>
@@ -82,8 +91,8 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
           </TableCell>
           <TableCell>
             <StatusChip
-              :label="host.status.toUpperCase()"
-              :tone="host.status === 'online' ? 'ok' : 'err'"
+              :label="hostStatusLabel(host.status)"
+              :tone="hostStatusTone(host.status)"
             />
           </TableCell>
           <TableCell class="font-mono text-[10px] text-fc-muted">
@@ -99,15 +108,63 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
             {{ relativeTime(host.observedAt) }}
           </TableCell>
         </TableRow>
+        <template v-if="!flat">
+          <TableRow
+            v-for="guest in guestsOf(host, guests)"
+            :key="guest.key"
+            class="cursor-pointer border-fc-line"
+            @click="emit('open-guest', guest.key)"
+          >
+            <TableCell class="pl-6 text-sm text-fc-ink">
+              <button
+                type="button"
+                class="text-left text-sm text-fc-ink"
+                @click.stop="emit('open-guest', guest.key)"
+              >
+                └ {{ guest.name }}
+              </button>
+              <span class="block font-mono text-[10px] text-fc-faint">{{ guest.kind === 'vm' ? `QEMU ${guest.vmid ?? '—'}` : `LXC ${guest.vmid ?? '—'}` }}</span>
+            </TableCell>
+            <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
+              {{ guest.kind === 'vm' ? 'VM' : 'LXC' }}
+            </TableCell>
+            <TableCell>
+              <StatusChip
+                :label="guest.status.toUpperCase()"
+                :tone="guestStatusTone(guest.status)"
+              />
+            </TableCell>
+            <TableCell class="font-mono text-[10px] text-fc-muted">
+              GUEST AGENT {{ guestAgentCell(guest.agentOnline) }}
+            </TableCell>
+            <TableCell class="font-mono text-[10px] text-fc-muted">
+              {{ guest.osName ?? '—' }}
+            </TableCell>
+            <TableCell class="font-mono text-[10px] text-fc-muted">
+              —
+            </TableCell>
+            <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
+              —
+            </TableCell>
+          </TableRow>
+        </template>
+      </template>
+      <template v-if="flat">
         <TableRow
-          v-for="guest in guestsOf(host, guests)"
+          v-for="guest in guests"
           :key="guest.key"
           class="cursor-pointer border-fc-line"
           @click="emit('open-guest', guest.key)"
         >
-          <TableCell class="pl-6 text-sm text-fc-ink">
-            └ {{ guest.name }}
-            <span class="block font-mono text-[10px] text-fc-faint">{{ guest.kind === 'vm' ? `QEMU ${guest.vmid}` : `LXC ${guest.vmid}` }}</span>
+          <TableCell class="text-sm text-fc-ink">
+            <button
+              type="button"
+              class="text-left text-sm text-fc-ink"
+              @click.stop="emit('open-guest', guest.key)"
+            >
+              {{ guest.name }}
+            </button>
+            <span class="block font-mono text-[10px] text-fc-faint">{{ guest.kind === 'vm' ? `QEMU ${guest.vmid ?? '—'}` : `LXC ${guest.vmid ?? '—'}` }} · {{ guest.node }}</span>
           </TableCell>
           <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
             {{ guest.kind === 'vm' ? 'VM' : 'LXC' }}
@@ -119,7 +176,7 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
             />
           </TableCell>
           <TableCell class="font-mono text-[10px] text-fc-muted">
-            GUEST AGENT {{ guest.agentOnline === null ? '?' : guest.agentOnline ? 'OK' : '—' }}
+            GUEST AGENT {{ guestAgentCell(guest.agentOnline) }}
           </TableCell>
           <TableCell class="font-mono text-[10px] text-fc-muted">
             {{ guest.osName ?? '—' }}
@@ -133,66 +190,80 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
         </TableRow>
       </template>
 
-      <TableRow class="border-fc-line bg-fc-inset hover:bg-fc-inset">
-        <TableCell class="font-semibold text-fc-ink">
-          Machines
-        </TableCell>
-        <TableCell
-          v-for="i in 6"
-          :key="i"
-        />
-      </TableRow>
-      <TableRow
-        v-if="machines.length === 0"
-        class="border-fc-line"
+      <template
+        v-for="group in machineGroups"
+        :key="group.name || '_machines'"
       >
-        <TableCell
-          colspan="7"
-          class="text-xs text-fc-faint"
+        <TableRow
+          v-if="group.name"
+          class="border-fc-line bg-fc-inset hover:bg-fc-inset"
         >
-          No machines yet —
-          <RouterLink
-            to="/fleet/add"
-            class="underline decoration-dotted hover:text-fc-ink"
-          >
-            Add machine
-          </RouterLink>
-        </TableCell>
-      </TableRow>
-      <TableRow
-        v-for="machine in machines"
-        :key="machine.id"
-        class="cursor-pointer border-fc-line"
-        @click="emit('open-machine', machine.id)"
-      >
-        <TableCell class="text-sm text-fc-ink">
-          {{ machine.name }}
-          <span class="block font-mono text-[10px] text-fc-faint">{{ specLine(machine) }}</span>
-        </TableCell>
-        <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
-          MACHINE
-        </TableCell>
-        <TableCell>
-          <StatusChip
-            :label="machine.status"
-            :tone="machineStatusTone(machine.status)"
+          <TableCell class="font-semibold text-fc-ink">
+            {{ group.name }}
+          </TableCell>
+          <TableCell
+            v-for="i in 6"
+            :key="i"
           />
-        </TableCell>
-        <TableCell class="font-mono text-[10px] text-fc-muted">
-          {{ machine.endpointKinds.join(' · ') || '—' }}<template v-if="machine.tailnet">
-            · TAILSCALE
-          </template>
-        </TableCell>
-        <TableCell class="font-mono text-[10px] text-fc-muted">
-          {{ osLine(machine) ?? '—' }}
-        </TableCell>
-        <TableCell class="font-mono text-[10px] text-fc-muted">
-          {{ resourcesLine(machine) ?? '—' }}
-        </TableCell>
-        <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
-          {{ relativeTime(machine.lastSeenAt ?? machine.lastObservation?.collectedAt ?? null) }}
-        </TableCell>
-      </TableRow>
+        </TableRow>
+        <TableRow
+          v-if="group.machines.length === 0 && !group.name"
+          class="border-fc-line"
+        >
+          <TableCell
+            colspan="7"
+            class="text-xs text-fc-faint"
+          >
+            No machines yet —
+            <RouterLink
+              to="/fleet/add"
+              class="underline decoration-dotted hover:text-fc-ink"
+            >
+              Add machine
+            </RouterLink>
+          </TableCell>
+        </TableRow>
+        <TableRow
+          v-for="machine in group.machines"
+          :key="machine.id"
+          class="cursor-pointer border-fc-line"
+          @click="emit('open-machine', machine.id)"
+        >
+          <TableCell class="text-sm text-fc-ink">
+            <button
+              type="button"
+              class="text-left text-sm text-fc-ink"
+              @click.stop="emit('open-machine', machine.id)"
+            >
+              {{ machine.name }}
+            </button>
+            <span class="block font-mono text-[10px] text-fc-faint">{{ specLine(machine) }}</span>
+          </TableCell>
+          <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
+            MACHINE
+          </TableCell>
+          <TableCell>
+            <StatusChip
+              :label="machine.status"
+              :tone="machineStatusTone(machine.status)"
+            />
+          </TableCell>
+          <TableCell class="font-mono text-[10px] text-fc-muted">
+            {{ machine.endpointKinds.join(' · ') || '—' }}<template v-if="machine.tailnet">
+              · TAILSCALE
+            </template>
+          </TableCell>
+          <TableCell class="font-mono text-[10px] text-fc-muted">
+            {{ osLine(machine) ?? '—' }}
+          </TableCell>
+          <TableCell class="font-mono text-[10px] text-fc-muted">
+            {{ resourcesLine(machine) ?? '—' }}
+          </TableCell>
+          <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
+            {{ relativeTime(machine.lastSeenAt ?? machine.lastObservation?.collectedAt ?? null) }}
+          </TableCell>
+        </TableRow>
+      </template>
 
       <TableRow
         v-if="tailnetOnly.length > 0"
@@ -220,8 +291,8 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
         </TableCell>
         <TableCell>
           <StatusChip
-            :label="device.online ? 'ONLINE' : 'OFFLINE'"
-            :tone="device.online ? 'ok' : 'faint'"
+            :label="tailnetStatusLabel(device.online)"
+            :tone="device.online ? 'ok' : device.online === null ? 'faint' : 'faint'"
           />
         </TableCell>
         <TableCell class="font-mono text-[10px] text-fc-muted">
