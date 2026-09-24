@@ -707,11 +707,44 @@ impl MachinePort for FakeMachines {
 
     async fn list(&self, filter: &MachineFilter, limit: u32) -> Result<Vec<Machine>, PortFailure> {
         *self.last_filter.lock().unwrap() = Some(filter.clone());
-        Ok(self
-            .machines
-            .lock()
-            .unwrap()
+        let mut machines = self.machines.lock().unwrap().clone();
+        machines.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        let cursor_created_at = filter
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                machines
+                    .iter()
+                    .find(|machine| machine.id == cursor)
+                    .map(|machine| machine.created_at)
+                    .ok_or_else(|| PortFailure::NotFound {
+                        what: format!("machine {cursor:?}"),
+                    })
+            })
+            .transpose()?;
+        Ok(machines
             .iter()
+            .filter(|machine| {
+                cursor_created_at.is_none_or(|created_at| {
+                    machine.created_at < created_at
+                        || (machine.created_at == created_at
+                            && filter
+                                .cursor
+                                .as_deref()
+                                .is_some_and(|cursor| machine.id.as_str() < cursor))
+                })
+            })
+            .filter(|machine| {
+                filter
+                    .tag
+                    .as_deref()
+                    .is_none_or(|tag| machine.tags.iter().any(|machine_tag| machine_tag == tag))
+            })
             .take(limit as usize)
             .cloned()
             .collect())
@@ -976,7 +1009,7 @@ async fn machine_filters_are_validated_and_forwarded() {
     let (parts, _) = call_via(
         &router,
         get(&format!(
-            "{API_BASE_PATH}/machines?tag=linux&group=lab&capability=tool:git&status=connected&limit=7"
+            "{API_BASE_PATH}/machines?tag=linux&group=lab&capability=tool:git&status=connected&cursor=01990000-0000-7000-8000-000000000009&limit=7"
         )),
     )
     .await;
@@ -989,6 +1022,59 @@ async fn machine_filters_are_validated_and_forwarded() {
         Some(("tool".to_owned(), "git".to_owned()))
     );
     assert_eq!(filter.status, Some(MachineStatus::Connected));
+    assert_eq!(
+        filter.cursor.as_deref(),
+        Some("01990000-0000-7000-8000-000000000009")
+    );
+
+    let (parts, body) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/machines?cursor=deleted-machine")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn machine_list_cursor_returns_the_following_page() {
+    let backend = Arc::new(
+        FakeMachines::default()
+            .with(example_machine())
+            .with(Machine {
+                id: "01990000-0000-7000-8000-000000000010".to_owned(),
+                name: "next-host".to_owned(),
+                ..example_machine()
+            })
+            .with(Machine {
+                id: "01990000-0000-7000-8000-000000000011".to_owned(),
+                name: "filtered-host".to_owned(),
+                tags: vec!["other".to_owned()],
+                ..example_machine()
+            }),
+    );
+    let router = principal_router(machine_state(Arc::new(PermitAllAuthorizer), backend));
+
+    let (parts, first) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/machines?limit=1&tag=linux")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK, "{first}");
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let cursor = first["page"]["nextCursor"].as_str().unwrap();
+
+    let (parts, second) = call_via(
+        &router,
+        get(&format!(
+            "{API_BASE_PATH}/machines?limit=1&tag=linux&cursor={cursor}"
+        )),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK, "{second}");
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["items"][0]["name"], "next-host");
+    assert_eq!(second["items"][0]["name"], "build-host");
 }
 
 #[tokio::test]

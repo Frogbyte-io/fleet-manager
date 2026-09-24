@@ -101,6 +101,8 @@ fn parsing_accepts_the_machine_grammar() {
         "tool:git",
         "--status",
         "connected",
+        "--cursor",
+        "previous-machine",
         "--limit",
         "7",
     ]
@@ -115,6 +117,7 @@ fn parsing_accepts_the_machine_grammar() {
             group: Some("lab".to_owned()),
             capability: Some("tool:git".to_owned()),
             status: Some("connected".to_owned()),
+            cursor: Some("previous-machine".to_owned()),
             limit: Some(7),
         }
     );
@@ -132,6 +135,7 @@ fn parsing_accepts_the_machine_grammar() {
             group: None,
             capability: None,
             status: None,
+            cursor: None,
             limit: None,
         }
     );
@@ -185,7 +189,7 @@ fn text_output_renders_machines_as_a_table() {
                 "tags": []
             }
         ],
-        "page": {"limit": 50, "nextCursor": null}
+        "page": {"limit": 50, "nextCursor": "01990000-0000-7000-8000-000000000003"}
     });
     let text = fleetctl::render_machines_for_test(&page);
     assert!(text.contains("NAME"), "{text}");
@@ -195,6 +199,10 @@ fn text_output_renders_machines_as_a_table() {
     assert!(text.contains("agentless"), "{text}");
     assert!(text.contains("ops@build.lan:22"), "{text}");
     assert!(text.contains("linux,build"), "{text}");
+    assert!(
+        text.contains("--cursor 01990000-0000-7000-8000-000000000003"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -398,6 +406,18 @@ fn fleetctl_machines_read_a_real_controller() {
     let json = run(&["--output", "json", "machines", "list"]);
     let page: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(page["items"][0]["machineStatus"], "agentless");
+
+    // A cursor resumes after the named machine.
+    let continued = run(&[
+        "--output",
+        "json",
+        "machines",
+        "list",
+        "--cursor",
+        &machine_id,
+    ]);
+    let continued: serde_json::Value = serde_json::from_str(&continued).unwrap();
+    assert!(continued["items"].as_array().unwrap().is_empty());
 
     // Filters flow through as query parameters.
     let filtered = run(&["machines", "list", "--tag", "nothing-matches"]);

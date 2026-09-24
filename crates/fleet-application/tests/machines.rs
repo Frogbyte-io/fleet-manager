@@ -415,6 +415,7 @@ async fn the_use_case_sends_the_filter_to_the_port() {
         group: Some("build".to_owned()),
         capability: Some(("tool".to_owned(), "git".to_owned())),
         status: Some(MachineStatus::Connected),
+        cursor: Some("build-machine".to_owned()),
     };
     machines
         .list(&PermitAll, &principal(), &filter, 10, NOW)

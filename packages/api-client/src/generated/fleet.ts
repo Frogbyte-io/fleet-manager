@@ -3563,6 +3563,10 @@ capability?: string;
  */
 status?: string;
 /**
+ * The opaque cursor from a previous page (the last machine's id).
+ */
+cursor?: string;
+/**
  * The maximum number of machines to return.
  * @minimum 0
  */
@@ -5072,7 +5076,7 @@ export const getListMachinesUrl = (params?: ListMachinesParams,) => {
  * # Errors
  *
  * Returns the public error envelope on refusal or backend failure.
- * @summary Lists machines, newest first, narrowed by the filters.
+ * @summary Lists machines, newest first, narrowed by the filters and optional cursor.
  */
 export const listMachines = async (params?: ListMachinesParams, options?: RequestInit): Promise<listMachinesResponse> => {
 

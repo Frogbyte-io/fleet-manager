@@ -222,6 +222,8 @@ pub struct ListMachinesParams {
     /// Only machines in this connectivity state: `connected`, `stale`,
     /// `offline`, or `agentless`.
     pub status: Option<String>,
+    /// The opaque cursor from a previous page (the last machine's id).
+    pub cursor: Option<String>,
     /// The maximum number of machines to return.
     pub limit: Option<u32>,
 }
@@ -293,7 +295,7 @@ pub(crate) fn invalid_request(message: &str, correlation_id: CorrelationId) -> A
     ApiError::new(&public, correlation_id).with_status(StatusCode::BAD_REQUEST)
 }
 
-/// Lists machines, newest first, narrowed by the filters.
+/// Lists machines, newest first, narrowed by the filters and optional cursor.
 ///
 /// # Errors
 ///
@@ -308,6 +310,7 @@ pub(crate) fn invalid_request(message: &str, correlation_id: CorrelationId) -> A
         ("group" = Option<String>, Query, description = "Only machines in this group."),
         ("capability" = Option<String>, Query, description = "Only machines carrying this capability, as `namespace:name`."),
         ("status" = Option<String>, Query, description = "Only machines in this state: connected, stale, offline, or agentless."),
+        ("cursor" = Option<String>, Query, description = "The opaque cursor from a previous page (the last machine's id)."),
         ("limit" = Option<u32>, Query, description = "The maximum number of machines to return.")
     ),
     responses(
@@ -318,7 +321,7 @@ pub(crate) fn invalid_request(message: &str, correlation_id: CorrelationId) -> A
         ),
         (
             status = 400,
-            description = "A filter is malformed.",
+            description = "A filter is malformed or the cursor names no machine.",
             body = crate::error::ApiError
         ),
         (
@@ -343,6 +346,7 @@ pub async fn list_machines(
         group: params.group,
         capability,
         status,
+        cursor: params.cursor,
     };
     let limit = params
         .limit
