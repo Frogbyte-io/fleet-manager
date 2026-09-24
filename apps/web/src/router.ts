@@ -36,6 +36,11 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: 'Add machine', group: 'Infrastructure' },
   },
   {
+    path: '/fleet/machines/:id',
+    component: () => import('./pages/machine/MachineRoute.vue'),
+    meta: { title: 'Machine', group: 'Infrastructure' },
+  },
+  {
     path: '/projects',
     component: () => import('./pages/projects/ProjectsPage.vue'),
     meta: { title: 'Projects', group: 'Work' },

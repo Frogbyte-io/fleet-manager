@@ -6,6 +6,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { RouterLink } from 'vue-router'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 import type { PageMachineDtoItemsItem } from '@frogbyte-io/fleet-api-client'
 import { machineStatusTone, osLine, relativeTime, resourcesLine, type MachineItem } from '../inventory'
@@ -153,9 +154,13 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
           </table>
         </div>
 
-        <p class="border-t border-fc-line pt-3 text-xs text-fc-faint">
-          Actions move to the machine page (FM-911).
-        </p>
+        <RouterLink
+          :to="`/fleet/machines/${machine.id}`"
+          class="block border-t border-fc-line pt-3 font-mono text-[11px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+          data-testid="machine-page-link"
+        >
+          Open machine page →
+        </RouterLink>
       </div>
     </SheetContent>
   </Sheet>
