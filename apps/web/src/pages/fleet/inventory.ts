@@ -23,6 +23,7 @@ export interface HostItem {
 export interface GuestItem {
   key: string
   accountId: string
+  accountName: string
   kind: 'vm' | 'lxc'
   vmid: number | null
   name: string
@@ -113,12 +114,8 @@ function fact(machine: MachineDto, namespace: string, name: string): string | nu
   return found?.value ?? null
 }
 
-export function specLine(machine: MachineItem): string {
+export function resourcesLine(machine: MachineItem): string | null {
   const parts: string[] = []
-  if (machine.os)
-    parts.push(machine.os)
-  if (machine.arch)
-    parts.push(machine.arch)
   if (machine.cpuCores !== null)
     parts.push(`${machine.cpuCores}C`)
   const mem = formatBytes(machine.memoryBytes)
@@ -127,7 +124,33 @@ export function specLine(machine: MachineItem): string {
   const disk = formatBytes(machine.diskFreeBytes)
   if (disk)
     parts.push(`${disk} FREE`)
+  return parts.length > 0 ? parts.join(' · ').toUpperCase() : null
+}
+
+export function osLine(machine: MachineItem): string | null {
+  const parts: string[] = []
+  if (machine.os)
+    parts.push(machine.os)
+  if (machine.arch)
+    parts.push(machine.arch)
+  return parts.length > 0 ? parts.join(' · ').toUpperCase() : null
+}
+
+export function specLine(machine: MachineItem): string {
+  const os = osLine(machine)
+  const resources = resourcesLine(machine)
+  const parts: string[] = []
+  if (os)
+    parts.push(os)
+  if (resources)
+    parts.push(resources)
   return parts.join(' · ').toUpperCase()
+}
+
+export function guestAgentLabel(agentOnline: boolean | null): string {
+  if (agentOnline === null)
+    return 'UNKNOWN (NO AGENT DATA)'
+  return agentOnline ? 'ONLINE' : 'OFFLINE'
 }
 
 export function machineStatusTone(status: string): Tone {
@@ -201,6 +224,7 @@ function buildGuests(
   resources: ProxmoxResourceDto[],
   guests: PageAssociatedGuestDtoItemsItem[] | null,
   accountId: string,
+  accountName: string,
 ): GuestItem[] {
   const discovered = resources.filter(r => isGuestKind(r.kind))
   const byVmid = new Map<number, PageAssociatedGuestDtoItemsItem>()
@@ -216,6 +240,7 @@ function buildGuests(
     return {
       key: `${accountId}:${resource.id}`,
       accountId,
+      accountName,
       kind,
       vmid: resource.vmid ?? null,
       name: resource.name ?? (resource.vmid !== null && resource.vmid !== undefined ? `VMID ${resource.vmid}` : resource.id),
@@ -337,7 +362,7 @@ export function buildInventory(input: InventoryInput): Inventory {
     }
     if (source.discovery) {
       hosts.push(...buildHosts(source.discovery.resources, source.accountName))
-      guests.push(...buildGuests(source.discovery.resources, source.guests, source.accountId))
+      guests.push(...buildGuests(source.discovery.resources, source.guests, source.accountId, source.accountName))
       sources.push({
         key,
         label,

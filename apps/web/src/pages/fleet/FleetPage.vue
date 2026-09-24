@@ -10,6 +10,7 @@ import MachinesPanel from '@/components/MachinesPanel.vue'
 import type { PageMachineDtoItemsItem } from '@frogbyte-io/fleet-api-client'
 
 import GuestCard from './components/GuestCard.vue'
+import GuestDrawer from './components/GuestDrawer.vue'
 import HostCard from './components/HostCard.vue'
 import MachineCard from './components/MachineCard.vue'
 import MachineDrawer from './components/MachineDrawer.vue'
@@ -221,29 +222,6 @@ const selectedRawMachine = computed<PageMachineDtoItemsItem | null>(() =>
 const selectedGuest = computed(() =>
   inventory.value.guests.find(g => g.key === selectedGuestKey.value) ?? null,
 )
-
-const guestAsMachine = computed<MachineItem | null>(() => {
-  const guest = selectedGuest.value
-  if (!guest)
-    return null
-  return {
-    id: guest.key,
-    name: guest.name,
-    status: guest.status,
-    os: guest.osName,
-    arch: null,
-    cpuCores: null,
-    memoryBytes: null,
-    diskFreeBytes: null,
-    endpointKinds: [],
-    tags: [],
-    groups: [],
-    lastSeenAt: null,
-    lastObservation: null,
-    guestCandidates: [],
-    tailnet: null,
-  }
-})
 
 const errorSources = computed(() =>
   inventory.value.sources.filter(s => s.state !== 'ok'),
@@ -502,7 +480,6 @@ function sourceBorder(state: string): string {
         </section>
 
         <section
-          v-if="filteredMachines.length > 0"
           data-testid="section-machines"
         >
           <div class="border-b-2 border-fc-line pb-1">
@@ -511,6 +488,18 @@ function sourceBorder(state: string): string {
               <span class="float-right font-mono text-[9.5px] font-normal text-fc-faint">{{ filteredMachines.length }} MACHINES</span>
             </h2>
           </div>
+          <p
+            v-if="filteredMachines.length === 0"
+            class="mt-3 text-xs text-fc-faint"
+          >
+            No machines yet —
+            <RouterLink
+              to="/fleet/add"
+              class="underline decoration-dotted hover:text-fc-ink"
+            >
+              Add machine
+            </RouterLink>
+          </p>
           <div
             v-for="group in machineGroups"
             :key="group.name || '_all'"
@@ -614,10 +603,9 @@ function sourceBorder(state: string): string {
       :raw="selectedRawMachine"
     />
 
-    <MachineDrawer
+    <GuestDrawer
       v-model:open="drawerOpen"
-      :machine="guestAsMachine"
-      :raw="null"
+      :guest="selectedGuest"
     />
 
     <Collapsible

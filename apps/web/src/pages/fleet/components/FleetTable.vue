@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { RouterLink } from 'vue-router'
 import {
   Table,
   TableBody,
@@ -11,7 +12,9 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 import {
   guestStatusTone,
   machineStatusTone,
+  osLine,
   relativeTime,
+  resourcesLine,
   specLine,
   type GuestItem,
   type HostItem,
@@ -31,6 +34,8 @@ const emit = defineEmits<{
   'open-guest': [guestKey: string]
 }>()
 
+const headClass = 'font-mono text-[10px] uppercase font-semibold text-fc-faint [letter-spacing:.14em]'
+
 function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
   return guests.filter(g => g.node === host.name)
 }
@@ -40,25 +45,25 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
   <Table>
     <TableHeader>
       <TableRow class="border-fc-line hover:bg-transparent">
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           Name
         </TableHead>
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           Kind
         </TableHead>
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           Status
         </TableHead>
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           Connections
         </TableHead>
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           OS / Arch
         </TableHead>
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           Resources
         </TableHead>
-        <TableHead class="font-mono uppercase text-fc-faint">
+        <TableHead :class="headClass">
           Seen
         </TableHead>
       </TableRow>
@@ -100,8 +105,9 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
           class="cursor-pointer border-fc-line"
           @click="emit('open-guest', guest.key)"
         >
-          <TableCell class="pl-6 font-mono text-xs text-fc-ink">
+          <TableCell class="pl-6 text-sm text-fc-ink">
             └ {{ guest.name }}
+            <span class="block font-mono text-[10px] text-fc-faint">{{ guest.kind === 'vm' ? `QEMU ${guest.vmid}` : `LXC ${guest.vmid}` }}</span>
           </TableCell>
           <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
             {{ guest.kind === 'vm' ? 'VM' : 'LXC' }}
@@ -119,7 +125,7 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
             {{ guest.osName ?? '—' }}
           </TableCell>
           <TableCell class="font-mono text-[10px] text-fc-muted">
-            {{ guest.vmid }}
+            —
           </TableCell>
           <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
             —
@@ -135,6 +141,23 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
           v-for="i in 6"
           :key="i"
         />
+      </TableRow>
+      <TableRow
+        v-if="machines.length === 0"
+        class="border-fc-line"
+      >
+        <TableCell
+          colspan="7"
+          class="text-xs text-fc-faint"
+        >
+          No machines yet —
+          <RouterLink
+            to="/fleet/add"
+            class="underline decoration-dotted hover:text-fc-ink"
+          >
+            Add machine
+          </RouterLink>
+        </TableCell>
       </TableRow>
       <TableRow
         v-for="machine in machines"
@@ -161,10 +184,10 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
           </template>
         </TableCell>
         <TableCell class="font-mono text-[10px] text-fc-muted">
-          {{ machine.os ?? '—' }} · {{ machine.arch ?? '—' }}
+          {{ osLine(machine) ?? '—' }}
         </TableCell>
         <TableCell class="font-mono text-[10px] text-fc-muted">
-          {{ machine.cpuCores ?? '—' }}C
+          {{ resourcesLine(machine) ?? '—' }}
         </TableCell>
         <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
           {{ relativeTime(machine.lastSeenAt ?? machine.lastObservation?.collectedAt ?? null) }}

@@ -8,7 +8,7 @@ import {
 } from '@/components/ui/sheet'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 import type { PageMachineDtoItemsItem } from '@frogbyte-io/fleet-api-client'
-import { formatBytes, machineStatusTone, relativeTime, type MachineItem } from '../inventory'
+import { machineStatusTone, osLine, relativeTime, resourcesLine, type MachineItem } from '../inventory'
 
 defineProps<{
   machine: MachineItem | null
@@ -48,13 +48,13 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
             Hardware
           </dt>
           <dd class="font-mono text-fc-ink">
-            {{ machine.cpuCores ?? '—' }}C · {{ formatBytes(machine.memoryBytes) ?? '—' }} · {{ formatBytes(machine.diskFreeBytes) ?? '—' }} FREE
+            {{ resourcesLine(machine) ?? 'Not observed yet' }}
           </dd>
           <dt class="text-fc-faint">
             OS
           </dt>
           <dd class="font-mono text-fc-ink">
-            {{ machine.os ?? '—' }} · {{ machine.arch ?? '—' }}
+            {{ osLine(machine) ?? 'Not observed yet' }}
           </dd>
           <dt class="text-fc-faint">
             Endpoints

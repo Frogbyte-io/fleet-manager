@@ -270,4 +270,60 @@ describe('FleetPage', () => {
     expect(wrapper.find('[data-testid="table-view"]').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('opens a guest drawer with agent info when clicking a guest row', async () => {
+    const router = makeRouter()
+    router.push('/fleet')
+    await router.isReady()
+    const wrapper = mountPage(router)
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="view-table"]').trigger('click')
+    await flushPromises()
+
+    const guestRows = wrapper.findAll('tbody tr').filter(r => r.text().includes('web'))
+    await guestRows[0]!.trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('Guest agent')
+    expect(document.body.textContent).toContain('ONLINE')
+    expect(document.body.textContent).not.toContain('Not observed yet')
+    wrapper.unmount()
+  })
+
+  it('shows "Not observed yet" in the machine drawer when no facts exist', async () => {
+    listMachines.mockResolvedValue(ok(page([{
+      ...machine(),
+      capabilities: [],
+    }]) as PageMachineDto))
+    const router = makeRouter()
+    router.push('/fleet?focus=m1')
+    await router.isReady()
+    const wrapper = mountPage(router)
+    await flushPromises()
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('Not observed yet')
+    expect(document.body.textContent).not.toContain('—C')
+    wrapper.unmount()
+  })
+
+  it('shows the empty machines row in the table and cards view', async () => {
+    listMachines.mockResolvedValue(ok(page([]) as PageMachineDto))
+    const router = makeRouter()
+    router.push('/fleet')
+    await router.isReady()
+    const wrapper = mountPage(router)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No machines yet')
+    expect(wrapper.text()).toContain('Add machine')
+
+    await wrapper.get('[data-testid="view-table"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('No machines yet')
+    wrapper.unmount()
+  })
 })
