@@ -618,7 +618,7 @@ FM-214 moves after the first Lab release. Initial Windows support in M6 is Proxm
 - FM-302's deferred Markdown editing is superseded by FM-922 and FM-S10.
 - `bootstrap/fleet-bootstrap` is retired by FM-924.
 
-GitHub mapping (epics and issues) is recorded below once created.
+Created on GitHub 2026-09-24 as milestone 10 with epics #118 (A, console foundation), #119 (B, fleet inventory), #120 (C, fleet-wide skills), #121 (D, Lab and images), #122 (E, settings/Proxmox/projects/audit/access). Issues: FM-900 #123, FM-901 #124, FM-902 #125, FM-910 #126, FM-911 #127, FM-912 #128, FM-913 #129, FM-914 #130, FM-915 #131, FM-916 #132, FM-S10 #133, FM-920 #134, FM-921 #135, FM-922 #136, FM-923 #137, FM-924 #138, FM-925 #139, FM-930 #140, FM-931 #141, FM-932 #142, FM-940 #143, FM-941 #144, FM-942 #145, FM-943 #146, FM-944 #147. #15 and #109 point their web items at FM-930/FM-932; #79 carries a supersession note.
 
 ## Creation and dependency hygiene
 
