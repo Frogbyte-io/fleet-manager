@@ -154,7 +154,7 @@ describe('SettingsPage', () => {
     )
     listProxmoxAccounts.mockImplementationOnce(async () => ({
       status: 403,
-      data: { code: 'forbidden', message: 'no', correlationId: 'c1', retry: false },
+      data: { code: 'forbidden', message: 'no', correlationId: 'c1', retry: 'never' },
     }))
     getTailnetStatus.mockImplementationOnce(async () => {
       throw new Error('refused')
@@ -175,7 +175,7 @@ describe('SettingsPage', () => {
     ]) {
       vi.mocked(fn).mockImplementationOnce(async () => ({
         status: 503,
-        data: { code: 'unavailable', message: 'down', correlationId: 'c1', retry: false },
+        data: { code: 'unavailable', message: 'down', correlationId: 'c1', retry: 'never' },
       }) as never)
     }
     wrapper = await mountAt()
