@@ -31,7 +31,13 @@ const HIDDEN_KEY = 'fleet-console-hidden-tailnet'
 const viewMode = ref<'cards' | 'table'>(
   localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'cards',
 )
-watch(viewMode, mode => localStorage.setItem(VIEW_KEY, mode))
+
+// Only an explicit user choice is persisted; deep links (?focus=) switch the
+// view for this visit without rewriting the saved preference.
+function chooseView(mode: 'cards' | 'table') {
+  viewMode.value = mode
+  localStorage.setItem(VIEW_KEY, mode)
+}
 
 const search = ref('')
 const statusFilter = ref('any')
@@ -160,7 +166,8 @@ const filteredHosts = computed(() =>
   }),
 )
 
-// Guests matched by search/kind keep their host row visible as context (finding 9).
+// A guest always appears under its Proxmox host, so a guest that matches the
+// filters keeps its host row as context even when the host itself does not match.
 const filteredGuests = computed(() =>
   inventory.value.guests.filter((g) => {
     if (kindFilter.value !== 'all' && kindFilter.value !== 'guests')
@@ -289,7 +296,7 @@ function sourceBorder(state: string): string {
             class="px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider"
             :class="viewMode === 'cards' ? 'bg-fc-inset text-fc-ink' : 'text-fc-faint hover:text-fc-ink'"
             data-testid="view-cards"
-            @click="viewMode = 'cards'"
+            @click="chooseView('cards')"
           >
             Cards
           </button>
@@ -297,7 +304,7 @@ function sourceBorder(state: string): string {
             class="px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider"
             :class="viewMode === 'table' ? 'bg-fc-inset text-fc-ink' : 'text-fc-faint hover:text-fc-ink'"
             data-testid="view-table"
-            @click="viewMode = 'table'"
+            @click="chooseView('table')"
           >
             Table
           </button>

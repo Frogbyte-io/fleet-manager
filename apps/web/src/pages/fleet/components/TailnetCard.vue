@@ -18,7 +18,7 @@ async function copyImportCommand() {
 </script>
 
 <template>
-  <article class="fc-card rounded-sm border border-dashed border-fc-line bg-transparent p-4">
+  <article class="fc-card flex flex-col rounded-sm border border-dashed border-fc-line bg-transparent p-4">
     <div class="flex items-start gap-3">
       <KindIcon kind="tailnet" />
       <div class="min-w-0 flex-1">

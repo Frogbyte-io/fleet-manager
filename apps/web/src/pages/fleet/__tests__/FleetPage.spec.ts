@@ -219,7 +219,7 @@ describe('FleetPage', () => {
     expect(text).toContain('build-host')
     expect(text).toContain('≈ build-host (aa:bb:cc:dd:ee:ff)')
     expect(text).toContain('spare.tailnet.xyz')
-    expect(text).toContain('NOT LINKED TO A FLEET MACHINE')
+    expect(wrapper.find('[data-testid="copy-import"]').exists()).toBe(true)
   })
 
   it('excludes templates from the guest section', async () => {
@@ -254,6 +254,7 @@ describe('FleetPage', () => {
   })
 
   it('selects a machine via ?focus= and opens the table view', async () => {
+    localStorage.setItem('fleet-console-fleet-view', 'cards')
     const router = makeRouter()
     await router.push('/fleet?focus=m1')
     await router.isReady()
@@ -269,6 +270,8 @@ describe('FleetPage', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="table-view"]').exists()).toBe(true)
+    // A deep link switches the view for this visit only.
+    expect(localStorage.getItem('fleet-console-fleet-view')).toBe('cards')
   })
 
   it('opens a guest drawer with agent info when clicking a guest row', async () => {
@@ -460,13 +463,22 @@ describe('FleetPage', () => {
 
   it('copies a shell-safe fleetctl import command', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.assign(navigator, { clipboard: { writeText } })
-    const wrapper = await mountPage()
-    await flushPromises()
-    await flushPromises()
+    const previous = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    try {
+      const wrapper = await mountPage()
+      await flushPromises()
+      await flushPromises()
 
-    await wrapper.get('[data-testid="copy-import"]').trigger('click')
-    expect(writeText).toHaveBeenCalledWith('fleetctl tailnet import ts2 --user SSH_USER')
+      await wrapper.get('[data-testid="copy-import"]').trigger('click')
+      expect(writeText).toHaveBeenCalledWith('fleetctl tailnet import ts2 --user SSH_USER')
+    }
+    finally {
+      if (previous)
+        Object.defineProperty(navigator, 'clipboard', previous)
+      else
+        delete (navigator as { clipboard?: unknown }).clipboard
+    }
   })
 
   it('clears a machines truncation warning after a complete refetch', async () => {
