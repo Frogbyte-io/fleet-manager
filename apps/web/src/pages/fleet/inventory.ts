@@ -6,6 +6,11 @@ import type {
   ProxmoxResourceDto,
 } from '@frogbyte-io/fleet-api-client'
 
+// localStorage keys for the Fleet page's persisted preferences.
+export const VIEW_KEY = 'fleet-console-fleet-view'
+export const VIEWS_KEY = 'fleet-console-fleet-views'
+export const HIDDEN_KEY = 'fleet-console-hidden-tailnet'
+
 export type Tone = 'ok' | 'info' | 'warn' | 'err' | 'muted' | 'faint'
 export type SourceState = 'ok' | 'error' | 'partial' | 'unconfigured' | 'untrusted' | 'loading' | 'warn'
 

@@ -13,6 +13,8 @@ import type {
   ProxmoxDiscoveryDto,
 } from '@frogbyte-io/fleet-api-client'
 
+import { VIEW_KEY } from '../inventory'
+
 const listMachines = vi.fn()
 const listProxmoxAccounts = vi.fn()
 const discoverProxmoxCluster = vi.fn()
@@ -254,7 +256,7 @@ describe('FleetPage', () => {
   })
 
   it('selects a machine via ?focus= and opens the table view', async () => {
-    localStorage.setItem('fleet-console-fleet-view', 'cards')
+    localStorage.setItem(VIEW_KEY, 'cards')
     const router = makeRouter()
     await router.push('/fleet?focus=m1')
     await router.isReady()
@@ -271,7 +273,7 @@ describe('FleetPage', () => {
 
     expect(wrapper.find('[data-testid="table-view"]').exists()).toBe(true)
     // A deep link switches the view for this visit only.
-    expect(localStorage.getItem('fleet-console-fleet-view')).toBe('cards')
+    expect(localStorage.getItem(VIEW_KEY)).toBe('cards')
   })
 
   it('opens a guest drawer with agent info when clicking a guest row', async () => {

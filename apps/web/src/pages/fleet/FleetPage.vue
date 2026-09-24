@@ -17,16 +17,13 @@ import MachineDrawer from './components/MachineDrawer.vue'
 import FleetTable from './components/FleetTable.vue'
 import TailnetCard from './components/TailnetCard.vue'
 import { useFleetInventory } from './useFleetInventory'
+import { HIDDEN_KEY, VIEW_KEY, VIEWS_KEY } from './inventory'
 import type { HostItem, MachineItem } from './inventory'
 const route = useRoute()
 
 const { inventory, isLoading, refetchAll } = useFleetInventory()
 
 const rawMachines = computed(() => inventory.value.rawMachines ?? [])
-
-const VIEW_KEY = 'fleet-console-fleet-view'
-const VIEWS_KEY = 'fleet-console-fleet-views'
-const HIDDEN_KEY = 'fleet-console-hidden-tailnet'
 
 const viewMode = ref<'cards' | 'table'>(
   localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'cards',
