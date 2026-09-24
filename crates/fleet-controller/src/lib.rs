@@ -156,10 +156,14 @@ fn api_state(
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
         );
         let system = ControllerSystemInfo { pool: pool.clone() };
+        let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(
+            fleet_storage_sqlite::AuditLedger::new(&pool),
+        ));
         return fleet_api::operations::ApiState {
             operations: std::sync::Arc::new(operations),
             authorizer,
             system: std::sync::Arc::new(system),
+            audit: Some(std::sync::Arc::new(audit)),
             nodes,
             machines: Some(std::sync::Arc::new(machines)),
             onboarding,
@@ -178,6 +182,7 @@ fn api_state(
         operations: state.operations,
         authorizer: std::sync::Arc::new(DenyAllForTests),
         system: state.system,
+        audit: None,
         nodes: None,
         machines: None,
         onboarding: None,

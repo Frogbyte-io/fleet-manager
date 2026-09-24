@@ -409,7 +409,7 @@ impl Lab {
             Permission::LabLease,
             Some(&version.id),
             "lab_lease_creating",
-            Some(("purpose", inherited.purpose.as_str())),
+            None,
         )
         .await?;
         self.leases

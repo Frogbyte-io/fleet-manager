@@ -336,6 +336,51 @@ export interface AssociatedGuestDto {
 }
 
 /**
+ * One audit event, containing validated metadata and no raw request payload.
+ */
+export interface AuditEventDto {
+  /** Action id. */
+  action: string;
+  /** Acting principal id. */
+  actor: string;
+  /** Whether authorization allowed the request. */
+  allowed: boolean;
+  /**
+     * Correlation id, when present.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Event identity. */
+  id: string;
+  /**
+     * Safe metadata facts with fixed formats. Free-form strings are omitted
+     * because caller text can contain credentials even under innocuous keys.
+     */
+  metadata: unknown;
+  /** When the event was recorded (epoch milliseconds). */
+  occurredAt: number;
+  /**
+     * Durable operation id, when present.
+     * @nullable
+     */
+  operationId?: string | null;
+  /**
+     * Terminal outcome id, when present.
+     * @nullable
+     */
+  outcome?: string | null;
+  /** Stable authorization decision reason. */
+  reason: string;
+  /**
+     * Resource id, when present.
+     * @nullable
+     */
+  resource?: string | null;
+  /** Append-only ledger sequence. */
+  seq: number;
+}
+
+/**
  * One secret-backed build variable.
  */
 export interface SecretVarDto {
@@ -1335,6 +1380,64 @@ export type PageAssociatedGuestDtoItemsItem = {
 export interface PageAssociatedGuestDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageAssociatedGuestDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One audit event, containing validated metadata and no raw request payload.
+ */
+export type PageAuditEventDtoItemsItem = {
+  /** Action id. */
+  action: string;
+  /** Acting principal id. */
+  actor: string;
+  /** Whether authorization allowed the request. */
+  allowed: boolean;
+  /**
+     * Correlation id, when present.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Event identity. */
+  id: string;
+  /**
+     * Safe metadata facts with fixed formats. Free-form strings are omitted
+     * because caller text can contain credentials even under innocuous keys.
+     */
+  metadata: unknown;
+  /** When the event was recorded (epoch milliseconds). */
+  occurredAt: number;
+  /**
+     * Durable operation id, when present.
+     * @nullable
+     */
+  operationId?: string | null;
+  /**
+     * Terminal outcome id, when present.
+     * @nullable
+     */
+  outcome?: string | null;
+  /** Stable authorization decision reason. */
+  reason: string;
+  /**
+     * Resource id, when present.
+     * @nullable
+     */
+  resource?: string | null;
+  /** Append-only ledger sequence. */
+  seq: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageAuditEventDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageAuditEventDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -3533,6 +3636,42 @@ export interface UpdateProjectRequest {
   name: string;
 }
 
+export type ListAuditEventsParams = {
+/**
+ * Only events from this principal.
+ */
+actor?: string;
+/**
+ * Only events for this action id.
+ */
+action?: string;
+/**
+ * Only events for this resource id.
+ */
+resource?: string;
+/**
+ * allowed, denied, pending, succeeded, failed, cancelled, or blocked_manual_approval.
+ */
+outcome?: string;
+/**
+ * Inclusive lower event time in epoch milliseconds.
+ */
+from?: number;
+/**
+ * Inclusive upper event time in epoch milliseconds.
+ */
+to?: number;
+/**
+ * The opaque cursor from a previous page.
+ */
+cursor?: string;
+/**
+ * Maximum events to return (at most 200).
+ * @minimum 0
+ */
+limit?: number;
+};
+
 export type ListImageRecipesParams = {
 /**
  * The maximum number of recipes to return.
@@ -3644,6 +3783,85 @@ limit?: number;
  */
 cursor?: string;
 };
+
+export type listAuditEventsResponse200 = {
+  data: PageAuditEventDto
+  status: 200
+}
+
+export type listAuditEventsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listAuditEventsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listAuditEventsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listAuditEventsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listAuditEventsResponseSuccess = (listAuditEventsResponse200) & {
+  headers: Headers;
+};
+export type listAuditEventsResponseError = (listAuditEventsResponse400 | listAuditEventsResponse403 | listAuditEventsResponse500 | listAuditEventsResponse503) & {
+  headers: Headers;
+};
+
+export type listAuditEventsResponse = (listAuditEventsResponseSuccess | listAuditEventsResponseError)
+
+export const getListAuditEventsUrl = (params?: ListAuditEventsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/audit?${stringifiedParams}` : `/api/v1/audit`
+}
+
+/**
+ * Cursor pagination follows append order; filters remain applied to every
+ * page. Times are inclusive epoch milliseconds.
+ *
+ * # Errors
+ *
+ * Returns a standard error envelope for malformed filters, denied access,
+ * an unresolved caller, an unavailable database, or a storage failure.
+ * @summary Lists audit events by actor, action, resource, outcome, and time.
+ */
+export const listAuditEvents = async (params?: ListAuditEventsParams, options?: RequestInit): Promise<listAuditEventsResponse> => {
+
+  const res = await fetch(getListAuditEventsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listAuditEventsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listAuditEventsResponse
+}
+
+
 
 export type startImageBuildResponse202 = {
   data: ResourceOperationDto

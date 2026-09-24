@@ -12,6 +12,7 @@ use http::Method;
 use std::sync::Arc;
 
 use fleet_api::{API_BASE_PATH, CORRELATION_ID_HEADER, operations::ApiState, router};
+use fleet_application::audit::{AuditEvent, AuditFilter, AuditOutcome, AuditPage, AuditQueryPort};
 use http_body_util::BodyExt as _;
 use serde_json::Value;
 use tower::ServiceExt as _;
@@ -21,7 +22,7 @@ const SUPPLIED_CORRELATION_ID: &str = "01900a3c-b576-7287-a004-61d5b384a076";
 /// The test router: the in-memory operation state plus a resolved LAN
 /// principal, as the controller's caller middleware provides in production.
 /// The fake backend is returned so tests can drive its state directly.
-fn test_router() -> (axum::Router, Arc<FakePort>) {
+fn test_router() -> (axum::Router, Arc<FakePort>, Arc<RecordingAuditQuery>) {
     #[derive(Debug)]
     struct PermitAll;
     impl fleet_application::authz::Authorizer for PermitAll {
@@ -33,10 +34,14 @@ fn test_router() -> (axum::Router, Arc<FakePort>) {
         }
     }
     let port = Arc::new(FakePort::default());
+    let audit = Arc::new(RecordingAuditQuery(std::sync::Mutex::new(None)));
     let state = Arc::new(ApiState {
         operations: Arc::new(Operations::new(port.clone(), Arc::new(FakeAudit))),
         authorizer: Arc::new(PermitAll),
         system: Arc::new(FakeSystemInfo),
+        audit: Some(Arc::new(fleet_application::audit::AuditQueries::new(
+            audit.clone(),
+        ))),
         nodes: None,
         machines: None,
         onboarding: None,
@@ -51,11 +56,39 @@ fn test_router() -> (axum::Router, Arc<FakePort>) {
             id: "anonymous-lan-admin".to_owned(),
         })),
         port,
+        audit,
     )
 }
 
+#[derive(Debug)]
+struct RecordingAuditQuery(std::sync::Mutex<Option<AuditFilter>>);
+
+#[async_trait::async_trait]
+impl AuditQueryPort for RecordingAuditQuery {
+    async fn query(&self, filter: &AuditFilter) -> Result<AuditPage, String> {
+        *self.0.lock().unwrap() = Some(filter.clone());
+        Ok(AuditPage {
+            events: vec![AuditEvent {
+                seq: 12,
+                id: "event-12".to_owned(),
+                occurred_at: 1_700_000_000_000,
+                actor: "alice".to_owned(),
+                action: "machine.update".to_owned(),
+                resource: Some("machine-1".to_owned()),
+                allowed: true,
+                reason: "allowed".to_owned(),
+                correlation_id: Some("flow-1".to_owned()),
+                operation_id: None,
+                outcome: Some(AuditOutcome::Succeeded),
+                metadata_json: r#"{"event":"machine_updated","machine":"machine-1","purpose":"operator supplied access phrase"}"#.to_owned(),
+            }],
+            next_seq: Some(12),
+        })
+    }
+}
+
 async fn call(request: Request<Body>) -> (Parts, Value) {
-    let (router, _port) = test_router();
+    let (router, _port, _audit) = test_router();
     let response = router
         .oneshot(request)
         .await
@@ -103,6 +136,47 @@ async fn the_inert_endpoint_returns_the_resource_envelope() {
         body,
         serde_json::json!({"data": {"apiVersion": "v1", "service": "fleet-controller"}})
     );
+}
+
+#[tokio::test]
+async fn audit_api_forwards_filters_and_returns_a_metadata_only_page() {
+    let (router, _port, audit) = test_router();
+    let request = get(&format!(
+        "{API_BASE_PATH}/audit?actor=alice&action=machine.update&resource=machine-1&outcome=succeeded&from=1699999999000&to=1700000001000&cursor=11&limit=1"
+    ));
+    let response = router.oneshot(request).await.unwrap();
+    let (parts, body) = into_parts_json(response).await;
+
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["items"][0]["metadata"],
+        serde_json::json!({"event": "machine_updated"})
+    );
+    assert!(body["items"][0].get("metadataJson").is_none());
+    assert_eq!(body["page"]["nextCursor"], "12");
+    let filter = audit.0.lock().unwrap().clone().unwrap();
+    assert_eq!(filter.after_seq, Some(11));
+    assert_eq!(filter.actor.as_deref(), Some("alice"));
+    assert_eq!(filter.action.as_deref(), Some("machine.update"));
+    assert_eq!(filter.resource.as_deref(), Some("machine-1"));
+    assert_eq!(filter.outcome.as_deref(), Some("succeeded"));
+    assert_eq!(filter.from, Some(1_699_999_999_000));
+    assert_eq!(filter.to, Some(1_700_000_001_000));
+    assert_eq!(filter.limit, 1);
+}
+
+#[tokio::test]
+async fn audit_api_rejects_a_non_positive_cursor() {
+    let (parts, body) = call(get(&format!("{API_BASE_PATH}/audit?cursor=0"))).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn audit_api_returns_an_error_envelope_for_a_malformed_limit() {
+    let (parts, body) = call(get(&format!("{API_BASE_PATH}/audit?limit=not-a-number"))).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
 }
 
 #[tokio::test]
@@ -177,7 +251,7 @@ async fn error_bodies_never_carry_an_empty_field_violation_list() {
 // without a database.
 
 use async_trait::async_trait;
-use fleet_application::audit::{AuditIntent, AuditOutcome};
+use fleet_application::audit::AuditIntent;
 use fleet_application::authz::{Decision, ReasonId};
 use fleet_application::operation::{AuditPort, Operation, OperationPort, Operations, PortFailure};
 use std::sync::Mutex;
@@ -409,6 +483,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
         )),
         authorizer,
         system: Arc::new(FakeSystemInfo),
+        audit: None,
         nodes: None,
         machines: None,
         onboarding: None,
@@ -458,7 +533,7 @@ async fn an_unknown_kind_is_refused_with_the_invalid_request_code() {
 #[tokio::test]
 async fn the_operation_list_is_a_page() {
     // One router for both calls: the in-memory backend is per router.
-    let (router, _port) = test_router();
+    let (router, _port, _audit) = test_router();
     router
         .clone()
         .oneshot(
@@ -493,7 +568,7 @@ async fn an_unknown_operation_is_not_found() {
 #[tokio::test]
 async fn cancelling_records_a_durable_request() {
     // One router for both calls: the in-memory backend is per router.
-    let (router, _port) = test_router();
+    let (router, _port, _audit) = test_router();
     let (_, body) = {
         let response = router
             .clone()
@@ -579,7 +654,7 @@ async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
 #[tokio::test]
 async fn the_operation_event_stream_snapshots_and_closes_on_terminal() {
     // One router for both calls: the in-memory backend is per router.
-    let (router, port) = test_router();
+    let (router, port, _audit) = test_router();
     let (_, created) = {
         let response = router
             .clone()
@@ -874,6 +949,7 @@ fn machine_state(
         )),
         authorizer,
         system: Arc::new(FakeSystemInfo),
+        audit: None,
         nodes: None,
         machines: Some(Arc::new(Machines::new(backend, Arc::new(FakeAudit)))),
         onboarding: None,

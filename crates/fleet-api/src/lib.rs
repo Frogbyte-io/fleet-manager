@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod apply;
+pub mod audit;
 mod correlation;
 mod envelope;
 mod error;
@@ -104,6 +105,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         apply::ApplyAuthDto,
         apply::FieldDifferenceDto,
         apply::StartApplyRequest,
+        audit::AuditEventDto,
         projects::CreateProjectRequest,
         projects::ProjectDto,
         projects::UpdateProjectRequest,
@@ -161,6 +163,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
     tags(
         (name = "meta", description = "Service and contract description."),
         (name = "system", description = "The controller's own view of itself."),
+        (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (
             name = "machines",
@@ -223,6 +226,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(operations::get_operation))
                 .routes(routes!(operations::cancel_operation))
                 .routes(routes!(system::get_system_info))
+                .routes(routes!(audit::list_audit_events))
                 .routes(routes!(system::stream_operation_events))
                 .routes(routes!(machines::list_machines))
                 .routes(routes!(machines::get_machine))

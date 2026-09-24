@@ -48,7 +48,7 @@ Initial permission vocabulary includes:
 - `labs.read`, `labs.create`, `labs.exec`, `labs.destroy`, `labs.keep`, `hardware.reserve`
 - `desired.read`, `desired.plan`, `desired.apply`, `desired.admin`
 - `secrets.use` (provider- and purpose-scoped), never a general `secrets.read` for agents
-- `fleet.audit.read`, `fleet.policy.admin`, `fleet.admin`
+- `audit.read`, `fleet.policy.admin`, `fleet.admin`
 
 Future bindings can scope resources by ID, project, provider account, machine group/tag, environment classification, owner, TTL, and resource ceilings. Do not build an ad-hoc expression language. M1 implements the authorization port and explicit trusted-LAN policy; evaluate an embedded engine only when authenticated or multi-user deployment requires concrete policies.
 
@@ -85,6 +85,10 @@ Authentication, authorization, human approval, and provider privilege are separa
 ## Audit
 
 Audit events are append-only application records with timestamp, actor and credential/session IDs, action, resource, decision, request/correlation/operation IDs, outcome, provider external task/reference, and redacted metadata. The application writes intent/decision in the same database transaction as accepted state where possible and records terminal outcome later.
+
+Audit reads use the `audit.read` permission and a filtered, cursor-paginated API. The response exposes only fixed-format event identifiers, digests, enum values, and numeric facts from metadata. Free-form values such as names, purposes, notes, hostnames, and remotes are omitted because caller text can contain credentials under otherwise harmless keys. Lab lease purposes are not written to audit metadata.
+
+Pending status is tracked from the audit-query migration boundary forward. Earlier outcome rows did not retain a reliable intent link, so the migration does not infer one from similar historical event fields or report unmatched historical intents as pending.
 
 Audit is not a dump of commands or provider bodies. Redaction tests cover URLs, headers, environment, stdout/stderr, Git remotes, SSH errors, and serialized job payloads. Retention/export and tamper-evident external forwarding are later administration features.
 

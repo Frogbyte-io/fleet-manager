@@ -17,8 +17,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
-use crate::authz::Decision;
+use async_trait::async_trait;
+
+use crate::authz::{AccessRequest, Authorizer, Decision, Permission, authorize};
 
 /// Metadata entry value bound. Audit metadata is for references and facts,
 /// not payloads; anything larger belongs in an artifact or a log.
@@ -180,6 +183,154 @@ impl AuditOutcome {
             Self::Cancelled => "cancelled",
             Self::BlockedManualApproval => "blocked_manual_approval",
         }
+    }
+
+    /// Parses a stable outcome id.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            "blocked_manual_approval" => Some(Self::BlockedManualApproval),
+            _ => None,
+        }
+    }
+}
+
+/// Filters and pagination for an authorized audit read.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AuditFilter {
+    /// Exclusive sequence cursor from the previous page.
+    pub after_seq: Option<i64>,
+    /// Maximum number of returned events.
+    pub limit: u32,
+    /// Match one acting principal.
+    pub actor: Option<String>,
+    /// Match one action id.
+    pub action: Option<String>,
+    /// Match one resource id.
+    pub resource: Option<String>,
+    /// Match a decision/outcome id: allowed, denied, pending, or a terminal outcome id.
+    pub outcome: Option<String>,
+    /// Inclusive lower timestamp bound in epoch milliseconds.
+    pub from: Option<i64>,
+    /// Inclusive upper timestamp bound in epoch milliseconds.
+    pub to: Option<i64>,
+    /// Match one correlation identity.
+    pub correlation_id: Option<String>,
+}
+
+/// One page of audit events, in append order.
+#[derive(Clone, Debug, Default)]
+pub struct AuditPage {
+    /// The events returned by the query.
+    pub events: Vec<AuditEvent>,
+    /// The sequence to use as the exclusive cursor for the next page.
+    pub next_seq: Option<i64>,
+}
+
+/// The persistence contract for filtered audit reads.
+#[async_trait]
+pub trait AuditQueryPort: fmt::Debug + Send + Sync {
+    /// Reads the matching events in append order.
+    async fn query(&self, filter: &AuditFilter) -> Result<AuditPage, String>;
+}
+
+/// Errors returned by the authorized audit query use case.
+#[derive(Debug)]
+pub enum AuditQueryError {
+    /// The caller may not read the ledger.
+    Denied(Decision),
+    /// A filter is malformed.
+    Invalid {
+        /// What is malformed.
+        detail: String,
+    },
+    /// The persistence adapter failed.
+    Backend {
+        /// The storage failure detail.
+        detail: String,
+    },
+}
+
+impl fmt::Display for AuditQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied(decision) => write!(f, "denied: {decision}"),
+            Self::Invalid { detail } => write!(f, "invalid audit query: {detail}"),
+            Self::Backend { detail } => write!(f, "audit query failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for AuditQueryError {}
+
+/// The authorized audit query use case.
+#[derive(Debug)]
+pub struct AuditQueries {
+    port: Arc<dyn AuditQueryPort>,
+}
+
+impl AuditQueries {
+    /// Composes the query service from its persistence port.
+    #[must_use]
+    pub fn new(port: Arc<dyn AuditQueryPort>) -> Self {
+        Self { port }
+    }
+
+    /// Lists the events visible to a caller with `audit.read`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when authorization is denied, filters are invalid, or the
+    /// persistence adapter returns an error.
+    pub async fn list(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        filter: AuditFilter,
+    ) -> Result<AuditPage, AuditQueryError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::AuditRead,
+                resource: None,
+            },
+        )
+        .map_err(AuditQueryError::Denied)?;
+
+        if filter
+            .from
+            .zip(filter.to)
+            .is_some_and(|(from, to)| from > to)
+        {
+            return Err(AuditQueryError::Invalid {
+                detail: "from must be less than or equal to to".to_owned(),
+            });
+        }
+        if filter.outcome.as_deref().is_some_and(|outcome| {
+            !matches!(
+                outcome,
+                "allowed"
+                    | "denied"
+                    | "pending"
+                    | "succeeded"
+                    | "failed"
+                    | "cancelled"
+                    | "blocked_manual_approval"
+            )
+        }) {
+            return Err(AuditQueryError::Invalid {
+                detail: "unknown audit outcome".to_owned(),
+            });
+        }
+
+        self.port
+            .query(&filter)
+            .await
+            .map_err(|detail| AuditQueryError::Backend { detail })
     }
 }
 
