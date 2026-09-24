@@ -707,19 +707,38 @@ impl MachinePort for FakeMachines {
 
     async fn list(&self, filter: &MachineFilter, limit: u32) -> Result<Vec<Machine>, PortFailure> {
         *self.last_filter.lock().unwrap() = Some(filter.clone());
-        let machines = self.machines.lock().unwrap();
-        let start = filter.cursor.as_deref().map_or(Ok(0), |cursor| {
-            machines
-                .iter()
-                .position(|machine| machine.id == cursor)
-                .map(|index| index + 1)
-                .ok_or_else(|| PortFailure::NotFound {
-                    what: format!("machine {cursor:?}"),
-                })
-        })?;
+        let mut machines = self.machines.lock().unwrap().clone();
+        machines.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        let cursor_created_at = filter
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                machines
+                    .iter()
+                    .find(|machine| machine.id == cursor)
+                    .map(|machine| machine.created_at)
+                    .ok_or_else(|| PortFailure::NotFound {
+                        what: format!("machine {cursor:?}"),
+                    })
+            })
+            .transpose()?;
         Ok(machines
             .iter()
-            .skip(start)
+            .filter(|machine| {
+                cursor_created_at.is_none_or(|created_at| {
+                    machine.created_at < created_at
+                        || (machine.created_at == created_at
+                            && filter
+                                .cursor
+                                .as_deref()
+                                .is_some_and(|cursor| machine.id.as_str() < cursor))
+                })
+            })
             .filter(|machine| {
                 filter
                     .tag
@@ -1026,6 +1045,12 @@ async fn machine_list_cursor_returns_the_following_page() {
                 id: "01990000-0000-7000-8000-000000000010".to_owned(),
                 name: "next-host".to_owned(),
                 ..example_machine()
+            })
+            .with(Machine {
+                id: "01990000-0000-7000-8000-000000000011".to_owned(),
+                name: "filtered-host".to_owned(),
+                tags: vec!["other".to_owned()],
+                ..example_machine()
             }),
     );
     let router = principal_router(machine_state(Arc::new(PermitAllAuthorizer), backend));
@@ -1048,7 +1073,8 @@ async fn machine_list_cursor_returns_the_following_page() {
     .await;
     assert_eq!(parts.status, StatusCode::OK, "{second}");
     assert_eq!(second["items"].as_array().unwrap().len(), 1);
-    assert_eq!(second["items"][0]["name"], "next-host");
+    assert_eq!(first["items"][0]["name"], "next-host");
+    assert_eq!(second["items"][0]["name"], "build-host");
 }
 
 #[tokio::test]

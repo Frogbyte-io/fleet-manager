@@ -189,7 +189,7 @@ fn text_output_renders_machines_as_a_table() {
                 "tags": []
             }
         ],
-        "page": {"limit": 50, "nextCursor": null}
+        "page": {"limit": 50, "nextCursor": "01990000-0000-7000-8000-000000000003"}
     });
     let text = fleetctl::render_machines_for_test(&page);
     assert!(text.contains("NAME"), "{text}");
@@ -199,6 +199,10 @@ fn text_output_renders_machines_as_a_table() {
     assert!(text.contains("agentless"), "{text}");
     assert!(text.contains("ops@build.lan:22"), "{text}");
     assert!(text.contains("linux,build"), "{text}");
+    assert!(
+        text.contains("--cursor 01990000-0000-7000-8000-000000000003"),
+        "{text}"
+    );
 }
 
 #[test]

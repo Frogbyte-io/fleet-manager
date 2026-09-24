@@ -582,7 +582,7 @@ impl Machines {
     ///
     /// # Errors
     ///
-    /// Fails on denial or a backend failure.
+    /// Fails on denial, an unknown cursor, or a backend failure.
     pub async fn list(
         &self,
         authorizer: &dyn Authorizer,

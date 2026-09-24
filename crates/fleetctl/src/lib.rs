@@ -3470,6 +3470,15 @@ fn render_machines(value: Option<&Value>) -> String {
         if items.is_empty() {
             lines.push("(no machines)".to_owned());
         }
+        if let Some(cursor) = value
+            .get("page")
+            .and_then(|page| page.get("nextCursor"))
+            .and_then(Value::as_str)
+        {
+            lines.push(format!(
+                "Next page: fleetctl machines list --cursor {cursor} (repeat any filters used)"
+            ));
+        }
         lines.join("\n")
     } else {
         machine_detail(value)
