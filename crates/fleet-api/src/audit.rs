@@ -149,9 +149,11 @@ fn safe_metadata_entry(key: &str, value: &serde_json::Value) -> bool {
         "kind" => {
             !value.is_empty()
                 && value.len() <= 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'.' | b'-')
+                })
         }
         "attempt" | "vmid" => !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
         // Names, purposes, notes, hostnames, remotes, and opaque ids are
@@ -184,10 +186,11 @@ mod tests {
     #[test]
     fn dto_omits_free_form_metadata_values() {
         let dto = AuditEventDto::from(event(
-            r#"{"event":"lab_lease_creating","purpose":"operator supplied access phrase","name":"operator supplied"}"#,
+            r#"{"event":"lab_lease_creating","kind":"mise.install","purpose":"operator supplied access phrase","name":"operator supplied"}"#,
         ));
 
         assert_eq!(dto.metadata["event"], "lab_lease_creating");
+        assert_eq!(dto.metadata["kind"], "mise.install");
         assert!(dto.metadata.get("purpose").is_none());
         assert!(dto.metadata.get("name").is_none());
     }
