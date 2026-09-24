@@ -267,6 +267,7 @@ fn state_for(
         )),
         authorizer,
         system: Arc::new(FakeSystemInfo),
+        audit: None,
         nodes: None,
         machines: None,
         onboarding: None,

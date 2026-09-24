@@ -1,6 +1,8 @@
 //! Exercises the CLI contract: parsing, both output modes, and a real
 //! end-to-end request against a running controller router.
 
+use fleet_application::audit::{AuditIntent, AuditMetadata, AuditOutcome};
+use fleet_application::authz::{Decision, Permission};
 use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
 use serde_json::json;
 
@@ -26,6 +28,101 @@ fn parsing_accepts_the_documented_grammar() {
         invocation.command,
         fleetctl::Command::OperationsList { limit: Some(5) }
     );
+}
+
+#[test]
+fn audit_list_accepts_filters_and_json_output_after_the_command() {
+    let args: Vec<String> = [
+        "audit",
+        "list",
+        "--actor",
+        "alice",
+        "--action",
+        "machine.update",
+        "--resource",
+        "machine-1",
+        "--outcome",
+        "succeeded",
+        "--from",
+        "100",
+        "--to",
+        "200",
+        "--cursor",
+        "12",
+        "--limit",
+        "7",
+        "--output",
+        "json",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+
+    assert_eq!(invocation.output, fleetctl::Output::Json);
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::AuditList {
+            actor: Some("alice".to_owned()),
+            action: Some("machine.update".to_owned()),
+            resource: Some("machine-1".to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            from: Some(100),
+            to: Some(200),
+            cursor: Some("12".to_owned()),
+            limit: Some(7),
+        }
+    );
+}
+
+#[test]
+fn audit_list_accepts_output_between_filters_and_reports_missing_value() {
+    let args: Vec<String> = ["audit", "list", "--output", "json", "--limit", "5"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(invocation.output, fleetctl::Output::Json);
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::AuditList {
+            actor: None,
+            action: None,
+            resource: None,
+            outcome: None,
+            from: None,
+            to: None,
+            cursor: None,
+            limit: Some(5),
+        }
+    );
+
+    let args: Vec<String> = ["audit", "list", "--output"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("--output requires json or text"));
+}
+
+#[test]
+fn audit_text_output_shows_events_and_continuation() {
+    let page = json!({
+        "items": [{
+            "occurredAt": 1_700_000_000_000_i64,
+            "actor": "alice",
+            "action": "machine.update",
+            "resource": "machine-1",
+            "allowed": true,
+            "outcome": "succeeded"
+        }],
+        "page": {"limit": 1, "nextCursor": "14"}
+    });
+    let text = fleetctl::render_audit_for_test(&page);
+    assert!(text.contains("alice"), "{text}");
+    assert!(text.contains("machine.update"), "{text}");
+    assert!(text.contains("succeeded"), "{text}");
+    assert!(text.contains("fleetctl audit list --cursor 14"), "{text}");
 }
 
 #[test]
@@ -247,6 +344,7 @@ fn text_output_renders_a_machine_detail_with_facts() {
 /// The end-to-end path: a real HTTP server on an ephemeral port serving the
 /// real router, driven by the real CLI code.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn fleetctl_talks_to_a_real_controller() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -256,6 +354,25 @@ fn fleetctl_talks_to_a_real_controller() {
         let dist = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let ledger = fleet_storage_sqlite::AuditLedger::new(store.pool());
+        let mut metadata = AuditMetadata::default();
+        metadata.insert("event", "cli_e2e").unwrap();
+        let intent_id = ledger
+            .append_intent(&AuditIntent {
+                actor: "anonymous-lan-admin".to_owned(),
+                action: Permission::SystemRead.id().to_owned(),
+                resource: None,
+                decision: Decision::allow(),
+                correlation_id: Some("audit-cli-e2e".to_owned()),
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .unwrap();
+        ledger
+            .append_outcome(&intent_id, AuditOutcome::Succeeded)
             .await
             .unwrap();
         let settings = fleet_controller::Settings {
@@ -326,6 +443,32 @@ fn fleetctl_talks_to_a_real_controller() {
     let invocation = fleetctl::parse(&args).unwrap();
     let listing = fleetctl::run(&invocation).unwrap();
     assert!(listing.contains("no operations"), "{listing}");
+
+    let args: Vec<String> = [
+        "--url",
+        &format!("http://{addr}"),
+        "audit",
+        "list",
+        "--actor",
+        "anonymous-lan-admin",
+        "--action",
+        "system.read",
+        "--outcome",
+        "succeeded",
+        "--cursor",
+        "1",
+        "--output",
+        "json",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    let audit_json = fleetctl::run(&invocation).unwrap();
+    let audit_page: serde_json::Value = serde_json::from_str(&audit_json).unwrap();
+    assert_eq!(audit_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(audit_page["items"][0]["outcome"], "succeeded");
+    assert_eq!(audit_page["items"][0]["metadata"]["event"], "cli_e2e");
 }
 
 /// The machines commands over the same real-router path: register one

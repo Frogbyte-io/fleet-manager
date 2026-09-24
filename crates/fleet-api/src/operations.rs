@@ -36,6 +36,8 @@ pub struct ApiState {
     pub authorizer: Arc<dyn Authorizer>,
     /// The system view's source, assembled by the controller.
     pub system: Arc<dyn crate::system::SystemInfoSource>,
+    /// The authorized audit query use case, when the controller has a store.
+    pub audit: Option<Arc<fleet_application::audit::AuditQueries>>,
     /// The node trust use cases, when the controller was composed with a
     /// database and a master key; `None` only in document/test states.
     pub nodes: Option<Arc<fleet_application::node::Nodes>>,
@@ -70,6 +72,7 @@ impl std::fmt::Debug for ApiState {
             .field("operations", &self.operations)
             .field("authorizer", &"dyn Authorizer")
             .field("system", &"dyn SystemInfoSource")
+            .field("audit", &self.audit)
             .field("nodes", &self.nodes)
             .field("machines", &self.machines)
             .field("onboarding", &self.onboarding)
@@ -244,6 +247,7 @@ impl ApiState {
             )),
             authorizer: Arc::new(PermitAllForDocument),
             system: Arc::new(UnavailableSystemInfo),
+            audit: None,
             nodes: None,
             machines: None,
             onboarding: None,

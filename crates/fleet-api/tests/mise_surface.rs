@@ -338,6 +338,7 @@ fn state_for(
             operations: Arc::new(Operations::new(operations, Arc::new(FakeAudit))),
             authorizer,
             system: Arc::new(FakeSystemInfo),
+            audit: None,
             nodes: None,
             machines: Some(Arc::new(fleet_application::machine::Machines::new(
                 Arc::new(FakeMachines),

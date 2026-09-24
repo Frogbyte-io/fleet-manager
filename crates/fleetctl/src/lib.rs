@@ -92,6 +92,25 @@ pub enum Command {
         /// The operation id.
         id: String,
     },
+    /// List audit events with optional filters and cursor pagination.
+    AuditList {
+        /// Acting principal id.
+        actor: Option<String>,
+        /// Action id.
+        action: Option<String>,
+        /// Resource id.
+        resource: Option<String>,
+        /// Decision or terminal outcome id.
+        outcome: Option<String>,
+        /// Inclusive lower timestamp in epoch milliseconds.
+        from: Option<i64>,
+        /// Inclusive upper timestamp in epoch milliseconds.
+        to: Option<i64>,
+        /// Resume after this audit sequence.
+        cursor: Option<String>,
+        /// Maximum entries to request.
+        limit: Option<u32>,
+    },
     /// List machines with optional filters.
     MachinesList {
         /// Only machines carrying this tag.
@@ -724,6 +743,7 @@ pub enum OnboardAuthArg {
 /// # Errors
 ///
 /// Fails with a caller-safe usage message on anything unexpected.
+#[allow(clippy::too_many_lines)]
 pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     let mut url = DEFAULT_URL.to_owned();
     let mut url_explicit = false;
@@ -802,6 +822,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["operations", "cancel", id] => Command::OperationsCancel {
             id: (*id).to_owned(),
         },
+        ["audit", "list", rest @ ..] => parse_audit_list(rest, &mut output)?,
         ["machines", "list", rest @ ..] => parse_machines_list(rest)?,
         ["machines", "get", id] => Command::MachinesGet {
             id: (*id).to_owned(),
@@ -829,6 +850,80 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         socket,
         output,
         command,
+    })
+}
+
+/// Parses `audit list` query filters.
+fn parse_audit_list(rest: &[&str], output: &mut Output) -> Result<Command, CliError> {
+    let mut actor = None;
+    let mut action = None;
+    let mut resource = None;
+    let mut outcome = None;
+    let mut from = None;
+    let mut to = None;
+    let mut cursor = None;
+    let mut limit = None;
+    let mut flags = rest.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--actor" => actor = Some(value("actor")?.to_owned()),
+            "--action" => action = Some(value("action")?.to_owned()),
+            "--resource" => resource = Some(value("resource")?.to_owned()),
+            "--outcome" => outcome = Some(value("outcome")?.to_owned()),
+            "--cursor" => cursor = Some(value("cursor")?.to_owned()),
+            "--from" | "--to" => {
+                let name = flag.trim_start_matches('-');
+                let raw = value(name)?;
+                let parsed = raw.parse().map_err(|_| CliError {
+                    message: format!("--{name} must be epoch milliseconds, not {raw:?}"),
+                })?;
+                if flag == "--from" {
+                    from = Some(parsed);
+                } else {
+                    to = Some(parsed);
+                }
+            }
+            "--limit" => {
+                let raw = value("limit")?;
+                limit = Some(raw.parse().map_err(|_| CliError {
+                    message: format!("--limit must be a number, not {raw:?}"),
+                })?);
+            }
+            "--output" => {
+                let format = flags.next().ok_or_else(|| CliError {
+                    message: "--output requires json or text".to_owned(),
+                })?;
+                *output = match format {
+                    "json" => Output::Json,
+                    "text" => Output::Text,
+                    other => {
+                        return Err(CliError {
+                            message: format!("--output must be json or text, not {other:?}"),
+                        });
+                    }
+                };
+            }
+            other => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+        }
+    }
+    Ok(Command::AuditList {
+        actor,
+        action,
+        resource,
+        outcome,
+        from,
+        to,
+        cursor,
+        limit,
     })
 }
 
@@ -1800,7 +1895,7 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -2296,6 +2391,7 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             Command::MachinesList { .. } | Command::MachinesGet { .. } => {
                 render_machines(Some(payload))
             }
+            Command::AuditList { .. } => render_audit(Some(payload)),
             Command::MachinesOnboardList { .. }
             | Command::MachinesOnboardGet { .. }
             | Command::MachinesOnboardCreate { .. }
@@ -2372,6 +2468,30 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             reqwest::Method::POST,
             format!("/api/v1/operations/{id}/cancel"),
             Vec::new(),
+            None,
+        ),
+        Command::AuditList {
+            actor,
+            action,
+            resource,
+            outcome,
+            from,
+            to,
+            cursor,
+            limit,
+        } => (
+            reqwest::Method::GET,
+            "/api/v1/audit".to_owned(),
+            audit_list_query(
+                actor.as_ref(),
+                action.as_ref(),
+                resource.as_ref(),
+                outcome.as_ref(),
+                *from,
+                *to,
+                cursor.as_ref(),
+                *limit,
+            ),
             None,
         ),
         Command::MachinesList {
@@ -3307,6 +3427,37 @@ fn machines_list_query(
     query
 }
 
+#[allow(clippy::too_many_arguments)]
+fn audit_list_query(
+    actor: Option<&String>,
+    action: Option<&String>,
+    resource: Option<&String>,
+    outcome: Option<&String>,
+    from: Option<i64>,
+    to: Option<i64>,
+    cursor: Option<&String>,
+    limit: Option<u32>,
+) -> Vec<(&'static str, String)> {
+    let mut query = Vec::new();
+    for (name, value) in [
+        ("actor", actor),
+        ("action", action),
+        ("resource", resource),
+        ("outcome", outcome),
+        ("cursor", cursor),
+    ] {
+        if let Some(value) = value {
+            query.push((name, value.clone()));
+        }
+    }
+    for (name, value) in [("from", from), ("to", to), ("limit", limit.map(i64::from))] {
+        if let Some(value) = value {
+            query.push((name, value.to_string()));
+        }
+    }
+    query
+}
+
 /// Sends one controller request and answers the decoded body, refusing
 /// non-2xx answers with the envelope's code and message. An empty 204 body
 /// decodes as `null`.
@@ -3453,6 +3604,60 @@ pub fn render_for_test(value: &Value) -> String {
 #[must_use]
 pub fn render_machines_for_test(value: &Value) -> String {
     render_machines(Some(value))
+}
+
+/// Renders an audit list payload in text mode.
+#[must_use]
+pub fn render_audit_for_test(value: &Value) -> String {
+    render_audit(Some(value))
+}
+
+fn render_audit(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let Some(items) = value.get("items").and_then(Value::as_array) else {
+        return render_text(Some(value));
+    };
+    let mut lines = vec![format!(
+        "{:<14} {:<24} {:<30} {:<24} {}",
+        "TIME", "ACTOR", "ACTION", "RESOURCE", "OUTCOME"
+    )];
+    for item in items {
+        let occurred_at = item
+            .get("occurredAt")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let actor = item.get("actor").and_then(Value::as_str).unwrap_or("-");
+        let action = item.get("action").and_then(Value::as_str).unwrap_or("-");
+        let resource = item.get("resource").and_then(Value::as_str).unwrap_or("-");
+        let outcome = item
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                if item.get("allowed").and_then(Value::as_bool) == Some(false) {
+                    "denied"
+                } else {
+                    "pending"
+                }
+            });
+        lines.push(format!(
+            "{occurred_at:<14} {actor:<24} {action:<30} {resource:<24} {outcome}"
+        ));
+    }
+    if items.is_empty() {
+        lines.push("(no audit events)".to_owned());
+    }
+    if let Some(cursor) = value
+        .get("page")
+        .and_then(|page| page.get("nextCursor"))
+        .and_then(Value::as_str)
+    {
+        lines.push(format!(
+            "Next page: fleetctl audit list --cursor {cursor} (repeat any filters used)"
+        ));
+    }
+    lines.join("\n")
 }
 
 fn render_machines(value: Option<&Value>) -> String {

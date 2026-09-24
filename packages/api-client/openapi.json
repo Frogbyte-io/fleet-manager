@@ -10,6 +10,146 @@
     "version": "v1"
   },
   "paths": {
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Lists audit events by actor, action, resource, outcome, and time.",
+        "description": "Cursor pagination follows append order; filters remain applied to every\npage. Times are inclusive epoch milliseconds.\n\n# Errors\n\nReturns a standard error envelope for malformed filters, denied access,\nan unresolved caller, an unavailable database, or a storage failure.",
+        "operationId": "listAuditEvents",
+        "parameters": [
+          {
+            "name": "actor",
+            "in": "query",
+            "description": "Only events from this principal.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Only events for this action id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resource",
+            "in": "query",
+            "description": "Only events for this resource id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "allowed, denied, pending, succeeded, failed, cancelled, or blocked_manual_approval.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive lower event time in epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Inclusive upper event time in epoch milliseconds.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum events to return (at most 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of audit events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AuditEventDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter or cursor is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the audit ledger.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The audit query could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The audit surface is unavailable without a database.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/builds": {
       "post": {
         "tags": [
@@ -4540,6 +4680,83 @@
           }
         }
       },
+      "AuditEventDto": {
+        "type": "object",
+        "description": "One audit event, containing validated metadata and no raw request payload.",
+        "required": [
+          "seq",
+          "id",
+          "occurredAt",
+          "actor",
+          "action",
+          "allowed",
+          "reason",
+          "metadata"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Action id."
+          },
+          "actor": {
+            "type": "string",
+            "description": "Acting principal id."
+          },
+          "allowed": {
+            "type": "boolean",
+            "description": "Whether authorization allowed the request."
+          },
+          "correlationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Correlation id, when present."
+          },
+          "id": {
+            "type": "string",
+            "description": "Event identity."
+          },
+          "metadata": {
+            "description": "Safe metadata facts with fixed formats. Free-form strings are omitted\nbecause caller text can contain credentials even under innocuous keys."
+          },
+          "occurredAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the event was recorded (epoch milliseconds)."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Durable operation id, when present."
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Terminal outcome id, when present."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Stable authorization decision reason."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resource id, when present."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Append-only ledger sequence."
+          }
+        }
+      },
       "BuildImageRequest": {
         "type": "object",
         "description": "The build request: which version to build and the deadline.",
@@ -6597,6 +6814,101 @@
                     "type": "string"
                   },
                   "description": "The bounded per-surface warnings."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_AuditEventDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One audit event, containing validated metadata and no raw request payload.",
+              "required": [
+                "seq",
+                "id",
+                "occurredAt",
+                "actor",
+                "action",
+                "allowed",
+                "reason",
+                "metadata"
+              ],
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "description": "Action id."
+                },
+                "actor": {
+                  "type": "string",
+                  "description": "Acting principal id."
+                },
+                "allowed": {
+                  "type": "boolean",
+                  "description": "Whether authorization allowed the request."
+                },
+                "correlationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Correlation id, when present."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Event identity."
+                },
+                "metadata": {
+                  "description": "Safe metadata facts with fixed formats. Free-form strings are omitted\nbecause caller text can contain credentials even under innocuous keys."
+                },
+                "occurredAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the event was recorded (epoch milliseconds)."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Durable operation id, when present."
+                },
+                "outcome": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Terminal outcome id, when present."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "Stable authorization decision reason."
+                },
+                "resource": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Resource id, when present."
+                },
+                "seq": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Append-only ledger sequence."
                 }
               }
             },
@@ -10589,6 +10901,10 @@
     {
       "name": "system",
       "description": "The controller's own view of itself."
+    },
+    {
+      "name": "audit",
+      "description": "Authorized, metadata-only audit event queries."
     },
     {
       "name": "operations",

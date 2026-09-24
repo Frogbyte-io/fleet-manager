@@ -3,7 +3,7 @@
 //! rules, and authorized queries.
 
 use fleet_application::audit::{AuditIntent, AuditMetadata, AuditOutcome, MetadataError};
-use fleet_application::authz::{AccessRequest, Decision, Permission, ReasonId};
+use fleet_application::authz::{Decision, Permission, ReasonId};
 use fleet_storage_sqlite::audit::Query;
 use fleet_storage_sqlite::{AuditLedger, Store};
 
@@ -63,14 +63,7 @@ async fn an_intent_rolled_back_with_its_transaction_leaves_no_event() {
     tx.rollback().await.unwrap();
 
     let ledger = AuditLedger::new(store.pool());
-    let page = ledger
-        .query(
-            &fleet_auth::LanAllowAllAuthorizer,
-            "anonymous-lan-admin",
-            Query::default(),
-        )
-        .await
-        .unwrap();
+    let page = ledger.query(&Query::default()).await.unwrap();
     assert!(
         page.events.iter().all(|event| event.id != id),
         "a rolled-back intent must not persist"
@@ -92,20 +85,16 @@ async fn pagination_is_ordered_and_the_cursor_advances() {
             .unwrap();
     }
 
-    let authorizer = fleet_auth::LanAllowAllAuthorizer;
     let mut seen = Vec::new();
     let mut after_seq = None;
     loop {
         let page = ledger
-            .query(
-                &authorizer,
-                "anonymous-lan-admin",
-                Query {
-                    after_seq,
-                    limit: 2,
-                    correlation_id: None,
-                },
-            )
+            .query(&Query {
+                after_seq,
+                limit: 2,
+                correlation_id: None,
+                ..Query::default()
+            })
             .await
             .unwrap();
         seen.extend(page.events.iter().map(|event| event.seq));
@@ -134,48 +123,165 @@ async fn a_correlation_filter_returns_only_that_flow() {
         .unwrap();
 
     let page = ledger
-        .query(
-            &fleet_auth::LanAllowAllAuthorizer,
-            "anonymous-lan-admin",
-            Query {
-                after_seq: None,
-                limit: 10,
-                correlation_id: Some("flow-b"),
-            },
-        )
+        .query(&Query {
+            after_seq: None,
+            limit: 10,
+            correlation_id: Some("flow-b".to_owned()),
+            ..Query::default()
+        })
         .await
         .unwrap();
     assert_eq!(page.events.len(), 1);
     assert_eq!(page.events[0].correlation_id.as_deref(), Some("flow-b"));
 }
 
-/// An authorizer that denies everything, to drive the real denial path.
-#[derive(Debug)]
-struct DenyAll;
-impl fleet_application::authz::Authorizer for DenyAll {
-    fn decide(&self, _request: AccessRequest<'_>) -> Decision {
-        Decision::deny(ReasonId::UnknownPrincipal)
-    }
-}
-
 #[tokio::test]
-async fn an_unauthorized_caller_cannot_read_the_ledger() {
+async fn audit_filters_are_applied_before_sequence_cursor_pagination() {
     let (_dir, store) = store().await;
     let ledger = AuditLedger::new(store.pool());
+    let first = AuditIntent {
+        actor: "alice".to_owned(),
+        action: "machine.update".to_owned(),
+        resource: Some("machine-1".to_owned()),
+        decision: Decision::allow(),
+        correlation_id: None,
+        operation_id: None,
+        metadata: AuditMetadata::default(),
+    };
+    let first_id = ledger.append_intent(&first).await.unwrap();
     ledger
-        .append_intent(&intent(Permission::SystemRead, true, None))
+        .append_outcome(&first_id, AuditOutcome::Succeeded)
+        .await
+        .unwrap();
+    let second_id = ledger
+        .append_intent(&AuditIntent {
+            actor: "alice".to_owned(),
+            action: "machine.update".to_owned(),
+            resource: Some("machine-1".to_owned()),
+            decision: Decision::allow(),
+            correlation_id: None,
+            operation_id: None,
+            metadata: AuditMetadata::default(),
+        })
+        .await
+        .unwrap();
+    ledger
+        .append_outcome(&second_id, AuditOutcome::Succeeded)
+        .await
+        .unwrap();
+    ledger
+        .append_intent(&AuditIntent {
+            actor: "bob".to_owned(),
+            action: "machine.delete".to_owned(),
+            resource: Some("machine-2".to_owned()),
+            decision: Decision::deny(ReasonId::UnknownPrincipal),
+            correlation_id: None,
+            operation_id: None,
+            metadata: AuditMetadata::default(),
+        })
         .await
         .unwrap();
 
-    let error = ledger
-        .query(&DenyAll, "someone-else", Query::default())
+    let page = ledger
+        .query(&Query {
+            after_seq: None,
+            limit: 1,
+            correlation_id: None,
+            actor: Some("alice".to_owned()),
+            action: Some("machine.update".to_owned()),
+            resource: Some("machine-1".to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            from: None,
+            to: None,
+        })
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        fleet_storage_sqlite::audit::AuditError::Unauthorized(_)
-    ));
-    assert!(error.to_string().contains("policy.unknown_principal"));
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].actor, "alice");
+    assert_eq!(page.events[0].outcome, Some(AuditOutcome::Succeeded));
+    assert_eq!(page.next_seq, Some(page.events[0].seq));
+
+    let next_page = ledger
+        .query(&Query {
+            after_seq: page.next_seq,
+            limit: 1,
+            actor: Some("alice".to_owned()),
+            action: Some("machine.update".to_owned()),
+            resource: Some("machine-1".to_owned()),
+            outcome: Some("succeeded".to_owned()),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(next_page.events.len(), 1);
+    assert_eq!(next_page.events[0].actor, "alice");
+    assert_eq!(next_page.events[0].outcome, Some(AuditOutcome::Succeeded));
+    assert!(next_page.events[0].seq > page.events[0].seq);
+
+    let no_events = ledger
+        .query(&Query {
+            from: Some(i64::MAX),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        no_events.events.is_empty(),
+        "the inclusive lower time bound is applied"
+    );
+    let no_events = ledger
+        .query(&Query {
+            to: Some(0),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        no_events.events.is_empty(),
+        "the inclusive upper time bound is applied"
+    );
+}
+
+#[tokio::test]
+async fn completed_intents_are_not_returned_as_pending() {
+    let (_dir, store) = store().await;
+    let ledger = AuditLedger::new(store.pool());
+    let intent_id = ledger
+        .append_intent(&AuditIntent {
+            actor: "pending-actor".to_owned(),
+            action: "operation.run".to_owned(),
+            resource: None,
+            decision: Decision::allow(),
+            correlation_id: None,
+            operation_id: Some("operation-pending".to_owned()),
+            metadata: AuditMetadata::default(),
+        })
+        .await
+        .unwrap();
+
+    let pending = ledger
+        .query(&Query {
+            actor: Some("pending-actor".to_owned()),
+            outcome: Some("pending".to_owned()),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending.events.len(), 1);
+
+    ledger
+        .append_outcome(&intent_id, AuditOutcome::Succeeded)
+        .await
+        .unwrap();
+    let no_longer_pending = ledger
+        .query(&Query {
+            actor: Some("pending-actor".to_owned()),
+            outcome: Some("pending".to_owned()),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert!(no_longer_pending.events.is_empty());
 }
 
 #[tokio::test]
@@ -193,15 +299,12 @@ async fn outcomes_append_separately_and_reference_their_intent() {
         .unwrap();
 
     let page = ledger
-        .query(
-            &fleet_auth::LanAllowAllAuthorizer,
-            "anonymous-lan-admin",
-            Query {
-                after_seq: None,
-                limit: 10,
-                correlation_id: Some("flow-x"),
-            },
-        )
+        .query(&Query {
+            after_seq: None,
+            limit: 10,
+            correlation_id: Some("flow-x".to_owned()),
+            ..Query::default()
+        })
         .await
         .unwrap();
     assert_eq!(page.events.len(), 2);
@@ -283,15 +386,12 @@ async fn validated_metadata_is_stored_and_readable() {
     ledger.append_intent(&intent).await.unwrap();
 
     let page = ledger
-        .query(
-            &fleet_auth::LanAllowAllAuthorizer,
-            "anonymous-lan-admin",
-            Query {
-                after_seq: None,
-                limit: 10,
-                correlation_id: Some("flow-m"),
-            },
-        )
+        .query(&Query {
+            after_seq: None,
+            limit: 10,
+            correlation_id: Some("flow-m".to_owned()),
+            ..Query::default()
+        })
         .await
         .unwrap();
     assert!(
