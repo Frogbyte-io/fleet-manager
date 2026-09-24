@@ -179,7 +179,7 @@ onMounted(load)
         Add Machine
       </h2>
       <button
-        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted"
         @click="load"
       >
         Refresh
@@ -255,7 +255,7 @@ onMounted(load)
       v-if="drafts.length > 0"
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-fc-faint">
+      <thead class="text-xs uppercase tracking-wide text-muted-foreground">
         <tr>
           <th class="py-2">
             Name
@@ -296,7 +296,7 @@ onMounted(load)
     </table>
     <p
       v-else
-      class="mt-4 text-center text-sm text-fc-faint"
+      class="mt-4 text-center text-sm text-muted-foreground"
     >
       No drafts yet
     </p>
@@ -308,10 +308,10 @@ onMounted(load)
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold text-foreground">
           {{ selected.name }}
-          <span class="ml-2 text-xs font-normal text-fc-faint">{{ selected.stage }}</span>
+          <span class="ml-2 text-xs font-normal text-muted-foreground">{{ selected.stage }}</span>
         </h3>
         <button
-          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-line2"
+          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-muted"
           @click="close"
         >
           Close
@@ -319,13 +319,13 @@ onMounted(load)
       </div>
 
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Endpoint
         </dt>
         <dd class="font-mono">
           {{ selected.endpoint.user }}@{{ selected.endpoint.host }}:{{ selected.endpoint.port }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Auth
         </dt>
         <dd class="font-mono">
@@ -337,7 +337,7 @@ onMounted(load)
           </template>
         </dd>
         <template v-if="selected.hostKey">
-          <dt class="text-fc-faint">
+          <dt class="text-muted-foreground">
             Host key ({{ selected.hostKeyStage }})
           </dt>
           <dd class="font-mono">
@@ -345,7 +345,7 @@ onMounted(load)
           </dd>
         </template>
         <template v-if="selected.lastTest">
-          <dt class="text-fc-faint">
+          <dt class="text-muted-foreground">
             Last test
           </dt>
           <dd class="font-mono">
@@ -358,7 +358,7 @@ onMounted(load)
           </dd>
         </template>
         <template v-if="selected.profileHint">
-          <dt class="text-fc-faint">
+          <dt class="text-muted-foreground">
             Profile hint
           </dt>
           <dd class="font-mono">
@@ -385,7 +385,7 @@ onMounted(load)
         v-if="selected.facts.length > 0"
         class="mt-3 text-xs"
       >
-        <p class="text-fc-faint">
+        <p class="text-muted-foreground">
           Discovered facts — review before adding:
         </p>
         <div class="mt-1 font-mono text-foreground">
@@ -394,14 +394,14 @@ onMounted(load)
             :key="`${fact.namespace}.${fact.name}`"
           >
             {{ fact.namespace }}.{{ fact.name }} = {{ fact.value ?? '–' }}
-            <span class="text-fc-faint">{{ fact.status }}</span>
+            <span class="text-muted-foreground">{{ fact.status }}</span>
           </div>
         </div>
       </div>
 
       <div class="mt-4 flex flex-wrap gap-2">
         <button
-          class="rounded border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2 disabled:opacity-50"
+          class="rounded border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted disabled:opacity-50"
           :disabled="busy"
           @click="runStage('test')"
         >
@@ -417,7 +417,7 @@ onMounted(load)
         </button>
         <button
           v-if="selected.stage === 'ready'"
-          class="rounded border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2 disabled:opacity-50"
+          class="rounded border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted disabled:opacity-50"
           :disabled="busy"
           @click="runStage('discover')"
         >

@@ -58,8 +58,8 @@ Dark tokens (light values in parentheses):
 - `--fc-panel` `#11161f` (`#ffffff`) — cards, tables
 - `--fc-inset` `#0d1219` (`#eef0f4`) — icon wells, inputs, chart wells
 - `--fc-line` `#1f2733` (`#dde1e8`) · `--fc-line2` `#2a3442` (`#c9cfd9`)
-- `--fc-ink` `#eef1f6` (`#161a21`) · `--fc-muted` `#98a2b3` (`#5c6672`) · `--fc-faint` `#5f6a7c` (`#8b95a3`)
-- `--fc-ok` `#2fd28c` · `--fc-info` `#57a8ff` · `--fc-warn` `#f5a524` (`#b7791f`) · `--fc-err` `#ff5c5c`
+- `--fc-ink` `#eef1f6` (`#161a21`) · `--fc-muted` `#98a2b3` (`#5c6672`) · `--fc-faint` `#5f6a7c` (`#6b7584`)
+- `--fc-ok` `#2fd28c` (`#178a55`) · `--fc-info` `#57a8ff` (`#1f6fd1`) · `--fc-warn` `#f5a524` (`#b7791f`) · `--fc-err` `#ff5c5c` (`#d93636`)
 
 `--fc-warn` is the single new status token: "needs attention but not failed"
 (stale machines, blocked approvals). It is distinct from `--fc-err`, which
@@ -155,7 +155,7 @@ shadcn-vue variables map onto Fleet tokens:
 | `--secondary-foreground` | `--fc-ink` |
 | `--muted` | `--fc-inset` |
 | `--muted-foreground` | `--fc-muted` |
-| `--accent` | `--fc-panel` |
+| `--accent` | `--fc-line` |
 | `--accent-foreground` | `--fc-ink` |
 | `--destructive` | `--fc-err` |
 | `--border` | `--fc-line` |

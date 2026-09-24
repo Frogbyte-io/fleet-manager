@@ -89,7 +89,7 @@ onBeforeUnmount(() => {
         Operations
       </h2>
       <button
-        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted"
         @click="load"
       >
         Refresh
@@ -107,7 +107,7 @@ onBeforeUnmount(() => {
       v-else
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-fc-faint">
+      <thead class="text-xs uppercase tracking-wide text-muted-foreground">
         <tr>
           <th class="py-2">
             ID
@@ -150,7 +150,7 @@ onBeforeUnmount(() => {
         <tr v-if="operations.length === 0">
           <td
             colspan="4"
-            class="py-4 text-center text-fc-faint"
+            class="py-4 text-center text-muted-foreground"
           >
             No operations yet
           </td>
@@ -172,32 +172,32 @@ onBeforeUnmount(() => {
         You missed changes to this operation; the view was refetched.
       </p>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Kind
         </dt>
         <dd class="font-mono">
           {{ selected.kind }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           State
         </dt>
         <dd class="font-mono">
           {{ selected.state }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Cancel requested
         </dt>
         <dd class="font-mono">
           {{ selected.cancelRequested ? 'yes' : 'no' }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Progress
         </dt>
         <dd class="font-mono">
           {{ selected.progressCurrent ?? '–' }} / {{ selected.progressTotal ?? '–' }}
           {{ selected.progressMessage ?? '' }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Correlation
         </dt>
         <dd class="font-mono">

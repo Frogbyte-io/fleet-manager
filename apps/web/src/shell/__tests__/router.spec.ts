@@ -11,7 +11,8 @@ function resolve(path: string) {
 describe('router', () => {
   it('resolves every NAV item path to a route', () => {
     for (const item of NAV_GROUPS.flatMap(g => g.items)) {
-      expect(resolve(item.to), item.to).not.toBe('')
+      const resolved = router.resolve(item.to)
+      expect(resolved.matched[0]?.path, item.to).toBe(item.to)
     }
   })
 

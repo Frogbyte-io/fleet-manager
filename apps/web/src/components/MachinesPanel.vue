@@ -142,7 +142,7 @@ onBeforeUnmount(() => {
         Machines
       </h2>
       <button
-        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted"
         @click="load"
       >
         Refresh
@@ -160,7 +160,7 @@ onBeforeUnmount(() => {
       v-else
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-fc-faint">
+      <thead class="text-xs uppercase tracking-wide text-muted-foreground">
         <tr>
           <th class="py-2">
             Name
@@ -207,7 +207,7 @@ onBeforeUnmount(() => {
         <tr v-if="machines.length === 0">
           <td
             colspan="4"
-            class="py-4 text-center text-fc-faint"
+            class="py-4 text-center text-muted-foreground"
           >
             No machines yet
           </td>
@@ -224,26 +224,26 @@ onBeforeUnmount(() => {
           {{ selected.name }}
         </h3>
         <button
-          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-line2"
+          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-muted"
           @click="close"
         >
           Close
         </button>
       </div>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Status
         </dt>
         <dd class="font-mono">
           {{ selected.machineStatus }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Last seen
         </dt>
         <dd class="font-mono">
           {{ selected.lastSeenAt ?? '–' }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Last observation
         </dt>
         <dd class="font-mono">
@@ -256,7 +256,7 @@ onBeforeUnmount(() => {
         </dd>
       </dl>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Endpoints
         </dt>
         <dd class="font-mono">
@@ -267,13 +267,13 @@ onBeforeUnmount(() => {
             {{ endpoint.kind }} {{ endpoint.reference }}
           </div>
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Tags
         </dt>
         <dd class="font-mono">
           {{ selected.tags.join(', ') || '–' }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Groups
         </dt>
         <dd class="font-mono">
@@ -284,7 +284,7 @@ onBeforeUnmount(() => {
         v-if="selected.capabilities.length > 0"
         class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs"
       >
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Capabilities
         </dt>
         <dd class="font-mono">
@@ -293,13 +293,13 @@ onBeforeUnmount(() => {
             :key="`${fact.namespace}.${fact.name}`"
           >
             {{ fact.namespace }}.{{ fact.name }} = {{ fact.value ?? '–' }}
-            <span class="text-fc-faint">{{ fact.status }}</span>
+            <span class="text-muted-foreground">{{ fact.status }}</span>
           </div>
         </dd>
       </dl>
 
       <div class="mt-4 border-t border-border pt-3">
-        <p class="text-xs text-fc-faint">
+        <p class="text-xs text-muted-foreground">
           Install Fleet Node — upgrades this machine to fully managed. The
           controller picks the package for the machine's platform; the
           machine's Fleet id is kept.
@@ -341,7 +341,7 @@ onBeforeUnmount(() => {
             {{ installState }}
             <span
               v-if="installProgress"
-              class="text-fc-faint"
+              class="text-muted-foreground"
             >— {{ installProgress }}</span>
           </p>
           <p

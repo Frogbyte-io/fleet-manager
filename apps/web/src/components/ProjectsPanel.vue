@@ -199,7 +199,7 @@ onMounted(() => {
         Projects
       </h2>
       <button
-        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted"
         @click="load"
       >
         Refresh
@@ -242,7 +242,7 @@ onMounted(() => {
       v-if="projects.length > 0"
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-fc-faint">
+      <thead class="text-xs uppercase tracking-wide text-muted-foreground">
         <tr>
           <th class="py-2">
             Name
@@ -270,7 +270,7 @@ onMounted(() => {
     </table>
     <p
       v-else
-      class="mt-4 text-center text-sm text-fc-faint"
+      class="mt-4 text-center text-sm text-muted-foreground"
     >
       No projects yet
     </p>
@@ -284,20 +284,20 @@ onMounted(() => {
           {{ selected.name }}
         </h3>
         <button
-          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-line2"
+          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-muted"
           @click="close"
         >
           Close
         </button>
       </div>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Remote
         </dt>
         <dd class="font-mono">
           {{ selected.remote }}
         </dd>
-        <dt class="text-fc-faint">
+        <dt class="text-muted-foreground">
           Checkouts
         </dt>
         <dd class="font-mono">
@@ -309,7 +309,7 @@ onMounted(() => {
           </div>
           <span
             v-if="selected.checkouts.length === 0"
-            class="text-fc-faint"
+            class="text-muted-foreground"
           >
             none observed
           </span>
@@ -326,7 +326,7 @@ onMounted(() => {
       <!-- The ready workflow: inspect the plan with a dry run, then
            execute and follow the operation's progress. -->
       <div class="mt-4 border-t border-border pt-4">
-        <h4 class="text-xs font-semibold uppercase tracking-wide text-fc-faint">
+        <h4 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Make ready
         </h4>
         <div class="mt-2 grid grid-cols-3 gap-2 text-xs">

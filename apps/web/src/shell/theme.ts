@@ -23,8 +23,17 @@ function readStored(): Theme | null {
 
 /** Applies the initial theme: URL param wins, then localStorage, then dark. */
 export function applyInitialTheme() {
-  const param = new URLSearchParams(window.location.search).get('theme')
+  const param = readThemeParam()
   apply(param === 'light' || param === 'dark' ? param : (readStored() ?? 'dark'))
+}
+
+function readThemeParam(): string | null {
+  const search = new URLSearchParams(window.location.search).get('theme')
+  if (search !== null) return search
+  const hash = window.location.hash
+  const queryIndex = hash.indexOf('?')
+  if (queryIndex === -1) return null
+  return new URLSearchParams(hash.slice(queryIndex + 1)).get('theme')
 }
 
 export function useTheme() {

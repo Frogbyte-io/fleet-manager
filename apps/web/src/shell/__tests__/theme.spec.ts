@@ -30,6 +30,26 @@ describe('theme', () => {
     expect(document.documentElement.dataset.theme).toBe('dark')
   })
 
+  it('honors the theme param in the hash query', () => {
+    window.localStorage.setItem('fleet-console-theme', 'dark')
+    vi.stubGlobal('location', new URL('http://localhost/#/fleet?theme=light', window.location.href))
+    applyInitialTheme()
+    expect(document.documentElement.dataset.theme).toBe('light')
+  })
+
+  it('ignores an unknown theme param and uses the stored value', () => {
+    window.localStorage.setItem('fleet-console-theme', 'light')
+    vi.stubGlobal('location', new URL('http://localhost/?theme=blue', window.location.href))
+    applyInitialTheme()
+    expect(document.documentElement.dataset.theme).toBe('light')
+  })
+
+  it('falls back to dark for an unknown theme param with nothing stored', () => {
+    vi.stubGlobal('location', new URL('http://localhost/?theme=blue', window.location.href))
+    applyInitialTheme()
+    expect(document.documentElement.dataset.theme).toBe('dark')
+  })
+
   it('toggle persists to localStorage and flips the dark class', () => {
     applyInitialTheme()
     const { theme, toggle } = useTheme()

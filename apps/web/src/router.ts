@@ -77,4 +77,5 @@ export const routes: RouteRecordRaw[] = [
 export const router = createRouter({
   history: createWebHashHistory(),
   routes,
+  scrollBehavior: () => ({ top: 0 }),
 })

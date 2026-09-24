@@ -16,7 +16,5 @@ const props = defineProps<{
       'bg-background h-8 w-full shadow-none',
       props.class,
     )"
-  >
-    <slot />
-  </Input>
+  />
 </template>

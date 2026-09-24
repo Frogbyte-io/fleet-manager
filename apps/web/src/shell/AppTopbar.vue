@@ -39,8 +39,9 @@ const isLight = computed(() => theme.value === 'light')
     <div class="ml-auto flex items-center gap-2">
       <button
         type="button"
-        aria-disabled="true"
-        class="flex h-9 w-56 items-center gap-2 rounded-sm border border-input bg-inset px-3 text-sm text-fc-faint"
+        disabled
+        aria-hidden="true"
+        class="hidden h-9 w-56 items-center gap-2 rounded-sm border border-input bg-inset px-3 text-sm text-fc-faint md:flex"
       >
         <Search class="size-4" />
         <span class="flex-1 text-left">Search…</span>
