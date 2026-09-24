@@ -36,8 +36,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::body::{Body, Bytes};
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use sqlx::SqlitePool;
 use tower_http::services::ServeDir;
@@ -262,11 +265,11 @@ fn shell(settings: &Settings) -> ServeDir {
 
 /// Builds the controller's HTTP router.
 ///
-/// Order of authority for an unmatched path, decided once and documented here:
-/// the health probes match first, the static shell answers any path that is a
-/// file in the web distribution, and the public API adapter answers everything
-/// else — including unknown `/api/v1` paths, which therefore keep the JSON
-/// error envelope instead of ever falling through to the web shell.
+/// The health probes and routes mounted outside the static service, including
+/// downloads and machine-facing routes, take precedence over static files.
+/// The public API is the static service's fallback, so existing web files are
+/// served first. Unmatched API, download, and asset paths keep their own 404
+/// responses, while eligible HTML navigation requests receive the SPA shell.
 ///
 /// `db` is the store's connection pool once the database is open; readiness
 /// probes it live and the operation use cases run over it. Passing `None` is
@@ -306,6 +309,9 @@ pub fn build_router(
         lab.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
+    let web_index = std::fs::read(settings.web_dist.join("index.html"))
+        .ok()
+        .map(Bytes::from);
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -321,7 +327,7 @@ pub fn build_router(
         );
     }
     let Some(services) = services else {
-        return router;
+        return router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
     };
     // The machine-facing node surface: versioned with the node protocol,
     // documented in proto/README.md, and mounted beside the public API —
@@ -329,7 +335,88 @@ pub fn build_router(
     // nest so no path overlaps.
     let node_routes = fleet_api::node::node_router(api_state)
         .merge(gateway::gateway_router(services.gateway.clone()));
-    router.nest("/api/node/v1", node_routes)
+    router
+        .nest("/api/node/v1", node_routes)
+        .layer(middleware::from_fn_with_state(web_index, spa_fallback))
+}
+
+/// Rewrites eligible static/API 404s to the console entry point. The API and
+/// reserved static namespaces retain their own 404 responses.
+async fn spa_fallback(
+    State(index_file): State<Option<Bytes>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let accepts_html = accepts_html(request.headers());
+    let response = next.run(request).await;
+
+    if response.status() != StatusCode::NOT_FOUND
+        || !(method == Method::GET || method == Method::HEAD)
+        || !accepts_html
+        || is_reserved_path(&path)
+    {
+        return response;
+    }
+
+    let Some(contents) = index_file else {
+        return response;
+    };
+    let content_length = contents.len().to_string();
+    let Ok(content_length) = HeaderValue::from_str(&content_length) else {
+        return response;
+    };
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(contents)
+    };
+    let mut response = response;
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, content_length);
+    *response.body_mut() = body;
+    response
+}
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|media_range| {
+            let mut parts = media_range.split(';').map(str::trim);
+            if !parts
+                .next()
+                .is_some_and(|media_type| media_type.eq_ignore_ascii_case("text/html"))
+            {
+                return false;
+            }
+            let quality = parts.find_map(|parameter| {
+                let (name, value) = parameter.split_once('=')?;
+                name.trim()
+                    .eq_ignore_ascii_case("q")
+                    .then_some(value.trim())
+            });
+            quality.is_none_or(|quality| quality.parse::<f32>().is_ok_and(|quality| quality > 0.0))
+        })
+}
+
+fn is_reserved_path(path: &str) -> bool {
+    let decoded_path = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+    let first_segment = decoded_path.trim_start_matches('/').split('/').next();
+    first_segment.is_some_and(|segment| {
+        ["api", "downloads", "assets"]
+            .iter()
+            .any(|namespace| segment.eq_ignore_ascii_case(namespace))
+    })
 }
 
 async fn healthz() -> &'static str {

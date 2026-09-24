@@ -73,10 +73,36 @@ async fn spawn(
 
 /// Performs one HTTP/1.0 GET and returns the status code and full body.
 async fn get(address: std::net::SocketAddr, path: &str) -> (u16, String) {
+    let (status, _, body) = request_details(address, "GET", path).await;
+    (status, body)
+}
+
+async fn request(address: std::net::SocketAddr, method: &str, path: &str) -> (u16, String) {
+    let (status, _, body) = request_details(address, method, path).await;
+    (status, body)
+}
+
+async fn request_details(
+    address: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+) -> (u16, String, String) {
+    request_details_with_accept(address, method, path, None).await
+}
+
+async fn request_details_with_accept(
+    address: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    accept: Option<&str>,
+) -> (u16, String, String) {
     let mut stream = TcpStream::connect(address)
         .await
         .expect("the server must accept");
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {address}\r\n\r\n");
+    let accept_header = accept
+        .map(|accept| format!("Accept: {accept}\r\n"))
+        .unwrap_or_default();
+    let request = format!("{method} {path} HTTP/1.0\r\nHost: {address}\r\n{accept_header}\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -94,7 +120,7 @@ async fn get(address: std::net::SocketAddr, path: &str) -> (u16, String) {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or(0);
-    (status, body.to_owned())
+    (status, head.to_owned(), body.to_owned())
 }
 
 #[tokio::test]
@@ -119,6 +145,101 @@ async fn the_web_shell_is_served_with_its_assets() {
     let (status, body) = get(address, "/assets/app.js").await;
     assert_eq!(status, 200);
     assert_eq!(body, "console.log('fleet');\n");
+}
+
+#[tokio::test]
+async fn deep_links_serve_the_web_shell() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, _, body) =
+        request_details_with_accept(address, "GET", "/fleet/add", Some("text/html")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "<html>fleet shell</html>\n");
+}
+
+#[tokio::test]
+async fn deep_links_keep_the_controller_security_headers() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, headers, _) =
+        request_details_with_accept(address, "GET", "/fleet/add", Some("text/html")).await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-security-policy: default-src 'self'"));
+    assert!(headers.contains("x-content-type-options: nosniff"));
+    assert!(headers.contains("x-frame-options: DENY"));
+    assert!(headers.contains("referrer-policy: no-referrer"));
+}
+
+#[tokio::test]
+async fn missing_assets_and_downloads_stay_not_found() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    std::fs::remove_dir_all(dist.path().join("assets"))
+        .expect("assets directory must be absent for the namespace-root test");
+    for path in [
+        "/assets",
+        "/assets/missing.js",
+        "/asset%73/missing.js",
+        "/Assets/missing.js",
+        "//assets/missing.js",
+        "/downloads",
+        "/downloads/missing.tar.gz",
+        "/download%73/missing.tar.gz",
+        "/Downloads/missing.tar.gz",
+        "//downloads/missing.tar.gz",
+    ] {
+        let (status, _, body) =
+            request_details_with_accept(address, "GET", path, Some("text/html")).await;
+        assert_eq!(status, 404, "{path}: {body}");
+        assert!(!body.contains("fleet shell"), "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn head_deep_links_serve_shell_headers_without_a_body() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, headers, body) =
+        request_details_with_accept(address, "HEAD", "/fleet/add", Some("text/html")).await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-type: text/html; charset=utf-8"));
+    assert!(headers.contains("content-length: 25"));
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn non_html_404s_keep_their_not_found_response() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, _, body) =
+        request_details_with_accept(address, "GET", "/missing.json", Some("application/json"))
+            .await;
+    assert_eq!(status, 404);
+    assert!(!body.contains("fleet shell"), "{body}");
+
+    let (status, _, body) =
+        request_details_with_accept(address, "GET", "/declined.html", Some("text/html;Q=0")).await;
+    assert_eq!(status, 404);
+    assert!(!body.contains("fleet shell"), "{body}");
+}
+
+#[tokio::test]
+async fn api_prefixed_but_unreserved_paths_receive_the_web_shell() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, _, body) =
+        request_details_with_accept(address, "GET", "/apix/route", Some("text/html")).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "<html>fleet shell</html>\n");
+}
+
+#[tokio::test]
+async fn non_get_requests_do_not_receive_the_web_shell() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, body) = request(address, "POST", "/fleet/add").await;
+    assert_eq!(status, 404);
+    assert!(body.contains("\"code\":\"not_found\""), "{body}");
 }
 
 #[tokio::test]

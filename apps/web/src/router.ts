@@ -1,6 +1,24 @@
-import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-// Hash history: the controller serves static files with no SPA fallback.
+/** Returns the clean URL represented by a legacy `/#/...` URL. */
+export function legacyHashUrl(search: string, hash: string): string | null {
+  if (!hash.startsWith('#/') || hash[2] === '/' || hash[2] === '\\') return null
+  const route = hash.slice(1)
+  const queryIndex = route.indexOf('?')
+  const path = queryIndex === -1 ? route : route.slice(0, queryIndex)
+  const routeQuery = queryIndex === -1 ? '' : route.slice(queryIndex + 1)
+  const outerQuery = search.startsWith('?') ? search.slice(1) : search
+  const query = [outerQuery, routeQuery].filter(Boolean).join('&')
+  return `${path}${query ? `?${query}` : ''}`
+}
+
+const legacyUrl = typeof window === 'undefined'
+  ? null
+  : legacyHashUrl(window.location.search, window.location.hash)
+if (legacyUrl) {
+  window.history.replaceState(window.history.state, '', legacyUrl)
+}
+
 export const routes: RouteRecordRaw[] = [
   {
     path: '/',
@@ -75,7 +93,7 @@ export const routes: RouteRecordRaw[] = [
 ]
 
 export const router = createRouter({
-  history: createWebHashHistory(),
+  history: createWebHistory(),
   routes,
   scrollBehavior: () => ({ top: 0 }),
 })
