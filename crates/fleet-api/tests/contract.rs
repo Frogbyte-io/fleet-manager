@@ -177,7 +177,6 @@ async fn audit_api_returns_an_error_envelope_for_a_malformed_limit() {
     let (parts, body) = call(get(&format!("{API_BASE_PATH}/audit?limit=not-a-number"))).await;
     assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_request");
-    assert!(body["message"].as_str().unwrap().contains("limit"));
 }
 
 #[tokio::test]

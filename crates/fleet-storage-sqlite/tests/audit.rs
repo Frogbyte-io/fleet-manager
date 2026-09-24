@@ -5,7 +5,8 @@
 use fleet_application::audit::{AuditIntent, AuditMetadata, AuditOutcome, MetadataError};
 use fleet_application::authz::{Decision, Permission, ReasonId};
 use fleet_storage_sqlite::audit::Query;
-use fleet_storage_sqlite::{AuditLedger, Store};
+use fleet_storage_sqlite::{AuditLedger, MIGRATOR, Store};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 async fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
@@ -282,6 +283,59 @@ async fn completed_intents_are_not_returned_as_pending() {
         .await
         .unwrap();
     assert!(no_longer_pending.events.is_empty());
+}
+
+#[tokio::test]
+async fn migration_does_not_guess_pending_status_for_historical_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fleet.db");
+    let legacy_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    MIGRATOR.run_to(22, &legacy_pool).await.unwrap();
+
+    // Before migration 23 outcomes did not reference their intent. Even when
+    // the fields match exactly, do not infer whether an old intent is pending.
+    sqlx::query(
+        "INSERT INTO audit_events \
+         (id, occurred_at, actor, action, resource, allowed, reason, correlation_id, operation_id, outcome, metadata_json) \
+         VALUES ('legacy-intent', 1, 'actor', 'operation.run', NULL, 1, 'permitted', NULL, 'op-1', NULL, '{}'), \
+                ('legacy-outcome', 2, 'actor', 'operation.run', NULL, 1, 'permitted', NULL, 'op-1', 'succeeded', '{}')",
+    )
+    .execute(&legacy_pool)
+    .await
+    .unwrap();
+    legacy_pool.close().await;
+
+    let store = Store::open(&path).await.unwrap();
+    let ledger = AuditLedger::new(store.pool());
+    let historical = ledger
+        .query(&Query {
+            outcome: Some("pending".to_owned()),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert!(historical.events.is_empty());
+
+    ledger
+        .append_intent(&intent(Permission::SystemRead, true, None))
+        .await
+        .unwrap();
+    let current = ledger
+        .query(&Query {
+            outcome: Some("pending".to_owned()),
+            ..Query::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(current.events.len(), 1);
 }
 
 #[tokio::test]

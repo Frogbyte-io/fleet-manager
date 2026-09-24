@@ -88,6 +88,8 @@ Audit events are append-only application records with timestamp, actor and crede
 
 Audit reads use the `audit.read` permission and a filtered, cursor-paginated API. The response exposes only fixed-format event identifiers, digests, enum values, and numeric facts from metadata. Free-form values such as names, purposes, notes, hostnames, and remotes are omitted because caller text can contain credentials under otherwise harmless keys. Lab lease purposes are not written to audit metadata.
 
+Pending status is tracked from the audit-query migration boundary forward. Earlier outcome rows did not retain a reliable intent link, so the migration does not infer one from similar historical event fields or report unmatched historical intents as pending.
+
 Audit is not a dump of commands or provider bodies. Redaction tests cover URLs, headers, environment, stdout/stderr, Git remotes, SSH errors, and serialized job payloads. Retention/export and tamper-evident external forwarding are later administration features.
 
 ## Required threat-model scenarios

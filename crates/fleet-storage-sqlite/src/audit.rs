@@ -171,7 +171,8 @@ impl AuditLedger {
             }
             Some("pending") => {
                 statement.push(
-                    " AND allowed = 1 AND outcome IS NULL \
+                    " AND seq > (SELECT pending_since_seq FROM audit_query_state WHERE singleton = 1) \
+                     AND allowed = 1 AND outcome IS NULL \
                      AND NOT EXISTS (SELECT 1 FROM audit_events AS completed \
                                      WHERE completed.intent_seq = audit_events.seq)",
                 );

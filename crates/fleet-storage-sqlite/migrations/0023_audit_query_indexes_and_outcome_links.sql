@@ -1,38 +1,16 @@
--- Tie each terminal outcome row to the accepted intent it completes. The
--- audit ledger stays append-only after this one-time, trigger-free backfill.
-DROP TRIGGER audit_events_no_update;
-
+-- Tie future terminal outcome rows to the accepted intent they complete.
+-- Historical outcomes do not always contain enough information to identify
+-- their intent safely, so pending queries start at this migration boundary.
 ALTER TABLE audit_events
     ADD COLUMN intent_seq INTEGER REFERENCES audit_events(seq);
 
-UPDATE audit_events AS completed
-SET intent_seq = (
-    SELECT pending.seq
-    FROM audit_events AS pending
-    WHERE pending.seq < completed.seq
-      AND pending.outcome IS NULL
-      AND pending.actor = completed.actor
-      AND pending.action = completed.action
-      AND pending.resource IS completed.resource
-      AND pending.allowed = completed.allowed
-      AND pending.reason = completed.reason
-      AND pending.correlation_id IS completed.correlation_id
-      AND pending.operation_id IS completed.operation_id
-      AND pending.metadata_json = completed.metadata_json
-      AND NOT EXISTS (
-          SELECT 1 FROM audit_events AS prior
-          WHERE prior.intent_seq = pending.seq
-      )
-    ORDER BY pending.seq DESC
-    LIMIT 1
-)
-WHERE completed.outcome IS NOT NULL;
+CREATE TABLE audit_query_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    pending_since_seq INTEGER NOT NULL
+) STRICT;
 
-CREATE TRIGGER audit_events_no_update
-    BEFORE UPDATE ON audit_events
-BEGIN
-    SELECT RAISE(ABORT, 'audit_events is append-only');
-END;
+INSERT INTO audit_query_state (singleton, pending_since_seq)
+SELECT 1, COALESCE(MAX(seq), 0) FROM audit_events;
 
 CREATE INDEX audit_events_actor ON audit_events (actor, seq);
 CREATE INDEX audit_events_action ON audit_events (action, seq);
