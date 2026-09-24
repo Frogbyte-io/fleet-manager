@@ -47,32 +47,33 @@ async function fetchAllPages<T>(
   return { items, truncated: true }
 }
 
-const MACHINE_LIMIT = 1000
-
 export function useFleetInventory(): {
   inventory: ComputedRef<Inventory>
   isLoading: ComputedRef<boolean>
   refetchAll: () => Promise<void>
 } {
-  const paginationWarning = ref<string | null>(null)
+  const paginationWarnings = ref(new Map<string, string>())
 
-  function noteTruncation(message: string) {
-    paginationWarning.value = paginationWarning.value
-      ? `${paginationWarning.value} ${message}`
-      : message
+  function setPaginationWarning(key: string, message: string | null) {
+    if (message)
+      paginationWarnings.value.set(key, message)
+    else
+      paginationWarnings.value.delete(key)
   }
 
   const machinesQuery = useQuery({
     queryKey: ['fleet', 'machines'],
     queryFn: async () => {
       // The machines endpoint takes no cursor (only `limit`), so one request
-      // with a generous limit is the whole list; a reported next cursor means
-      // the list was cut short, which is surfaced rather than hidden.
-      const response = await listMachines({ limit: MACHINE_LIMIT })
+      // is the whole list; a reported next cursor means it was cut short,
+      // which is surfaced rather than hidden (#151).
+      const response = await listMachines({ limit: 200 })
       if (response.status !== 200)
         throw new Error(`listMachines failed (${response.status})`)
       if (response.data.page?.nextCursor)
-        noteTruncation(`More than ${MACHINE_LIMIT} machines — some are not shown.`)
+        setPaginationWarning('machines', `Showing the first ${response.data.page.limit} machines — the machines API cannot page further yet (#151).`)
+      else
+        setPaginationWarning('machines', null)
       return response.data.items
     },
   })
@@ -80,8 +81,9 @@ export function useFleetInventory(): {
   const accountsQuery = useQuery({
     queryKey: ['fleet', 'proxmox-accounts'],
     queryFn: async () => {
-      const { items } = await fetchAllPages(cursor =>
+      const { items, truncated } = await fetchAllPages(cursor =>
         listProxmoxAccounts({ limit: 200, cursor }) as unknown as Promise<PagedResponse<PageProxmoxAccountDtoItemsItem>>)
+      setPaginationWarning('accounts', truncated ? 'Proxmox accounts hit the 20-page safety cap — some accounts may be missing.' : null)
       return items
     },
   })
@@ -122,8 +124,7 @@ export function useFleetInventory(): {
         queryFn: async () => {
           const { items, truncated } = await fetchAllPages(cursor =>
             listProxmoxGuests(accountId, { limit: 200, cursor }) as unknown as Promise<PagedResponse<PageAssociatedGuestDtoItemsItem>>)
-          if (truncated)
-            noteTruncation('Guests hit the 20-page safety cap — some guests may be missing.')
+          setPaginationWarning(`guests:${accountId}`, truncated ? 'Guests hit the 20-page safety cap — some guests may be missing.' : null)
           return items
         },
       })),
@@ -137,8 +138,7 @@ export function useFleetInventory(): {
     queryFn: async () => {
       const { items, truncated } = await fetchAllPages(cursor =>
         listTailnetDevices({ limit: 200, cursor }) as unknown as Promise<PagedResponse<PageCorrelatedDeviceDtoItemsItem>>)
-      if (truncated)
-        noteTruncation('Tailnet devices hit the 20-page safety cap — some devices may be missing.')
+      setPaginationWarning('tailnet', truncated ? 'Tailnet devices hit the 20-page safety cap — some devices may be missing.' : null)
       return items
     },
     enabled: tailnetConfigured,
@@ -186,6 +186,7 @@ export function useFleetInventory(): {
         guests,
         discoveryError,
         guestsError,
+        discoveryWarnings: discovery?.warnings ?? null,
       }
     })
 
@@ -204,7 +205,7 @@ export function useFleetInventory(): {
             ? (tailnetDevicesQuery.error.value ? errorOf(tailnetDevicesQuery.error.value) : null)
             : null,
       },
-      paginationWarning: paginationWarning.value,
+      paginationWarning: [...paginationWarnings.value.values()].join(' ') || null,
     })
   })
 

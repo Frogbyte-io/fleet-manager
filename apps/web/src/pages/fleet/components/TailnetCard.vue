@@ -8,7 +8,7 @@ const props = defineProps<{ device: TailnetItem }>()
 
 async function copyImportCommand() {
   try {
-    await navigator.clipboard.writeText(`fleetctl tailnet import ${props.device.nodeId} --user <ssh-user>`)
+    await navigator.clipboard.writeText(`fleetctl tailnet import ${props.device.nodeId} --user SSH_USER`)
     toast('Copied import command')
   }
   catch {

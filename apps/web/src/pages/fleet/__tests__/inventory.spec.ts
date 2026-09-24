@@ -175,7 +175,7 @@ describe('relativeTime', () => {
 describe('buildInventory', () => {
   it('counts host guests and templates, excluding templates from guests', () => {
     const built = buildInventory(inventoryInput({
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: null, discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.hosts).toHaveLength(1)
     expect(built.hosts[0].guestCount).toBe(1)
@@ -186,7 +186,7 @@ describe('buildInventory', () => {
 
   it('enriches guests by accountId+vmid', () => {
     const built = buildInventory(inventoryInput({
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest()], discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest()], discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.guests[0].osName).toBe('Debian 12')
     expect(built.guests[0].agentOnline).toBe(true)
@@ -195,7 +195,7 @@ describe('buildInventory', () => {
 
   it('does not enrich when no guest-list entry matches the discovered vmid', () => {
     const built = buildInventory(inventoryInput({
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest({ vmid: 999 })], discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest({ vmid: 999 })], discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.guests[0].agentOnline).toBeNull()
     expect(built.guests[0].candidates).toHaveLength(0)
@@ -204,7 +204,7 @@ describe('buildInventory', () => {
   it('builds machine guestCandidates from guest candidates', () => {
     const built = buildInventory(inventoryInput({
       machines: [machine()],
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest()], discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest()], discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.machines[0].guestCandidates).toHaveLength(1)
     expect(built.machines[0].guestCandidates[0]).toMatchObject({ accountName: 'homelab', node: 'pve', vmid: 100 })
@@ -236,7 +236,7 @@ describe('buildInventory', () => {
   it('a machine never merges with a guest: both appear', () => {
     const built = buildInventory(inventoryInput({
       machines: [machine()],
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest()], discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest()], discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.machines[0].name).toBe('build-host')
     expect(built.guests[0].name).toBe('web')
@@ -245,7 +245,7 @@ describe('buildInventory', () => {
   it('marks unconfirmed accounts untrusted with no discovery data', () => {
     const built = buildInventory(inventoryInput({
       machines: [machine()],
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: false, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: false, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.hosts).toHaveLength(0)
     expect(built.sources.find(s => s.key === 'proxmox:acc1')?.state).toBe('untrusted')
@@ -254,7 +254,7 @@ describe('buildInventory', () => {
   it('propagates a discovery error as a source error', () => {
     const built = buildInventory(inventoryInput({
       machines: [machine()],
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: null, guests: null, discoveryError: 'unreachable', guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: null, guests: null, discoveryError: 'unreachable', guestsError: null, discoveryWarnings: null }],
     }))
     const source = built.sources.find(s => s.key === 'proxmox:acc1')
     expect(source?.state).toBe('error')
@@ -281,7 +281,7 @@ describe('buildInventory', () => {
 
   it('marks a confirmed account with no discovery and no error as loading, not untrusted', () => {
     const built = buildInventory(inventoryInput({
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: true, discovery: null, guests: null, discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: true, discovery: null, guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     const source = built.sources.find(s => s.key === 'proxmox:acc1')
     expect(source?.state).toBe('loading')
@@ -304,6 +304,7 @@ describe('buildInventory', () => {
         guests: null,
         discoveryError: null,
         guestsError: null,
+        discoveryWarnings: null,
       }],
     }))
     expect(built.hosts[0].name).toBe('pve')
@@ -320,8 +321,8 @@ describe('buildInventory source honesty', () => {
       proxmoxAccountsError: null,
       paginationWarning: null,
       proxmox: [
-        { accountId: 'acc-unconfirmed', accountName: 'unconfirmed', confirmed: false, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null },
-        { accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: null, discoveryError: null, guestsError: null },
+        { accountId: 'acc-unconfirmed', accountName: 'unconfirmed', confirmed: false, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null },
+        { accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null },
       ],
       tailnet: { configured: false, loading: false, devices: null, error: null },
     })
@@ -337,7 +338,7 @@ describe('buildInventory source honesty', () => {
       machinesError: null,
       proxmoxAccountsError: null,
       paginationWarning: null,
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: null, discoveryError: null, guestsError: 'listProxmoxGuests failed (500)' }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: null, discoveryError: null, guestsError: 'listProxmoxGuests failed (500)', discoveryWarnings: null }],
       tailnet: { configured: false, loading: false, devices: null, error: null },
     })
     expect(built.hosts).toHaveLength(1)
@@ -382,7 +383,7 @@ describe('buildInventory source honesty', () => {
       machinesError: null,
       proxmoxAccountsError: null,
       paginationWarning: null,
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null }],
       tailnet: { configured: false, loading: false, devices: null, error: null },
     })
     const source = built.sources.find(s => s.key === 'proxmox:acc1')
@@ -401,6 +402,68 @@ describe('buildInventory source honesty', () => {
     })
     const source = built.sources.find(s => s.key === 'pagination')
     expect(source?.message).toContain('20-page safety cap')
+  })
+
+  it('emits a tailnet error when configured with no devices, no error and not loading', () => {
+    const built = buildInventory({
+      machines: [],
+      machinesError: null,
+      proxmoxAccountsError: null,
+      paginationWarning: null,
+      proxmox: [],
+      tailnet: { configured: true, loading: false, devices: null, error: null },
+    })
+    const source = built.sources.find(s => s.key === 'tailnet')
+    expect(source?.state).toBe('error')
+    expect(source?.message).toBe('No tailnet device data returned.')
+  })
+
+  it('marks an account partial when discovery returns warnings, keeping hosts and guests', () => {
+    const built = buildInventory({
+      machines: [],
+      machinesError: null,
+      proxmoxAccountsError: null,
+      paginationWarning: null,
+      proxmox: [{
+        accountId: 'acc1',
+        accountName: 'homelab',
+        confirmed: true,
+        loading: false,
+        discovery: discovery({ warnings: ['cluster status unavailable'] }),
+        guests: null,
+        discoveryError: null,
+        guestsError: null,
+        discoveryWarnings: ['cluster status unavailable'],
+      }],
+      tailnet: { configured: false, loading: false, devices: null, error: null },
+    })
+    expect(built.hosts).toHaveLength(1)
+    expect(built.guests).toHaveLength(1)
+    const source = built.sources.find(s => s.key === 'proxmox:acc1')
+    expect(source?.state).toBe('partial')
+    expect(source?.message).toBe('homelab: discovery returned 1 warning(s) — some resources may be missing: cluster status unavailable')
+  })
+
+  it('keeps a confirmed account ok when discovery warnings are empty', () => {
+    const built = buildInventory({
+      machines: [],
+      machinesError: null,
+      proxmoxAccountsError: null,
+      paginationWarning: null,
+      proxmox: [{
+        accountId: 'acc1',
+        accountName: 'homelab',
+        confirmed: true,
+        loading: false,
+        discovery: discovery(),
+        guests: null,
+        discoveryError: null,
+        guestsError: null,
+        discoveryWarnings: [],
+      }],
+      tailnet: { configured: false, loading: false, devices: null, error: null },
+    })
+    expect(built.sources.find(s => s.key === 'proxmox:acc1')?.state).toBe('ok')
   })
 })
 
@@ -426,8 +489,8 @@ describe('cross-account enrichment', () => {
       proxmoxAccountsError: null,
       paginationWarning: null,
       proxmox: [
-        { accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [acc1Guest], discoveryError: null, guestsError: null },
-        { accountId: 'acc2', accountName: 'remote', confirmed: true, loading: false, discovery: acc2Discovery, guests: [acc2Guest], discoveryError: null, guestsError: null },
+        { accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [acc1Guest], discoveryError: null, guestsError: null, discoveryWarnings: null },
+        { accountId: 'acc2', accountName: 'remote', confirmed: true, loading: false, discovery: acc2Discovery, guests: [acc2Guest], discoveryError: null, guestsError: null, discoveryWarnings: null },
       ],
       tailnet: { configured: false, loading: false, devices: null, error: null },
     })
@@ -449,7 +512,7 @@ describe('loading flag honesty', () => {
       machinesError: null,
       proxmoxAccountsError: null,
       paginationWarning: null,
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: true, discovery: null, guests: null, discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: true, discovery: null, guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null }],
       tailnet: { configured: false, loading: false, devices: null, error: null },
     })
     expect(loading.sources.find(s => s.key === 'proxmox:acc1')?.state).toBe('loading')
@@ -459,7 +522,7 @@ describe('loading flag honesty', () => {
       machinesError: null,
       proxmoxAccountsError: null,
       paginationWarning: null,
-      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null }],
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: null, guests: null, discoveryError: null, guestsError: null, discoveryWarnings: null }],
       tailnet: { configured: false, loading: false, devices: null, error: null },
     })
     expect(stalled.sources.find(s => s.key === 'proxmox:acc1')?.state).toBe('error')

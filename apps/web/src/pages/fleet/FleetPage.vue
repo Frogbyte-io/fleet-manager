@@ -142,6 +142,16 @@ const machinesSourceOk = computed(() =>
   inventory.value.sources.find(s => s.key === 'machines')?.state === 'ok',
 )
 
+const machinesSourceFailed = computed(() =>
+  inventory.value.sources.find(s => s.key === 'machines')?.state === 'error',
+)
+
+const nothingElseToShow = computed(() =>
+  inventory.value.hosts.length === 0
+  && inventory.value.guests.length === 0
+  && inventory.value.tailnetOnly.length === 0,
+)
+
 const filteredHosts = computed(() =>
   inventory.value.hosts.filter((h) => {
     if (kindFilter.value !== 'all' && kindFilter.value !== 'hosts')
@@ -456,7 +466,7 @@ function sourceBorder(state: string): string {
     </div>
 
     <div
-      v-else-if="!machinesSourceOk"
+      v-else-if="machinesSourceFailed && nothingElseToShow"
       class="mt-6 rounded-sm border border-fc-line bg-fc-panel p-10 text-center"
       data-testid="empty-error"
     >

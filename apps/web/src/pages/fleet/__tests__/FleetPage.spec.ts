@@ -325,12 +325,15 @@ describe('FleetPage', () => {
     expect(wrapper.text()).toContain('No machines yet')
   })
 
-  it('shows an error empty state when machines fail to load', async () => {
+  it('shows an error empty state when machines fail with nothing else to show', async () => {
     listMachines.mockRejectedValue(new Error('listMachines failed (500)'))
+    listProxmoxAccounts.mockResolvedValue(ok(page([]) as PageProxmoxAccountDto))
+    getTailnetStatus.mockResolvedValue(ok({ data: { configured: false, clientId: null, scope: null } }))
     const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
+    expect(wrapper.find('[data-testid="empty-error"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('Machines could not be loaded')
     expect(wrapper.text()).not.toContain('No machines yet')
 
@@ -339,9 +342,22 @@ describe('FleetPage', () => {
     expect(wrapper.text()).toContain('Machines could not be loaded')
   })
 
+  it('renders the normal views when machines fail but Proxmox data is present', async () => {
+    listMachines.mockRejectedValue(new Error('listMachines failed (500)'))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="empty-error"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Proxmox hosts')
+    expect(wrapper.text()).toContain('pve')
+    expect(wrapper.text()).toContain('listMachines failed (500)')
+  })
+
   it('fetches machines in one request and flags a truncated list', async () => {
-    // The machines endpoint has no cursor parameter: one request with a large
-    // limit is the whole list, and a reported next cursor means it was cut short.
+    // The machines endpoint has no cursor parameter: one request with the
+    // clamped limit is the whole list, and a reported next cursor means it was
+    // cut short, which is surfaced rather than hidden (#151).
     listMachines.mockResolvedValueOnce(ok(page([machine()], 'more') as PageMachineDto))
     const wrapper = await mountPage()
     await flushPromises()
@@ -349,8 +365,9 @@ describe('FleetPage', () => {
 
     expect(wrapper.text()).toContain('build-host')
     expect(listMachines).toHaveBeenCalledTimes(1)
+    expect(listMachines.mock.calls[0]![0]).toMatchObject({ limit: 200 })
     expect(listMachines.mock.calls[0]![0]).not.toHaveProperty('cursor')
-    expect(wrapper.text()).toContain('some are not shown')
+    expect(wrapper.text()).toContain('Showing the first 200 machines — the machines API cannot page further yet (#151).')
   })
 
   it('paginates tailnet devices across nextCursor pages', async () => {
@@ -439,5 +456,33 @@ describe('FleetPage', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('Proxmox accounts unavailable: listProxmoxAccounts failed (503)')
+  })
+
+  it('copies a shell-safe fleetctl import command', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="copy-import"]').trigger('click')
+    expect(writeText).toHaveBeenCalledWith('fleetctl tailnet import ts2 --user SSH_USER')
+  })
+
+  it('clears a machines truncation warning after a complete refetch', async () => {
+    listMachines
+      .mockResolvedValueOnce(ok(page([machine()], 'more') as PageMachineDto))
+      .mockResolvedValue(ok(page([machine()]) as PageMachineDto))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Showing the first 200 machines — the machines API cannot page further yet (#151).')
+
+    await wrapper.get('[data-testid="refresh"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('cannot page further yet')
   })
 })

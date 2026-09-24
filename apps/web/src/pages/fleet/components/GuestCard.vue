@@ -41,7 +41,7 @@ defineProps<{ guest: GuestItem }>()
 
     <div class="mt-3">
       <ConnectionBadge
-        label="GUEST AGENT"
+        :label="guest.agentOnline === null ? 'GUEST AGENT —' : guest.agentOnline ? 'GUEST AGENT ONLINE' : 'GUEST AGENT OFFLINE'"
         :dot="guest.agentOnline ? 'ok' : 'faint'"
       />
     </div>

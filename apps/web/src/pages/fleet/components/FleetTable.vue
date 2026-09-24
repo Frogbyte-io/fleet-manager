@@ -9,9 +9,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import StatusChip from '@/components/fleet/StatusChip.vue'
+import GuestRow from './GuestRow.vue'
 import {
-  guestAgentCell,
-  guestStatusTone,
   hostStatusLabel,
   hostStatusTone,
   machineStatusTone,
@@ -109,85 +108,24 @@ function guestsOf(host: HostItem, guests: GuestItem[]): GuestItem[] {
           </TableCell>
         </TableRow>
         <template v-if="!flat">
-          <TableRow
+          <GuestRow
             v-for="guest in guestsOf(host, guests)"
             :key="guest.key"
-            class="cursor-pointer border-fc-line"
-            @click="emit('open-guest', guest.key)"
-          >
-            <TableCell class="pl-6 text-sm text-fc-ink">
-              <button
-                type="button"
-                class="text-left text-sm text-fc-ink"
-                @click.stop="emit('open-guest', guest.key)"
-              >
-                └ {{ guest.name }}
-              </button>
-              <span class="block font-mono text-[10px] text-fc-faint">{{ guest.kind === 'vm' ? `QEMU ${guest.vmid ?? '—'}` : `LXC ${guest.vmid ?? '—'}` }}</span>
-            </TableCell>
-            <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
-              {{ guest.kind === 'vm' ? 'VM' : 'LXC' }}
-            </TableCell>
-            <TableCell>
-              <StatusChip
-                :label="guest.status.toUpperCase()"
-                :tone="guestStatusTone(guest.status)"
-              />
-            </TableCell>
-            <TableCell class="font-mono text-[10px] text-fc-muted">
-              GUEST AGENT {{ guestAgentCell(guest.agentOnline) }}
-            </TableCell>
-            <TableCell class="font-mono text-[10px] text-fc-muted">
-              {{ guest.osName ?? '—' }}
-            </TableCell>
-            <TableCell class="font-mono text-[10px] text-fc-muted">
-              —
-            </TableCell>
-            <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
-              —
-            </TableCell>
-          </TableRow>
+            :guest="guest"
+            nested
+            @open-guest="emit('open-guest', $event)"
+          />
         </template>
       </template>
       <template v-if="flat">
-        <TableRow
+        <GuestRow
           v-for="guest in guests"
           :key="guest.key"
-          class="cursor-pointer border-fc-line"
-          @click="emit('open-guest', guest.key)"
-        >
-          <TableCell class="text-sm text-fc-ink">
-            <button
-              type="button"
-              class="text-left text-sm text-fc-ink"
-              @click.stop="emit('open-guest', guest.key)"
-            >
-              {{ guest.name }}
-            </button>
-            <span class="block font-mono text-[10px] text-fc-faint">{{ guest.kind === 'vm' ? `QEMU ${guest.vmid ?? '—'}` : `LXC ${guest.vmid ?? '—'}` }} · {{ guest.node }}</span>
-          </TableCell>
-          <TableCell class="font-mono text-[10px] uppercase text-fc-muted">
-            {{ guest.kind === 'vm' ? 'VM' : 'LXC' }}
-          </TableCell>
-          <TableCell>
-            <StatusChip
-              :label="guest.status.toUpperCase()"
-              :tone="guestStatusTone(guest.status)"
-            />
-          </TableCell>
-          <TableCell class="font-mono text-[10px] text-fc-muted">
-            GUEST AGENT {{ guestAgentCell(guest.agentOnline) }}
-          </TableCell>
-          <TableCell class="font-mono text-[10px] text-fc-muted">
-            {{ guest.osName ?? '—' }}
-          </TableCell>
-          <TableCell class="font-mono text-[10px] text-fc-muted">
-            —
-          </TableCell>
-          <TableCell class="font-mono text-[10px] uppercase text-fc-faint">
-            —
-          </TableCell>
-        </TableRow>
+          :guest="guest"
+          :nested="false"
+          :context-host="guest.node"
+          @open-guest="emit('open-guest', $event)"
+        />
       </template>
 
       <template

@@ -47,12 +47,17 @@ defineProps<{ machine: MachineItem }>()
       />
     </div>
 
-    <p
+    <div
       v-if="machine.guestCandidates.length > 0"
       class="font-mono text-[10px] text-fc-info"
     >
-      ≈ {{ machine.guestCandidates[0].kind === 'lxc' ? 'LXC' : 'QEMU' }} {{ machine.guestCandidates[0].vmid ?? '—' }} ON {{ machine.guestCandidates[0].node }} ({{ machine.guestCandidates[0].evidence }})
-    </p>
+      <p
+        v-for="(candidate, index) in machine.guestCandidates"
+        :key="`${candidate.accountName}:${candidate.node}:${candidate.vmid ?? '—'}:${index}`"
+      >
+        ≈ {{ candidate.kind === 'lxc' ? 'LXC' : 'QEMU' }} {{ candidate.vmid ?? '—' }} ON {{ candidate.node }} ({{ candidate.evidence }})
+      </p>
+    </div>
 
     <div
       v-if="machine.tags.length > 0"

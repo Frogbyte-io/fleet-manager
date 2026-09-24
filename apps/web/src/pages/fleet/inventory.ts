@@ -7,7 +7,7 @@ import type {
 } from '@frogbyte-io/fleet-api-client'
 
 export type Tone = 'ok' | 'info' | 'warn' | 'err' | 'muted' | 'faint'
-export type SourceState = 'ok' | 'error' | 'unconfigured' | 'untrusted' | 'loading' | 'warn'
+export type SourceState = 'ok' | 'error' | 'partial' | 'unconfigured' | 'untrusted' | 'loading' | 'warn'
 
 export interface HostItem {
   key: string
@@ -90,6 +90,7 @@ export interface ProxmoxSourceInput {
   guests: PageAssociatedGuestDtoItemsItem[] | null
   discoveryError: string | null
   guestsError: string | null
+  discoveryWarnings: string[] | null
 }
 
 export interface InventoryInput {
@@ -406,6 +407,14 @@ export function buildInventory(input: InventoryInput): Inventory {
           message: source.guestsError,
         })
       }
+      else if (source.discoveryWarnings && source.discoveryWarnings.length > 0) {
+        sources.push({
+          key,
+          label,
+          state: 'partial',
+          message: `${source.accountName}: discovery returned ${source.discoveryWarnings.length} warning(s) — some resources may be missing: ${source.discoveryWarnings[0]}`,
+        })
+      }
       else {
         sources.push({
           key,
@@ -484,6 +493,14 @@ export function buildInventory(input: InventoryInput): Inventory {
       label: 'Tailnet',
       state: 'loading',
       message: 'Loading tailnet devices…',
+    })
+  }
+  else {
+    sources.push({
+      key: 'tailnet',
+      label: 'Tailnet',
+      state: 'error',
+      message: 'No tailnet device data returned.',
     })
   }
 
