@@ -83,42 +83,64 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
+  <section class="rounded-sm border border-border bg-card p-6">
     <div class="flex items-center justify-between">
-      <h2 class="text-lg font-semibold text-slate-100">Operations</h2>
+      <h2 class="text-lg font-semibold text-foreground">
+        Operations
+      </h2>
       <button
-        class="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2"
         @click="load"
       >
         Refresh
       </button>
     </div>
 
-    <p v-if="failed" class="mt-4 text-sm text-rose-400">{{ failure }}</p>
+    <p
+      v-if="failed"
+      class="mt-4 text-sm text-fc-err"
+    >
+      {{ failure }}
+    </p>
 
-    <table v-else class="mt-4 w-full text-left text-sm">
-      <thead class="text-xs uppercase tracking-wide text-slate-500">
+    <table
+      v-else
+      class="mt-4 w-full text-left text-sm"
+    >
+      <thead class="text-xs uppercase tracking-wide text-fc-faint">
         <tr>
-          <th class="py-2">ID</th>
-          <th class="py-2">Kind</th>
-          <th class="py-2">State</th>
+          <th class="py-2">
+            ID
+          </th>
+          <th class="py-2">
+            Kind
+          </th>
+          <th class="py-2">
+            State
+          </th>
           <th class="py-2" />
         </tr>
       </thead>
-      <tbody class="font-mono text-slate-200">
+      <tbody class="font-mono text-foreground">
         <tr
           v-for="operation in operations"
           :key="operation.id"
-          class="cursor-pointer border-t border-slate-800 hover:bg-slate-800/60"
+          class="cursor-pointer border-t border-border hover:bg-accent"
           @click="open(operation)"
         >
-          <td class="py-2 text-xs">{{ operation.id }}</td>
-          <td class="py-2">{{ operation.kind }}</td>
-          <td class="py-2">{{ operation.state }}</td>
+          <td class="py-2 text-xs">
+            {{ operation.id }}
+          </td>
+          <td class="py-2">
+            {{ operation.kind }}
+          </td>
+          <td class="py-2">
+            {{ operation.state }}
+          </td>
           <td class="py-2 text-right">
             <button
               v-if="!TERMINAL.has(operation.state)"
-              class="rounded border border-rose-500/40 px-2 py-0.5 text-xs text-rose-300 hover:bg-rose-500/10"
+              class="rounded border border-fc-err/40 px-2 py-0.5 text-xs text-fc-err hover:bg-fc-err/10"
               @click.stop="cancel(operation)"
             >
               Cancel
@@ -126,30 +148,61 @@ onBeforeUnmount(() => {
           </td>
         </tr>
         <tr v-if="operations.length === 0">
-          <td colspan="4" class="py-4 text-center text-slate-500">No operations yet</td>
+          <td
+            colspan="4"
+            class="py-4 text-center text-fc-faint"
+          >
+            No operations yet
+          </td>
         </tr>
       </tbody>
     </table>
 
-    <div v-if="selected" class="mt-6 rounded-xl border border-slate-800 bg-slate-950 p-4">
-      <h3 class="text-sm font-semibold text-slate-200">Operation {{ selected.id }}</h3>
-      <p v-if="gapSeen" class="mt-2 text-xs text-amber-300">
+    <div
+      v-if="selected"
+      class="mt-6 rounded-sm border border-border bg-inset p-4"
+    >
+      <h3 class="text-sm font-semibold text-foreground">
+        Operation {{ selected.id }}
+      </h3>
+      <p
+        v-if="gapSeen"
+        class="mt-2 text-xs text-fc-warn"
+      >
         You missed changes to this operation; the view was refetched.
       </p>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-slate-500">Kind</dt>
-        <dd class="font-mono">{{ selected.kind }}</dd>
-        <dt class="text-slate-500">State</dt>
-        <dd class="font-mono">{{ selected.state }}</dd>
-        <dt class="text-slate-500">Cancel requested</dt>
-        <dd class="font-mono">{{ selected.cancelRequested ? 'yes' : 'no' }}</dd>
-        <dt class="text-slate-500">Progress</dt>
+        <dt class="text-fc-faint">
+          Kind
+        </dt>
+        <dd class="font-mono">
+          {{ selected.kind }}
+        </dd>
+        <dt class="text-fc-faint">
+          State
+        </dt>
+        <dd class="font-mono">
+          {{ selected.state }}
+        </dd>
+        <dt class="text-fc-faint">
+          Cancel requested
+        </dt>
+        <dd class="font-mono">
+          {{ selected.cancelRequested ? 'yes' : 'no' }}
+        </dd>
+        <dt class="text-fc-faint">
+          Progress
+        </dt>
         <dd class="font-mono">
           {{ selected.progressCurrent ?? '–' }} / {{ selected.progressTotal ?? '–' }}
           {{ selected.progressMessage ?? '' }}
         </dd>
-        <dt class="text-slate-500">Correlation</dt>
-        <dd class="font-mono">{{ selected.correlationId ?? '–' }}</dd>
+        <dt class="text-fc-faint">
+          Correlation
+        </dt>
+        <dd class="font-mono">
+          {{ selected.correlationId ?? '–' }}
+        </dd>
       </dl>
     </div>
   </section>

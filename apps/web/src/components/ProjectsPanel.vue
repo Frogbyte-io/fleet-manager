@@ -193,13 +193,13 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
+  <section class="rounded-sm border border-border bg-card p-6">
     <div class="flex items-center justify-between">
-      <h2 class="text-lg font-semibold text-slate-100">
+      <h2 class="text-lg font-semibold text-foreground">
         Projects
       </h2>
       <button
-        class="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-line2"
         @click="load"
       >
         Refresh
@@ -208,7 +208,7 @@ onMounted(() => {
 
     <p
       v-if="failed"
-      class="mt-4 text-sm text-rose-400"
+      class="mt-4 text-sm text-fc-err"
     >
       {{ failure }}
     </p>
@@ -217,20 +217,20 @@ onMounted(() => {
       <input
         v-model="form.remote"
         placeholder="git remote (any spelling)"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 font-mono text-foreground"
       >
       <input
         v-model="form.name"
         placeholder="display name"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 text-foreground"
       >
       <input
         v-model="form.description"
         placeholder="description (optional)"
-        class="col-span-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+        class="col-span-2 rounded-sm border border-input bg-background px-3 py-2 text-foreground"
       >
       <button
-        class="col-span-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50"
+        class="col-span-2 rounded-sm border border-fc-info/40 bg-fc-info/10 px-3 py-2 text-sm text-fc-info hover:bg-fc-info/20 disabled:opacity-50"
         :disabled="busy || form.remote === '' || form.name === ''"
         @click="create"
       >
@@ -242,7 +242,7 @@ onMounted(() => {
       v-if="projects.length > 0"
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-slate-500">
+      <thead class="text-xs uppercase tracking-wide text-fc-faint">
         <tr>
           <th class="py-2">
             Name
@@ -252,11 +252,11 @@ onMounted(() => {
           </th>
         </tr>
       </thead>
-      <tbody class="font-mono text-slate-200">
+      <tbody class="font-mono text-foreground">
         <tr
           v-for="project in projects"
           :key="project.id"
-          class="cursor-pointer border-t border-slate-800 hover:bg-slate-800/60"
+          class="cursor-pointer border-t border-border hover:bg-accent"
           @click="open(project)"
         >
           <td class="py-2">
@@ -270,34 +270,34 @@ onMounted(() => {
     </table>
     <p
       v-else
-      class="mt-4 text-center text-sm text-slate-500"
+      class="mt-4 text-center text-sm text-fc-faint"
     >
       No projects yet
     </p>
 
     <div
       v-if="selected"
-      class="mt-6 rounded-xl border border-slate-800 bg-slate-950 p-4"
+      class="mt-6 rounded-sm border border-border bg-inset p-4"
     >
       <div class="flex items-center justify-between">
-        <h3 class="text-sm font-semibold text-slate-200">
+        <h3 class="text-sm font-semibold text-foreground">
           {{ selected.name }}
         </h3>
         <button
-          class="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-300 hover:border-slate-500"
+          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-line2"
           @click="close"
         >
           Close
         </button>
       </div>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-slate-500">
+        <dt class="text-fc-faint">
           Remote
         </dt>
         <dd class="font-mono">
           {{ selected.remote }}
         </dd>
-        <dt class="text-slate-500">
+        <dt class="text-fc-faint">
           Checkouts
         </dt>
         <dd class="font-mono">
@@ -309,14 +309,14 @@ onMounted(() => {
           </div>
           <span
             v-if="selected.checkouts.length === 0"
-            class="text-slate-500"
+            class="text-fc-faint"
           >
             none observed
           </span>
         </dd>
       </dl>
       <button
-        class="mt-4 rounded border border-rose-500/40 px-3 py-1 text-xs text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"
+        class="mt-4 rounded border border-fc-err/40 px-3 py-1 text-xs text-fc-err hover:bg-fc-err/10 disabled:opacity-50"
         :disabled="busy"
         @click="remove"
       >
@@ -325,29 +325,29 @@ onMounted(() => {
 
       <!-- The ready workflow: inspect the plan with a dry run, then
            execute and follow the operation's progress. -->
-      <div class="mt-4 border-t border-slate-800 pt-4">
-        <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+      <div class="mt-4 border-t border-border pt-4">
+        <h4 class="text-xs font-semibold uppercase tracking-wide text-fc-faint">
           Make ready
         </h4>
         <div class="mt-2 grid grid-cols-3 gap-2 text-xs">
           <input
             v-model="readyForm.machineId"
             placeholder="machine id"
-            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+            class="rounded border border-input bg-inset px-2 py-1 font-mono text-foreground"
           >
           <input
             v-model="readyForm.endpointId"
             placeholder="endpoint id"
-            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+            class="rounded border border-input bg-inset px-2 py-1 font-mono text-foreground"
           >
           <input
             v-model="readyForm.root"
             placeholder="checkout root"
-            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+            class="rounded border border-input bg-inset px-2 py-1 font-mono text-foreground"
           >
           <select
             v-model="readyForm.auth"
-            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-200"
+            class="rounded border border-input bg-inset px-2 py-1 text-foreground"
           >
             <option value="agent">
               agent auth
@@ -360,19 +360,19 @@ onMounted(() => {
             v-if="readyForm.auth === 'identity-file'"
             v-model="readyForm.identity"
             placeholder="identity path"
-            class="rounded border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-slate-200"
+            class="rounded border border-input bg-inset px-2 py-1 font-mono text-foreground"
           >
         </div>
         <div class="mt-2 flex items-center gap-2">
           <button
-            class="rounded border border-cyan-500/40 px-3 py-1 text-xs text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50"
+            class="rounded border border-fc-info/40 px-3 py-1 text-xs text-fc-info hover:bg-fc-info/10 disabled:opacity-50"
             :disabled="busy || readyForm.machineId === '' || readyForm.endpointId === '' || readyForm.root === ''"
             @click="readyForm.dryRun = true; makeReady()"
           >
             Plan (dry run)
           </button>
           <button
-            class="rounded border border-emerald-500/40 px-3 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
+            class="rounded border border-fc-ok/40 px-3 py-1 text-xs text-fc-ok hover:bg-fc-ok/10 disabled:opacity-50"
             :disabled="busy || readyForm.machineId === '' || readyForm.endpointId === '' || readyForm.root === ''"
             @click="readyForm.dryRun = false; makeReady()"
           >
@@ -381,11 +381,11 @@ onMounted(() => {
         </div>
         <pre
           v-if="readyPlan"
-          class="mt-2 overflow-x-auto rounded bg-slate-900 p-2 text-xs text-slate-300"
+          class="mt-2 overflow-x-auto rounded bg-inset p-2 text-xs text-foreground"
         >{{ readyPlan }}</pre>
         <p
           v-if="readyProgress"
-          class="mt-2 text-xs text-slate-400"
+          class="mt-2 text-xs text-muted-foreground"
         >
           {{ readyProgress }}
         </p>
