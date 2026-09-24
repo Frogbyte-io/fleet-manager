@@ -8,7 +8,8 @@
 //! stream. The remote side never emits anything but these lines.
 //!
 //! The fact set is deliberately read-only and bounded: OS, kernel,
-//! architecture, hostname, CPU/RAM/disk sizes, the primary IPv4, and the
+//! architecture, hostname, CPU/RAM/disk sizes, virtualization, the board
+//! or product model, the CPU model, the primary IPv4, and the
 //! presence/version of the tools the plan names — Git, Docker, Tailscale,
 //! mise, Skills Manager, Frogenv, and the major coding agents. Nothing is
 //! installed, updated, or recursively scanned here; that is later work.
@@ -37,6 +38,7 @@ pub const COLLECTION_DEADLINE: Duration = Duration::from_secs(120);
 /// The fixed probe script. Values are base64'd on the remote side
 /// (`base64 -w0`), so the JSON stays one clean line per fact.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn probe_script() -> String {
     r#"fleet_t=$(date +%s%3N 2>/dev/null) || fleet_t=0
 fleet_emit() {
@@ -89,9 +91,47 @@ else
 fi
 if command -v df >/dev/null 2>&1; then
   fleet_emit hardware disk_free_bytes "$(printf '%s' "$(df -kP / 2>/dev/null | tail -n 1 | awk '{print $4 * 1024}')" | base64 -w0)" known
+  fleet_emit hardware disk_total_bytes "$(printf '%s' "$(df -kP / 2>/dev/null | tail -n 1 | awk '{print $2 * 1024}')" | base64 -w0)" known
 else
   fleet_emit hardware disk_free_bytes "" unavailable
+  fleet_emit hardware disk_total_bytes "" unavailable
 fi
+# Virtualization: systemd-detect-virt names the container or hypervisor;
+# "none" means bare metal. Absent (non-systemd hosts) is unavailable, not
+# a guess of "none".
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+  if fleet_virt=$(systemd-detect-virt 2>/dev/null) && [ -n "$fleet_virt" ]; then
+    fleet_emit host virtualization "$(printf '%s' "$fleet_virt" | base64 -w0)" known
+  else
+    fleet_emit host virtualization "" unavailable
+  fi
+else
+  fleet_emit host virtualization "" unavailable
+fi
+
+# Hardware model: the device-tree model on SBCs (Raspberry Pi et al.),
+# the DMI product name on x86 boxes; DMI serials are never read.
+if [ -r /proc/device-tree/model ]; then
+  fleet_emit hardware model "$(printf '%s' "$(tr -d '\0' </proc/device-tree/model 2>/dev/null)" | base64 -w0)" known
+elif [ -r /sys/class/dmi/id/product_name ]; then
+  fleet_emit hardware model "$(printf '%s' "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" | base64 -w0)" known
+else
+  fleet_emit hardware model "" unavailable
+fi
+
+# CPU model: the first "model name" line, which is the marketing string
+# a human recognizes; ARM SBCs may lack it and report unavailable.
+if [ -r /proc/cpuinfo ]; then
+  fleet_cpu_model=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d ':' -f2- | sed 's/^ //')
+  if [ -n "$fleet_cpu_model" ]; then
+    fleet_emit hardware cpu_model "$(printf '%s' "$fleet_cpu_model" | base64 -w0)" known
+  else
+    fleet_emit hardware cpu_model "" unavailable
+  fi
+else
+  fleet_emit hardware cpu_model "" unavailable
+fi
+
 if hostname -I >/dev/null 2>&1; then
   fleet_emit network ipv4 "$(printf '%s' "$(hostname -I 2>/dev/null | awk '{print $1}')" | base64 -w0)" known
 else

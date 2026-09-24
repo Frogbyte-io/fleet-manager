@@ -182,6 +182,7 @@ pub fn standard_probes() -> Vec<Arc<dyn Probe>> {
         Arc::new(OsProbe),
         Arc::new(HostProbe),
         Arc::new(AgentProbe),
+        Arc::new(HardwareProbe),
         Arc::new(ToolProbe::git()),
         Arc::new(ToolProbe::docker()),
         Arc::new(ToolProbe::tailscale()),
@@ -246,6 +247,110 @@ impl Probe for AgentProbe {
             "fleetd",
             Some(env!("CARGO_PKG_VERSION").to_owned()),
         )])
+    }
+}
+
+/// The hardware probe: virtualization kind, board or product model, CPU
+/// model, and the root disk's total size. Read-only file and command
+/// observation with honest unavailable states; serial numbers are never
+/// read (FM-914).
+#[derive(Debug)]
+pub struct HardwareProbe;
+
+impl Probe for HardwareProbe {
+    fn name(&self) -> &'static str {
+        "hardware"
+    }
+
+    fn collect(&self) -> Result<Vec<CapabilityFact>, String> {
+        Ok(vec![
+            Self::virtualization(),
+            Self::model(),
+            Self::cpu_model(),
+            Self::disk_total(),
+        ])
+    }
+}
+
+impl HardwareProbe {
+    fn virtualization() -> CapabilityFact {
+        match std::process::Command::new("systemd-detect-virt").output() {
+            Ok(output)
+                if output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout).trim().is_empty() =>
+            {
+                let kind = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                fact("host", "virtualization", Some(kind))
+            }
+            _ => unavailable("host", "virtualization"),
+        }
+    }
+
+    fn model() -> CapabilityFact {
+        if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
+            let model = model.trim_end_matches('\0').trim().to_owned();
+            if !model.is_empty() {
+                return fact("hardware", "model", Some(model));
+            }
+        }
+        if let Ok(model) = std::fs::read_to_string("/sys/class/dmi/id/product_name") {
+            let model = model.trim().to_owned();
+            if !model.is_empty() {
+                return fact("hardware", "model", Some(model));
+            }
+        }
+        unavailable("hardware", "model")
+    }
+
+    fn cpu_model() -> CapabilityFact {
+        match std::fs::read_to_string("/proc/cpuinfo") {
+            Ok(cpuinfo) => {
+                let model = cpuinfo
+                    .lines()
+                    .find_map(|line| line.strip_prefix("model name"))
+                    .and_then(|rest| rest.split_once(':'))
+                    .map(|(_, model)| model.trim().to_owned())
+                    .filter(|model| !model.is_empty());
+                match model {
+                    Some(model) => fact("hardware", "cpu_model", Some(model)),
+                    None => unavailable("hardware", "cpu_model"),
+                }
+            }
+            Err(_) => unavailable("hardware", "cpu_model"),
+        }
+    }
+
+    fn disk_total() -> CapabilityFact {
+        match std::process::Command::new("df").args(["-kP", "/"]).output() {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let total_kb = text
+                    .lines()
+                    .last()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|field| field.parse::<u64>().ok());
+                match total_kb {
+                    Some(kb) => fact(
+                        "hardware",
+                        "disk_total_bytes",
+                        Some((kb * 1024).to_string()),
+                    ),
+                    None => unavailable("hardware", "disk_total_bytes"),
+                }
+            }
+            _ => unavailable("hardware", "disk_total_bytes"),
+        }
+    }
+}
+
+fn unavailable(namespace: &str, name: &str) -> CapabilityFact {
+    CapabilityFact {
+        namespace: namespace.to_owned(),
+        name: name.to_owned(),
+        value: None,
+        status: CapabilityStatus::Unavailable,
+        observed_at: fleet_core::Timestamp::from_unix_millis(0),
+        source: String::new(),
     }
 }
 
@@ -497,6 +602,67 @@ mod tests {
                 .iter()
                 .find(|f| f.namespace == "tool" && f.name == tool);
             assert!(fact.is_some(), "the {tool} fact must exist");
+        }
+    }
+
+    #[test]
+    fn the_hardware_probe_reports_its_facts_honestly() {
+        // FM-914: the four hardware facts always exist, with a value when
+        // this host can answer and an honest unavailable when it cannot.
+        let probe = HardwareProbe;
+        let facts = probe.collect().expect("the hardware probe collects");
+        let names: Vec<(&str, &str)> = facts
+            .iter()
+            .map(|fact| (fact.namespace.as_str(), fact.name.as_str()))
+            .collect();
+        for expected in [
+            ("host", "virtualization"),
+            ("hardware", "model"),
+            ("hardware", "cpu_model"),
+            ("hardware", "disk_total_bytes"),
+        ] {
+            assert!(
+                names.contains(&expected),
+                "missing {expected:?} in {names:?}"
+            );
+        }
+        for fact in &facts {
+            assert!(
+                fact.status == CapabilityStatus::Known
+                    || fact.status == CapabilityStatus::Unavailable,
+                "{:?} must be known or unavailable, not a guess",
+                fact
+            );
+        }
+        // The disk total is a byte count when known.
+        if let Some(disk) = facts
+            .iter()
+            .find(|fact| fact.namespace == "hardware" && fact.name == "disk_total_bytes")
+        {
+            if disk.status == CapabilityStatus::Known {
+                let value = disk
+                    .value
+                    .as_deref()
+                    .expect("a known disk total has a value");
+                assert!(
+                    value.parse::<u64>().is_ok(),
+                    "the disk total is a byte count, got {value:?}"
+                );
+            }
+        }
+        // The CPU model parses from "model name : ..." without the label
+        // or the colon.
+        if let Some(cpu) = facts
+            .iter()
+            .find(|fact| fact.namespace == "hardware" && fact.name == "cpu_model")
+        {
+            if cpu.status == CapabilityStatus::Known {
+                let value = cpu.value.as_deref().expect("a known cpu model has a value");
+                assert!(
+                    !value.contains("model name") && !value.starts_with(':'),
+                    "the cpu model is the bare string, got {value:?}"
+                );
+            }
         }
     }
 
