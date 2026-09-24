@@ -68,10 +68,13 @@ means the state is already bad.
 **The gradient** — the single brand gesture, shared with Filaments.gg:
 
 ```css
---fc-g1:#ff8a00; --fc-g2:#ff3d77;                 /* dark theme */
---fc-g1:#e06d00; --fc-g2:#e01e5a;                 /* light theme */
---fc-grad: linear-gradient(100deg,var(--fc-g1),var(--fc-g2));
+:root, [data-theme="dark"] { --fc-g1: #ff8a00; --fc-g2: #ff3d77; }
+[data-theme="light"] { --fc-g1: #e06d00; --fc-g2: #e01e5a; }
+:root { --fc-grad: linear-gradient(100deg, var(--fc-g1), var(--fc-g2)); }
 ```
+
+Other color tokens follow the same pattern: dark values on
+`:root, [data-theme="dark"]`, light overrides on `[data-theme="light"]`.
 
 Allowed uses, nowhere else: key words in the H1 (via `background-clip:text`),
 primary CTA buttons, active sidebar item text + its 2px left accent, the
