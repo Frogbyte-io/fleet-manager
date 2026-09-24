@@ -36,8 +36,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use sqlx::SqlitePool;
 use tower_http::services::ServeDir;
@@ -262,11 +265,10 @@ fn shell(settings: &Settings) -> ServeDir {
 
 /// Builds the controller's HTTP router.
 ///
-/// Order of authority for an unmatched path, decided once and documented here:
-/// the health probes match first, the static shell answers any path that is a
-/// file in the web distribution, and the public API adapter answers everything
-/// else — including unknown `/api/v1` paths, which therefore keep the JSON
-/// error envelope instead of ever falling through to the web shell.
+/// The health probes and explicit API routes take precedence over static
+/// files. Existing web files are served directly; unmatched API, download,
+/// and asset paths keep their own 404 responses, while eligible browser
+/// navigation requests receive the SPA entry point.
 ///
 /// `db` is the store's connection pool once the database is open; readiness
 /// probes it live and the operation use cases run over it. Passing `None` is
@@ -306,6 +308,7 @@ pub fn build_router(
         lab.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
+    let web_index = settings.web_dist.join("index.html");
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -321,7 +324,7 @@ pub fn build_router(
         );
     }
     let Some(services) = services else {
-        return router;
+        return router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
     };
     // The machine-facing node surface: versioned with the node protocol,
     // documented in proto/README.md, and mounted beside the public API —
@@ -329,7 +332,44 @@ pub fn build_router(
     // nest so no path overlaps.
     let node_routes = fleet_api::node::node_router(api_state)
         .merge(gateway::gateway_router(services.gateway.clone()));
-    router.nest("/api/node/v1", node_routes)
+    router
+        .nest("/api/node/v1", node_routes)
+        .layer(middleware::from_fn_with_state(web_index, spa_fallback))
+}
+
+/// Rewrites eligible static/API 404s to the console entry point. The API and
+/// reserved static namespaces retain their own 404 responses.
+async fn spa_fallback(State(index_file): State<PathBuf>, request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let response = next.run(request).await;
+
+    if response.status() != StatusCode::NOT_FOUND
+        || !(method == Method::GET || method == Method::HEAD)
+        || is_reserved_path(&path)
+    {
+        return response;
+    }
+
+    let Ok(contents) = tokio::fs::read(index_file).await else {
+        return response;
+    };
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(contents)
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(body)
+        .unwrap_or(response)
+}
+
+fn is_reserved_path(path: &str) -> bool {
+    ["/api", "/downloads/", "/assets/"]
+        .iter()
+        .any(|prefix| path == prefix.trim_end_matches('/') || path.starts_with(prefix))
 }
 
 async fn healthz() -> &'static str {

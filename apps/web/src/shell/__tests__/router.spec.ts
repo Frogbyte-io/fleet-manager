@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { NAV_GROUPS } from '../nav'
-import { routes, router } from '@/router'
+import { legacyHashUrl, routes, router } from '@/router'
 
 function resolve(path: string) {
   const resolved = router.resolve(path)
@@ -31,5 +31,16 @@ describe('routes', () => {
     expect(overview?.meta?.title).toBe('Overview')
     const fleet = routes.find(r => r.path === '/fleet')
     expect(fleet?.meta?.group).toBe('Infrastructure')
+  })
+})
+
+describe('legacy hash URLs', () => {
+  it('returns the clean path and query for old hash links', () => {
+    expect(legacyHashUrl('?theme=dark', '#/fleet/add')).toBe('/fleet/add?theme=dark')
+  })
+
+  it('leaves ordinary URLs unchanged', () => {
+    expect(legacyHashUrl('?theme=dark', '')).toBeNull()
+    expect(legacyHashUrl('', '#section')).toBeNull()
   })
 })

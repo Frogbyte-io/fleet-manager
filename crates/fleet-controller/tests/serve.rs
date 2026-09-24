@@ -73,10 +73,14 @@ async fn spawn(
 
 /// Performs one HTTP/1.0 GET and returns the status code and full body.
 async fn get(address: std::net::SocketAddr, path: &str) -> (u16, String) {
+    request(address, "GET", path).await
+}
+
+async fn request(address: std::net::SocketAddr, method: &str, path: &str) -> (u16, String) {
     let mut stream = TcpStream::connect(address)
         .await
         .expect("the server must accept");
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {address}\r\n\r\n");
+    let request = format!("{method} {path} HTTP/1.0\r\nHost: {address}\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -119,6 +123,44 @@ async fn the_web_shell_is_served_with_its_assets() {
     let (status, body) = get(address, "/assets/app.js").await;
     assert_eq!(status, 200);
     assert_eq!(body, "console.log('fleet');\n");
+}
+
+#[tokio::test]
+async fn deep_links_serve_the_web_shell() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, body) = get(address, "/fleet/add").await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "<html>fleet shell</html>\n");
+}
+
+#[tokio::test]
+async fn missing_assets_and_downloads_stay_not_found() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    for path in ["/assets/missing.js", "/downloads/missing.tar.gz"] {
+        let (status, body) = get(address, path).await;
+        assert_eq!(status, 404, "{path}: {body}");
+        assert!(!body.contains("fleet shell"), "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn head_deep_links_serve_shell_headers_without_a_body() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, body) = request(address, "HEAD", "/fleet/add").await;
+    assert_eq!(status, 200);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn non_get_requests_do_not_receive_the_web_shell() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, body) = request(address, "POST", "/fleet/add").await;
+    assert_eq!(status, 404);
+    assert!(body.contains("\"code\":\"not_found\""), "{body}");
 }
 
 #[tokio::test]
