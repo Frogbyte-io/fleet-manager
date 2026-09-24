@@ -410,7 +410,7 @@ fn accepts_html(headers: &HeaderMap) -> bool {
 }
 
 fn is_reserved_path(path: &str) -> bool {
-    path == "/api"
+    ["/api", "/downloads", "/assets"].contains(&path)
         || ["/api/", "/downloads/", "/assets/"]
             .iter()
             .any(|prefix| path.starts_with(prefix))

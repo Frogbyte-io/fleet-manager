@@ -174,8 +174,16 @@ async fn deep_links_keep_the_controller_security_headers() {
 async fn missing_assets_and_downloads_stay_not_found() {
     let dist = shell_dist();
     let (address, _shutdown) = spawn(settings(dist.path()), None).await;
-    for path in ["/assets/missing.js", "/downloads/missing.tar.gz"] {
-        let (status, body) = get(address, path).await;
+    std::fs::remove_dir_all(dist.path().join("assets"))
+        .expect("assets directory must be absent for the namespace-root test");
+    for path in [
+        "/assets",
+        "/assets/missing.js",
+        "/downloads",
+        "/downloads/missing.tar.gz",
+    ] {
+        let (status, _, body) =
+            request_details_with_accept(address, "GET", path, Some("text/html")).await;
         assert_eq!(status, 404, "{path}: {body}");
         assert!(!body.contains("fleet shell"), "{path}: {body}");
     }
