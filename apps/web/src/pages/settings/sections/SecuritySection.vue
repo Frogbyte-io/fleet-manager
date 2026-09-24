@@ -22,7 +22,7 @@ const warning = computed(() => props.system?.trustWarning ?? '')
       class="mt-4 border-l-2 border-fc-err bg-fc-err/10 p-3 text-sm"
     >
       <span class="font-semibold text-fc-err">Trusted-LAN mode.</span>
-      <span class="text-fc-muted">{{ warning }}</span>
+      <span class="text-fc-muted">{{ warning.replace(/^TRUSTED-LAN MODE:\s*/i, '') }}</span>
     </div>
 
     <dl

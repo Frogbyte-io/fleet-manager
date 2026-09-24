@@ -14,20 +14,24 @@ import type { ProxmoxAccountDto, ResourceTailnetStatusDtoData } from '@frogbyte-
 
 const props = defineProps<{
   proxmoxAccounts: ProxmoxAccountDto[]
+  proxmoxUnavailable: boolean
   tailnet: ResourceTailnetStatusDtoData | null
+  tailnetUnavailable: boolean
 }>()
 
 const proxmoxChip = computed(() => {
+  if (props.proxmoxUnavailable) return { text: 'unavailable', class: 'bg-fc-warn/15 text-fc-warn' }
   const accounts = props.proxmoxAccounts
   if (accounts.length === 0) return { text: 'not configured', class: 'bg-muted text-fc-muted' }
-  const pinned = accounts.filter((account) => account.fingerprintState === 'pinned').length
+  const confirmed = accounts.filter((account) => account.fingerprintState === 'confirmed').length
   return {
-    text: `${accounts.length} account${accounts.length === 1 ? '' : 's'} · ${pinned} pinned`,
+    text: `${accounts.length} account${accounts.length === 1 ? '' : 's'} · ${confirmed} confirmed`,
     class: 'bg-fc-ok/15 text-fc-ok',
   }
 })
 
 const tailnetChip = computed(() => {
+  if (props.tailnetUnavailable) return { text: 'unavailable', class: 'bg-fc-warn/15 text-fc-warn' }
   if (!props.tailnet) return { text: 'unknown', class: 'bg-muted text-fc-muted' }
   return props.tailnet.configured
     ? { text: 'configured', class: 'bg-fc-ok/15 text-fc-ok' }
@@ -35,7 +39,7 @@ const tailnetChip = computed(() => {
 })
 
 function formatCreated(at: number): string {
-  return new Date(at).toISOString().slice(0, 10)
+  return new Date(at).toLocaleDateString()
 }
 </script>
 
@@ -66,6 +70,12 @@ function formatCreated(at: number): string {
             {{ proxmoxAccounts.map((a) => `${a.name} · ${a.host} · ${a.tokenId} · SET ${formatCreated(a.createdAt)}`).join(' | ') }}
           </p>
           <p
+            v-else-if="proxmoxUnavailable"
+            class="mt-1 text-xs text-fc-warn"
+          >
+            The account list could not be read; the controller did not answer.
+          </p>
+          <p
             v-else
             class="mt-1 text-xs text-fc-muted"
           >
@@ -91,7 +101,13 @@ function formatCreated(at: number): string {
             {{ tailnet.clientId ?? 'client id withheld' }} · scope {{ tailnet.scope }}
           </p>
           <p
-            v-else
+            v-else-if="tailnetUnavailable"
+            class="mt-1 text-xs text-fc-warn"
+          >
+            The integration status could not be read; the controller did not answer.
+          </p>
+          <p
+            v-else-if="tailnet"
             class="mt-1 text-xs text-fc-muted"
           >
             An OAuth client with <code class="font-mono">devices:core:read</code> enables discovery.

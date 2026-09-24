@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -44,7 +44,9 @@ const system = ref<SystemInfo | null>(null)
 const meta = ref<ResourceMetaData | null>(null)
 const machines = ref<MachineDto[]>([])
 const proxmoxAccounts = ref<ProxmoxAccountDto[]>([])
+const proxmoxUnavailable = ref(false)
 const tailnet = ref<ResourceTailnetStatusDtoData | null>(null)
+const tailnetUnavailable = ref(false)
 const failed = ref(false)
 const failure = ref('')
 const loaded = ref(false)
@@ -115,11 +117,19 @@ async function load(): Promise<void> {
   }
   if (proxmoxResult.status === 'fulfilled' && proxmoxResult.value.status === 200) {
     proxmoxAccounts.value = proxmoxResult.value.data.items
+  } else {
+    proxmoxUnavailable.value = true
   }
   if (tailnetResult.status === 'fulfilled' && tailnetResult.value.status === 200) {
     tailnet.value = tailnetResult.value.data.data
+  } else {
+    tailnetUnavailable.value = true
   }
-  if (results.every((result) => result.status === 'rejected')) {
+  // A fulfilled non-2xx response is still a failed load: the generated
+  // client resolves errors, it does not reject them.
+  const ok = (result: PromiseSettledResult<{ status: number }>): boolean =>
+    result.status === 'fulfilled' && result.value.status === 200
+  if (results.every((result) => !ok(result as PromiseSettledResult<{ status: number }>))) {
     failed.value = true
     failure.value = 'every settings source refused the request'
   }
@@ -127,7 +137,6 @@ async function load(): Promise<void> {
 }
 
 void load()
-watch(section, () => undefined)
 </script>
 
 <template>
@@ -196,7 +205,9 @@ watch(section, () => undefined)
         <IntegrationsSection
           v-else-if="section === 'integrations'"
           :proxmox-accounts="proxmoxAccounts"
+          :proxmox-unavailable="proxmoxUnavailable"
           :tailnet="tailnet"
+          :tailnet-unavailable="tailnetUnavailable"
         />
         <FleetdSection
           v-else-if="section === 'fleetd'"

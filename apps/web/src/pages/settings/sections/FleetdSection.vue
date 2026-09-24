@@ -12,11 +12,15 @@ const nodes = computed(() =>
     const identity = machine.capabilities.find(
       (fact) => fact.namespace === 'agent' && fact.name === 'fleetd',
     )
+    // A stale or unknown fact is not a current version; qualify it.
+    const version =
+      identity?.status === 'known' ? (identity.value ?? null) : null
     return {
       id: machine.id,
       name: machine.name,
       status: machine.machineStatus,
-      fleetd: identity?.value ?? null,
+      fleetd: version,
+      fleetdStatus: identity?.status ?? null,
     }
   }),
 )
@@ -28,8 +32,7 @@ const nodes = computed(() =>
       fleetd &amp; enrollment
     </h2>
     <p class="mt-1 text-sm text-muted-foreground">
-      Enrollment tokens are minted per machine from its detail page; this section summarizes
-      which machines run the node daemon.
+      This section summarizes which machines report the node daemon in their inventory.
     </p>
 
     <table
@@ -59,7 +62,16 @@ const nodes = computed(() =>
             {{ node.name }}
           </td>
           <td class="py-2 font-mono text-foreground">
-            {{ node.fleetd ?? '—' }}
+            <template v-if="node.fleetd">
+              {{ node.fleetd }}
+              <span
+                v-if="node.fleetdStatus && node.fleetdStatus !== 'known'"
+                class="text-xs text-fc-warn"
+              >({{ node.fleetdStatus }})</span>
+            </template>
+            <template v-else>
+              —
+            </template>
           </td>
           <td class="py-2">
             <span :class="node.status === 'connected' ? 'text-fc-ok' : 'text-fc-muted'">{{ node.status }}</span>

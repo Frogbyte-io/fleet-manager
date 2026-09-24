@@ -20,7 +20,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   })),
   getMeta: vi.fn(async () => ({
     status: 200,
-    data: { apiVersion: 'v1', service: 'fleet-controller' },
+    data: { data: { apiVersion: 'v1', service: 'fleet-controller' } },
   })),
   listMachines: vi.fn(async () => ({
     status: 200,
@@ -54,7 +54,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
           host: 'pve.lan',
           port: 8006,
           tokenId: 'FLEET@PVE!CTRL',
-          fingerprintState: 'pinned',
+          fingerprintState: 'confirmed',
           fingerprint: 'sha256:abc',
           createdAt: 1_757_000_000_000,
         },
@@ -104,10 +104,12 @@ describe('SettingsPage', () => {
     expect(wrapper.text()).toContain('Behaviour')
     expect(wrapper.text()).toContain('Integrations')
     expect(wrapper.text()).toContain('Proxmox VE')
-    expect(wrapper.text()).toContain('1 account · 1 pinned')
+    expect(wrapper.text()).toContain('1 account · 1 confirmed')
     expect(wrapper.text()).toContain('FLEET@PVE!CTRL')
     expect(wrapper.text()).toContain('not configured')
-    // No secret value is ever rendered.
+    // No secret-shaped value is ever rendered: the fingerprint is exactly
+    // the kind of value the page must keep out of the DOM.
+    expect(wrapper.text()).not.toContain('sha256:abc')
     expect(wrapper.text()).not.toContain('SECRET')
   })
 
