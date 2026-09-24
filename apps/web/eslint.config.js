@@ -17,4 +17,12 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // shadcn-vue primitives are generated source we own; their single-word
+    // names (Button, Table, …) follow the upstream registry.
+    files: ['src/components/ui/**/*.vue'],
+    rules: {
+      'vue/multi-word-component-names': 'off',
+    },
+  },
 )

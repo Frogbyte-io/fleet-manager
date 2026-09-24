@@ -1,15 +1,82 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
+@custom-variant dark (&:is(.dark *));
+
+/* Fleet Console tokens (DESIGN.md §3). --fc- prefix avoids shadcn-vue name clashes (§4). */
+:root,
+[data-theme="dark"] {
+  --fc-bg: #0b0e14; --fc-nav: #0d1219; --fc-panel: #11161f; --fc-inset: #0d1219;
+  --fc-line: #1f2733; --fc-line2: #2a3442; --fc-ink: #eef1f6; --fc-muted: #98a2b3; --fc-faint: #5f6a7c;
+  --fc-ok: #2fd28c; --fc-info: #57a8ff; --fc-warn: #f5a524; --fc-err: #ff5c5c;
+  --fc-g1: #ff8a00; --fc-g2: #ff3d77;
+}
+[data-theme="light"] {
+  --fc-bg: #f2f4f7; --fc-nav: #ffffff; --fc-panel: #ffffff; --fc-inset: #eef0f4;
+  --fc-line: #dde1e8; --fc-line2: #c9cfd9; --fc-ink: #161a21; --fc-muted: #5c6672;
+  --fc-ok: #178a55; --fc-info: #1f6fd1; --fc-warn: #b7791f; --fc-err: #d93636;
+  --fc-faint: #6b7584; --fc-g1: #e06d00; --fc-g2: #e01e5a;
+}
 :root {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color-scheme: dark;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  --fc-grad: linear-gradient(100deg, var(--fc-g1), var(--fc-g2));
+  --fc-head: "Montserrat", "Archivo", "Archivo Black", system-ui, sans-serif;
+  --fc-body: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --fc-chart: "Inconsolata", ui-monospace, Menlo, Consolas, monospace;
+  --fc-c-compute: #1c7ed6; --fc-c-storage: #2f9e44; --fc-c-board: #e8590c; --fc-c-desktop: #9c36b5; --fc-c-lab: #495057;
+
+  /* shadcn-vue variables mapped onto Fleet tokens (DESIGN.md §4) */
+  --background: var(--fc-bg); --foreground: var(--fc-ink);
+  --card: var(--fc-panel); --card-foreground: var(--fc-ink);
+  --popover: var(--fc-panel); --popover-foreground: var(--fc-ink);
+  --primary: var(--fc-g2); --primary-foreground: #ffffff;
+  --secondary: var(--fc-inset); --secondary-foreground: var(--fc-ink);
+  --muted: var(--fc-inset); --muted-foreground: var(--fc-muted);
+  --accent: var(--fc-line); --accent-foreground: var(--fc-ink);
+  --destructive: var(--fc-err);
+  --border: var(--fc-line); --input: var(--fc-line2); --ring: var(--fc-g1);
+  --radius: 2px;
+  --chart-1: var(--fc-g1); --chart-2: var(--fc-g2); --chart-3: var(--fc-ok); --chart-4: var(--fc-info); --chart-5: var(--fc-err);
+  --sidebar: var(--fc-nav); --sidebar-foreground: var(--fc-muted);
+  --sidebar-primary: var(--fc-g1); --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--fc-panel); --sidebar-accent-foreground: var(--fc-ink);
+  --sidebar-border: var(--fc-line); --sidebar-ring: var(--fc-g1);
 }
 
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
+@theme inline {
+  --font-sans: var(--fc-body);
+  --font-mono: var(--fc-chart);
+  --font-head: var(--fc-head);
+  --color-background: var(--background); --color-foreground: var(--foreground);
+  --color-card: var(--card); --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover); --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary); --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary); --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted); --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent); --color-accent-foreground: var(--accent-foreground);
+  --color-inset: var(--fc-inset);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border); --color-input: var(--input); --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1); --color-chart-2: var(--chart-2); --color-chart-3: var(--chart-3); --color-chart-4: var(--chart-4); --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar); --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary); --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent); --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border); --color-sidebar-ring: var(--sidebar-ring);
+  --color-fc-ok: var(--fc-ok); --color-fc-info: var(--fc-info); --color-fc-warn: var(--fc-warn); --color-fc-err: var(--fc-err);
+  --color-fc-ink: var(--fc-ink); --color-fc-muted: var(--fc-muted); --color-fc-faint: var(--fc-faint);
+  --color-fc-panel: var(--fc-panel); --color-fc-inset: var(--fc-inset); --color-fc-line: var(--fc-line); --color-fc-line2: var(--fc-line2);
+  --radius-sm: 2px; --radius-md: 2px; --radius-lg: 2px; --radius-xl: 2px;
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  html { color-scheme: dark; }
+  html[data-theme="light"] { color-scheme: light; }
+  body { @apply bg-background text-foreground; margin: 0; min-width: 320px; min-height: 100vh; font: 14px/1.55 var(--fc-body); font-synthesis: none; text-rendering: optimizeLegibility; }
+}
+
+@layer components {
+  .fc-kicker { font-family: var(--fc-chart); font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--fc-faint); }
+  .fc-grad-text { background: var(--fc-grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .fc-grad-bg { background: var(--fc-grad); color: #fff; }
+  .fc-h1 { font: 800 26px/1.2 var(--fc-head); letter-spacing: -.02em; margin: 0; }
 }

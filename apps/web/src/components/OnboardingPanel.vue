@@ -173,13 +173,13 @@ onMounted(load)
 </script>
 
 <template>
-  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
+  <section class="rounded-sm border border-border bg-card p-6">
     <div class="flex items-center justify-between">
-      <h2 class="text-lg font-semibold text-slate-100">
+      <h2 class="text-lg font-semibold text-foreground">
         Add Machine
       </h2>
       <button
-        class="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted"
         @click="load"
       >
         Refresh
@@ -188,7 +188,7 @@ onMounted(load)
 
     <p
       v-if="failed"
-      class="mt-4 text-sm text-rose-400"
+      class="mt-4 text-sm text-fc-err"
     >
       {{ failure }}
     </p>
@@ -197,22 +197,22 @@ onMounted(load)
       <input
         v-model="form.user"
         placeholder="login user"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 font-mono text-foreground"
       >
       <input
         v-model="form.host"
         placeholder="host"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 font-mono text-foreground"
       >
       <input
         v-model.number="form.port"
         type="number"
         placeholder="port"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 font-mono text-foreground"
       >
       <select
         v-model="form.authType"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 text-foreground"
       >
         <option value="identityFile">
           identity file
@@ -225,25 +225,25 @@ onMounted(load)
         v-if="form.authType === 'identityFile'"
         v-model="form.identityPath"
         placeholder="identity file path"
-        class="col-span-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-slate-200"
+        class="col-span-2 rounded-sm border border-input bg-background px-3 py-2 font-mono text-foreground"
       >
       <input
         v-model="form.name"
         placeholder="machine name (optional)"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 text-foreground"
       >
       <input
         v-model="form.tags"
         placeholder="tags, comma-separated"
-        class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+        class="rounded-sm border border-input bg-background px-3 py-2 text-foreground"
       >
       <input
         v-model="form.description"
         placeholder="description (optional)"
-        class="col-span-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-200"
+        class="col-span-2 rounded-sm border border-input bg-background px-3 py-2 text-foreground"
       >
       <button
-        class="col-span-2 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50"
+        class="col-span-2 rounded-sm border border-fc-info/40 bg-fc-info/10 px-3 py-2 text-sm text-fc-info hover:bg-fc-info/20 disabled:opacity-50"
         :disabled="busy || form.user === '' || form.host === '' || (form.authType === 'identityFile' && form.identityPath === '')"
         @click="create"
       >
@@ -255,7 +255,7 @@ onMounted(load)
       v-if="drafts.length > 0"
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-slate-500">
+      <thead class="text-xs uppercase tracking-wide text-muted-foreground">
         <tr>
           <th class="py-2">
             Name
@@ -268,11 +268,11 @@ onMounted(load)
           </th>
         </tr>
       </thead>
-      <tbody class="font-mono text-slate-200">
+      <tbody class="font-mono text-foreground">
         <tr
           v-for="draft in drafts"
           :key="draft.id"
-          class="cursor-pointer border-t border-slate-800 hover:bg-slate-800/60"
+          class="cursor-pointer border-t border-border hover:bg-accent"
           @click="open(draft.id)"
         >
           <td class="py-2">
@@ -282,9 +282,9 @@ onMounted(load)
             <span
               class="rounded border px-1.5 py-0.5 text-xs"
               :class="{
-                'border-emerald-500/40 text-emerald-300': draft.stage === 'ready',
-                'border-amber-500/40 text-amber-300': draft.stage === 'review',
-                'border-slate-600 text-slate-400': draft.stage === 'untested',
+                'border-fc-ok/40 text-fc-ok': draft.stage === 'ready',
+                'border-fc-warn/40 text-fc-warn': draft.stage === 'review',
+                'border-input text-muted-foreground': draft.stage === 'untested',
               }"
             >{{ draft.stage }}</span>
           </td>
@@ -296,22 +296,22 @@ onMounted(load)
     </table>
     <p
       v-else
-      class="mt-4 text-center text-sm text-slate-500"
+      class="mt-4 text-center text-sm text-muted-foreground"
     >
       No drafts yet
     </p>
 
     <div
       v-if="selected"
-      class="mt-6 rounded-xl border border-slate-800 bg-slate-950 p-4"
+      class="mt-6 rounded-sm border border-border bg-inset p-4"
     >
       <div class="flex items-center justify-between">
-        <h3 class="text-sm font-semibold text-slate-200">
+        <h3 class="text-sm font-semibold text-foreground">
           {{ selected.name }}
-          <span class="ml-2 text-xs font-normal text-slate-500">{{ selected.stage }}</span>
+          <span class="ml-2 text-xs font-normal text-muted-foreground">{{ selected.stage }}</span>
         </h3>
         <button
-          class="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-300 hover:border-slate-500"
+          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-muted"
           @click="close"
         >
           Close
@@ -319,13 +319,13 @@ onMounted(load)
       </div>
 
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Endpoint
         </dt>
         <dd class="font-mono">
           {{ selected.endpoint.user }}@{{ selected.endpoint.host }}:{{ selected.endpoint.port }}
         </dd>
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Auth
         </dt>
         <dd class="font-mono">
@@ -337,7 +337,7 @@ onMounted(load)
           </template>
         </dd>
         <template v-if="selected.hostKey">
-          <dt class="text-slate-500">
+          <dt class="text-muted-foreground">
             Host key ({{ selected.hostKeyStage }})
           </dt>
           <dd class="font-mono">
@@ -345,7 +345,7 @@ onMounted(load)
           </dd>
         </template>
         <template v-if="selected.lastTest">
-          <dt class="text-slate-500">
+          <dt class="text-muted-foreground">
             Last test
           </dt>
           <dd class="font-mono">
@@ -358,7 +358,7 @@ onMounted(load)
           </dd>
         </template>
         <template v-if="selected.profileHint">
-          <dt class="text-slate-500">
+          <dt class="text-muted-foreground">
             Profile hint
           </dt>
           <dd class="font-mono">
@@ -369,7 +369,7 @@ onMounted(load)
 
       <div
         v-if="selected.duplicates.length > 0"
-        class="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200"
+        class="mt-3 rounded-sm border border-fc-warn/40 bg-fc-warn/10 p-3 text-xs text-fc-warn"
       >
         Machines already registered on this host (warned, never merged):
         <div
@@ -385,23 +385,23 @@ onMounted(load)
         v-if="selected.facts.length > 0"
         class="mt-3 text-xs"
       >
-        <p class="text-slate-500">
+        <p class="text-muted-foreground">
           Discovered facts — review before adding:
         </p>
-        <div class="mt-1 font-mono text-slate-300">
+        <div class="mt-1 font-mono text-foreground">
           <div
             v-for="fact in selected.facts"
             :key="`${fact.namespace}.${fact.name}`"
           >
             {{ fact.namespace }}.{{ fact.name }} = {{ fact.value ?? '–' }}
-            <span class="text-slate-500">{{ fact.status }}</span>
+            <span class="text-muted-foreground">{{ fact.status }}</span>
           </div>
         </div>
       </div>
 
       <div class="mt-4 flex flex-wrap gap-2">
         <button
-          class="rounded border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:border-slate-500 disabled:opacity-50"
+          class="rounded border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted disabled:opacity-50"
           :disabled="busy"
           @click="runStage('test')"
         >
@@ -409,7 +409,7 @@ onMounted(load)
         </button>
         <button
           v-if="selected.hostKey && selected.hostKeyStage !== 'confirmed'"
-          class="rounded border border-amber-500/40 px-3 py-1 text-xs text-amber-200 hover:bg-amber-500/10 disabled:opacity-50"
+          class="rounded border border-fc-warn/40 px-3 py-1 text-xs text-fc-warn hover:bg-fc-warn/10 disabled:opacity-50"
           :disabled="busy"
           @click="confirmFingerprint"
         >
@@ -417,7 +417,7 @@ onMounted(load)
         </button>
         <button
           v-if="selected.stage === 'ready'"
-          class="rounded border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:border-slate-500 disabled:opacity-50"
+          class="rounded border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted disabled:opacity-50"
           :disabled="busy"
           @click="runStage('discover')"
         >
@@ -425,14 +425,14 @@ onMounted(load)
         </button>
         <button
           v-if="selected.stage === 'ready'"
-          class="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+          class="rounded border border-fc-ok/40 bg-fc-ok/10 px-3 py-1 text-xs text-fc-ok hover:bg-fc-ok/20 disabled:opacity-50"
           :disabled="busy"
           @click="add"
         >
           Add machine
         </button>
         <button
-          class="rounded border border-rose-500/40 px-3 py-1 text-xs text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"
+          class="rounded border border-fc-err/40 px-3 py-1 text-xs text-fc-err hover:bg-fc-err/10 disabled:opacity-50"
           :disabled="busy"
           @click="cancel"
         >
@@ -443,13 +443,13 @@ onMounted(load)
 
     <div
       v-if="added"
-      class="mt-6 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-200"
+      class="mt-6 rounded-sm border border-fc-ok/40 bg-fc-ok/10 p-4 text-sm text-fc-ok"
     >
       Machine registered: {{ added.machine.name }} ({{ added.machine.id }})
       <div
         v-for="candidate in added.duplicates"
         :key="candidate.machineId"
-        class="mt-1 text-xs text-amber-200"
+        class="mt-1 text-xs text-fc-warn"
       >
         Duplicate candidate (warned, not merged): {{ candidate.name }} {{ candidate.reference }}
       </div>

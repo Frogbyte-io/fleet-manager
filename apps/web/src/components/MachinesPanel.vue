@@ -136,13 +136,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl">
+  <section class="rounded-sm border border-border bg-card p-6">
     <div class="flex items-center justify-between">
-      <h2 class="text-lg font-semibold text-slate-100">
+      <h2 class="text-lg font-semibold text-foreground">
         Machines
       </h2>
       <button
-        class="rounded-lg border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-500"
+        class="rounded-sm border border-input px-3 py-1 text-xs text-foreground hover:border-fc-muted"
         @click="load"
       >
         Refresh
@@ -151,7 +151,7 @@ onBeforeUnmount(() => {
 
     <p
       v-if="failed"
-      class="mt-4 text-sm text-rose-400"
+      class="mt-4 text-sm text-fc-err"
     >
       {{ failure }}
     </p>
@@ -160,7 +160,7 @@ onBeforeUnmount(() => {
       v-else
       class="mt-4 w-full text-left text-sm"
     >
-      <thead class="text-xs uppercase tracking-wide text-slate-500">
+      <thead class="text-xs uppercase tracking-wide text-muted-foreground">
         <tr>
           <th class="py-2">
             Name
@@ -176,11 +176,11 @@ onBeforeUnmount(() => {
           </th>
         </tr>
       </thead>
-      <tbody class="font-mono text-slate-200">
+      <tbody class="font-mono text-foreground">
         <tr
           v-for="machine in machines"
           :key="machine.id"
-          class="cursor-pointer border-t border-slate-800 hover:bg-slate-800/60"
+          class="cursor-pointer border-t border-border hover:bg-accent"
           @click="open(machine)"
         >
           <td class="py-2">
@@ -190,24 +190,24 @@ onBeforeUnmount(() => {
             <span
               class="rounded border px-1.5 py-0.5 text-xs"
               :class="{
-                'border-emerald-500/40 text-emerald-300': machine.machineStatus === 'connected',
-                'border-amber-500/40 text-amber-300': machine.machineStatus === 'stale',
-                'border-slate-600 text-slate-400': machine.machineStatus === 'offline',
-                'border-cyan-500/40 text-cyan-300': machine.machineStatus === 'agentless',
+                'border-fc-ok/40 text-fc-ok': machine.machineStatus === 'connected',
+                'border-fc-warn/40 text-fc-warn': machine.machineStatus === 'stale',
+                'border-input text-muted-foreground': machine.machineStatus === 'offline',
+                'border-fc-info/40 text-fc-info': machine.machineStatus === 'agentless',
               }"
             >{{ machine.machineStatus }}</span>
           </td>
           <td class="py-2 text-xs">
             {{ machine.endpoints[0]?.reference ?? '–' }}
           </td>
-          <td class="py-2 text-xs text-slate-400">
+          <td class="py-2 text-xs text-muted-foreground">
             {{ machine.tags.join(', ') }}
           </td>
         </tr>
         <tr v-if="machines.length === 0">
           <td
             colspan="4"
-            class="py-4 text-center text-slate-500"
+            class="py-4 text-center text-muted-foreground"
           >
             No machines yet
           </td>
@@ -217,33 +217,33 @@ onBeforeUnmount(() => {
 
     <div
       v-if="selected"
-      class="mt-6 rounded-xl border border-slate-800 bg-slate-950 p-4"
+      class="mt-6 rounded-sm border border-border bg-inset p-4"
     >
       <div class="flex items-center justify-between">
-        <h3 class="text-sm font-semibold text-slate-200">
+        <h3 class="text-sm font-semibold text-foreground">
           {{ selected.name }}
         </h3>
         <button
-          class="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-300 hover:border-slate-500"
+          class="rounded border border-input px-2 py-0.5 text-xs text-foreground hover:border-fc-muted"
           @click="close"
         >
           Close
         </button>
       </div>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Status
         </dt>
         <dd class="font-mono">
           {{ selected.machineStatus }}
         </dd>
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Last seen
         </dt>
         <dd class="font-mono">
           {{ selected.lastSeenAt ?? '–' }}
         </dd>
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Last observation
         </dt>
         <dd class="font-mono">
@@ -256,7 +256,7 @@ onBeforeUnmount(() => {
         </dd>
       </dl>
       <dl class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Endpoints
         </dt>
         <dd class="font-mono">
@@ -267,13 +267,13 @@ onBeforeUnmount(() => {
             {{ endpoint.kind }} {{ endpoint.reference }}
           </div>
         </dd>
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Tags
         </dt>
         <dd class="font-mono">
           {{ selected.tags.join(', ') || '–' }}
         </dd>
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Groups
         </dt>
         <dd class="font-mono">
@@ -284,7 +284,7 @@ onBeforeUnmount(() => {
         v-if="selected.capabilities.length > 0"
         class="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs"
       >
-        <dt class="text-slate-500">
+        <dt class="text-muted-foreground">
           Capabilities
         </dt>
         <dd class="font-mono">
@@ -293,13 +293,13 @@ onBeforeUnmount(() => {
             :key="`${fact.namespace}.${fact.name}`"
           >
             {{ fact.namespace }}.{{ fact.name }} = {{ fact.value ?? '–' }}
-            <span class="text-slate-500">{{ fact.status }}</span>
+            <span class="text-muted-foreground">{{ fact.status }}</span>
           </div>
         </dd>
       </dl>
 
-      <div class="mt-4 border-t border-slate-800 pt-3">
-        <p class="text-xs text-slate-500">
+      <div class="mt-4 border-t border-border pt-3">
+        <p class="text-xs text-muted-foreground">
           Install Fleet Node — upgrades this machine to fully managed. The
           controller picks the package for the machine's platform; the
           machine's Fleet id is kept.
@@ -310,7 +310,7 @@ onBeforeUnmount(() => {
         >
           <select
             v-model="installForm.authType"
-            class="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200"
+            class="rounded border border-input bg-background px-2 py-1 text-foreground"
           >
             <option value="identityFile">
               identity file
@@ -323,10 +323,10 @@ onBeforeUnmount(() => {
             v-if="installForm.authType === 'identityFile'"
             v-model="installForm.identityPath"
             placeholder="identity file path"
-            class="rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-slate-200"
+            class="rounded border border-input bg-background px-2 py-1 font-mono text-foreground"
           >
           <button
-            class="rounded border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50"
+            class="rounded border border-fc-info/40 bg-fc-info/10 px-3 py-1 text-fc-info hover:bg-fc-info/20 disabled:opacity-50"
             :disabled="installBusy || (installForm.authType === 'identityFile' && installForm.identityPath === '')"
             @click="startInstall"
           >
@@ -337,23 +337,23 @@ onBeforeUnmount(() => {
           v-else
           class="mt-2 text-xs"
         >
-          <p class="font-mono text-slate-300">
+          <p class="font-mono text-foreground">
             {{ installState }}
             <span
               v-if="installProgress"
-              class="text-slate-500"
+              class="text-muted-foreground"
             >— {{ installProgress }}</span>
           </p>
           <p
             v-if="installResult"
             class="mt-1 font-mono"
-            :class="installFailed ? 'text-rose-400' : 'text-emerald-300'"
+            :class="installFailed ? 'text-fc-err' : 'text-fc-ok'"
           >
             {{ installResult }}
           </p>
           <button
             v-if="installState === 'pending' || installState === 'running'"
-            class="mt-2 rounded border border-rose-500/40 px-2 py-0.5 text-rose-300 hover:bg-rose-500/10"
+            class="mt-2 rounded border border-fc-err/40 px-2 py-0.5 text-fc-err hover:bg-fc-err/10"
             @click="cancelInstall"
           >
             Cancel operation
