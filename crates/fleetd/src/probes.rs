@@ -278,11 +278,11 @@ impl HardwareProbe {
         // The bare-metal answer is exit 1 with "none" on stdout, so judge
         // the text, not the status (matching the agentless probe).
         match std::process::Command::new("systemd-detect-virt").output() {
-            Ok(output) if !String::from_utf8_lossy(&output.stdout).trim().is_empty() => {
-                let kind = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                fact("host", "virtualization", Some(kind))
-            }
-            _ => unavailable("host", "virtualization"),
+            Ok(output) => match virtualization_kind(&String::from_utf8_lossy(&output.stdout)) {
+                Some(kind) => fact("host", "virtualization", Some(kind)),
+                None => unavailable("host", "virtualization"),
+            },
+            Err(_) => unavailable("host", "virtualization"),
         }
     }
 
@@ -345,6 +345,18 @@ fn root_disk_total_bytes(df_output: &str) -> Option<u64> {
         .and_then(|field| field.parse::<u64>().ok())
         .filter(|kb| *kb > 0)
         .map(|kb| kb * 1024)
+}
+
+/// The virtualization kind from `systemd-detect-virt` stdout: non-empty
+/// text is the answer ("none" for bare metal included); empty or missing
+/// output is no fact.
+fn virtualization_kind(stdout: &str) -> Option<String> {
+    let kind = stdout.trim();
+    if kind.is_empty() {
+        None
+    } else {
+        Some(kind.to_owned())
+    }
 }
 
 fn unavailable(namespace: &str, name: &str) -> CapabilityFact {
@@ -665,6 +677,20 @@ mod tests {
                 "the cpu model is the bare string, got {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_bare_metal_none_output_is_a_known_fact() {
+        // systemd-detect-virt exits 1 on bare metal but still prints
+        // "none"; the text, not the exit status, is the answer.
+        assert_eq!(
+            virtualization_kind("none\n"),
+            Some("none".to_owned()),
+            "exit-1 bare metal is known, not unavailable"
+        );
+        assert_eq!(virtualization_kind("kvm\n"), Some("kvm".to_owned()));
+        assert_eq!(virtualization_kind(""), None);
+        assert_eq!(virtualization_kind("   \n"), None);
     }
 
     #[test]
