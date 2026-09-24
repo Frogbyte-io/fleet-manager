@@ -8,7 +8,7 @@ export function legacyHashUrl(search: string, hash: string): string | null {
   const path = queryIndex === -1 ? route : route.slice(0, queryIndex)
   const routeQuery = queryIndex === -1 ? '' : route.slice(queryIndex + 1)
   const outerQuery = search.startsWith('?') ? search.slice(1) : search
-  const query = [routeQuery, outerQuery].filter(Boolean).join('&')
+  const query = [outerQuery, routeQuery].filter(Boolean).join('&')
   return `${path}${query ? `?${query}` : ''}`
 }
 

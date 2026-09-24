@@ -40,7 +40,12 @@ describe('legacy hash URLs', () => {
   })
 
   it('combines the legacy outer and route queries', () => {
-    expect(legacyHashUrl('?campaign=x', '#/fleet?tab=y')).toBe('/fleet?tab=y&campaign=x')
+    expect(legacyHashUrl('?campaign=x', '#/fleet?tab=y')).toBe('/fleet?campaign=x&tab=y')
+  })
+
+  it('preserves outer-query precedence for repeated keys', () => {
+    expect(legacyHashUrl('?theme=dark', '#/fleet?theme=light'))
+      .toBe('/fleet?theme=dark&theme=light')
   })
 
   it('leaves ordinary URLs unchanged', () => {
