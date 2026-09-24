@@ -90,17 +90,35 @@ else
   fleet_emit hardware memory_bytes "" unavailable
 fi
 if command -v df >/dev/null 2>&1; then
-  fleet_emit hardware disk_free_bytes "$(printf '%s' "$(df -kP / 2>/dev/null | tail -n 1 | awk '{print $4 * 1024}')" | base64 -w0)" known
-  fleet_emit hardware disk_total_bytes "$(printf '%s' "$(df -kP / 2>/dev/null | tail -n 1 | awk '{print $2 * 1024}')" | base64 -w0)" known
+  # Both sizes come from the same df line; a numeric field is required
+  # before "known", otherwise the fact is unavailable (no invented zero).
+  fleet_df_line=$(df -kP / 2>/dev/null | tail -n 1)
+  fleet_disk_free=$(printf '%s' "$fleet_df_line" | awk '{print $4 * 1024}')
+  fleet_disk_total=$(printf '%s' "$fleet_df_line" | awk '{print $2 * 1024}')
+  case "$fleet_disk_free" in ''|*[!0-9]*) fleet_disk_free= ;; esac
+  case "$fleet_disk_total" in ''|*[!0-9]*) fleet_disk_total= ;; esac
+  if [ -n "$fleet_disk_free" ]; then
+    fleet_emit hardware disk_free_bytes "$(printf '%s' "$fleet_disk_free" | base64 -w0)" known
+  else
+    fleet_emit hardware disk_free_bytes "" unavailable
+  fi
+  if [ -n "$fleet_disk_total" ]; then
+    fleet_emit hardware disk_total_bytes "$(printf '%s' "$fleet_disk_total" | base64 -w0)" known
+  else
+    fleet_emit hardware disk_total_bytes "" unavailable
+  fi
 else
   fleet_emit hardware disk_free_bytes "" unavailable
   fleet_emit hardware disk_total_bytes "" unavailable
 fi
 # Virtualization: systemd-detect-virt names the container or hypervisor;
-# "none" means bare metal. Absent (non-systemd hosts) is unavailable, not
+# "none" (exit 1) means bare metal. A missing binary is unavailable, not
 # a guess of "none".
 if command -v systemd-detect-virt >/dev/null 2>&1; then
-  if fleet_virt=$(systemd-detect-virt 2>/dev/null) && [ -n "$fleet_virt" ]; then
+  # The bare-metal answer is exit 1 with "none" on stdout, so capture the
+  # output first and judge the text, not the status.
+  fleet_virt=$(systemd-detect-virt 2>/dev/null || true)
+  if [ -n "$fleet_virt" ]; then
     fleet_emit host virtualization "$(printf '%s' "$fleet_virt" | base64 -w0)" known
   else
     fleet_emit host virtualization "" unavailable
@@ -110,11 +128,17 @@ else
 fi
 
 # Hardware model: the device-tree model on SBCs (Raspberry Pi et al.),
-# the DMI product name on x86 boxes; DMI serials are never read.
+# the DMI product name on x86 boxes; DMI serials are never read. An empty
+# read falls through to the next source rather than emitting a blank fact.
+fleet_model=""
 if [ -r /proc/device-tree/model ]; then
-  fleet_emit hardware model "$(printf '%s' "$(tr -d '\0' </proc/device-tree/model 2>/dev/null)" | base64 -w0)" known
-elif [ -r /sys/class/dmi/id/product_name ]; then
-  fleet_emit hardware model "$(printf '%s' "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" | base64 -w0)" known
+  fleet_model=$(tr -d '\0' </proc/device-tree/model 2>/dev/null)
+fi
+if [ -z "$fleet_model" ] && [ -r /sys/class/dmi/id/product_name ]; then
+  fleet_model=$(cat /sys/class/dmi/id/product_name 2>/dev/null)
+fi
+if [ -n "$fleet_model" ]; then
+  fleet_emit hardware model "$(printf '%s' "$fleet_model" | base64 -w0)" known
 else
   fleet_emit hardware model "" unavailable
 fi

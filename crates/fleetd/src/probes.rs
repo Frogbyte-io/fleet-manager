@@ -175,7 +175,8 @@ fn run_isolated<T: Send + 'static>(
 }
 
 /// The standard node probe set: the platform, the hostname, this daemon,
-/// and the tools on PATH.
+/// the hardware facts (virtualization, model, CPU model, disk total), and
+/// the tools on PATH.
 #[must_use]
 pub fn standard_probes() -> Vec<Arc<dyn Probe>> {
     vec![
@@ -328,7 +329,8 @@ impl HardwareProbe {
                     .lines()
                     .last()
                     .and_then(|line| line.split_whitespace().nth(1))
-                    .and_then(|field| field.parse::<u64>().ok());
+                    .and_then(|field| field.parse::<u64>().ok())
+                    .filter(|kb| *kb > 0);
                 match total_kb {
                     Some(kb) => fact(
                         "hardware",

@@ -119,6 +119,23 @@ fn hardware_facts_carry_honest_states() {
         .find(|fact| fact.namespace == "hardware" && fact.name == "disk_total_bytes")
         .unwrap();
     assert_eq!(disk.value.as_deref(), Some("512110190592"));
+    // The four unavailable shapes stay honest: unavailable with no value,
+    // visibly distinct from the known half of the stream.
+    let unavailable = facts
+        .iter()
+        .filter(|fact| fact.status == fleet_core::CapabilityStatus::Unavailable)
+        .count();
+    assert_eq!(unavailable, 4, "the unavailable half of the stream");
+    for fact in facts.iter().filter(|fact| {
+        matches!(
+            (fact.namespace.as_str(), fact.name.as_str()),
+            ("host", "virtualization") | ("hardware", "model" | "cpu_model" | "disk_total_bytes")
+        )
+    }) {
+        if fact.status == fleet_core::CapabilityStatus::Unavailable {
+            assert_eq!(fact.value, None, "{fact:?} carries no invented value");
+        }
+    }
 }
 
 #[test]

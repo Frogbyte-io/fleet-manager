@@ -42,7 +42,10 @@ ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 ProtectProc=invisible
-ProcSubset=pid
+# The hardware probe reads /proc/cpuinfo, /proc/meminfo, and the
+# device-tree model — read-only, non-pid /proc must stay visible. The
+# daemon never reads other processes' data.
+# ProcSubset is deliberately not set: it would hide those files.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
