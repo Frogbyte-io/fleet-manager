@@ -13,7 +13,7 @@
 }
 [data-theme="light"] {
   --fc-bg: #f2f4f7; --fc-nav: #ffffff; --fc-panel: #ffffff; --fc-inset: #eef0f4;
-  --fc-line: #dde1e8; --fc-line2: #c9cfd9; --fc-ink: #161a21; --fc-muted: #5c6672; --fc-faint: #8b95a3;
+  --fc-line: #dde1e8; --fc-line2: #c9cfd9; --fc-ink: #161a21; --fc-muted: #5c6672;
   --fc-ok: #178a55; --fc-info: #1f6fd1; --fc-warn: #b7791f; --fc-err: #d93636;
   --fc-faint: #6b7584; --fc-g1: #e06d00; --fc-g2: #e01e5a;
 }

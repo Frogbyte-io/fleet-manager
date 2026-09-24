@@ -24,7 +24,7 @@ function skipToMain(event: MouseEvent) {
       <main
         id="main"
         tabindex="-1"
-        class="mx-auto w-full max-w-[1320px] p-6 focus:outline-none"
+        class="mx-auto w-full max-w-[1320px] p-6 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <RouterView />
       </main>
