@@ -39,6 +39,10 @@ describe('legacy hash URLs', () => {
     expect(legacyHashUrl('?theme=dark', '#/fleet/add')).toBe('/fleet/add?theme=dark')
   })
 
+  it('combines the legacy outer and route queries', () => {
+    expect(legacyHashUrl('?campaign=x', '#/fleet?tab=y')).toBe('/fleet?tab=y&campaign=x')
+  })
+
   it('leaves ordinary URLs unchanged', () => {
     expect(legacyHashUrl('?theme=dark', '')).toBeNull()
     expect(legacyHashUrl('', '#section')).toBeNull()

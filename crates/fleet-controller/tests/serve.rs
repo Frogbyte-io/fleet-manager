@@ -73,10 +73,20 @@ async fn spawn(
 
 /// Performs one HTTP/1.0 GET and returns the status code and full body.
 async fn get(address: std::net::SocketAddr, path: &str) -> (u16, String) {
-    request(address, "GET", path).await
+    let (status, _, body) = request_details(address, "GET", path).await;
+    (status, body)
 }
 
 async fn request(address: std::net::SocketAddr, method: &str, path: &str) -> (u16, String) {
+    let (status, _, body) = request_details(address, method, path).await;
+    (status, body)
+}
+
+async fn request_details(
+    address: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+) -> (u16, String, String) {
     let mut stream = TcpStream::connect(address)
         .await
         .expect("the server must accept");
@@ -98,7 +108,7 @@ async fn request(address: std::net::SocketAddr, method: &str, path: &str) -> (u1
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or(0);
-    (status, body.to_owned())
+    (status, head.to_owned(), body.to_owned())
 }
 
 #[tokio::test]
@@ -132,6 +142,18 @@ async fn deep_links_serve_the_web_shell() {
     let (status, body) = get(address, "/fleet/add").await;
     assert_eq!(status, 200);
     assert_eq!(body, "<html>fleet shell</html>\n");
+}
+
+#[tokio::test]
+async fn deep_links_keep_the_controller_security_headers() {
+    let dist = shell_dist();
+    let (address, _shutdown) = spawn(settings(dist.path()), None).await;
+    let (status, headers, _) = request_details(address, "GET", "/fleet/add").await;
+    assert_eq!(status, 200);
+    assert!(headers.contains("content-security-policy: default-src 'self'"));
+    assert!(headers.contains("x-content-type-options: nosniff"));
+    assert!(headers.contains("x-frame-options: DENY"));
+    assert!(headers.contains("referrer-policy: no-referrer"));
 }
 
 #[tokio::test]

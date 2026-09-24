@@ -3,7 +3,13 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 /** Returns the clean URL represented by a legacy `/#/...` URL. */
 export function legacyHashUrl(search: string, hash: string): string | null {
   if (!hash.startsWith('#/')) return null
-  return `${hash.slice(1)}${search}`
+  const route = hash.slice(1)
+  const queryIndex = route.indexOf('?')
+  const path = queryIndex === -1 ? route : route.slice(0, queryIndex)
+  const routeQuery = queryIndex === -1 ? '' : route.slice(queryIndex + 1)
+  const outerQuery = search.startsWith('?') ? search.slice(1) : search
+  const query = [routeQuery, outerQuery].filter(Boolean).join('&')
+  return `${path}${query ? `?${query}` : ''}`
 }
 
 const legacyUrl = typeof window === 'undefined'

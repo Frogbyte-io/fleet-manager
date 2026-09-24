@@ -38,7 +38,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
@@ -354,16 +354,26 @@ async fn spa_fallback(State(index_file): State<PathBuf>, request: Request, next:
     let Ok(contents) = tokio::fs::read(index_file).await else {
         return response;
     };
+    let content_length = contents.len().to_string();
+    let Ok(content_length) = HeaderValue::from_str(&content_length) else {
+        return response;
+    };
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
         Body::from(contents)
     };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(body)
-        .unwrap_or(response)
+    let mut response = response;
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, content_length);
+    *response.body_mut() = body;
+    response
 }
 
 fn is_reserved_path(path: &str) -> bool {
