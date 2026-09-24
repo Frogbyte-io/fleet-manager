@@ -52,4 +52,9 @@ describe('legacy hash URLs', () => {
     expect(legacyHashUrl('?theme=dark', '')).toBeNull()
     expect(legacyHashUrl('', '#section')).toBeNull()
   })
+
+  it('ignores hash routes that could be interpreted as network paths', () => {
+    expect(legacyHashUrl('', '#//evil.example')).toBeNull()
+    expect(legacyHashUrl('', '#/\\\\evil.example')).toBeNull()
+  })
 })

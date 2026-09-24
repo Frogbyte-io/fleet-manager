@@ -36,9 +36,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
@@ -265,10 +265,11 @@ fn shell(settings: &Settings) -> ServeDir {
 
 /// Builds the controller's HTTP router.
 ///
-/// The health probes and explicit API routes take precedence over static
-/// files. Existing web files are served directly; unmatched API, download,
-/// and asset paths keep their own 404 responses, while eligible browser
-/// navigation requests receive the SPA entry point.
+/// The health probes and routes mounted outside the static service, including
+/// downloads and machine-facing routes, take precedence over static files.
+/// The public API is the static service's fallback, so existing web files are
+/// served first. Unmatched API, download, and asset paths keep their own 404
+/// responses, while eligible HTML navigation requests receive the SPA shell.
 ///
 /// `db` is the store's connection pool once the database is open; readiness
 /// probes it live and the operation use cases run over it. Passing `None` is
@@ -308,7 +309,9 @@ pub fn build_router(
         lab.cloned(),
     ));
     let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
-    let web_index = settings.web_dist.join("index.html");
+    let web_index = std::fs::read(settings.web_dist.join("index.html"))
+        .ok()
+        .map(Bytes::from);
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -339,19 +342,25 @@ pub fn build_router(
 
 /// Rewrites eligible static/API 404s to the console entry point. The API and
 /// reserved static namespaces retain their own 404 responses.
-async fn spa_fallback(State(index_file): State<PathBuf>, request: Request, next: Next) -> Response {
+async fn spa_fallback(
+    State(index_file): State<Option<Bytes>>,
+    request: Request,
+    next: Next,
+) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    let accepts_html = accepts_html(request.headers());
     let response = next.run(request).await;
 
     if response.status() != StatusCode::NOT_FOUND
         || !(method == Method::GET || method == Method::HEAD)
+        || !accepts_html
         || is_reserved_path(&path)
     {
         return response;
     }
 
-    let Ok(contents) = tokio::fs::read(index_file).await else {
+    let Some(contents) = index_file else {
         return response;
     };
     let content_length = contents.len().to_string();
@@ -376,10 +385,35 @@ async fn spa_fallback(State(index_file): State<PathBuf>, request: Request, next:
     response
 }
 
-fn is_reserved_path(path: &str) -> bool {
-    ["/api", "/downloads/", "/assets/"]
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
         .iter()
-        .any(|prefix| path == prefix.trim_end_matches('/') || path.starts_with(prefix))
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|media_range| {
+            let mut parts = media_range.split(';').map(str::trim);
+            if !parts
+                .next()
+                .is_some_and(|media_type| media_type.eq_ignore_ascii_case("text/html"))
+            {
+                return false;
+            }
+            let quality = parts.find_map(|parameter| {
+                let (name, value) = parameter.split_once('=')?;
+                name.trim()
+                    .eq_ignore_ascii_case("q")
+                    .then_some(value.trim())
+            });
+            quality.is_none_or(|quality| quality.parse::<f32>().is_ok_and(|quality| quality > 0.0))
+        })
+}
+
+fn is_reserved_path(path: &str) -> bool {
+    path == "/api"
+        || ["/api/", "/downloads/", "/assets/"]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
 }
 
 async fn healthz() -> &'static str {
