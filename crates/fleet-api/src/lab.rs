@@ -1019,11 +1019,6 @@ pub async fn sweep_lab_leases(
             .events
             .publish(fleet_application::events::EventKind::LeaseChanged);
     }
-    if !released.is_empty() {
-        state
-            .events
-            .publish(fleet_application::events::EventKind::LeaseChanged);
-    }
     let items: Vec<LeaseDto> = released.into_iter().map(Into::into).collect();
     Ok(Json(Page {
         page: PageInfo {

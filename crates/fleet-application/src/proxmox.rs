@@ -1179,7 +1179,11 @@ impl ProxmoxAccounts {
                 MachineUseCaseError::Backend { context, detail } => {
                     ProxmoxUseCaseError::Backend { context, detail }
                 }
-            })
+            })?;
+        if let Some(events) = &self.events {
+            events.publish(crate::events::EventKind::MachineChanged);
+        }
+        Ok(())
     }
 
     /// The account with the explicit-trust gate applied: without a

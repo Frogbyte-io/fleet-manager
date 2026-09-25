@@ -2311,6 +2311,15 @@ fn stream_events(invocation: &Invocation) -> Result<(), CliError> {
         let response =
             match event_stream_request(&client, &invocation.url, last_event_id.as_deref()) {
                 Ok(response) if response.status().is_success() => response,
+                Ok(response) if retryable_event_stream_status(response.status()) => {
+                    eprintln!(
+                        "fleetctl: event stream returned {}; reconnecting",
+                        response.status()
+                    );
+                    std::thread::sleep(retry);
+                    retry = (retry * 2).min(std::time::Duration::from_secs(10));
+                    continue;
+                }
                 Ok(response) => return Err(event_stream_http_error(response)),
                 Err(error) => {
                     eprintln!("fleetctl: event stream disconnected: {error}; reconnecting");
@@ -2371,6 +2380,10 @@ fn event_stream_http_error(response: reqwest::blocking::Response) -> CliError {
             body["message"].as_str().unwrap_or("no detail")
         ),
     }
+}
+
+fn retryable_event_stream_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
 fn read_sse_events(
@@ -2445,7 +2458,8 @@ fn render_stream_event(
 #[cfg(test)]
 mod event_output_tests {
     use super::{
-        Output, event_stream_http_error, event_stream_request, read_sse_events, render_stream_event,
+        Output, event_stream_http_error, event_stream_request, read_sse_events,
+        render_stream_event, retryable_event_stream_status,
     };
     use std::io::{BufRead as _, Write as _};
     use std::net::TcpListener;
@@ -2484,6 +2498,22 @@ mod event_output_tests {
             render_stream_event(Output::Json, "machine.changed", Some("epoch:17")).unwrap(),
             r#"{"id":"epoch:17","type":"machine.changed"}"#
         );
+    }
+
+    #[test]
+    fn transient_event_stream_http_statuses_retry_and_auth_errors_stop() {
+        assert!(retryable_event_stream_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(retryable_event_stream_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(!retryable_event_stream_status(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+        assert!(!retryable_event_stream_status(
+            reqwest::StatusCode::NOT_FOUND
+        ));
     }
 
     #[test]

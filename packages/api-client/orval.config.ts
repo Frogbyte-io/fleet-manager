@@ -9,11 +9,36 @@ export default defineConfig({
   fleet: {
     input: {
       target: './openapi.json',
-      // The raw SSE endpoint is documented in OpenAPI but must be consumed
-      // with EventSource; Orval's fetch wrapper assumes JSON responses.
+      // SSE endpoints stay in OpenAPI, but Orval's fetch wrapper assumes JSON.
       override: {
         transformer: (spec) => {
-          delete spec.paths?.['/api/v1/events'];
+          const paths = spec.paths ?? {};
+          if (!paths['/api/v1/events']) {
+            throw new Error('the documented fleet event stream path is missing');
+          }
+          const ssePaths = Object.entries(paths).filter(([, pathItem]) =>
+            Object.values(pathItem ?? {}).some((operation) => {
+              if (!operation || typeof operation !== 'object' || !('responses' in operation)) {
+                return false;
+              }
+              return Object.values(operation.responses ?? {}).some((response) => {
+                if (!response || typeof response !== 'object' || !('content' in response)) {
+                  return false;
+                }
+                const content = response.content;
+                return (
+                  !!content &&
+                  typeof content === 'object' &&
+                  Object.prototype.hasOwnProperty.call(content, 'text/event-stream')
+                );
+              });
+            }),
+          );
+          if (ssePaths.length === 0) {
+            throw new Error('no text/event-stream operations were found in OpenAPI');
+          }
+          for (const [path] of ssePaths) delete paths[path];
+          spec.paths = paths;
           return spec;
         },
       },

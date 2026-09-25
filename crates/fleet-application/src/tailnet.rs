@@ -475,13 +475,37 @@ impl TailnetIntegration {
                 detail: "the client secret must be 1..=256 characters".to_owned(),
             });
         }
-        self.credentials
-            .store(client_id, client_secret)
-            .await
-            .map_err(|detail| TailnetUseCaseError::Backend {
+        let previous =
+            self.credentials
+                .load()
+                .await
+                .map_err(|detail| TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail,
+                })?;
+        if let Err(detail) = self.credentials.store(client_id, client_secret).await {
+            let rollback = match previous.as_ref() {
+                Some(previous) => {
+                    self.credentials
+                        .store(&previous.client_id, previous.client_secret.expose())
+                        .await
+                }
+                None => self.credentials.clear().await,
+            };
+            if rollback.is_err() {
+                // The port may have committed one of the credential writes
+                // before failing; notify clients if restoration also fails.
+                self.publish_changed();
+                return Err(TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail: "credential replacement and rollback both failed".to_owned(),
+                });
+            }
+            return Err(TailnetUseCaseError::Backend {
                 context: "credentials",
                 detail,
-            })?;
+            });
+        }
         self.publish_changed();
         self.audit_event(principal, "tailscale_configured", Some(client_id))
             .await?;
@@ -522,13 +546,35 @@ impl TailnetIntegration {
             },
         )
         .map_err(TailnetUseCaseError::Denied)?;
-        self.credentials
-            .clear()
-            .await
-            .map_err(|detail| TailnetUseCaseError::Backend {
+        let previous =
+            self.credentials
+                .load()
+                .await
+                .map_err(|detail| TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail,
+                })?;
+        if let Err(detail) = self.credentials.clear().await {
+            let rollback = match previous.as_ref() {
+                Some(previous) => {
+                    self.credentials
+                        .store(&previous.client_id, previous.client_secret.expose())
+                        .await
+                }
+                None => Err("credential state was not readable before clear".to_owned()),
+            };
+            if rollback.is_err() {
+                self.publish_changed();
+                return Err(TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail: "credential clearing and rollback both failed".to_owned(),
+                });
+            }
+            return Err(TailnetUseCaseError::Backend {
                 context: "credentials",
                 detail,
-            })?;
+            });
+        }
         self.publish_changed();
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;
@@ -694,6 +740,26 @@ impl TailnetIntegration {
         port: Option<u16>,
         idempotency_key: Option<&str>,
     ) -> Result<DraftView, TailnetUseCaseError> {
+        self.import_with_outcome(authorizer, principal, node_id, user, port, idempotency_key)
+            .await
+            .map(|(draft, _created)| draft)
+    }
+
+    /// Imports a device and reports whether a draft was actually inserted.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unconfigured integration, an unknown device, a
+    /// device without an IPv4 address, or any onboarding failure.
+    pub async fn import_with_outcome(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        node_id: &str,
+        user: &str,
+        port: Option<u16>,
+        idempotency_key: Option<&str>,
+    ) -> Result<(DraftView, bool), TailnetUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -724,7 +790,7 @@ impl TailnetIntegration {
                 .await
                 .map_err(TailnetUseCaseError::from)?;
             if let Some(draft) = replay {
-                return Ok(draft);
+                return Ok((draft, false));
             }
         }
         let credentials = self.require_credentials().await?;
@@ -747,7 +813,7 @@ impl TailnetIntegration {
             });
         };
         self.onboarding
-            .create_draft(
+            .create_draft_with_outcome(
                 authorizer,
                 principal,
                 NewDraft {

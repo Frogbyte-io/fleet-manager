@@ -519,6 +519,21 @@ fn service_with_guests(
     )
 }
 
+#[tokio::test]
+async fn committed_account_mutations_publish_through_the_attached_event_hub() {
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    let proxmox = proxmox.with_events(hub);
+
+    create_account(&proxmox).await;
+
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::ProxmoxChanged
+    );
+}
+
 async fn create_account(proxmox: &ProxmoxAccounts) -> fleet_application::proxmox::ProxmoxAccount {
     proxmox
         .create(
