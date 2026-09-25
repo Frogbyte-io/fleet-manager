@@ -31,6 +31,17 @@ fn parsing_accepts_the_documented_grammar() {
 }
 
 #[test]
+fn events_command_accepts_the_documented_json_output_flag() {
+    let args: Vec<String> = ["--url", "http://box.lan:9000", "events", "--output", "json"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(invocation.output, fleetctl::Output::Json);
+    assert_eq!(invocation.command, fleetctl::Command::Events);
+}
+
+#[test]
 fn audit_list_accepts_filters_and_json_output_after_the_command() {
     let args: Vec<String> = [
         "audit",

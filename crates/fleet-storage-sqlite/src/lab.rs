@@ -571,7 +571,11 @@ impl LeasePort for LeaseRepository {
         Ok(updated.rows_affected() == 1)
     }
 
-    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String> {
+    async fn attach_provision(
+        &self,
+        id: &str,
+        provision_id: &str,
+    ) -> Result<fleet_application::lab::AttachProvisionOutcome, String> {
         let updated = sqlx::query(
             "UPDATE lab_leases SET state = 'provisioning', provision_id = ?2 \
              WHERE id = ?1 AND state = 'requested' AND provision_id IS NULL",
@@ -582,17 +586,23 @@ impl LeasePort for LeaseRepository {
         .await
         .map_err(|error| format!("attach provision failed: {error}"))?;
         if updated.rows_affected() == 1 {
-            return Ok(true);
+            return Ok(fleet_application::lab::AttachProvisionOutcome::Attached);
         }
         let current = sqlx::query("SELECT state, provision_id FROM lab_leases WHERE id = ?1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| format!("read linked provision failed: {error}"))?;
-        Ok(current.is_some_and(|row| {
-            row.get::<String, _>("state") == "provisioning"
-                && row.get::<Option<String>, _>("provision_id").as_deref() == Some(provision_id)
-        }))
+        Ok(
+            if current.is_some_and(|row| {
+                row.get::<String, _>("state") == "provisioning"
+                    && row.get::<Option<String>, _>("provision_id").as_deref() == Some(provision_id)
+            }) {
+                fleet_application::lab::AttachProvisionOutcome::AlreadyAttached
+            } else {
+                fleet_application::lab::AttachProvisionOutcome::Conflict
+            },
+        )
     }
 
     async fn claim_for_release(

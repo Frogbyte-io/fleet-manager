@@ -488,8 +488,8 @@ pub async fn import_tailnet_device(
 > {
     let tailnet = tailnet_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let draft = tailnet
-        .import(
+    let (draft, created) = tailnet
+        .import_with_outcome(
             state.authorizer.as_ref(),
             &principal,
             &node_id,
@@ -501,6 +501,11 @@ pub async fn import_tailnet_device(
         )
         .await
         .map_err(|error| map_tailnet_error(&error, correlation_id))?;
+    if created {
+        state
+            .events
+            .publish(fleet_application::events::EventKind::OnboardingChanged);
+    }
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(

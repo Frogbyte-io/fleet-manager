@@ -9,6 +9,39 @@ export default defineConfig({
   fleet: {
     input: {
       target: './openapi.json',
+      // SSE endpoints stay in OpenAPI, but Orval's fetch wrapper assumes JSON.
+      override: {
+        transformer: (spec) => {
+          const paths = spec.paths ?? {};
+          if (!paths['/api/v1/events']) {
+            throw new Error('the documented fleet event stream path is missing');
+          }
+          const ssePaths = Object.entries(paths).filter(([, pathItem]) =>
+            Object.values(pathItem ?? {}).some((operation) => {
+              if (!operation || typeof operation !== 'object' || !('responses' in operation)) {
+                return false;
+              }
+              return Object.values(operation.responses ?? {}).some((response) => {
+                if (!response || typeof response !== 'object' || !('content' in response)) {
+                  return false;
+                }
+                const content = response.content;
+                return (
+                  !!content &&
+                  typeof content === 'object' &&
+                  Object.prototype.hasOwnProperty.call(content, 'text/event-stream')
+                );
+              });
+            }),
+          );
+          if (!ssePaths.some(([path]) => path === '/api/v1/events')) {
+            throw new Error('the fleet event stream is missing its text/event-stream response');
+          }
+          for (const [path] of ssePaths) delete paths[path];
+          spec.paths = paths;
+          return spec;
+        },
+      },
     },
     output: {
       target,

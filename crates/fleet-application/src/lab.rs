@@ -292,13 +292,17 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         new_expires_at: i64,
     ) -> Result<bool, String>;
     /// Attaches a provision record to a requested lease, moving it into
-    /// provisioning. A replay of the same link succeeds; a different link
-    /// or intervening state change returns false.
+    /// provisioning. Returns whether this call made the transition, accepts
+    /// an already attached matching link, or rejects a conflict.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors.
-    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String>;
+    async fn attach_provision(
+        &self,
+        id: &str,
+        provision_id: &str,
+    ) -> Result<AttachProvisionOutcome, String>;
     /// Claims one lease for release, conditional on its observed state:
     /// the compare-and-set that keeps concurrent sweeps from
     /// double-claiming or winning over an extension after an expiry scan.
@@ -314,6 +318,17 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         observed_expires_at: i64,
         now: i64,
     ) -> Result<bool, String>;
+}
+
+/// Result of linking a provision record to a lease.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachProvisionOutcome {
+    /// The lease transitioned from requested to provisioning.
+    Attached,
+    /// The same provision was already attached.
+    AlreadyAttached,
+    /// The lease changed to an incompatible state or link.
+    Conflict,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -692,6 +707,25 @@ impl Lab {
         principal: &ActingPrincipal,
         now: i64,
     ) -> Result<Vec<Lease>, LabUseCaseError> {
+        self.sweep_expired_with_progress(authorizer, principal, now, || {})
+            .await
+    }
+
+    /// Sweeps expired leases and calls `on_claim` immediately after each
+    /// durable transition. The callback lets adapters publish invalidations
+    /// even if a later lease in the same sweep fails.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure; prior successful claims remain
+    /// reported through `on_claim`.
+    pub async fn sweep_expired_with_progress(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        now: i64,
+        mut on_claim: impl FnMut(),
+    ) -> Result<Vec<Lease>, LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -737,6 +771,7 @@ impl Lab {
                 })?;
             if claimed_ok {
                 released.push(claimed);
+                on_claim();
             }
         }
         Ok(released)
@@ -1047,6 +1082,28 @@ impl Lab {
         idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<ProvisionRecord, LabUseCaseError> {
+        self.start_provision_with_outcome(
+            authorizer,
+            principal,
+            version_id,
+            lease_id,
+            idempotency_key,
+            now,
+        )
+        .await
+        .map(|(record, _)| record)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn start_provision_with_outcome(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        version_id: &str,
+        lease_id: Option<&str>,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<(ProvisionRecord, bool), LabUseCaseError> {
         let authorization_resource = lease_id.unwrap_or(version_id);
         authorize(
             authorizer,
@@ -1138,9 +1195,10 @@ impl Lab {
                     detail: "this lease's provision attempt is terminal; release it and request a replacement lease".to_owned(),
                 });
             }
-            self.attach_lease_provision(lease.as_ref(), &existing)
+            let changed = self
+                .attach_lease_provision(lease.as_ref(), &existing)
                 .await?;
-            return Ok(existing);
+            return Ok((existing, changed));
         }
         let provision = self
             .provisions
@@ -1157,9 +1215,10 @@ impl Lab {
                 context: "provisions",
                 detail,
             })?;
-        self.attach_lease_provision(lease.as_ref(), &provision)
+        let changed = self
+            .attach_lease_provision(lease.as_ref(), &provision)
             .await?;
-        Ok(provision)
+        Ok((provision, changed))
     }
 
     /// Starts the provision saga attached to an existing lease.
@@ -1175,7 +1234,7 @@ impl Lab {
         lease_id: &str,
         idempotency_key: Option<&str>,
         now: i64,
-    ) -> Result<ProvisionRecord, LabUseCaseError> {
+    ) -> Result<(ProvisionRecord, bool), LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -1197,7 +1256,7 @@ impl Lab {
                 }
             }
         })?;
-        self.start_provision(
+        self.start_provision_with_outcome(
             authorizer,
             principal,
             &lease.template_version_id,
@@ -1212,9 +1271,9 @@ impl Lab {
         &self,
         lease: Option<&Lease>,
         provision: &ProvisionRecord,
-    ) -> Result<(), LabUseCaseError> {
+    ) -> Result<bool, LabUseCaseError> {
         let Some(lease) = lease else {
-            return Ok(());
+            return Ok(false);
         };
         if provision.lease_id.as_deref() != Some(lease.id.as_str()) {
             return Err(LabUseCaseError::Conflict {
@@ -1229,12 +1288,13 @@ impl Lab {
                 context: "leases",
                 detail,
             })?;
-        if !attached {
-            return Err(LabUseCaseError::Conflict {
+        match attached {
+            AttachProvisionOutcome::Attached => Ok(true),
+            AttachProvisionOutcome::AlreadyAttached => Ok(false),
+            AttachProvisionOutcome::Conflict => Err(LabUseCaseError::Conflict {
                 detail: format!("lease {} changed before provisioning started", lease.id),
-            });
+            }),
         }
-        Ok(())
     }
 
     /// Lists the provisioning records.

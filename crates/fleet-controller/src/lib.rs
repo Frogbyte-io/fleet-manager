@@ -72,6 +72,21 @@ pub struct NodeServices {
     pub nodes: Arc<fleet_application::node::Nodes>,
     /// The node gateway: the WebSocket session registry and its route.
     pub gateway: Arc<gateway::GatewayService>,
+    /// The event hub shared by gateway transitions and the API stream.
+    pub events: Arc<fleet_application::events::EventHub>,
+}
+
+fn event_hub_for_services(
+    services: Option<&NodeServices>,
+) -> Arc<fleet_application::events::EventHub> {
+    services.map_or_else(
+        || {
+            Arc::new(fleet_application::events::EventHub::new(
+                fleet_application::events::DEFAULT_EVENT_CAPACITY,
+            ))
+        },
+        |services| services.events.clone(),
+    )
 }
 
 impl std::fmt::Debug for NodeServices {
@@ -79,6 +94,7 @@ impl std::fmt::Debug for NodeServices {
         f.debug_struct("NodeServices")
             .field("nodes", &self.nodes)
             .field("gateway", &self.gateway)
+            .field("events", &self.events)
             .finish()
     }
 }
@@ -91,17 +107,40 @@ pub fn compose_node_services(
     db: &SqlitePool,
     crypto: Arc<dyn fleet_application::node::NodeCrypto>,
 ) -> NodeServices {
+    compose_node_services_with_events(
+        db,
+        crypto,
+        Arc::new(fleet_application::events::EventHub::new(
+            fleet_application::events::DEFAULT_EVENT_CAPACITY,
+        )),
+    )
+}
+
+/// Composes node trust services with the process-wide event hub.
+#[must_use]
+pub fn compose_node_services_with_events(
+    db: &SqlitePool,
+    crypto: Arc<dyn fleet_application::node::NodeCrypto>,
+    events: Arc<fleet_application::events::EventHub>,
+) -> NodeServices {
     let nodes = Arc::new(fleet_application::node::Nodes::new(
         Arc::new(fleet_storage_sqlite::NodeRepository::new(db.clone())),
         crypto,
         Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
     ));
-    let gateway = Arc::new(gateway::GatewayService::new(
-        nodes.clone(),
-        Arc::new(fleet_storage_sqlite::NodeRepository::new(db.clone())),
-        Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
-    ));
-    NodeServices { nodes, gateway }
+    let gateway = Arc::new(
+        gateway::GatewayService::new(
+            nodes.clone(),
+            Arc::new(fleet_storage_sqlite::NodeRepository::new(db.clone())),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+        )
+        .with_events(events.clone()),
+    );
+    NodeServices {
+        nodes,
+        gateway,
+        events,
+    }
 }
 
 /// Composes the Add Machine onboarding service over a store: the draft
@@ -145,13 +184,15 @@ fn api_state(
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<Arc<fleet_application::images::Images>>,
     lab: Option<Arc<fleet_application::lab::Lab>>,
+    events: Arc<fleet_application::events::EventHub>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
     if let Some(pool) = db {
-        let operations = fleet_application::operation::Operations::new(
+        let operations = fleet_application::operation::Operations::new_with_events(
             std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            events.clone(),
         );
         let machines = fleet_application::machine::Machines::new(
             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
@@ -166,6 +207,7 @@ fn api_state(
             authorizer,
             system: std::sync::Arc::new(system),
             audit: Some(std::sync::Arc::new(audit)),
+            events: std::sync::Arc::new(fleet_application::events::Events::new(events)),
             nodes,
             machines: Some(std::sync::Arc::new(machines)),
             onboarding,
@@ -185,6 +227,7 @@ fn api_state(
         authorizer: std::sync::Arc::new(DenyAllForTests),
         system: state.system,
         audit: None,
+        events: state.events,
         nodes: None,
         machines: None,
         onboarding: None,
@@ -303,7 +346,35 @@ pub fn build_router(
     lab: Option<&Arc<fleet_application::lab::Lab>>,
 ) -> Router {
     build_router_for_caller(
-        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, false,
+        settings,
+        db,
+        services,
+        onboarding,
+        tailnet,
+        projects,
+        proxmox,
+        images,
+        lab,
+        false,
+        event_hub_for_services(services),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_router_with_events(
+    settings: &Settings,
+    db: Option<SqlitePool>,
+    services: Option<&NodeServices>,
+    onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<&Arc<fleet_application::project::Projects>>,
+    proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<&Arc<fleet_application::images::Images>>,
+    lab: Option<&Arc<fleet_application::lab::Lab>>,
+    events: Arc<fleet_application::events::EventHub>,
+) -> Router {
+    build_router_for_caller(
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, false, events,
     )
 }
 
@@ -318,9 +389,10 @@ fn build_tailscale_serve_router(
     proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<&Arc<fleet_application::images::Images>>,
     lab: Option<&Arc<fleet_application::lab::Lab>>,
+    events: Arc<fleet_application::events::EventHub>,
 ) -> Router {
     build_router_for_caller(
-        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, true,
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, true, events,
     )
 }
 
@@ -336,6 +408,7 @@ fn build_router_for_caller(
     images: Option<&Arc<fleet_application::images::Images>>,
     lab: Option<&Arc<fleet_application::lab::Lab>>,
     tailscale_identity: bool,
+    events: Arc<fleet_application::events::EventHub>,
 ) -> Router {
     let audit_db = db.clone();
     let probe = Probe {
@@ -351,6 +424,7 @@ fn build_router_for_caller(
         proxmox.cloned(),
         images.cloned(),
         lab.cloned(),
+        events,
     ));
     let api_router = fleet_api::router(api_state.clone());
     let shell = shell(settings).fallback(api_router);
@@ -577,10 +651,33 @@ pub async fn serve(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(settings.listen).await?;
-    serve_on(
-        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, lab,
+    let events = event_hub_for_services(services.as_ref());
+    serve_with_events(
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, events,
         shutdown,
+    )
+    .await
+}
+
+/// Binds and serves with a shared event hub used by API handlers and workers.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_events(
+    settings: Settings,
+    db: Option<SqlitePool>,
+    services: Option<NodeServices>,
+    onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<Arc<fleet_application::project::Projects>>,
+    proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<Arc<fleet_application::images::Images>>,
+    lab: Option<Arc<fleet_application::lab::Lab>>,
+    events: Arc<fleet_application::events::EventHub>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(settings.listen).await?;
+    serve_on_with_events(
+        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, lab,
+        events, shutdown,
     )
     .await
 }
@@ -604,6 +701,30 @@ pub async fn serve_on(
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<Arc<fleet_application::images::Images>>,
     lab: Option<Arc<fleet_application::lab::Lab>>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    let events = event_hub_for_services(services.as_ref());
+    serve_on_with_events(
+        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, lab,
+        events, shutdown,
+    )
+    .await
+}
+
+/// Serves on an already bound listener with the process event hub.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_on_with_events(
+    listener: tokio::net::TcpListener,
+    settings: Settings,
+    db: Option<SqlitePool>,
+    services: Option<NodeServices>,
+    onboarding: Option<Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<Arc<fleet_application::project::Projects>>,
+    proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<Arc<fleet_application::images::Images>>,
+    lab: Option<Arc<fleet_application::lab::Lab>>,
+    events: Arc<fleet_application::events::EventHub>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
@@ -644,7 +765,7 @@ pub async fn serve_on(
     }
     let direct_server = axum::serve(
         listener,
-        build_router(
+        build_router_with_events(
             &settings,
             db.clone(),
             services.as_ref(),
@@ -654,6 +775,7 @@ pub async fn serve_on(
             proxmox.as_ref(),
             images.as_ref(),
             lab.as_ref(),
+            events.clone(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
     );
@@ -670,6 +792,7 @@ pub async fn serve_on(
                 proxmox.as_ref(),
                 images.as_ref(),
                 lab.as_ref(),
+                events.clone(),
             )
             .into_make_service_with_connect_info::<SocketAddr>(),
         );
@@ -789,8 +912,18 @@ mod tailscale_identity_tests {
             web_dist: web_dist.path().to_path_buf(),
             artifacts_dir: Some(artifacts.path().to_path_buf()),
         };
-        let router =
-            build_tailscale_serve_router(&settings, None, None, None, None, None, None, None, None);
+        let router = build_tailscale_serve_router(
+            &settings,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(fleet_application::events::EventHub::new(8)),
+        );
 
         for path in [
             "/",
@@ -864,6 +997,7 @@ mod tailscale_identity_tests {
             None,
             None,
             None,
+            Arc::new(fleet_application::events::EventHub::new(8)),
         );
         let mut request = Request::builder()
             .uri("/api/v1/system")

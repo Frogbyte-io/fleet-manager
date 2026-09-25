@@ -427,8 +427,8 @@ pub async fn create_onboarding_draft(
         OnboardAuthDto::Agent => OnboardAuth::Agent,
         OnboardAuthDto::IdentityFile { path } => OnboardAuth::IdentityFile { path },
     };
-    let draft = onboarding
-        .create_draft(
+    let (draft, created) = onboarding
+        .create_draft_with_outcome(
             state.authorizer.as_ref(),
             &principal,
             fleet_application::onboarding::NewDraft {
@@ -450,6 +450,11 @@ pub async fn create_onboarding_draft(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    if created {
+        state
+            .events
+            .publish(fleet_application::events::EventKind::OnboardingChanged);
+    }
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(OnboardingDraftDto::from(draft))),
@@ -770,6 +775,9 @@ pub async fn confirm_onboarding_host_key(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok(Json(Resource::new(OnboardingDraftDetailDto::from(view))))
 }
 
@@ -829,6 +837,12 @@ pub async fn add_onboarding_machine(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(AddedMachineDto {
@@ -895,5 +909,8 @@ pub async fn cancel_onboarding_draft(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok(StatusCode::NO_CONTENT)
 }

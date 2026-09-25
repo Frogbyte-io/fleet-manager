@@ -189,6 +189,9 @@ pub async fn enroll(
         )
         .await
         .map_err(|error| map_node_error(&error, fresh_correlation_id()))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(EnrollResponse {
@@ -307,6 +310,9 @@ pub async fn session(
         )
         .await
         .map_err(|error| map_node_error(&error, fresh_correlation_id()))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok(Json(Resource::new(SessionResponse {
         machine_id: outcome.machine_id,
         session: outcome.session_token,
@@ -363,6 +369,9 @@ pub async fn rotate(
         )
         .await
         .map_err(|error| map_node_error(&error, fresh_correlation_id()))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok(Json(Resource::new(RotateResponse {
         machine_id: outcome.machine_id,
         credential: outcome.credential_token,
@@ -585,6 +594,9 @@ pub async fn create_enrollment_token(
         )
         .await
         .map_err(|error| map_node_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(created_dto(created))),
@@ -752,6 +764,9 @@ pub async fn revoke_node(
         .revoke(state.authorizer.as_ref(), &principal, &machine_id)
         .await
         .map_err(|error| map_node_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok(Json(Resource::new(NodeRevokedDto {
         machine_id,
         status: NodeStatus::Revoked.id().to_owned(),

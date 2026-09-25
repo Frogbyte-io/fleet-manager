@@ -116,6 +116,8 @@ impl TailnetSource for FakeSource {
 struct FakeCredentialStore {
     stored: Mutex<Option<(String, String)>>,
     reads: Mutex<usize>,
+    fail_next_store: Mutex<bool>,
+    fail_next_clear: Mutex<bool>,
 }
 
 #[async_trait]
@@ -135,10 +137,16 @@ impl fleet_application::tailnet::TailnetCredentialStore for FakeCredentialStore 
 
     async fn store(&self, client_id: &str, client_secret: &str) -> Result<(), String> {
         *self.stored.lock().unwrap() = Some((client_id.to_owned(), client_secret.to_owned()));
+        if std::mem::take(&mut *self.fail_next_store.lock().unwrap()) {
+            return Err("simulated partial store failure".to_owned());
+        }
         Ok(())
     }
 
     async fn clear(&self) -> Result<(), String> {
+        if std::mem::take(&mut *self.fail_next_clear.lock().unwrap()) {
+            return Err("simulated clear failure".to_owned());
+        }
         *self.stored.lock().unwrap() = None;
         Ok(())
     }
@@ -377,6 +385,7 @@ struct Fixture {
     onboarding: Arc<FakeOnboarding>,
     machines: Arc<FakeMachines>,
     audit: Arc<FakeAudit>,
+    events: Arc<fleet_application::events::EventHub>,
     tailnet: TailnetIntegration,
 }
 
@@ -389,6 +398,7 @@ fn compose(machines: FakeMachines, devices: Vec<TailnetDevice>) -> Fixture {
     let onboarding = Arc::new(FakeOnboarding::default());
     let machines = Arc::new(machines);
     let audit = Arc::new(FakeAudit::default());
+    let events = Arc::new(fleet_application::events::EventHub::new(8));
     let tailnet = TailnetIntegration::new(
         source.clone(),
         credentials.clone(),
@@ -402,13 +412,15 @@ fn compose(machines: FakeMachines, devices: Vec<TailnetDevice>) -> Fixture {
         )),
         Arc::new(Machines::new(machines.clone(), audit.clone())),
         audit.clone(),
-    );
+    )
+    .with_events(events.clone());
     Fixture {
         source,
         credentials,
         onboarding,
         machines,
         audit,
+        events,
         tailnet,
     }
 }
@@ -436,6 +448,7 @@ impl fleet_application::onboarding::OnboardTrustPort for FakeTrust {
 #[tokio::test]
 async fn configure_stores_and_reports_without_the_secret() {
     let fixture = compose(FakeMachines::default(), Vec::new());
+    let mut changes = fixture.events.subscribe(None).receiver;
     let unconfigured = fixture
         .tailnet
         .status(&AllowAll, &principal())
@@ -452,6 +465,10 @@ async fn configure_stores_and_reports_without_the_secret() {
         .unwrap();
     assert!(configured.configured);
     assert_eq!(configured.client_id.as_deref(), Some("k-client"));
+    assert_eq!(
+        changes.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::TailnetChanged
+    );
     // The stored credential keeps the secret; the status carries only the id.
     let stored = fixture.credentials.stored.lock().unwrap().clone().unwrap();
     assert_eq!(stored.1, "tskey-client-secret");
@@ -470,21 +487,151 @@ async fn configure_stores_and_reports_without_the_secret() {
 #[tokio::test]
 async fn clear_removes_the_credentials_and_audits() {
     let fixture = compose(FakeMachines::default(), Vec::new());
+    let mut changes = fixture.events.subscribe(None).receiver;
     fixture
         .tailnet
         .configure(&AllowAll, &principal(), "k-client", "tskey-client-secret")
         .await
         .unwrap();
+    assert_eq!(
+        changes.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::TailnetChanged
+    );
     let cleared = fixture
         .tailnet
         .clear(&AllowAll, &principal())
         .await
         .unwrap();
+    assert_eq!(
+        changes.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::TailnetChanged
+    );
     assert!(!cleared.configured);
     assert!(fixture.credentials.stored.lock().unwrap().is_none());
     let events = fixture.audit.events.lock().unwrap();
     assert_eq!(events.len(), 2, "configured then cleared");
     assert!(events[1].metadata.to_json().contains("tailscale_cleared"));
+}
+
+#[tokio::test]
+async fn partially_committed_tailnet_credentials_are_invalidated_on_rollback_failure() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    let mut changes = fixture.events.subscribe(None).receiver;
+    *fixture.credentials.fail_next_store.lock().unwrap() = true;
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+
+    let error = fixture
+        .tailnet
+        .configure(&AllowAll, &principal(), "k-client", "tskey-client-secret")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, TailnetUseCaseError::Backend { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("simulated partial store failure")
+    );
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert_eq!(
+        changes.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::TailnetChanged
+    );
+    assert!(fixture.credentials.stored.lock().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn failed_tailnet_mutations_restore_prior_credentials_without_false_events() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    fixture
+        .credentials
+        .store("old-client", "old-secret")
+        .await
+        .unwrap();
+    let mut changes = fixture.events.subscribe(None).receiver;
+
+    *fixture.credentials.fail_next_store.lock().unwrap() = true;
+    let error = fixture
+        .tailnet
+        .configure(&AllowAll, &principal(), "new-client", "new-secret")
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("simulated partial store failure")
+    );
+    assert_eq!(
+        fixture.credentials.stored.lock().unwrap().as_ref().unwrap(),
+        &("old-client".to_owned(), "old-secret".to_owned())
+    );
+    assert!(matches!(
+        changes.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+    let error = fixture
+        .tailnet
+        .clear(&AllowAll, &principal())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert_eq!(
+        fixture.credentials.stored.lock().unwrap().as_ref().unwrap(),
+        &("old-client".to_owned(), "old-secret".to_owned())
+    );
+    assert!(matches!(
+        changes.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn failed_tailnet_clear_with_failed_rollback_reports_partial_state() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    fixture
+        .credentials
+        .store("old-client", "old-secret")
+        .await
+        .unwrap();
+    let mut changes = fixture.events.subscribe(None).receiver;
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+    *fixture.credentials.fail_next_store.lock().unwrap() = true;
+
+    let error = fixture
+        .tailnet
+        .clear(&AllowAll, &principal())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert!(
+        error
+            .to_string()
+            .contains("simulated partial store failure")
+    );
+    assert_eq!(
+        changes.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::TailnetChanged
+    );
+}
+
+#[tokio::test]
+async fn failed_clear_of_an_empty_tailnet_store_preserves_the_original_error() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    let mut changes = fixture.events.subscribe(None).receiver;
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+
+    let error = fixture
+        .tailnet
+        .clear(&AllowAll, &principal())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert!(matches!(
+        changes.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]
@@ -588,6 +735,53 @@ async fn import_hands_the_device_to_the_onboarding_flow() {
     let stored = fixture.onboarding.drafts.lock().unwrap();
     assert_eq!(stored.len(), 1);
     assert!(stored[0].host_key.is_none());
+}
+
+#[tokio::test]
+async fn tailnet_import_reports_idempotent_replays_without_a_new_draft() {
+    let fixture = compose(
+        FakeMachines::default(),
+        vec![device("nABC", "build-host", "100.64.0.10")],
+    );
+    fixture
+        .credentials
+        .store("k-client", "tskey-client-secret")
+        .await
+        .unwrap();
+
+    let (created, inserted) = fixture
+        .tailnet
+        .import_with_outcome(
+            &AllowAll,
+            &principal(),
+            "nABC",
+            "ops",
+            None,
+            Some("retry-key"),
+        )
+        .await
+        .unwrap();
+    assert!(inserted);
+    let (replayed, inserted) = fixture
+        .tailnet
+        .import_with_outcome(
+            &AllowAll,
+            &principal(),
+            "nABC",
+            "ops",
+            None,
+            Some("retry-key"),
+        )
+        .await
+        .unwrap();
+    assert!(!inserted);
+    assert_eq!(replayed.id, created.id);
+    assert_eq!(fixture.onboarding.drafts.lock().unwrap().len(), 1);
+    assert_eq!(
+        fixture.source.calls(),
+        1,
+        "the replay skips a second import"
+    );
 }
 
 #[tokio::test]

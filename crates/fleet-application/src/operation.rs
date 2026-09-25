@@ -508,13 +508,63 @@ pub struct NewOperation {
 pub struct Operations {
     pub(crate) port: Arc<dyn OperationPort>,
     audit: Arc<dyn AuditPort>,
+    pub(crate) events: Option<Arc<crate::events::EventHub>>,
 }
 
 impl Operations {
     /// Composes the service from its ports.
     #[must_use]
     pub fn new(port: Arc<dyn OperationPort>, audit: Arc<dyn AuditPort>) -> Self {
-        Self { port, audit }
+        Self {
+            port,
+            audit,
+            events: None,
+        }
+    }
+
+    /// Composes the service with a shared fleet event publisher.
+    #[must_use]
+    pub fn new_with_events(
+        port: Arc<dyn OperationPort>,
+        audit: Arc<dyn AuditPort>,
+        events: Arc<crate::events::EventHub>,
+    ) -> Self {
+        Self {
+            port,
+            audit,
+            events: Some(events),
+        }
+    }
+
+    pub(crate) fn publish_operation(&self, operation: &Operation, completed: bool) {
+        let Some(events) = &self.events else {
+            return;
+        };
+        events.publish(crate::events::EventKind::OperationChanged);
+        if completed {
+            let kind = match operation.kind.as_str() {
+                "agentless.inventory" | "node.inventory" | "machine.install-fleetd" => {
+                    Some(crate::events::EventKind::MachineChanged)
+                }
+                "lab.provision" => Some(crate::events::EventKind::LeaseChanged),
+                kind if kind.starts_with("proxmox.") => {
+                    Some(crate::events::EventKind::ProxmoxChanged)
+                }
+                kind if kind.starts_with("tailnet.") || kind.starts_with("tailscale.") => {
+                    Some(crate::events::EventKind::TailnetChanged)
+                }
+                kind if kind.starts_with("onboarding.")
+                    || kind.starts_with("machine.onboarding.")
+                    || kind.starts_with("machine.onboard.") =>
+                {
+                    Some(crate::events::EventKind::OnboardingChanged)
+                }
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                events.publish(kind);
+            }
+        }
     }
 
     /// Creates an operation after authorization, recording the audit intent
@@ -702,6 +752,7 @@ impl Operations {
             )
             .await
             .map_err(map_port_failure("create"))?;
+        self.publish_operation(&operation, false);
 
         let mut metadata = AuditMetadata::default();
         metadata
@@ -756,6 +807,7 @@ impl Operations {
         else {
             return Err(format!("the operation {id} could not be claimed"));
         };
+        self.publish_operation(&operation, false);
         // The claim is renewed while the step runs, so a long SSH step
         // cannot be marked failed by maintenance mid-flight.
         let renewal = {
@@ -919,6 +971,7 @@ impl Operations {
             .request_cancel(id)
             .await
             .map_err(map_port_failure("cancel"))?;
+        self.publish_operation(&operation, false);
 
         self.audit
             .record_intent(&crate::audit::AuditIntent {
@@ -956,6 +1009,7 @@ impl Operations {
             .complete(id, state, result_json, error_json)
             .await
             .map_err(map_port_failure("complete"))?;
+        self.publish_operation(&operation, true);
         let outcome = match state {
             "succeeded" => AuditOutcome::Succeeded,
             "cancelled" => AuditOutcome::Cancelled,

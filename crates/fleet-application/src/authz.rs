@@ -29,6 +29,8 @@ pub enum Permission {
     /// Read system-level facts: build metadata, configuration summary,
     /// trust mode, storage health.
     SystemRead,
+    /// Subscribe to payload-free fleet change notifications.
+    EventsRead,
     /// List and read operations and their progress.
     OperationRead,
     /// Create a durable operation. A mutation.
@@ -174,6 +176,7 @@ impl Permission {
     /// catalog and nothing outside it.
     pub const ALL: &'static [Permission] = &[
         Permission::SystemRead,
+        Permission::EventsRead,
         Permission::OperationRead,
         Permission::OperationCreate,
         Permission::OperationCancel,
@@ -228,6 +231,7 @@ impl Permission {
     pub fn id(self) -> &'static str {
         match self {
             Permission::SystemRead => "system.read",
+            Permission::EventsRead => "events.read",
             Permission::OperationRead => "operation.read",
             Permission::OperationCreate => "operation.create",
             Permission::OperationCancel => "operation.cancel",
@@ -285,6 +289,7 @@ impl Permission {
     pub fn is_risky(self) -> bool {
         match self {
             Permission::SystemRead
+            | Permission::EventsRead
             | Permission::OperationRead
             | Permission::SecretList
             | Permission::AuditRead
@@ -342,6 +347,7 @@ impl Permission {
     pub fn requires_resource(self) -> bool {
         match self {
             Permission::SystemRead
+            | Permission::EventsRead
             | Permission::OperationRead
             | Permission::OperationCreate
             | Permission::SecretList

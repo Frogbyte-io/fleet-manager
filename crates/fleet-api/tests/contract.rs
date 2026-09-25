@@ -43,6 +43,9 @@ fn test_state() -> (Arc<ApiState>, Arc<FakePort>, Arc<RecordingAuditQuery>) {
         audit: Some(Arc::new(fleet_application::audit::AuditQueries::new(
             audit.clone(),
         ))),
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: None,
         onboarding: None,
@@ -154,6 +157,7 @@ async fn audit_api_forwards_filters_and_returns_a_metadata_only_page() {
     let (parts, body) = into_parts_json(response).await;
 
     assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
     assert_eq!(
         body["items"][0]["metadata"],
         serde_json::json!({"event": "machine_updated", "invalidatedEnrollmentCount": "2"})
@@ -394,10 +398,20 @@ impl OperationPort for FakePort {
 
     async fn claim_pending(
         &self,
-        _worker_id: &str,
-        _now: i64,
+        worker_id: &str,
+        now: i64,
     ) -> Result<Option<Operation>, PortFailure> {
-        Ok(None)
+        let mut operations = self.operations.lock().unwrap();
+        let Some(operation) = operations
+            .iter_mut()
+            .find(|operation| operation.state == "pending" && !operation.cancel_requested)
+        else {
+            return Ok(None);
+        };
+        "running".clone_into(&mut operation.state);
+        operation.worker_id = Some(worker_id.to_owned());
+        operation.claimed_at = Some(now);
+        Ok(Some(operation.clone()))
     }
     async fn claim_pending_by_id(
         &self,
@@ -483,14 +497,26 @@ impl AuditPort for FakeAudit {
 }
 
 fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<ApiState> {
+    operation_state_with_hub(
+        authorizer,
+        Arc::new(fleet_application::events::EventHub::new(8)),
+    )
+}
+
+fn operation_state_with_hub(
+    authorizer: Arc<dyn fleet_application::authz::Authorizer>,
+    hub: Arc<fleet_application::events::EventHub>,
+) -> Arc<ApiState> {
     Arc::new(ApiState {
-        operations: Arc::new(Operations::new(
+        operations: Arc::new(Operations::new_with_events(
             Arc::new(FakePort::default()),
             Arc::new(FakeAudit),
+            hub.clone(),
         )),
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(hub)),
         nodes: None,
         machines: None,
         onboarding: None,
@@ -524,6 +550,217 @@ async fn creating_an_operation_returns_the_durable_resource() {
     assert_eq!(body["data"]["state"], "pending");
     assert_eq!(body["data"]["idempotencyKey"], "demo-1");
     assert!(body["data"]["id"].is_string());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn operation_events_cover_acceptance_and_onboarding_completion() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let state = operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub.clone());
+    let mut events = hub.subscribe(None).receiver;
+    let operation = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            "anonymous-lan-admin",
+            &fleet_application::operation::NewOperation {
+                kind: "machine.onboard.test".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OperationChanged
+    );
+
+    state
+        .operations
+        .complete(&operation.id, "succeeded", None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OperationChanged
+    );
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OnboardingChanged
+    );
+
+    let cancellable = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            "anonymous-lan-admin",
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OperationChanged
+    );
+    state
+        .operations
+        .cancel(
+            state.authorizer.as_ref(),
+            "anonymous-lan-admin",
+            &cancellable.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OperationChanged
+    );
+
+    let claimable = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            "anonymous-lan-admin",
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OperationChanged
+    );
+    let mut report = fleet_application::worker::TickReport::default();
+    let claimed = state
+        .operations
+        .claim_only("test-worker", 100, &mut report)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, claimable.id);
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OperationChanged
+    );
+}
+
+#[derive(Debug, Default)]
+struct ContractOnboardingTrust;
+
+#[async_trait]
+impl fleet_application::onboarding::OnboardTrustPort for ContractOnboardingTrust {
+    async fn pin(
+        &self,
+        _host: &str,
+        _key: &fleet_application::onboarding::OnboardHostKey,
+    ) -> Result<(), PortFailure> {
+        Ok(())
+    }
+
+    async fn unpin(&self, _host: &str) -> Result<(), PortFailure> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn onboarding_events_cover_create_replay_and_machine_add() {
+    use fleet_application::machine::Machines;
+    use fleet_application::onboarding::{HostKeyStage, OnboardHostKey, Onboarding, OnboardingPort};
+    use fleet_storage_sqlite::{MachineRepository, OnboardingRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let drafts = Arc::new(OnboardingRepository::new(store.pool().clone()));
+    let audit = Arc::new(FakeAudit);
+    let onboarding = Arc::new(Onboarding::new(
+        drafts.clone(),
+        Arc::new(ContractOnboardingTrust),
+        Arc::new(Machines::new(
+            Arc::new(MachineRepository::new(store.pool().clone())),
+            audit.clone(),
+        )),
+        audit,
+    ));
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    let mut state = (*operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).clone();
+    state.onboarding = Some(onboarding);
+    let app = router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
+        id: "anonymous-lan-admin".to_owned(),
+    }));
+    let create = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_BASE_PATH}/machines/onboarding/drafts"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", "draft-replay")
+            .body(Body::from(
+                r#"{"user":"ops","host":"build-host","auth":{"type":"agent"},"name":"build-host"}"#,
+            ))
+            .unwrap()
+    };
+    let (parts, body) = call_via(&app, create()).await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    let draft_id = body["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OnboardingChanged
+    );
+    let (parts, replay) = call_via(&app, create()).await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay["data"]["id"], draft_id);
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    let mut draft = drafts.get(&draft_id).await.unwrap();
+    draft.host_key_stage = HostKeyStage::Confirmed;
+    draft.confirmed_fingerprint =
+        Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
+    draft.host_key = Some(OnboardHostKey {
+        key_type: "ED25519".to_owned(),
+        fingerprint: draft.confirmed_fingerprint.clone().unwrap(),
+        raw_line: "build-host ssh-ed25519 test".to_owned(),
+    });
+    drafts.update(&draft).await.unwrap();
+    let (parts, added) = call_via(
+        &app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "{API_BASE_PATH}/machines/onboarding/drafts/{draft_id}/add"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{added}");
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OnboardingChanged
+    );
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
 }
 
 #[tokio::test]
@@ -672,6 +909,192 @@ async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
             .unwrap()
             .contains("no accounts")
     );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_replays_payload_free_changes_from_last_event_id() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(4));
+    let first = hub.publish(fleet_application::events::EventKind::MachineChanged);
+    let second = hub.publish(fleet_application::events::EventKind::LeaseChanged);
+    let app = router(operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).layer(
+        axum::Extension(fleet_api::ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        }),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/events"))
+                .header("last-event-id", first.id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        response.into_body().frame(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap()
+    .into_data()
+    .unwrap();
+    let frame = String::from_utf8_lossy(&frame);
+    assert!(frame.contains("event: lease.changed"), "{frame}");
+    assert!(frame.contains(&format!("id: {}", second.id)), "{frame}");
+    assert!(
+        frame.contains("data:  \n"),
+        "empty data dispatches EventSource events: {frame}"
+    );
+    assert!(
+        !frame.contains("data: {"),
+        "events carry no resource payloads"
+    );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_delivers_events_published_after_subscription() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(4));
+    let app = router(operation_state_with_hub(
+        Arc::new(PermitAllAuthorizer),
+        hub.clone(),
+    ))
+    .layer(axum::Extension(fleet_api::ActingPrincipal {
+        id: "anonymous-lan-admin".to_owned(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/events"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    hub.publish(fleet_application::events::EventKind::MachineChanged);
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        response.into_body().frame(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap()
+    .into_data()
+    .unwrap();
+    assert!(String::from_utf8_lossy(&frame).contains("event: machine.changed"));
+}
+
+#[tokio::test]
+async fn fleet_event_stream_reports_and_closes_after_live_receiver_lag() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(2));
+    let cursor = hub.current_id();
+    let app = router(operation_state_with_hub(
+        Arc::new(PermitAllAuthorizer),
+        hub.clone(),
+    ))
+    .layer(axum::Extension(fleet_api::ActingPrincipal {
+        id: "anonymous-lan-admin".to_owned(),
+    }));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/events"))
+                .header("last-event-id", cursor)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    hub.publish(fleet_application::events::EventKind::MachineChanged);
+    hub.publish(fleet_application::events::EventKind::LeaseChanged);
+    hub.publish(fleet_application::events::EventKind::OperationChanged);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&frame).contains("event: gap"));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_reports_a_gap_and_closes_for_expired_cursors() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(1));
+    let expired = hub.publish(fleet_application::events::EventKind::MachineChanged);
+    hub.publish(fleet_application::events::EventKind::LeaseChanged);
+    hub.publish(fleet_application::events::EventKind::OperationChanged);
+    hub.publish(fleet_application::events::EventKind::OnboardingChanged);
+    let latest = hub.current_id();
+    let app = router(operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).layer(
+        axum::Extension(fleet_api::ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        }),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/events"))
+                .header("last-event-id", expired.id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    let frame = String::from_utf8_lossy(&frame);
+    assert!(frame.contains("event: gap"), "{frame}");
+    assert!(frame.contains(&format!("id: {latest}")), "{frame}");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_requires_events_read_authorization() {
+    #[derive(Debug)]
+    struct DenyAll;
+    impl fleet_application::authz::Authorizer for DenyAll {
+        fn decide(&self, _request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+            Decision::deny(ReasonId::UnknownPrincipal)
+        }
+    }
+    let app = router(operation_state(Arc::new(DenyAll))).layer(axum::Extension(
+        fleet_api::ActingPrincipal {
+            id: "not-authorized".to_owned(),
+        },
+    ));
+    let response = app
+        .oneshot(get(&format!("{API_BASE_PATH}/events")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -1092,6 +1515,9 @@ fn machine_state(
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: Some(Arc::new(Machines::new(backend, Arc::new(FakeAudit)))),
         onboarding: None,
@@ -1358,6 +1784,7 @@ impl fleet_application::lab::ImagePinValidator for NoPromotedVersions {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn lab_lease_extension_returns_the_updated_deadline() {
     use fleet_application::lab::{Lab, LeasePort, NewLease};
     use fleet_core::{CleanupStrategy, LeaseState};
@@ -1390,13 +1817,16 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     let lab = Arc::new(Lab::new(
         repository.clone(),
         repository,
-        leases,
+        leases.clone(),
         Arc::new(NoPromotedVersions),
         Arc::new(FakeAudit),
     ));
     let base = test_state().0;
     let mut state = (*base).clone();
     state.lab = Some(lab);
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    state.events = Arc::new(fleet_application::events::Events::new(hub));
     let router = principal_router(Arc::new(state));
     let request = Request::builder()
         .method(Method::POST)
@@ -1412,6 +1842,66 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     assert_eq!(
         body["data"]["maxLifetimeAt"],
         now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS
+    );
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::LeaseChanged
+    );
+
+    let release = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/{}/release", lease.id))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"keep":false}"#))
+        .unwrap();
+    let (parts, body) = call_via(&router, release).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::LeaseChanged
+    );
+
+    let empty_sweep = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/sweep"))
+        .body(Body::empty())
+        .unwrap();
+    let (parts, body) = call_via(&router, empty_sweep).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    let mut expired = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "expired sweep test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            now - 3_700_000,
+        )
+        .await
+        .unwrap();
+    expired.state = LeaseState::Ready;
+    expired.ready_at = Some(now - 3_700_000);
+    expired.expires_at = Some(now - 1);
+    leases.update(&expired).await.unwrap();
+    let nonempty_sweep = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/sweep"))
+        .body(Body::empty())
+        .unwrap();
+    let (parts, body) = call_via(&router, nonempty_sweep).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::LeaseChanged
     );
 
     let malformed = Request::builder()

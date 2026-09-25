@@ -392,9 +392,21 @@ pub fn compose_proxmox(
     transport: Arc<dyn PveTransport>,
     audit: Arc<dyn fleet_application::operation::AuditPort>,
 ) -> fleet_application::proxmox::ProxmoxAccounts {
+    compose_proxmox_with_events(pool, secrets, transport, audit, None)
+}
+
+/// Composes Proxmox use cases with the process event hub.
+#[must_use]
+pub fn compose_proxmox_with_events(
+    pool: sqlx::SqlitePool,
+    secrets: Arc<SecretStore>,
+    transport: Arc<dyn PveTransport>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+    events: Option<Arc<fleet_application::events::EventHub>>,
+) -> fleet_application::proxmox::ProxmoxAccounts {
     let client = fleet_provider_proxmox::ProxmoxClient::new(transport.clone());
     let discovery = Arc::new(ProviderDiscovery::new(client.clone()));
-    fleet_application::proxmox::ProxmoxAccounts::new(
+    let accounts = fleet_application::proxmox::ProxmoxAccounts::new(
         Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
             pool.clone(),
         )),
@@ -404,7 +416,11 @@ pub fn compose_proxmox(
         Arc::new(ProviderTrustProbe::new(transport)),
         machines_for(pool, audit.clone()),
         audit,
-    )
+    );
+    match events {
+        Some(hub) => accounts.with_events(hub),
+        None => accounts,
+    }
 }
 
 /// The machine use cases over the shared pool and audit sink.

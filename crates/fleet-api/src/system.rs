@@ -19,7 +19,7 @@ use axum::{
     response::sse::{Event as SseEvent, KeepAlive, Sse},
 };
 use fleet_application::operation::Operation;
-use futures_util::stream::Stream;
+use futures_util::stream::{Stream, unfold};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -251,6 +251,118 @@ pub async fn stream_operation_events(
         }
     });
 
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
+}
+
+/// Streams payload-free notifications for fleet-wide query invalidation.
+///
+/// Reconnects replay events still in the bounded process buffer. An expired,
+/// foreign, malformed, or lagged cursor produces a `gap` event so clients
+/// refetch through authorized resource reads. Slow live subscribers are then
+/// disconnected instead of accumulating memory.
+///
+/// # Errors
+///
+/// Returns the standard API error when the caller has no resolved principal
+/// or lacks `events.read`.
+#[utoipa::path(
+    get,
+    path = "/events",
+    tag = "events",
+    operation_id = "streamFleetEvents",
+    params(
+        ("Last-Event-ID" = Option<String>, Header, description = "The last event cursor received by this client.")
+    ),
+    responses(
+        (status = 200, description = "A resumable stream of payload-free fleet change notifications.", content_type = "text/event-stream"),
+        (status = 403, description = "The caller may not subscribe to fleet event metadata.", body = crate::error::ApiError)
+    )
+)]
+pub async fn stream_fleet_events(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Extension(correlation_id): Extension<CorrelationId>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiErrorResponse> {
+    let Some(Extension(principal)) = principal else {
+        return Err(unresolved_principal());
+    };
+    let mut cursor_values = headers.get_all("last-event-id").iter();
+    let first_cursor = cursor_values.next();
+    let last_event_id = if cursor_values.next().is_some() {
+        Some("")
+    } else {
+        first_cursor.map(|value| {
+            // Preserve malformed header values as an invalid cursor so the
+            // subscriber receives an explicit gap instead of silently starting
+            // at the live edge.
+            value.to_str().unwrap_or("")
+        })
+    };
+    let subscription = state
+        .events
+        .subscribe(state.authorizer.as_ref(), &principal.id, last_event_id)
+        .map_err(|denial| crate::machines::denied_error(denial, correlation_id))?;
+    let events = state.events.clone();
+    let authorizer = state.authorizer.clone();
+    let principal_id = principal.id;
+    let stream = unfold(
+        (subscription, events, authorizer, principal_id, false),
+        |(mut subscription, events, authorizer, principal_id, close_after_gap)| async move {
+            if close_after_gap {
+                return None;
+            }
+            if events.authorize(&*authorizer, &principal_id).is_err() {
+                return None;
+            }
+            if let Some(gap_id) = subscription.gap_id.take() {
+                // EventSource ignores events without a data field; one
+                // whitespace-only value dispatches type/id without a payload.
+                let event = SseEvent::default().event("gap").id(gap_id).data(" ");
+                return Some((
+                    Ok(event),
+                    (subscription, events, authorizer, principal_id, true),
+                ));
+            }
+            if let Some(event) = subscription.replay.pop_front() {
+                let event = SseEvent::default()
+                    .event(event.kind.as_str())
+                    .id(event.id)
+                    .data(" ");
+                return Some((
+                    Ok(event),
+                    (subscription, events, authorizer, principal_id, false),
+                ));
+            }
+            match subscription.receiver.recv().await {
+                Ok(event) => {
+                    // Recheck after the await as policy may have changed
+                    // while this subscriber was idle.
+                    if events.authorize(&*authorizer, &principal_id).is_err() {
+                        return None;
+                    }
+                    Some((
+                        Ok(SseEvent::default()
+                            .event(event.kind.as_str())
+                            .id(event.id)
+                            .data(" ")),
+                        (subscription, events, authorizer, principal_id, false),
+                    ))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let event = SseEvent::default()
+                        .event("gap")
+                        .id(events.current_id())
+                        .data(" ");
+                    Some((
+                        Ok(event),
+                        (subscription, events, authorizer, principal_id, true),
+                    ))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+            }
+        },
+    );
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
 }
 

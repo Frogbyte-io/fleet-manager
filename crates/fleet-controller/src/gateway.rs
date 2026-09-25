@@ -183,6 +183,7 @@ pub struct GatewayService {
     port: Arc<dyn NodePort>,
     audit: Arc<dyn AuditPort>,
     registry: Arc<Registry>,
+    events: Option<Arc<fleet_application::events::EventHub>>,
 }
 
 impl GatewayService {
@@ -194,7 +195,15 @@ impl GatewayService {
             port,
             audit,
             registry: Arc::new(Registry::default()),
+            events: None,
         }
+    }
+
+    /// Attaches the controller's shared fleet event publisher.
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<fleet_application::events::EventHub>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     /// The WebSocket upgrade handler, mounted at `/api/node/v1/connect`.
@@ -475,6 +484,9 @@ impl GatewayService {
             eprintln!("node gateway: cannot persist {state:?} for machine {machine_id}: {error}");
         } else {
             eprintln!("node gateway: machine {machine_id} is now {}", state.id());
+            if let Some(events) = &self.events {
+                events.publish(fleet_application::events::EventKind::MachineChanged);
+            }
         }
     }
 

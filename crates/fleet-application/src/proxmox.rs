@@ -593,6 +593,7 @@ pub struct ProxmoxAccounts {
     trust: Arc<dyn ProxmoxTrustProbe>,
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
+    events: Option<Arc<crate::events::EventHub>>,
 }
 
 impl ProxmoxAccounts {
@@ -615,6 +616,21 @@ impl ProxmoxAccounts {
             trust,
             machines,
             audit,
+            events: None,
+        }
+    }
+
+    /// Attaches the process event hub so notifications follow durable commits,
+    /// even when a later completion audit fails.
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<crate::events::EventHub>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    fn publish_changed(&self) {
+        if let Some(events) = &self.events {
+            events.publish(crate::events::EventKind::ProxmoxChanged);
         }
     }
 
@@ -745,6 +761,7 @@ impl ProxmoxAccounts {
                 detail: error.to_string(),
             });
         }
+        self.publish_changed();
         self.audit_event(
             principal,
             Permission::ProxmoxConfig,
@@ -803,6 +820,7 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
+        self.publish_changed();
         self.audit_event(
             principal,
             Permission::ProxmoxConfig,
@@ -852,6 +870,7 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
+        self.publish_changed();
         Ok(observed)
     }
 
@@ -921,6 +940,7 @@ impl ProxmoxAccounts {
                 context: "accounts",
                 detail,
             })?;
+        self.publish_changed();
         self.audit_event(
             principal,
             Permission::ProxmoxConfig,
@@ -1159,7 +1179,11 @@ impl ProxmoxAccounts {
                 MachineUseCaseError::Backend { context, detail } => {
                     ProxmoxUseCaseError::Backend { context, detail }
                 }
-            })
+            })?;
+        if let Some(events) = &self.events {
+            events.publish(crate::events::EventKind::MachineChanged);
+        }
+        Ok(())
     }
 
     /// The account with the explicit-trust gate applied: without a

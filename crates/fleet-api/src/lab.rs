@@ -643,7 +643,7 @@ pub async fn start_lab_lease_provision(
             correlation_id,
         )
     })?;
-    let provision = lab
+    let (provision, lease_changed) = lab
         .start_lease_provision(
             state.authorizer.as_ref(),
             &principal,
@@ -653,6 +653,11 @@ pub async fn start_lab_lease_provision(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    if lease_changed {
+        state
+            .events
+            .publish(fleet_application::events::EventKind::LeaseChanged);
+    }
     let payload = serde_json::json!({
         "recordId": provision.id,
         "leaseId": lease_id,
@@ -818,6 +823,9 @@ pub async fn create_lab_lease(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(lease.into()))))
 }
 
@@ -897,6 +905,9 @@ pub async fn release_lab_lease(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok(Json(Resource::new(lease.into())))
 }
 
@@ -966,6 +977,9 @@ pub async fn extend_lab_lease(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok(Json(Resource::new(lease.into())))
 }
 
@@ -982,9 +996,9 @@ pub async fn extend_lab_lease(
     tag = "lab",
     operation_id = "sweepLabLeases",
     responses(
-        (status = 200, description = "The leases transitioned into releasing.", body = Page<LeaseDto>),
+        (status = 200, description = "All expired leases transitioned into releasing. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.", body = Page<LeaseDto>),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
-        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed. Earlier claims in this sweep may already be committed; retry to process the remaining expired leases.", body = crate::error::ApiError),
     )
 )]
 pub async fn sweep_lab_leases(
@@ -995,10 +1009,15 @@ pub async fn sweep_lab_leases(
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let released = lab
-        .sweep_expired(
+        .sweep_expired_with_progress(
             state.authorizer.as_ref(),
             &principal,
             fleet_core::SystemClock::now_unix_millis(),
+            || {
+                state
+                    .events
+                    .publish(fleet_application::events::EventKind::LeaseChanged);
+            },
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;

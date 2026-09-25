@@ -519,6 +519,51 @@ fn service_with_guests(
     )
 }
 
+#[tokio::test]
+async fn committed_account_mutations_publish_through_the_attached_event_hub() {
+    let (proxmox, _audit) = service(FakeDiscovery::with(Ok(discovery_ok())), FakeProbe::with(FP));
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    let proxmox = proxmox.with_events(hub);
+
+    let account = create_account(&proxmox).await;
+
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::ProxmoxChanged
+    );
+    let conflict = proxmox
+        .create(
+            &AllowAll,
+            &principal(),
+            NewProxmoxAccount {
+                name: "pve-main".to_owned(),
+                host: "192.168.68.224".to_owned(),
+                port: Some(8006),
+                token_id: "root@pam!GLM-AGENT".to_owned(),
+            },
+            "the-token-secret-material",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        ProxmoxUseCaseError::Conflict { ref detail } if detail.contains("taken")
+    ));
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    proxmox
+        .delete(&AllowAll, &principal(), &account.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::ProxmoxChanged
+    );
+}
+
 async fn create_account(proxmox: &ProxmoxAccounts) -> fleet_application::proxmox::ProxmoxAccount {
     proxmox
         .create(
@@ -1089,6 +1134,9 @@ async fn observe_guest_records_the_guest_facts_on_the_machine() {
     );
     let account = create_account(&proxmox).await;
     observe_and_confirm(&proxmox, &account.id).await;
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    let proxmox = proxmox.with_events(hub);
     let machine_id = register_machine(
         &machine_port,
         "fleet-test-01",
@@ -1101,6 +1149,20 @@ async fn observe_guest_records_the_guest_facts_on_the_machine() {
         .observe_guest(&AllowAll, &principal(), &account.id, 101, &machine_id, NOW)
         .await
         .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
+    assert!(
+        proxmox
+            .observe_guest(&AllowAll, &principal(), &account.id, 999, &machine_id, NOW)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 
     let recorded = machine_port.recorded.lock().unwrap();
     let (_, facts) = recorded

@@ -145,11 +145,28 @@ pub fn compose_tailnet(
     machines: Arc<fleet_application::machine::Machines>,
     audit: Arc<dyn fleet_application::operation::AuditPort>,
 ) -> TailnetIntegration {
-    TailnetIntegration::new(
+    compose_tailnet_with_events(secrets, source, onboarding, machines, audit, None)
+}
+
+/// Composes Tailscale discovery with the process event hub.
+#[must_use]
+pub fn compose_tailnet_with_events(
+    secrets: Arc<SecretStore>,
+    source: Arc<dyn fleet_application::tailnet::TailnetSource>,
+    onboarding: Arc<fleet_application::onboarding::Onboarding>,
+    machines: Arc<fleet_application::machine::Machines>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+    events: Option<Arc<fleet_application::events::EventHub>>,
+) -> TailnetIntegration {
+    let tailnet = TailnetIntegration::new(
         source,
         Arc::new(SecretBackedTailnetStore::new(secrets)),
         onboarding,
         machines,
         audit,
-    )
+    );
+    match events {
+        Some(hub) => tailnet.with_events(hub),
+        None => tailnet,
+    }
 }

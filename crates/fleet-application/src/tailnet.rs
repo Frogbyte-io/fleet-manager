@@ -370,6 +370,8 @@ pub struct TailnetIntegration {
     onboarding: Arc<Onboarding>,
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
+    events: Option<Arc<crate::events::EventHub>>,
+    credential_mutation: tokio::sync::Mutex<()>,
 }
 
 impl TailnetIntegration {
@@ -388,6 +390,22 @@ impl TailnetIntegration {
             onboarding,
             machines,
             audit,
+            events: None,
+            credential_mutation: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Attaches the process event hub so notifications follow durable
+    /// credential-store commits even if completion auditing fails.
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<crate::events::EventHub>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    fn publish_changed(&self) {
+        if let Some(events) = &self.events {
+            events.publish(crate::events::EventKind::TailnetChanged);
         }
     }
 
@@ -411,14 +429,7 @@ impl TailnetIntegration {
             },
         )
         .map_err(TailnetUseCaseError::Denied)?;
-        let stored =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
+        let stored = self.load_credentials().await?;
         Ok(TailnetStatus {
             configured: stored.is_some(),
             client_id: stored.map(|credentials| credentials.client_id),
@@ -459,25 +470,13 @@ impl TailnetIntegration {
                 detail: "the client secret must be 1..=256 characters".to_owned(),
             });
         }
-        self.credentials
-            .store(client_id, client_secret)
-            .await
-            .map_err(|detail| TailnetUseCaseError::Backend {
-                context: "credentials",
-                detail,
-            })?;
+        self.replace_credentials(Some((client_id, client_secret)))
+            .await?;
         self.audit_event(principal, "tailscale_configured", Some(client_id))
             .await?;
         // The mutator earned this decision already; re-asking tailscale.read
         // would fail a principal allowed to configure but not to list.
-        let stored =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
+        let stored = self.load_credentials().await?;
         Ok(TailnetStatus {
             configured: stored.is_some(),
             client_id: stored.map(|credentials| credentials.client_id),
@@ -505,23 +504,10 @@ impl TailnetIntegration {
             },
         )
         .map_err(TailnetUseCaseError::Denied)?;
-        self.credentials
-            .clear()
-            .await
-            .map_err(|detail| TailnetUseCaseError::Backend {
-                context: "credentials",
-                detail,
-            })?;
+        self.replace_credentials(None).await?;
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;
-        let stored =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
+        let stored = self.load_credentials().await?;
         Ok(TailnetStatus {
             configured: stored.is_some(),
             client_id: stored.map(|credentials| credentials.client_id),
@@ -676,6 +662,26 @@ impl TailnetIntegration {
         port: Option<u16>,
         idempotency_key: Option<&str>,
     ) -> Result<DraftView, TailnetUseCaseError> {
+        self.import_with_outcome(authorizer, principal, node_id, user, port, idempotency_key)
+            .await
+            .map(|(draft, _created)| draft)
+    }
+
+    /// Imports a device and reports whether a draft was actually inserted.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unconfigured integration, an unknown device, a
+    /// device without an IPv4 address, or any onboarding failure.
+    pub async fn import_with_outcome(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        node_id: &str,
+        user: &str,
+        port: Option<u16>,
+        idempotency_key: Option<&str>,
+    ) -> Result<(DraftView, bool), TailnetUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -706,7 +712,7 @@ impl TailnetIntegration {
                 .await
                 .map_err(TailnetUseCaseError::from)?;
             if let Some(draft) = replay {
-                return Ok(draft);
+                return Ok((draft, false));
             }
         }
         let credentials = self.require_credentials().await?;
@@ -729,7 +735,7 @@ impl TailnetIntegration {
             });
         };
         self.onboarding
-            .create_draft(
+            .create_draft_with_outcome(
                 authorizer,
                 principal,
                 NewDraft {
@@ -755,14 +761,69 @@ impl TailnetIntegration {
 
     /// Loads the stored credentials or refuses with [`TailnetUseCaseError::Unconfigured`].
     async fn require_credentials(&self) -> Result<TailnetCredentials, TailnetUseCaseError> {
+        self.load_credentials()
+            .await?
+            .ok_or(TailnetUseCaseError::Unconfigured)
+    }
+
+    async fn load_credentials(&self) -> Result<Option<TailnetCredentials>, TailnetUseCaseError> {
+        let _read = self.credential_mutation.lock().await;
         self.credentials
             .load()
             .await
             .map_err(|detail| TailnetUseCaseError::Backend {
                 context: "credentials",
                 detail,
-            })?
-            .ok_or(TailnetUseCaseError::Unconfigured)
+            })
+    }
+
+    async fn replace_credentials(
+        &self,
+        replacement: Option<(&str, &str)>,
+    ) -> Result<(), TailnetUseCaseError> {
+        let mutation = self.credential_mutation.lock().await;
+        let previous =
+            self.credentials
+                .load()
+                .await
+                .map_err(|detail| TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail,
+                })?;
+        let result = match replacement {
+            Some((client_id, client_secret)) => {
+                self.credentials.store(client_id, client_secret).await
+            }
+            None => self.credentials.clear().await,
+        };
+        if let Err(detail) = result {
+            let rollback = match previous.as_ref() {
+                Some(previous) => {
+                    self.credentials
+                        .store(&previous.client_id, previous.client_secret.expose())
+                        .await
+                }
+                None => self.credentials.clear().await,
+            };
+            if let Err(rollback_detail) = rollback {
+                // A failed mutation and failed restoration leave the committed
+                // state uncertain, so notify readers and report both failures.
+                self.publish_changed();
+                return Err(TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail: format!(
+                        "credential mutation failed ({detail}); rollback failed ({rollback_detail})"
+                    ),
+                });
+            }
+            return Err(TailnetUseCaseError::Backend {
+                context: "credentials",
+                detail,
+            });
+        }
+        drop(mutation);
+        self.publish_changed();
+        Ok(())
     }
 
     async fn audit_event(

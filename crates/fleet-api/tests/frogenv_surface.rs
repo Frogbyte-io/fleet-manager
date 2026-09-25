@@ -337,6 +337,9 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: Some(Arc::new(fleet_application::machine::Machines::new(
             Arc::new(FakeMachines),
@@ -424,6 +427,9 @@ async fn an_env_run_carries_its_root_and_command() {
         authorizer: Arc::new(PermitAll),
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: Some(Arc::new(fleet_application::machine::Machines::new(
             Arc::new(FakeMachines),

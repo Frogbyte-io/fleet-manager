@@ -51,6 +51,7 @@ struct Harness {
     machines: fleet_storage_sqlite::MachineRepository,
     nodes: Arc<fleet_application::node::Nodes>,
     gateway: Arc<GatewayService>,
+    events: Arc<fleet_application::events::EventHub>,
     operations: Arc<fleet_application::operation::Operations>,
     address: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
@@ -80,6 +81,7 @@ async fn harness() -> Harness {
         .await
         .expect("the node signing key must provision");
     let services = compose_node_services(store.pool(), Arc::new(crypto));
+    let events = services.events.clone();
     let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
 
     let router = build_router(
@@ -122,6 +124,7 @@ async fn harness() -> Harness {
         machines,
         nodes: services.nodes.clone(),
         gateway: services.gateway.clone(),
+        events,
         operations,
         address,
         shutdown: Some(shutdown_tx),
@@ -437,6 +440,7 @@ async fn a_session_connects_negotiates_and_heartbeats() {
     let keys = NodeKeys::generate();
     let (machine_id, credential) = harness.enroll_node("alive", &keys).await;
     let session = harness.prove_session(&credential, &keys).await;
+    let mut events = harness.events.subscribe(None).receiver;
 
     let (stream, response) = connect_node(&harness, &session).await.unwrap();
     assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
@@ -463,6 +467,10 @@ async fn a_session_connects_negotiates_and_heartbeats() {
         "the gateway state must become connected",
     )
     .await;
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
 
     // Heartbeats keep it alive without touching SQLite: the state stays
     // connected and the registry's sequence advances.
@@ -475,6 +483,14 @@ async fn a_session_connects_negotiates_and_heartbeats() {
         .await
         .expect("the session is registered");
     assert_eq!(entry.heartbeat_sequence.load(Ordering::Relaxed), 2);
+    let heartbeat_event = events.try_recv();
+    assert!(
+        matches!(
+            heartbeat_event,
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a repeated connected heartbeat must not publish: {heartbeat_event:?}"
+    );
 
     sink.close().await.unwrap();
     wait_until(
@@ -482,6 +498,10 @@ async fn a_session_connects_negotiates_and_heartbeats() {
         "a closed session must settle offline",
     )
     .await;
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
 }
 
 #[tokio::test]
@@ -613,10 +633,20 @@ async fn a_quiet_session_goes_stale_and_a_heartbeat_recovers_it() {
     let (machine_id, credential) = harness.enroll_node("quiet", &keys).await;
 
     let session = harness.prove_session(&credential, &keys).await;
+    let mut events = harness.events.subscribe(None).receiver;
     let (stream, _) = connect_node(&harness, &session).await.unwrap();
     let (mut sink, mut source) = stream.split();
     send_frame(&mut sink, hello_frame(&machine_id, 1, 1)).await;
     let _welcome = receive_frame(&mut source).await.expect("a Welcome");
+    wait_until(
+        async || harness.gateway_state(&machine_id).await.as_deref() == Some("connected"),
+        "the gateway state must become connected",
+    )
+    .await;
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
 
     // A fast sweeper with a tiny staleness threshold stands in for the real
     // one's timing.
@@ -636,6 +666,10 @@ async fn a_quiet_session_goes_stale_and_a_heartbeat_recovers_it() {
         "a quiet session must go stale",
     )
     .await;
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
 
     // One heartbeat recovers it, and the state says connected again.
     send_frame(&mut sink, heartbeat_frame(1)).await;
@@ -644,6 +678,10 @@ async fn a_quiet_session_goes_stale_and_a_heartbeat_recovers_it() {
         "a heartbeat must recover a stale session",
     )
     .await;
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
 
     let _ = done_tx.send(());
     let _ = sweeper_task.await;

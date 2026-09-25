@@ -268,6 +268,9 @@ fn state_for(
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: None,
         onboarding: None,

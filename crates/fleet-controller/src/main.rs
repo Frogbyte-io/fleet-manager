@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use fleet_controller::exec::ScriptExecutor;
 use fleet_controller::worker::WorkerHost;
-use fleet_controller::{Settings, run_healthcheck, serve, shutdown_signal};
+use fleet_controller::{Settings, run_healthcheck, serve_with_events, shutdown_signal};
 
 const HELP: &str = "Usage: fleet-controller [--config <path>] [--help|--version|serve|healthcheck]";
 
@@ -94,6 +94,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             eprintln!("secret store unavailable: no master key configured");
         }
         let pool = Some(store.pool().clone());
+        let events = std::sync::Arc::new(fleet_application::events::EventHub::new(
+            fleet_application::events::DEFAULT_EVENT_CAPACITY,
+        ));
         // The node-trust services compose only over a store and a secret
         // store; without both, the node surface serves the standard
         // "unavailable" envelope instead of minting credentials it cannot
@@ -102,9 +105,10 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         let services = match secrets.as_ref() {
             Some(secret_store) => {
                 match fleet_controller::node_crypto::NodeCryptoService::open(secret_store).await {
-                    Ok(crypto) => Some(fleet_controller::compose_node_services(
+                    Ok(crypto) => Some(fleet_controller::compose_node_services_with_events(
                         store.pool(),
                         std::sync::Arc::new(crypto),
+                        events.clone(),
                     )),
                     Err(error) => {
                         eprintln!("fleet-controller: refusing to start: {error}");
@@ -116,12 +120,14 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         };
         // The worker drives durable operations to their terminal states; it
         // drains when shutdown fires, before the server.
-        let worker_operations = std::sync::Arc::new(fleet_application::operation::Operations::new(
-            std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
-                store.pool().clone(),
-            )),
-            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-        ));
+        let worker_operations =
+            std::sync::Arc::new(fleet_application::operation::Operations::new_with_events(
+                std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                events.clone(),
+            ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
@@ -431,23 +437,28 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         // OAuth client lives there. Without it the surface serves the
         // standard "unavailable" envelope.
         let tailnet = secrets.as_ref().map(|secrets| {
-            std::sync::Arc::new(fleet_controller::tailnet_store::compose_tailnet(
-                secrets.clone(),
-                std::sync::Arc::new(fleet_provider_tailscale::TailscaleClient::new(
-                    std::sync::Arc::new(
-                        fleet_provider_tailscale::ReqwestTransport::new()
-                            .expect("the tailscale transport must build"),
-                    ),
-                )),
-                onboarding.clone(),
-                std::sync::Arc::new(fleet_application::machine::Machines::new(
-                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
-                        store.pool().clone(),
+            std::sync::Arc::new(
+                fleet_controller::tailnet_store::compose_tailnet_with_events(
+                    secrets.clone(),
+                    std::sync::Arc::new(fleet_provider_tailscale::TailscaleClient::new(
+                        std::sync::Arc::new(
+                            fleet_provider_tailscale::ReqwestTransport::new()
+                                .expect("the tailscale transport must build"),
+                        ),
+                    )),
+                    onboarding.clone(),
+                    std::sync::Arc::new(fleet_application::machine::Machines::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
                     )),
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-                )),
-                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-            ))
+                    Some(events.clone()),
+                ),
+            )
         });
         // The project surface composes over the store alone: identity and
         // observed checkouts need no secret material.
@@ -490,14 +501,17 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         let pve_transport: std::sync::Arc<dyn fleet_provider_proxmox::PveTransport> =
             std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new());
         let proxmox = secrets.as_ref().map(|secrets| {
-            std::sync::Arc::new(fleet_controller::proxmox_store::compose_proxmox(
-                store.pool().clone(),
-                secrets.clone(),
-                pve_transport.clone(),
-                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-            ))
+            std::sync::Arc::new(
+                fleet_controller::proxmox_store::compose_proxmox_with_events(
+                    store.pool().clone(),
+                    secrets.clone(),
+                    pve_transport.clone(),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                    Some(events.clone()),
+                ),
+            )
         });
-        let served = serve(
+        let served = serve_with_events(
             settings,
             pool,
             services,
@@ -507,6 +521,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             proxmox,
             Some(images),
             Some(lab),
+            events,
             shutdown_signal(),
         )
         .await;
