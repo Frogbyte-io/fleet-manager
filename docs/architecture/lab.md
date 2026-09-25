@@ -54,6 +54,8 @@ Deadlines:
 
 The current controller path attaches a provision record to a requested lease before queuing `lab.provision`. When the provision executor reaches guest readiness, it marks that same linked lease `ready`, starts its template TTL, and caps the expiry at the creation-relative maximum. Standalone template provisioning remains separate from lease lifecycle and does not make a lease ready.
 
+If the linked operation fails, the lease becomes terminal `failed`; any guest identifiers remain on its provision record for cleanup/reconciliation. The caller can request a replacement lease. Retrying the same failed lease returns its existing failed operation.
+
 Cleanup strategies:
 
 - `destroy` is the default and deletes the allocated clone.

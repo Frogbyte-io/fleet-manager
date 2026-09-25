@@ -338,7 +338,8 @@ pub enum LeaseState {
     Releasing,
     /// Released: the cleanup completed and nothing is owed.
     Released,
-    /// The lease failed before ready; no external allocation is owed.
+    /// Provisioning failed before ready. The linked provision record retains
+    /// any allocated guest identifiers for later cleanup or reconciliation.
     Failed,
     /// The cleanup failed: the lease visibly owns the remaining resource
     /// and retries with backoff until an operator intervenes.

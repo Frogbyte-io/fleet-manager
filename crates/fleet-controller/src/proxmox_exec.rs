@@ -1096,10 +1096,13 @@ impl ProvisionExecutor {
     }
 }
 
-#[async_trait::async_trait]
-impl OperationExecutor for ProvisionExecutor {
+impl ProvisionExecutor {
     #[allow(clippy::too_many_lines)]
-    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+    async fn execute_linked(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
         if operation.kind != "lab.provision" {
             return Err("not a Lab provision kind".to_owned());
         }
@@ -1118,11 +1121,34 @@ impl OperationExecutor for ProvisionExecutor {
             .as_str()
             .ok_or("the payload carries no accountId")?
             .to_owned();
+        let lease_id = payload["leaseId"]
+            .as_str()
+            .ok_or("the payload carries no leaseId")?
+            .to_owned();
         let record = self
             .provisions
             .get(&record_id)
             .await
             .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .await
+            .map_err(|detail| format!("the linked lease is unreadable: {detail}"))?;
+        if record.lease_id.as_deref() != Some(lease_id.as_str())
+            || lease.provision_id.as_deref() != Some(record.id.as_str())
+        {
+            return Err("the provision record is not linked to the authorized lease".to_owned());
+        }
+        if !matches!(
+            lease.state,
+            fleet_core::LeaseState::Provisioning | fleet_core::LeaseState::Ready
+        ) {
+            return Err(format!(
+                "the linked lease is in {} and cannot be provisioned",
+                lease.state.id()
+            ));
+        }
         let version = self
             .templates
             .get_version(&record.template_version_id)
@@ -1244,6 +1270,7 @@ impl OperationExecutor for ProvisionExecutor {
                 .await
                 .unwrap_or(false);
             if cancelled {
+                self.fail_linked_lease(&record).await?;
                 return complete_failure(
                     operations,
                     &operation.id,
@@ -1273,6 +1300,7 @@ impl OperationExecutor for ProvisionExecutor {
                     .update(&updated)
                     .await
                     .map_err(|detail| format!("the record update failed: {detail}"))?;
+                self.fail_linked_lease(&record).await?;
                 return complete_failure(
                     operations,
                     &operation.id,
@@ -1365,6 +1393,81 @@ impl OperationExecutor for ProvisionExecutor {
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    async fn fail_linked_lease(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+    ) -> Result<(), String> {
+        let Some(lease_id) = record.lease_id.as_deref() else {
+            return Ok(());
+        };
+        if self
+            .leases
+            .fail_provisioning(lease_id, &record.id)
+            .await
+            .map_err(|detail| format!("the linked lease failure update failed: {detail}"))?
+        {
+            return Ok(());
+        }
+        let current = self
+            .leases
+            .get(lease_id)
+            .await
+            .map_err(|detail| format!("the linked lease is unreadable: {detail}"))?;
+        if matches!(
+            current.state,
+            fleet_core::LeaseState::Failed | fleet_core::LeaseState::Ready
+        ) && current.provision_id.as_deref() == Some(record.id.as_str())
+        {
+            Ok(())
+        } else {
+            Err("the linked lease changed before failure was recorded".to_owned())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for ProvisionExecutor {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let result = self.execute_linked(operations, operation).await;
+        let Err(detail) = result else {
+            return result;
+        };
+        let linked = operation
+            .payload_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|payload| {
+                Some((
+                    payload["leaseId"].as_str()?.to_owned(),
+                    payload["recordId"].as_str()?.to_owned(),
+                ))
+            });
+        if let Some((lease_id, record_id)) = linked {
+            match self.leases.fail_provisioning(&lease_id, &record_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let current = self.leases.get(&lease_id).await.map_err(|failure| {
+                        format!("{detail}; linked lease state is unreadable: {failure}")
+                    })?;
+                    if current.state != fleet_core::LeaseState::Ready
+                        && current.state != fleet_core::LeaseState::Failed
+                    {
+                        return Err(format!(
+                            "{detail}; linked lease could not be marked failed from {}",
+                            current.state.id()
+                        ));
+                    }
+                }
+                Err(failure) => {
+                    return Err(format!(
+                        "{detail}; linked lease failure could not be persisted: {failure}"
+                    ));
+                }
+            }
+        }
+        Err(detail)
     }
 }
 

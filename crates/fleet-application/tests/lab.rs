@@ -355,6 +355,21 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             && stored.provision_id.as_deref() == Some(provision_id))
     }
 
+    async fn fail_provisioning(&self, id: &str, provision_id: &str) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state == LeaseState::Provisioning
+            && stored.provision_id.as_deref() == Some(provision_id)
+        {
+            stored.state = LeaseState::Failed;
+            return Ok(true);
+        }
+        Ok(stored.state == LeaseState::Failed
+            && stored.provision_id.as_deref() == Some(provision_id))
+    }
+
     async fn claim_for_release(
         &self,
         id: &str,

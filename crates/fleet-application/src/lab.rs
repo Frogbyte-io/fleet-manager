@@ -301,6 +301,14 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         ready_at: i64,
         expires_at: i64,
     ) -> Result<bool, String>;
+    /// Marks the linked in-flight lease failed after its provision operation
+    /// terminates unsuccessfully. A lease that has already become ready is
+    /// not changed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn fail_provisioning(&self, id: &str, provision_id: &str) -> Result<bool, String>;
     /// Claims one lease for release, conditional on its observed state:
     /// the compare-and-set that keeps concurrent sweeps from
     /// double-claiming or winning over an extension after an expiry scan.
