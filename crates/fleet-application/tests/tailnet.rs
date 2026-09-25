@@ -677,6 +677,11 @@ async fn tailnet_import_reports_idempotent_replays_without_a_new_draft() {
     assert!(!inserted);
     assert_eq!(replayed.id, created.id);
     assert_eq!(fixture.onboarding.drafts.lock().unwrap().len(), 1);
+    assert_eq!(
+        fixture.source.calls(),
+        1,
+        "the replay skips a second import"
+    );
 }
 
 #[tokio::test]

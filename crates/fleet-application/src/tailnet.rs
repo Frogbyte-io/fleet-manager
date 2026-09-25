@@ -371,6 +371,7 @@ pub struct TailnetIntegration {
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
     events: Option<Arc<crate::events::EventHub>>,
+    credential_mutation: tokio::sync::Mutex<()>,
 }
 
 impl TailnetIntegration {
@@ -390,6 +391,7 @@ impl TailnetIntegration {
             machines,
             audit,
             events: None,
+            credential_mutation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -475,6 +477,7 @@ impl TailnetIntegration {
                 detail: "the client secret must be 1..=256 characters".to_owned(),
             });
         }
+        let mutation = self.credential_mutation.lock().await;
         let previous =
             self.credentials
                 .load()
@@ -506,6 +509,7 @@ impl TailnetIntegration {
                 detail,
             });
         }
+        drop(mutation);
         self.publish_changed();
         self.audit_event(principal, "tailscale_configured", Some(client_id))
             .await?;
@@ -546,6 +550,7 @@ impl TailnetIntegration {
             },
         )
         .map_err(TailnetUseCaseError::Denied)?;
+        let mutation = self.credential_mutation.lock().await;
         let previous =
             self.credentials
                 .load()
@@ -575,6 +580,7 @@ impl TailnetIntegration {
                 detail,
             });
         }
+        drop(mutation);
         self.publish_changed();
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;

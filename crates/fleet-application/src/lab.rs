@@ -692,6 +692,25 @@ impl Lab {
         principal: &ActingPrincipal,
         now: i64,
     ) -> Result<Vec<Lease>, LabUseCaseError> {
+        self.sweep_expired_with_progress(authorizer, principal, now, || {})
+            .await
+    }
+
+    /// Sweeps expired leases and calls `on_claim` immediately after each
+    /// durable transition. The callback lets adapters publish invalidations
+    /// even if a later lease in the same sweep fails.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure; prior successful claims remain
+    /// reported through `on_claim`.
+    pub async fn sweep_expired_with_progress(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        now: i64,
+        mut on_claim: impl FnMut(),
+    ) -> Result<Vec<Lease>, LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -737,6 +756,7 @@ impl Lab {
                 })?;
             if claimed_ok {
                 released.push(claimed);
+                on_claim();
             }
         }
         Ok(released)

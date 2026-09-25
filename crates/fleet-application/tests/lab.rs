@@ -1030,12 +1030,14 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
     leases.update(&ready).await.unwrap();
 
     // The sweeper claims it into releasing.
+    let mut published = 0;
     let released = lab
-        .sweep_expired(&AllowAll, &principal(), NOW + 4)
+        .sweep_expired_with_progress(&AllowAll, &principal(), NOW + 4, || published += 1)
         .await
         .unwrap();
     assert_eq!(released.len(), 1);
     assert_eq!(released[0].state, LeaseState::Releasing);
+    assert_eq!(published, 1);
 
     // A second sweep claims nothing: the compare-and-set holds.
     let again = lab

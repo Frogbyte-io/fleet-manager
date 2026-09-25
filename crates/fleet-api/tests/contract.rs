@@ -404,7 +404,7 @@ impl OperationPort for FakePort {
         let mut operations = self.operations.lock().unwrap();
         let Some(operation) = operations
             .iter_mut()
-            .find(|operation| operation.state == "pending")
+            .find(|operation| operation.state == "pending" && !operation.cancel_requested)
         else {
             return Ok(None);
         };
@@ -643,18 +643,18 @@ async fn operation_events_cover_acceptance_and_onboarding_completion() {
         )
         .await
         .unwrap();
-    let _ = claimable;
     assert_eq!(
         events.try_recv().unwrap().kind,
         fleet_application::events::EventKind::OperationChanged
     );
     let mut report = fleet_application::worker::TickReport::default();
-    state
+    let claimed = state
         .operations
         .claim_only("test-worker", 100, &mut report)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(claimed.id, claimable.id);
     assert_eq!(
         events.try_recv().unwrap().kind,
         fleet_application::events::EventKind::OperationChanged

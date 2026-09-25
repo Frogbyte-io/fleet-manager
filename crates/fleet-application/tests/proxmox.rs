@@ -1104,6 +1104,9 @@ async fn observe_guest_records_the_guest_facts_on_the_machine() {
     );
     let account = create_account(&proxmox).await;
     observe_and_confirm(&proxmox, &account.id).await;
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    let proxmox = proxmox.with_events(hub);
     let machine_id = register_machine(
         &machine_port,
         "fleet-test-01",
@@ -1116,6 +1119,20 @@ async fn observe_guest_records_the_guest_facts_on_the_machine() {
         .observe_guest(&AllowAll, &principal(), &account.id, 101, &machine_id, NOW)
         .await
         .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::MachineChanged
+    );
+    assert!(
+        proxmox
+            .observe_guest(&AllowAll, &principal(), &account.id, 999, &machine_id, NOW)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 
     let recorded = machine_port.recorded.lock().unwrap();
     let (_, facts) = recorded

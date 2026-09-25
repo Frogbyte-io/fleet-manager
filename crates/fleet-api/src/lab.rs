@@ -1007,18 +1007,18 @@ pub async fn sweep_lab_leases(
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let released = lab
-        .sweep_expired(
+        .sweep_expired_with_progress(
             state.authorizer.as_ref(),
             &principal,
             fleet_core::SystemClock::now_unix_millis(),
+            || {
+                state
+                    .events
+                    .publish(fleet_application::events::EventKind::LeaseChanged);
+            },
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
-    if !released.is_empty() {
-        state
-            .events
-            .publish(fleet_application::events::EventKind::LeaseChanged);
-    }
     let items: Vec<LeaseDto> = released.into_iter().map(Into::into).collect();
     Ok(Json(Page {
         page: PageInfo {

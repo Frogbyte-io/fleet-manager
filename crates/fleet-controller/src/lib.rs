@@ -76,6 +76,19 @@ pub struct NodeServices {
     pub events: Arc<fleet_application::events::EventHub>,
 }
 
+fn event_hub_for_services(
+    services: Option<&NodeServices>,
+) -> Arc<fleet_application::events::EventHub> {
+    services.map_or_else(
+        || {
+            Arc::new(fleet_application::events::EventHub::new(
+                fleet_application::events::DEFAULT_EVENT_CAPACITY,
+            ))
+        },
+        |services| services.events.clone(),
+    )
+}
+
 impl std::fmt::Debug for NodeServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeServices")
@@ -343,14 +356,7 @@ pub fn build_router(
         images,
         lab,
         false,
-        services.map_or_else(
-            || {
-                Arc::new(fleet_application::events::EventHub::new(
-                    fleet_application::events::DEFAULT_EVENT_CAPACITY,
-                ))
-            },
-            |services| services.events.clone(),
-        ),
+        event_hub_for_services(services),
     )
 }
 
@@ -645,14 +651,7 @@ pub async fn serve(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    let events = services.as_ref().map_or_else(
-        || {
-            Arc::new(fleet_application::events::EventHub::new(
-                fleet_application::events::DEFAULT_EVENT_CAPACITY,
-            ))
-        },
-        |services| services.events.clone(),
-    );
+    let events = event_hub_for_services(services.as_ref());
     serve_with_events(
         settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, events,
         shutdown,
@@ -704,14 +703,7 @@ pub async fn serve_on(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    let events = services.as_ref().map_or_else(
-        || {
-            Arc::new(fleet_application::events::EventHub::new(
-                fleet_application::events::DEFAULT_EVENT_CAPACITY,
-            ))
-        },
-        |services| services.events.clone(),
-    );
+    let events = event_hub_for_services(services.as_ref());
     serve_on_with_events(
         listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, lab,
         events, shutdown,
