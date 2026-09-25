@@ -683,6 +683,38 @@ async fn tailscale_listener_rejects_a_missing_identity_with_the_api_401_envelope
 }
 
 #[tokio::test]
+async fn tailscale_rejection_keeps_the_malformed_correlation_error_contract() {
+    let router = fleet_api::tailscale_serve_router(
+        Arc::new(ApiState::for_document()),
+        fleet_auth::TailscaleServePeer,
+    );
+    let mut request = Request::builder()
+        .uri(format!("{API_BASE_PATH}/system"))
+        .header(CORRELATION_ID_HEADER, "not-a-valid-correlation-id")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = router.oneshot(request).await.unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "malformed_correlation_id");
+    assert_eq!(
+        parts
+            .headers
+            .get(CORRELATION_ID_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        body["correlationId"]
+    );
+}
+
+#[tokio::test]
 async fn tailscale_guard_protects_non_api_routes_too() {
     let router = fleet_api::tailscale_serve_guard(
         axum::Router::new().route("/", axum::routing::get(|| async { "shell" })),

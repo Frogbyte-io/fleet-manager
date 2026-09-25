@@ -54,7 +54,7 @@ pub async fn correlate(mut request: Request, next: Next) -> Response {
     with_header(next.run(request).await, correlation_id)
 }
 
-fn malformed_correlation_id(assigned: CorrelationId) -> Response {
+pub(crate) fn malformed_correlation_id(assigned: CorrelationId) -> Response {
     let public = PublicError::new(
         ErrorCode::from_str("malformed_correlation_id")
             .expect("the literal is valid error code syntax"),
