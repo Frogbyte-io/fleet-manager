@@ -1,7 +1,7 @@
 //! Lab lease persistence, TTL extension, and the compare-and-set shared by
 //! extension requests and expiry sweeps.
 
-use fleet_application::lab::{LeasePort, NewLease};
+use fleet_application::lab::{LeasePort as _, NewLease};
 use fleet_core::{CleanupStrategy, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS};
 use fleet_storage_sqlite::{LeaseRepository, Store};
 
