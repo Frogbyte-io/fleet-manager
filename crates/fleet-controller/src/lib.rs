@@ -72,6 +72,8 @@ pub struct NodeServices {
     pub nodes: Arc<fleet_application::node::Nodes>,
     /// The node gateway: the WebSocket session registry and its route.
     pub gateway: Arc<gateway::GatewayService>,
+    /// The event hub shared by gateway transitions and the API stream.
+    pub events: Arc<fleet_application::events::EventHub>,
 }
 
 impl std::fmt::Debug for NodeServices {
@@ -79,6 +81,7 @@ impl std::fmt::Debug for NodeServices {
         f.debug_struct("NodeServices")
             .field("nodes", &self.nodes)
             .field("gateway", &self.gateway)
+            .field("events", &self.events)
             .finish()
     }
 }
@@ -118,9 +121,13 @@ pub fn compose_node_services_with_events(
             Arc::new(fleet_storage_sqlite::NodeRepository::new(db.clone())),
             Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
         )
-        .with_events(events),
+        .with_events(events.clone()),
     );
-    NodeServices { nodes, gateway }
+    NodeServices {
+        nodes,
+        gateway,
+        events,
+    }
 }
 
 /// Composes the Add Machine onboarding service over a store: the draft
@@ -336,9 +343,14 @@ pub fn build_router(
         images,
         lab,
         false,
-        Arc::new(fleet_application::events::EventHub::new(
-            fleet_application::events::DEFAULT_EVENT_CAPACITY,
-        )),
+        services.map_or_else(
+            || {
+                Arc::new(fleet_application::events::EventHub::new(
+                    fleet_application::events::DEFAULT_EVENT_CAPACITY,
+                ))
+            },
+            |services| services.events.clone(),
+        ),
     )
 }
 
@@ -633,19 +645,16 @@ pub async fn serve(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
+    let events = services.as_ref().map_or_else(
+        || {
+            Arc::new(fleet_application::events::EventHub::new(
+                fleet_application::events::DEFAULT_EVENT_CAPACITY,
+            ))
+        },
+        |services| services.events.clone(),
+    );
     serve_with_events(
-        settings,
-        db,
-        services,
-        onboarding,
-        tailnet,
-        projects,
-        proxmox,
-        images,
-        lab,
-        Arc::new(fleet_application::events::EventHub::new(
-            fleet_application::events::DEFAULT_EVENT_CAPACITY,
-        )),
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, events,
         shutdown,
     )
     .await
@@ -695,21 +704,17 @@ pub async fn serve_on(
     lab: Option<Arc<fleet_application::lab::Lab>>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
+    let events = services.as_ref().map_or_else(
+        || {
+            Arc::new(fleet_application::events::EventHub::new(
+                fleet_application::events::DEFAULT_EVENT_CAPACITY,
+            ))
+        },
+        |services| services.events.clone(),
+    );
     serve_on_with_events(
-        listener,
-        settings,
-        db,
-        services,
-        onboarding,
-        tailnet,
-        projects,
-        proxmox,
-        images,
-        lab,
-        Arc::new(fleet_application::events::EventHub::new(
-            fleet_application::events::DEFAULT_EVENT_CAPACITY,
-        )),
-        shutdown,
+        listener, settings, db, services, onboarding, tailnet, projects, proxmox, images, lab,
+        events, shutdown,
     )
     .await
 }

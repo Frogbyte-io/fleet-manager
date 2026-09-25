@@ -437,23 +437,28 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         // OAuth client lives there. Without it the surface serves the
         // standard "unavailable" envelope.
         let tailnet = secrets.as_ref().map(|secrets| {
-            std::sync::Arc::new(fleet_controller::tailnet_store::compose_tailnet(
-                secrets.clone(),
-                std::sync::Arc::new(fleet_provider_tailscale::TailscaleClient::new(
-                    std::sync::Arc::new(
-                        fleet_provider_tailscale::ReqwestTransport::new()
-                            .expect("the tailscale transport must build"),
-                    ),
-                )),
-                onboarding.clone(),
-                std::sync::Arc::new(fleet_application::machine::Machines::new(
-                    std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
-                        store.pool().clone(),
+            std::sync::Arc::new(
+                fleet_controller::tailnet_store::compose_tailnet_with_events(
+                    secrets.clone(),
+                    std::sync::Arc::new(fleet_provider_tailscale::TailscaleClient::new(
+                        std::sync::Arc::new(
+                            fleet_provider_tailscale::ReqwestTransport::new()
+                                .expect("the tailscale transport must build"),
+                        ),
+                    )),
+                    onboarding.clone(),
+                    std::sync::Arc::new(fleet_application::machine::Machines::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
                     )),
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-                )),
-                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-            ))
+                    Some(events.clone()),
+                ),
+            )
         });
         // The project surface composes over the store alone: identity and
         // observed checkouts need no secret material.
@@ -496,12 +501,15 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         let pve_transport: std::sync::Arc<dyn fleet_provider_proxmox::PveTransport> =
             std::sync::Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new());
         let proxmox = secrets.as_ref().map(|secrets| {
-            std::sync::Arc::new(fleet_controller::proxmox_store::compose_proxmox(
-                store.pool().clone(),
-                secrets.clone(),
-                pve_transport.clone(),
-                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-            ))
+            std::sync::Arc::new(
+                fleet_controller::proxmox_store::compose_proxmox_with_events(
+                    store.pool().clone(),
+                    secrets.clone(),
+                    pve_transport.clone(),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                    Some(events.clone()),
+                ),
+            )
         });
         let served = serve_with_events(
             settings,

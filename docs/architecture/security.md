@@ -57,6 +57,7 @@ Initial permission vocabulary includes:
 - `desired.read`, `desired.plan`, `desired.apply`, `desired.admin`
 - `secrets.use` (provider- and purpose-scoped), never a general `secrets.read` for agents
 - `audit.read`, `fleet.policy.admin`, `fleet.admin`
+- `events.read` (payload-free fleet change notifications)
 
 Future bindings can scope resources by ID, project, provider account, machine group/tag, environment classification, owner, TTL, and resource ceilings. Do not build an ad-hoc expression language. M1 implements the authorization port and explicit trusted-LAN policy; evaluate an embedded engine only when authenticated or multi-user deployment requires concrete policies.
 

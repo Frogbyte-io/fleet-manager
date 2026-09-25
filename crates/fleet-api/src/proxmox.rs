@@ -482,9 +482,6 @@ pub async fn create_proxmox_account(
         )
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::ProxmoxChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(account.into()))))
 }
 
@@ -535,9 +532,6 @@ pub async fn delete_proxmox_account(
         .delete(state.authorizer.as_ref(), &principal, &account_id)
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::ProxmoxChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -671,9 +665,6 @@ pub async fn confirm_proxmox_fingerprint(
         )
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::ProxmoxChanged);
     Ok(Json(Resource::new(account.into())))
 }
 
@@ -735,9 +726,6 @@ pub async fn discover_proxmox_cluster(
         )
         .await
         .map_err(|error| map_proxmox_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::ProxmoxChanged);
     Ok(Json(Resource::new(ProxmoxDiscoveryDto {
         account_id: discovery.account_id,
         pve_version: discovery.pve_version,

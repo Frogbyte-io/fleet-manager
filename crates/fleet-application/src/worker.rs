@@ -188,9 +188,7 @@ impl Operations {
                 .unwrap_or(false)
             {
                 report.recovered += 1;
-                if let Some(events) = &self.events {
-                    events.publish(crate::events::EventKind::OperationChanged);
-                }
+                self.publish_operation(&operation, true);
             }
         }
 

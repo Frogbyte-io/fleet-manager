@@ -504,6 +504,23 @@ impl Onboarding {
         principal: &ActingPrincipal,
         new: NewDraft,
     ) -> Result<DraftView, OnboardingUseCaseError> {
+        self.create_draft_with_outcome(authorizer, principal, new)
+            .await
+            .map(|(draft, _created)| draft)
+    }
+
+    /// Creates a draft and reports whether this call inserted it. This lets
+    /// adapters avoid publishing a change for an idempotent replay.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a malformed or conflicting draft.
+    pub async fn create_draft_with_outcome(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        new: NewDraft,
+    ) -> Result<(DraftView, bool), OnboardingUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -525,7 +542,7 @@ impl Onboarding {
                 .map_err(|failure| map_port("find_by_idempotency_key", failure))?
         {
             let sensitive = self.may_read_sensitive(authorizer, principal, &existing.id);
-            return Ok(assemble_view(existing, sensitive, Vec::new()));
+            return Ok((assemble_view(existing, sensitive, Vec::new()), false));
         }
 
         let draft = self
@@ -541,7 +558,7 @@ impl Onboarding {
         )
         .await?;
         let sensitive = self.may_read_sensitive(authorizer, principal, &draft.id);
-        Ok(assemble_view(draft, sensitive, Vec::new()))
+        Ok((assemble_view(draft, sensitive, Vec::new()), true))
     }
 
     /// Reads one draft as the operator-facing view, including the derived

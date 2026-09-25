@@ -157,6 +157,7 @@ async fn audit_api_forwards_filters_and_returns_a_metadata_only_page() {
     let (parts, body) = into_parts_json(response).await;
 
     assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
     assert_eq!(
         body["items"][0]["metadata"],
         serde_json::json!({"event": "machine_updated", "invalidatedEnrollmentCount": "2"})
@@ -1485,6 +1486,7 @@ impl fleet_application::lab::ImagePinValidator for NoPromotedVersions {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn lab_lease_extension_returns_the_updated_deadline() {
     use fleet_application::lab::{Lab, LeasePort, NewLease};
     use fleet_core::{CleanupStrategy, LeaseState};
@@ -1517,13 +1519,16 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     let lab = Arc::new(Lab::new(
         repository.clone(),
         repository,
-        leases,
+        leases.clone(),
         Arc::new(NoPromotedVersions),
         Arc::new(FakeAudit),
     ));
     let base = test_state().0;
     let mut state = (*base).clone();
     state.lab = Some(lab);
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    state.events = Arc::new(fleet_application::events::Events::new(hub));
     let router = principal_router(Arc::new(state));
     let request = Request::builder()
         .method(Method::POST)
@@ -1539,6 +1544,66 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     assert_eq!(
         body["data"]["maxLifetimeAt"],
         now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS
+    );
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::LeaseChanged
+    );
+
+    let release = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/{}/release", lease.id))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"keep":false}"#))
+        .unwrap();
+    let (parts, body) = call_via(&router, release).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::LeaseChanged
+    );
+
+    let empty_sweep = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/sweep"))
+        .body(Body::empty())
+        .unwrap();
+    let (parts, body) = call_via(&router, empty_sweep).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    let mut expired = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "expired sweep test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            now - 3_700_000,
+        )
+        .await
+        .unwrap();
+    expired.state = LeaseState::Ready;
+    expired.ready_at = Some(now - 3_700_000);
+    expired.expires_at = Some(now - 1);
+    leases.update(&expired).await.unwrap();
+    let nonempty_sweep = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/sweep"))
+        .body(Body::empty())
+        .unwrap();
+    let (parts, body) = call_via(&router, nonempty_sweep).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::LeaseChanged
     );
 
     let malformed = Request::builder()

@@ -89,8 +89,8 @@ impl EventHub {
     /// Creates a hub with a fixed replay and live-delivery capacity.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
-        // Tokio broadcast channels have a minimum effective capacity of two.
-        // Keep replay and live bounds aligned with that actual capacity.
+        // Keep a minimally useful replay window and live ring. A one-event
+        // window would turn an ordinary reconnect into a gap immediately.
         let capacity = capacity.max(2);
         let (sender, _) = broadcast::channel(capacity);
         let mut ids = fleet_core::UuidV7Generator;
@@ -230,6 +230,21 @@ impl Events {
         principal_id: &str,
         last_event_id: Option<&str>,
     ) -> Result<EventSubscription, crate::authz::Decision> {
+        self.authorize(authorizer, principal_id)?;
+        Ok(self.hub.subscribe(last_event_id))
+    }
+
+    /// Rechecks a connected subscriber's permission before delivering an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the authorization denial when this principal lacks
+    /// `events.read`.
+    pub fn authorize(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+    ) -> Result<(), crate::authz::Decision> {
         crate::authz::authorize(
             authorizer,
             crate::authz::AccessRequest {
@@ -237,8 +252,8 @@ impl Events {
                 action: crate::authz::Permission::EventsRead,
                 resource: None,
             },
-        )?;
-        Ok(self.hub.subscribe(last_event_id))
+        )
+        .map(|_| ())
     }
 }
 

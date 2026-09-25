@@ -554,7 +554,8 @@ impl Operations {
                     Some(crate::events::EventKind::TailnetChanged)
                 }
                 kind if kind.starts_with("onboarding.")
-                    || kind.starts_with("machine.onboarding.") =>
+                    || kind.starts_with("machine.onboarding.")
+                    || kind.starts_with("machine.onboard.") =>
                 {
                     Some(crate::events::EventKind::OnboardingChanged)
                 }

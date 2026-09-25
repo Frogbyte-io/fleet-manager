@@ -2294,10 +2294,13 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
 /// Follows the controller's bounded SSE stream, reconnecting from the last
 /// cursor after transport failures. Event records contain only cursor and type.
 fn stream_events(invocation: &Invocation) -> Result<(), CliError> {
-    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::io::{BufReader, Write as _};
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(None)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // The controller emits a keep-alive every 15 seconds. A bounded
+        // request lifetime lets a silent half-open connection reconnect.
+        .timeout(Some(std::time::Duration::from_secs(45)))
         .build()
         .map_err(|error| CliError {
             message: format!("cannot build an HTTP client: {error}"),
@@ -2305,75 +2308,104 @@ fn stream_events(invocation: &Invocation) -> Result<(), CliError> {
     let mut last_event_id: Option<String> = None;
     let mut retry = std::time::Duration::from_secs(1);
     loop {
-        let mut request = client
-            .get(format!("{}/api/v1/events", invocation.url))
-            .header("accept", "text/event-stream")
-            .header("x-correlation-id", uuid::Uuid::now_v7().to_string());
-        if let Some(cursor) = &last_event_id {
-            request = request.header("last-event-id", cursor);
-        }
-        let response = match request.send() {
-            Ok(response) if response.status().is_success() => response,
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().unwrap_or_default();
-                let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let response =
+            match event_stream_request(&client, &invocation.url, last_event_id.as_deref()) {
+                Ok(response) if response.status().is_success() => response,
+                Ok(response) => return Err(event_stream_http_error(response)),
+                Err(error) => {
+                    eprintln!("fleetctl: event stream disconnected: {error}; reconnecting");
+                    std::thread::sleep(retry);
+                    retry = (retry * 2).min(std::time::Duration::from_secs(10));
+                    continue;
+                }
+            };
+        retry = std::time::Duration::from_secs(1);
+        let mut reader = BufReader::new(response);
+        read_sse_events(&mut reader, |event_type, event_id| {
+            if let Some(id) = event_id {
+                last_event_id = Some(id.to_owned());
+            }
+            if event_type == "gap" {
                 return Err(CliError {
                     message: format!(
-                        "the controller refused the event stream ({}, {}): {}",
-                        status.as_u16(),
-                        body["code"].as_str().unwrap_or("unknown"),
-                        body["message"].as_str().unwrap_or("no detail")
+                        "the event stream replay window was exceeded at {}",
+                        last_event_id.as_deref().unwrap_or("unknown cursor")
                     ),
                 });
             }
-            Err(error) => {
-                eprintln!("fleetctl: event stream disconnected: {error}; reconnecting");
-                std::thread::sleep(retry);
-                retry = (retry * 2).min(std::time::Duration::from_secs(10));
-                continue;
-            }
-        };
-        retry = std::time::Duration::from_secs(1);
-        let mut reader = BufReader::new(response);
-        let mut line = String::new();
-        let mut event_type = String::from("message");
-        let mut event_id = None;
-        let mut has_data = false;
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                if has_data || event_id.is_some() {
-                    if let Some(id) = event_id.take() {
-                        last_event_id = Some(id);
-                    }
-                    print_stream_event(invocation.output, &event_type, last_event_id.as_deref())?;
-                    std::io::stdout().flush().map_err(|error| CliError {
-                        message: format!("cannot write event output: {error}"),
-                    })?;
-                }
-                event_type.clear();
-                event_type.push_str("message");
-                has_data = false;
-            } else if let Some(value) = line.strip_prefix("event:") {
-                value.trim_start().clone_into(&mut event_type);
-            } else if let Some(value) = line.strip_prefix("id:") {
-                let id = value.trim_start();
-                if !id.contains('\0') && !id.is_empty() {
-                    event_id = Some(id.to_owned());
-                }
-            } else if line.starts_with("data:") {
-                has_data = true;
-            }
-        }
+            print_stream_event(invocation.output, event_type, last_event_id.as_deref())?;
+            std::io::stdout().flush().map_err(|error| CliError {
+                message: format!("cannot write event output: {error}"),
+            })
+        })?;
         eprintln!("fleetctl: event stream closed; reconnecting");
         std::thread::sleep(retry);
         retry = (retry * 2).min(std::time::Duration::from_secs(10));
+    }
+}
+
+fn event_stream_request(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    last_event_id: Option<&str>,
+) -> Result<reqwest::blocking::Response, reqwest::Error> {
+    let mut request = client
+        .get(format!("{base_url}/api/v1/events"))
+        .header("accept", "text/event-stream")
+        .header("x-correlation-id", uuid::Uuid::now_v7().to_string());
+    if let Some(cursor) = last_event_id {
+        request = request.header("last-event-id", cursor);
+    }
+    request.send()
+}
+
+fn event_stream_http_error(response: reqwest::blocking::Response) -> CliError {
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    CliError {
+        message: format!(
+            "the controller refused the event stream ({}, {}): {}",
+            status.as_u16(),
+            body["code"].as_str().unwrap_or("unknown"),
+            body["message"].as_str().unwrap_or("no detail")
+        ),
+    }
+}
+
+fn read_sse_events(
+    reader: &mut impl std::io::BufRead,
+    mut dispatch: impl FnMut(&str, Option<&str>) -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    let mut line = String::new();
+    let mut event_type = String::from("message");
+    let mut event_id = None;
+    let mut has_data = false;
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return Ok(()),
+            Ok(_) => {}
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            if has_data || event_id.is_some() {
+                dispatch(&event_type, event_id.as_deref())?;
+            }
+            event_type.clear();
+            event_type.push_str("message");
+            event_id = None;
+            has_data = false;
+        } else if let Some(value) = line.strip_prefix("event:") {
+            value.trim_start().clone_into(&mut event_type);
+        } else if let Some(value) = line.strip_prefix("id:") {
+            let id = value.trim_start();
+            if !id.contains('\0') && !id.is_empty() {
+                event_id = Some(id.to_owned());
+            }
+        } else if line.starts_with("data:") {
+            has_data = true;
+        }
     }
 }
 
@@ -2382,8 +2414,15 @@ fn print_stream_event(
     event_type: &str,
     event_id: Option<&str>,
 ) -> Result<(), CliError> {
-    println!("{}", render_stream_event(output, event_type, event_id)?);
-    Ok(())
+    use std::io::Write as _;
+    writeln!(
+        std::io::stdout().lock(),
+        "{}",
+        render_stream_event(output, event_type, event_id)?
+    )
+    .map_err(|error| CliError {
+        message: format!("cannot write event output: {error}"),
+    })
 }
 
 fn render_stream_event(
@@ -2405,7 +2444,39 @@ fn render_stream_event(
 
 #[cfg(test)]
 mod event_output_tests {
-    use super::{Output, render_stream_event};
+    use super::{
+        Output, event_stream_http_error, event_stream_request, read_sse_events, render_stream_event,
+    };
+    use std::io::{BufRead as _, Write as _};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn fake_controller(status: u16, body: &'static str) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            request
+        });
+        (format!("http://{address}"), handle)
+    }
 
     #[test]
     fn fleet_events_json_output_snapshot_contains_only_type_and_cursor() {
@@ -2413,6 +2484,67 @@ mod event_output_tests {
             render_stream_event(Output::Json, "machine.changed", Some("epoch:17")).unwrap(),
             r#"{"id":"epoch:17","type":"machine.changed"}"#
         );
+    }
+
+    #[test]
+    fn fake_controller_stream_dispatches_events_and_resumes_from_last_id() {
+        let client = reqwest::blocking::Client::builder().build().unwrap();
+        let (url, server) =
+            fake_controller(200, "event: machine.changed\nid: epoch:1\ndata:  \n\n");
+        let response = event_stream_request(&client, &url, None).unwrap();
+        assert!(response.status().is_success());
+        let request = server.join().unwrap();
+        assert!(request.contains("GET /api/v1/events HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("accept: text/event-stream")
+        );
+        let mut frames = Vec::new();
+        read_sse_events(&mut std::io::BufReader::new(response), |kind, id| {
+            frames.push((kind.to_owned(), id.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            frames,
+            [("machine.changed".to_owned(), Some("epoch:1".to_owned()))]
+        );
+
+        let (url, server) = fake_controller(200, "event: gap\nid: epoch:2\ndata:  \n\n");
+        let response = event_stream_request(&client, &url, Some("epoch:1")).unwrap();
+        assert!(response.status().is_success());
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("last-event-id: epoch:1")
+        );
+        let mut frames = Vec::new();
+        read_sse_events(&mut std::io::BufReader::new(response), |kind, id| {
+            if kind == "gap" {
+                return Err(super::CliError {
+                    message: format!("replay gap at {}", id.unwrap_or("unknown")),
+                });
+            }
+            frames.push(kind.to_owned());
+            Ok(())
+        })
+        .unwrap_err();
+
+        let (url, server) =
+            fake_controller(403, r#"{"code":"denied","message":"events.read required"}"#);
+        let response = event_stream_request(&client, &url, None).unwrap();
+        assert!(
+            server
+                .join()
+                .unwrap()
+                .contains("GET /api/v1/events HTTP/1.1")
+        );
+        let error = event_stream_http_error(response);
+        assert!(error.message.contains("403, denied"));
+        assert!(error.message.contains("events.read required"));
     }
 }
 

@@ -304,39 +304,60 @@ pub async fn stream_fleet_events(
         .subscribe(state.authorizer.as_ref(), &principal.id, last_event_id)
         .map_err(|denial| crate::machines::denied_error(denial, correlation_id))?;
     let events = state.events.clone();
+    let authorizer = state.authorizer.clone();
+    let principal_id = principal.id;
     let stream = unfold(
-        (subscription, events, false),
-        |(mut subscription, events, close_after_gap)| async move {
+        (subscription, events, authorizer, principal_id, false),
+        |(mut subscription, events, authorizer, principal_id, close_after_gap)| async move {
             if close_after_gap {
+                return None;
+            }
+            if events.authorize(&*authorizer, &principal_id).is_err() {
                 return None;
             }
             if let Some(gap_id) = subscription.gap_id.take() {
                 // EventSource ignores events without a data field; one
                 // whitespace-only value dispatches type/id without a payload.
                 let event = SseEvent::default().event("gap").id(gap_id).data(" ");
-                return Some((Ok(event), (subscription, events, true)));
+                return Some((
+                    Ok(event),
+                    (subscription, events, authorizer, principal_id, true),
+                ));
             }
             if let Some(event) = subscription.replay.pop_front() {
                 let event = SseEvent::default()
                     .event(event.kind.as_str())
                     .id(event.id)
                     .data(" ");
-                return Some((Ok(event), (subscription, events, false)));
+                return Some((
+                    Ok(event),
+                    (subscription, events, authorizer, principal_id, false),
+                ));
             }
             match subscription.receiver.recv().await {
-                Ok(event) => Some((
-                    Ok(SseEvent::default()
-                        .event(event.kind.as_str())
-                        .id(event.id)
-                        .data(" ")),
-                    (subscription, events, false),
-                )),
+                Ok(event) => {
+                    // Recheck after the await as policy may have changed
+                    // while this subscriber was idle.
+                    if events.authorize(&*authorizer, &principal_id).is_err() {
+                        return None;
+                    }
+                    Some((
+                        Ok(SseEvent::default()
+                            .event(event.kind.as_str())
+                            .id(event.id)
+                            .data(" ")),
+                        (subscription, events, authorizer, principal_id, false),
+                    ))
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let event = SseEvent::default()
                         .event("gap")
                         .id(events.current_id())
                         .data(" ");
-                    Some((Ok(event), (subscription, events, true)))
+                    Some((
+                        Ok(event),
+                        (subscription, events, authorizer, principal_id, true),
+                    ))
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             }

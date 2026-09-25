@@ -370,6 +370,7 @@ pub struct TailnetIntegration {
     onboarding: Arc<Onboarding>,
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
+    events: Option<Arc<crate::events::EventHub>>,
 }
 
 impl TailnetIntegration {
@@ -388,6 +389,21 @@ impl TailnetIntegration {
             onboarding,
             machines,
             audit,
+            events: None,
+        }
+    }
+
+    /// Attaches the process event hub so notifications follow durable
+    /// credential-store commits even if completion auditing fails.
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<crate::events::EventHub>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    fn publish_changed(&self) {
+        if let Some(events) = &self.events {
+            events.publish(crate::events::EventKind::TailnetChanged);
         }
     }
 
@@ -466,6 +482,7 @@ impl TailnetIntegration {
                 context: "credentials",
                 detail,
             })?;
+        self.publish_changed();
         self.audit_event(principal, "tailscale_configured", Some(client_id))
             .await?;
         // The mutator earned this decision already; re-asking tailscale.read
@@ -512,6 +529,7 @@ impl TailnetIntegration {
                 context: "credentials",
                 detail,
             })?;
+        self.publish_changed();
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;
         let stored =

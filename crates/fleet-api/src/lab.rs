@@ -653,6 +653,9 @@ pub async fn start_lab_lease_provision(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     let payload = serde_json::json!({
         "recordId": provision.id,
         "leaseId": lease_id,
@@ -676,9 +679,6 @@ pub async fn start_lab_lease_provision(
         )
         .await
         .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(operation.into()))))
 }
 
@@ -1014,6 +1014,11 @@ pub async fn sweep_lab_leases(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    if !released.is_empty() {
+        state
+            .events
+            .publish(fleet_application::events::EventKind::LeaseChanged);
+    }
     if !released.is_empty() {
         state
             .events
