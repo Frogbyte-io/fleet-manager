@@ -32,6 +32,7 @@ async fn a_spoofed_identity_header_is_audited_without_its_value() {
     let mut request = Request::builder()
         .uri("/api/v1/system")
         .header("tailscale-user-login", "spoofed-person@example.invalid")
+        .header("x-correlation-id", "00000000-0000-7000-8000-000000000001")
         .body(Body::empty())
         .unwrap();
     request.extensions_mut().insert(ConnectInfo(
@@ -39,9 +40,23 @@ async fn a_spoofed_identity_header_is_audited_without_its_value() {
     ));
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-correlation-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "00000000-0000-7000-8000-000000000001"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let system: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(system["currentPrincipal"], "anonymous-lan-admin");
 
     let row = sqlx::query(
-        "SELECT actor, action, allowed, metadata_json FROM audit_events \
+        "SELECT actor, action, allowed, correlation_id, metadata_json FROM audit_events \
          WHERE action = 'auth.identity_header_ignored'",
     )
     .fetch_one(store.pool())
@@ -49,6 +64,10 @@ async fn a_spoofed_identity_header_is_audited_without_its_value() {
     .unwrap();
     assert_eq!(row.get::<String, _>("actor"), "anonymous-lan-admin");
     assert!(!row.get::<bool, _>("allowed"));
+    assert_eq!(
+        row.get::<String, _>("correlation_id"),
+        "00000000-0000-7000-8000-000000000001"
+    );
     let metadata = row.get::<String, _>("metadata_json");
     assert!(metadata.contains("tailscale-user-login"));
     assert!(metadata.contains(r#""peerLoopback":false"#));

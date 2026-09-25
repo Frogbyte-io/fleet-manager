@@ -23,6 +23,14 @@ mod value;
 pub use difference::{DifferenceSet, DifferenceState, FieldDifference, compare_field};
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
+
+/// Tailscale Serve identity header names that may be recorded as audit evidence.
+/// Values from these headers are never part of audit metadata.
+pub const TAILSCALE_IDENTITY_HEADER_NAMES: [&str; 3] = [
+    "tailscale-user-login",
+    "tailscale-user-name",
+    "tailscale-user-profile-pic",
+];
 pub use image::{
     MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe,
 };

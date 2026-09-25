@@ -11,8 +11,12 @@
 //!
 //! 1. Built-in defaults — deliberately the safe ones: loopback listener.
 //! 2. The configuration file, selected with `--config <path>` (TOML).
-//! 3. Environment variables (`FLEET_LISTEN`, `FLEET_WEB_DIST`,
-//!    `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`).
+//! 3. Environment variables (`FLEET_LISTEN`, `FLEET_TAILSCALE_SERVE_LISTEN`,
+//!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`).
+//!
+//! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
+//! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
+//! addresses fail configuration loading with [`ConfigError::TailscaleServeListenInvalid`].
 //!
 //! There is no default master-key path: an unset key source is a valid
 //! pre-secrets state that must degrade loudly rather than point at a file

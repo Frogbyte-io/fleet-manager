@@ -16,5 +16,6 @@ The [2026-08-27 master-plan scope revision](../PLAN.md#confirmed-2026-08-27-prod
 | [0006](0006-rust-vue-monorepo-migration.md) | Rust/Vue monorepo with staged legacy migration | Accepted | 2026-08-25 | — |
 | [0007](0007-sqlite-single-controller.md) | SQLite and one active controller initially | Accepted | 2026-08-25 | — |
 | [0008](0008-durable-operations-and-lab-leases.md) | Durable operations and explicit Lab lease/reservation state machines | Accepted | 2026-08-25 | FM-S03 |
+| [0010](0010-tailscale-serve-identity.md) | Optional Tailscale Serve request principal | Accepted | 2026-09-25 | — |
 
-FM-S02 (authenticated authorization engine) is not scoped by an existing ADR. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. FM-S02 is expected to produce ADR-0009 before that engine lands.
+FM-S02 (authenticated authorization engine) is not scoped by an existing ADR. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. FM-S02 is expected to produce ADR-0011 before that engine lands.

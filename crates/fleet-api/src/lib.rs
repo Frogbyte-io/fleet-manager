@@ -310,13 +310,18 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
 
 /// Builds the API router over the given state.
 pub fn router(state: Arc<operations::ApiState>) -> Router {
-    unwrapped_router(state).layer(middleware::from_fn(correlation::correlate))
+    correlate_router(unwrapped_router(state))
 }
 
 /// Builds the API routes without correlation middleware, for a controller
 /// composition root that applies a wider request gate and correlation layer.
 pub fn unwrapped_router(state: Arc<operations::ApiState>) -> Router {
     api(state).0
+}
+
+/// Applies the API correlation contract to a wider controller router.
+pub fn correlate_router(router: Router) -> Router {
+    router.layer(middleware::from_fn(correlation::correlate))
 }
 
 /// Builds the API router for a dedicated Tailscale Serve listener. A request

@@ -55,9 +55,9 @@ pub const PROXY_EVIDENCE_HEADERS: [HeaderName; 4] = [
 /// Tailscale Serve identity headers. Only header names are retained as
 /// evidence; caller-supplied values are never copied into audit metadata.
 pub const TAILSCALE_IDENTITY_HEADERS: [HeaderName; 3] = [
-    HeaderName::from_static("tailscale-user-login"),
-    HeaderName::from_static("tailscale-user-name"),
-    HeaderName::from_static("tailscale-user-profile-pic"),
+    HeaderName::from_static(fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES[0]),
+    HeaderName::from_static(fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES[1]),
+    HeaderName::from_static(fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES[2]),
 ];
 
 /// The deployment's trust mode.

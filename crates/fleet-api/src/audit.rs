@@ -132,17 +132,13 @@ fn safe_metadata_entry(key: &str, value: &serde_json::Value) -> bool {
         return value.is_boolean();
     }
     if key == "identityHeaderNames" {
-        const IDENTITY_HEADERS: [&str; 3] = [
-            "tailscale-user-login",
-            "tailscale-user-name",
-            "tailscale-user-profile-pic",
-        ];
         return value.as_array().is_some_and(|names| {
             !names.is_empty()
-                && names.len() <= IDENTITY_HEADERS.len()
+                && names.len() <= fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES.len()
                 && names.iter().all(|name| {
-                    name.as_str()
-                        .is_some_and(|name| IDENTITY_HEADERS.contains(&name))
+                    name.as_str().is_some_and(|name| {
+                        fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES.contains(&name)
+                    })
                 })
         });
     }

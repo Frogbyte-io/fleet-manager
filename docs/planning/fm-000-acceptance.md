@@ -27,7 +27,7 @@ Consequences:
 
 ADRs 0001 through 0008 are `Accepted` as written, dated 2026-08-25. No ADR was modified as a condition of acceptance.
 
-Acceptance does not close the implementation questions inside them. The eight unresolved choices are now named spikes in [spikes.md](spikes.md) and must be created as `type:spike` issues under their owning milestones. FM-S02 is expected to produce ADR-0009 because no existing ADR scopes the authorization engine choice.
+Acceptance does not close the implementation questions inside them. The eight unresolved choices are now named spikes in [spikes.md](spikes.md) and must be created as `type:spike` issues under their owning milestones. FM-S02 is expected to produce ADR-0011 because no existing ADR scopes the authorization engine choice.
 
 Consequences:
 

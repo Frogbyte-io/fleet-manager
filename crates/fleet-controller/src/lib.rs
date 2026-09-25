@@ -352,18 +352,7 @@ fn build_router_for_caller(
         images.cloned(),
         lab.cloned(),
     ));
-    let mut api_router = if tailscale_identity {
-        fleet_api::unwrapped_router(api_state.clone())
-    } else {
-        fleet_api::router(api_state.clone())
-            .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
-    };
-    if let Some(db) = audit_db {
-        api_router = api_router.layer(middleware::from_fn_with_state(
-            db,
-            audit_untrusted_tailscale_identity_headers,
-        ));
-    }
+    let api_router = fleet_api::unwrapped_router(api_state.clone());
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
         .ok()
@@ -392,8 +381,19 @@ fn build_router_for_caller(
         router = router.nest("/api/node/v1", node_routes);
     }
     router = router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
+    if let Some(db) = audit_db {
+        router = router.layer(middleware::from_fn_with_state(
+            db,
+            audit_untrusted_tailscale_identity_headers,
+        ));
+    }
     if tailscale_identity {
         router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
+    } else {
+        // Correlation and caller resolution cover every direct-listener route,
+        // including static, health, downloads, and the node surface.
+        router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+        router = fleet_api::correlate_router(router);
     }
     router
 }
@@ -415,10 +415,14 @@ async fn audit_untrusted_tailscale_identity_headers(
         .filter(|header| request.headers().contains_key(*header))
         .map(|header| header.as_str().to_owned())
         .collect::<Vec<_>>();
+    let correlation_id = request
+        .extensions()
+        .get::<fleet_core::CorrelationId>()
+        .map(ToString::to_string);
     if !peer_is_loopback
         && !names.is_empty()
         && let Err(error) = fleet_storage_sqlite::AuditLedger::new(&db)
-            .record_ignored_tailscale_identity(&names, false)
+            .record_ignored_tailscale_identity(&names, false, correlation_id.as_deref())
             .await
     {
         eprintln!("could not persist ignored Tailscale identity headers: {error}");

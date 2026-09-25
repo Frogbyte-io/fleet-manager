@@ -665,15 +665,17 @@ async fn tailscale_listener_rejects_a_missing_identity_with_the_api_401_envelope
         Arc::new(ApiState::for_document()),
         fleet_auth::TailscaleServePeer,
     );
-    let response = router
-        .oneshot(
-            Request::builder()
-                .uri(format!("{API_BASE_PATH}/system"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let mut request = Request::builder()
+        .uri(format!("{API_BASE_PATH}/system"))
+        .body(Body::empty())
         .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = router.oneshot(request).await.unwrap();
     let (parts, body) = into_parts_json(response).await;
     assert_eq!(parts.status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["code"], "authentication_required");

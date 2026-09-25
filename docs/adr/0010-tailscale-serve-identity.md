@@ -1,4 +1,4 @@
-# ADR 0009: Tailscale Serve identity as an optional request principal
+# ADR 0010: Tailscale Serve identity as an optional request principal
 
 Status: Accepted
 

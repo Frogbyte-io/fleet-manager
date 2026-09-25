@@ -54,7 +54,8 @@ listeners bind to host loopback in this override; the existing bridged
 `compose.yaml` intentionally cannot use this mode because the proxy would
 arrive from a container bridge address instead of loopback. Host networking is
 an explicit change to the default deployment posture and is supported only
-where Docker shares the Linux host network namespace.
+where Docker shares the Linux host network namespace. This override uses the
+Compose `!reset` merge tag and requires Docker Compose v2.24.0 or newer.
 
 Identity mode keeps the regular controller listener loopback-only, so the
 existing node enrollment and gateway routes are host-local too. Remote
