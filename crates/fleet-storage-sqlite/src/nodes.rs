@@ -16,8 +16,8 @@ use uuid::Uuid;
 use fleet_application::node::{
     ChallengePurpose, EnrollClaim, EnrolledNode, EnrollmentTokenRecord, EnrollmentTokenView,
     GatewayState, NewChallenge, NewEnrollmentToken, NodeChallenge, NodeCredential, NodeIdentity,
-    NodePort, NodePortError, NodeSessionIssued, NodeStatus, NodeView, RotateClaim, RotationOutcome,
-    SessionClaim, SessionValidity, TokenFacts,
+    NodePort, NodePortError, NodeSessionIssued, NodeStatus, NodeView, RevokeClaim, RotateClaim,
+    RotationOutcome, SessionClaim, SessionValidity, TokenFacts,
 };
 
 use crate::audit::append_intent_tx;
@@ -483,38 +483,60 @@ impl NodePort for NodeRepository {
         })
     }
 
-    async fn revoke_identity(&self, machine_id: &str) -> Result<(), NodePortError> {
+    async fn revoke_identity(&self, claim: &RevokeClaim) -> Result<u64, NodePortError> {
         let mut tx = self.begin("revoke").await?;
         let updated = sqlx::query(
             "UPDATE node_identities SET status = 'revoked' WHERE machine_id = ?1 AND status = 'active'",
         )
-        .bind(machine_id)
+        .bind(&claim.machine_id)
         .execute(&mut *tx)
         .await
         .map_err(|error| backend_tx("revoke_identity", &error))?;
         if updated.rows_affected() == 0 {
             return Err(NodePortError::NotFound {
-                what: format!("active node identity of machine {machine_id:?}"),
+                what: format!("active node identity of machine {:?}", claim.machine_id),
             });
         }
         sqlx::query(
             "UPDATE node_credentials SET status = 'revoked' WHERE machine_id = ?1 AND status = 'active'",
         )
-        .bind(machine_id)
+        .bind(&claim.machine_id)
         .execute(&mut *tx)
         .await
         .map_err(|error| backend_tx("revoke_credentials", &error))?;
         sqlx::query(
             "UPDATE node_sessions SET status = 'revoked' WHERE machine_id = ?1 AND status = 'active'",
         )
-        .bind(machine_id)
+        .bind(&claim.machine_id)
         .execute(&mut *tx)
         .await
         .map_err(|error| backend_tx("revoke_sessions", &error))?;
+        let invalidated = sqlx::query(
+            "UPDATE node_enrollment_tokens SET status = 'consumed', consumed_at = ?2 \
+             WHERE machine_id = ?1 AND status = 'pending'",
+        )
+        .bind(&claim.machine_id)
+        .bind(claim.now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| backend_tx("revoke_enrollment_tokens", &error))?
+        .rows_affected();
+        let mut audit = claim.audit.clone();
+        audit
+            .metadata
+            .insert("invalidatedEnrollmentCount", &invalidated.to_string())
+            .map_err(|error| NodePortError::Backend {
+                detail: format!("revoke audit metadata: {error}"),
+            })?;
+        append_intent_tx(&mut tx, &audit)
+            .await
+            .map_err(|detail| NodePortError::Backend {
+                detail: format!("revoke audit: {detail}"),
+            })?;
         tx.commit()
             .await
             .map_err(|error| backend_tx("revoke", &error))?;
-        Ok(())
+        Ok(invalidated)
     }
 
     async fn node_view(

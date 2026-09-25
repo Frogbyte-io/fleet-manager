@@ -169,7 +169,9 @@ fn safe_metadata_entry(key: &str, value: &serde_json::Value) -> bool {
                         || matches!(byte, b'_' | b'.' | b'-')
                 })
         }
-        "attempt" | "vmid" => !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+        "attempt" | "vmid" | "invalidatedEnrollmentCount" => {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        }
         // Names, purposes, notes, hostnames, remotes, and opaque ids are
         // deliberately omitted because they can be caller-controlled text.
         _ => false,
@@ -216,6 +218,25 @@ mod tests {
         ));
 
         assert!(dto.metadata.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dto_exposes_only_decimal_invalidated_enrollment_counts() {
+        let dto = AuditEventDto::from(event(
+            r#"{"event":"node_identity_revoked","invalidatedEnrollmentCount":"2"}"#,
+        ));
+        assert_eq!(dto.metadata["invalidatedEnrollmentCount"], "2");
+
+        let malformed = AuditEventDto::from(event(
+            r#"{"event":"node_identity_revoked","invalidatedEnrollmentCount":"2 tokens"}"#,
+        ));
+        assert_eq!(malformed.metadata["event"], "node_identity_revoked");
+        assert!(
+            malformed
+                .metadata
+                .get("invalidatedEnrollmentCount")
+                .is_none()
+        );
     }
 
     #[test]
