@@ -729,10 +729,16 @@ impl fleet_application::tailnet::TailnetCredentialStore for ContractTailnetCrede
     }
 }
 
-#[tokio::test]
-async fn onboarding_events_cover_create_replay_and_machine_add() {
+struct OnboardingTestApp {
+    _dir: tempfile::TempDir,
+    drafts: Arc<fleet_storage_sqlite::OnboardingRepository>,
+    app: axum::Router,
+    events: tokio::sync::broadcast::Receiver<fleet_application::events::FleetEvent>,
+}
+
+async fn onboarding_test_app() -> OnboardingTestApp {
     use fleet_application::machine::Machines;
-    use fleet_application::onboarding::{HostKeyStage, OnboardHostKey, Onboarding, OnboardingPort};
+    use fleet_application::onboarding::Onboarding;
     use fleet_storage_sqlite::{MachineRepository, OnboardingRepository, Store};
 
     let dir = tempfile::tempdir().unwrap();
@@ -757,13 +763,28 @@ async fn onboarding_events_cover_create_replay_and_machine_add() {
         audit,
     ));
     let hub = Arc::new(fleet_application::events::EventHub::new(8));
-    let mut events = hub.subscribe(None).receiver;
+    let events = hub.subscribe(None).receiver;
     let mut state = (*operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).clone();
     state.onboarding = Some(onboarding);
     state.tailnet = Some(tailnet);
     let app = router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
         id: "anonymous-lan-admin".to_owned(),
     }));
+
+    OnboardingTestApp {
+        _dir: dir,
+        drafts,
+        app,
+        events,
+    }
+}
+
+#[tokio::test]
+async fn onboarding_events_cover_create_replay_and_machine_add() {
+    use fleet_application::onboarding::{HostKeyStage, OnboardHostKey, OnboardingPort};
+    let app = onboarding_test_app().await;
+    let drafts = app.drafts.clone();
+    let mut events = app.events;
     assert!(matches!(
         events.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
@@ -779,14 +800,14 @@ async fn onboarding_events_cover_create_replay_and_machine_add() {
             ))
             .unwrap()
     };
-    let (parts, body) = call_via(&app, create()).await;
+    let (parts, body) = call_via(&app.app, create()).await;
     assert_eq!(parts.status, StatusCode::CREATED, "{body}");
     let draft_id = body["data"]["id"].as_str().unwrap().to_owned();
     assert_eq!(
         events.try_recv().unwrap().kind,
         fleet_application::events::EventKind::OnboardingChanged
     );
-    let (parts, replay) = call_via(&app, create()).await;
+    let (parts, replay) = call_via(&app.app, create()).await;
     assert_eq!(parts.status, StatusCode::CREATED, "{replay}");
     assert_eq!(replay["data"]["id"], draft_id);
     assert!(matches!(
@@ -805,7 +826,7 @@ async fn onboarding_events_cover_create_replay_and_machine_add() {
     });
     drafts.update(&draft).await.unwrap();
     let (parts, added) = call_via(
-        &app,
+        &app.app,
         Request::builder()
             .method(Method::POST)
             .uri(format!(
@@ -827,40 +848,9 @@ async fn onboarding_events_cover_create_replay_and_machine_add() {
 }
 
 #[tokio::test]
-async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
-    use fleet_application::machine::Machines;
-    use fleet_application::onboarding::Onboarding;
-    use fleet_storage_sqlite::{MachineRepository, OnboardingRepository, Store};
-
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
-    let drafts = Arc::new(OnboardingRepository::new(store.pool().clone()));
-    let audit = Arc::new(FakeAudit);
-    let machines = Arc::new(Machines::new(
-        Arc::new(MachineRepository::new(store.pool().clone())),
-        audit.clone(),
-    ));
-    let onboarding = Arc::new(Onboarding::new(
-        drafts,
-        Arc::new(ContractOnboardingTrust),
-        machines.clone(),
-        audit.clone(),
-    ));
-    let tailnet = Arc::new(fleet_application::tailnet::TailnetIntegration::new(
-        Arc::new(ContractTailnetSource),
-        Arc::new(ContractTailnetCredentials),
-        onboarding.clone(),
-        machines,
-        audit,
-    ));
-    let hub = Arc::new(fleet_application::events::EventHub::new(8));
-    let mut events = hub.subscribe(None).receiver;
-    let mut state = (*operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).clone();
-    state.onboarding = Some(onboarding);
-    state.tailnet = Some(tailnet);
-    let app = router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
-        id: "anonymous-lan-admin".to_owned(),
-    }));
+async fn onboarding_and_tailnet_import_reject_option_like_ssh_user_and_host() {
+    let app = onboarding_test_app().await;
+    let mut events = app.events;
 
     for request_body in [
         r#"{"user":"-oProxyCommand=bad","host":"build-host","auth":{"type":"agent"},"name":"build-host"}"#,
@@ -869,7 +859,7 @@ async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
         r#"{"user":"ops","host":"build host","auth":{"type":"agent"},"name":"build-host"}"#,
     ] {
         let (parts, body) = call_via(
-            &app,
+            &app.app,
             Request::builder()
                 .method(Method::POST)
                 .uri(format!("{API_BASE_PATH}/machines/onboarding/drafts"))
@@ -887,7 +877,7 @@ async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
     ));
 
     let (parts, body) = call_via(
-        &app,
+        &app.app,
         Request::builder()
             .method(Method::POST)
             .uri(format!("{API_BASE_PATH}/tailnet/devices/nABC/import"))
@@ -904,7 +894,7 @@ async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
     );
 
     let (parts, body) = call_via(
-        &app,
+        &app.app,
         Request::builder()
             .method(Method::POST)
             .uri(format!("{API_BASE_PATH}/tailnet/devices/nABC/import"))
