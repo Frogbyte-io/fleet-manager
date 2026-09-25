@@ -37,7 +37,7 @@ const section = computed(() => {
 })
 
 function selectSection(id: string): void {
-  void router.replace({ query: { section: id } })
+  void router.replace({ query: { ...route.query, section: id } })
 }
 
 const system = ref<SystemInfo | null>(null)
@@ -250,11 +250,7 @@ void load()
 
     <div>
       <SettingsLoading
-        v-if="!loaded && !failed"
-        :failure="failure"
-      />
-      <SettingsLoading
-        v-else-if="failed"
+        v-if="!loaded || failed"
         :failure="failure"
       />
 
