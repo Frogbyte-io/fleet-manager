@@ -912,14 +912,21 @@ mod tailscale_identity_tests {
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45679))));
         let response = router.oneshot(malformed_correlation).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let response_correlation_id = response
-            .headers()
+        let (response_parts, response_body) = response.into_parts();
+        assert_eq!(response_parts.status, StatusCode::BAD_REQUEST);
+        let response_correlation_id = response_parts
+            .headers
             .get(fleet_api::CORRELATION_ID_HEADER)
             .unwrap()
             .to_str()
             .unwrap()
             .to_owned();
+        let response_body = axum::body::to_bytes(response_body, usize::MAX)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(error["code"], "malformed_correlation_id");
+        assert_eq!(error["correlationId"], response_correlation_id);
         let rows = sqlx::query(
             "SELECT correlation_id, metadata_json FROM audit_events \
              WHERE action = 'auth.identity_header_ignored' ORDER BY seq",
