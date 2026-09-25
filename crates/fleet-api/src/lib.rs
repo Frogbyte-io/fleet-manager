@@ -13,6 +13,7 @@
 
 pub mod apply;
 pub mod audit;
+pub mod auth;
 mod correlation;
 mod envelope;
 mod error;
@@ -312,6 +313,25 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
 /// Builds the API router over the given state.
 pub fn router(state: Arc<operations::ApiState>) -> Router {
     api(state).0
+}
+
+/// Builds the API router for a dedicated Tailscale Serve listener. A request
+/// must be resolved by the configured loopback caller middleware; rejection
+/// remains inside the API correlation envelope.
+pub fn tailscale_serve_router(
+    state: Arc<operations::ApiState>,
+    peer: fleet_auth::TailscaleServePeer,
+) -> Router {
+    api(state)
+        .0
+        .layer(middleware::from_fn(
+            auth::reject_unauthenticated_tailscale_caller,
+        ))
+        .layer(middleware::from_fn_with_state(
+            peer,
+            fleet_auth::resolve_tailscale_serve_caller,
+        ))
+        .layer(middleware::from_fn(correlation::correlate))
 }
 
 /// Builds the `OpenAPI` document. The document describes the router's

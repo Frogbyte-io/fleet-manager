@@ -53,6 +53,8 @@ use tower_http::services::ServeDir;
 pub struct Settings {
     /// The address the HTTP listener binds.
     pub listen: SocketAddr,
+    /// Optional loopback HTTP listener for requests proxied by Tailscale Serve.
+    pub tailscale_serve_listen: Option<SocketAddr>,
     /// The directory holding the built web shell; served at `/`.
     pub web_dist: PathBuf,
     /// The directory holding downloadable node artifacts; when set,
@@ -206,6 +208,7 @@ impl fleet_api::system::SystemInfoSource for ControllerSystemInfo {
     async fn info(&self) -> Result<fleet_api::system::SystemInfo, String> {
         let (storage_ok, depths) = probe_pool(&self.pool).await;
         Ok(fleet_api::system::SystemInfo {
+            current_principal: String::new(),
             service: "fleet-controller".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             trust_mode: fleet_auth::TrustMode::TrustedLan.id().to_owned(),
@@ -299,6 +302,41 @@ pub fn build_router(
     images: Option<&Arc<fleet_application::images::Images>>,
     lab: Option<&Arc<fleet_application::lab::Lab>>,
 ) -> Router {
+    build_router_for_caller(
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, false,
+    )
+}
+
+fn build_tailscale_serve_router(
+    settings: &Settings,
+    db: Option<SqlitePool>,
+    services: Option<&NodeServices>,
+    onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<&Arc<fleet_application::project::Projects>>,
+    proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<&Arc<fleet_application::images::Images>>,
+    lab: Option<&Arc<fleet_application::lab::Lab>>,
+) -> Router {
+    build_router_for_caller(
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_router_for_caller(
+    settings: &Settings,
+    db: Option<SqlitePool>,
+    services: Option<&NodeServices>,
+    onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<&Arc<fleet_application::project::Projects>>,
+    proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<&Arc<fleet_application::images::Images>>,
+    lab: Option<&Arc<fleet_application::lab::Lab>>,
+    tailscale_identity: bool,
+) -> Router {
+    let audit_db = db.clone();
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
         db: db.clone(),
@@ -313,7 +351,24 @@ pub fn build_router(
         images.cloned(),
         lab.cloned(),
     ));
-    let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
+    let mut api_router = if tailscale_identity {
+        fleet_api::tailscale_serve_router(
+            api_state.clone(),
+            fleet_auth::TailscaleServePeer {
+                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            },
+        )
+    } else {
+        fleet_api::router(api_state.clone())
+            .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
+    };
+    if let Some(db) = audit_db {
+        api_router = api_router.layer(middleware::from_fn_with_state(
+            db,
+            audit_untrusted_tailscale_identity_headers,
+        ));
+    }
+    let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
         .ok()
         .map(Bytes::from);
@@ -323,7 +378,6 @@ pub fn build_router(
         .fallback_service(shell)
         .layer(axum::middleware::from_fn(browser::browser_mutation_guard))
         .layer(axum::middleware::from_fn(browser::security_headers))
-        .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
         .with_state(probe);
     if let Some(artifacts_dir) = &settings.artifacts_dir {
         router = router.nest(
@@ -343,6 +397,34 @@ pub fn build_router(
     router
         .nest("/api/node/v1", node_routes)
         .layer(middleware::from_fn_with_state(web_index, spa_fallback))
+}
+
+/// Persists only the fixed Tailscale identity header names when they arrive
+/// from a peer outside loopback. Claim values are never logged or stored.
+async fn audit_untrusted_tailscale_identity_headers(
+    State(db): State<SqlitePool>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let remote_addr = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+    let peer_is_loopback = remote_addr.is_some_and(|address| address.ip().is_loopback());
+    let names = fleet_auth::TAILSCALE_IDENTITY_HEADERS
+        .iter()
+        .filter(|header| request.headers().contains_key(*header))
+        .map(|header| header.as_str().to_owned())
+        .collect::<Vec<_>>();
+    if !peer_is_loopback && !names.is_empty() {
+        if let Err(error) = fleet_storage_sqlite::AuditLedger::new(&db)
+            .record_ignored_tailscale_identity(&names, false)
+            .await
+        {
+            eprintln!("could not persist ignored Tailscale identity headers: {error}");
+        }
+    }
+    next.run(request).await
 }
 
 /// Rewrites eligible static/API 404s to the console entry point. The API and
@@ -517,6 +599,17 @@ pub async fn serve_on(
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
     eprintln!("fleet-controller listening on {}", listener.local_addr()?);
+    let tailscale_listener = match settings.tailscale_serve_listen {
+        Some(address) => {
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            eprintln!(
+                "Tailscale Serve identity listener on {}",
+                listener.local_addr()?
+            );
+            Some(listener)
+        }
+        None => None,
+    };
     if settings.web_dist.join("index.html").is_file() {
         eprintln!("serving web shell from {}", settings.web_dist.display());
     } else {
@@ -540,11 +633,11 @@ pub async fn serve_on(
     if sweeper_shutdown.is_none() {
         eprintln!("warning: node trust surface unavailable (no database or no master key)");
     }
-    axum::serve(
+    let direct_server = axum::serve(
         listener,
         build_router(
             &settings,
-            db,
+            db.clone(),
             services.as_ref(),
             onboarding.as_ref(),
             tailnet.as_ref(),
@@ -554,9 +647,41 @@ pub async fn serve_on(
             lab.as_ref(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await?;
+    );
+    if let Some(tailscale_listener) = tailscale_listener {
+        let identity_server = axum::serve(
+            tailscale_listener,
+            build_tailscale_serve_router(
+                &settings,
+                db,
+                services.as_ref(),
+                onboarding.as_ref(),
+                tailnet.as_ref(),
+                projects.as_ref(),
+                proxmox.as_ref(),
+                images.as_ref(),
+                lab.as_ref(),
+            )
+            .into_make_service_with_connect_info::<SocketAddr>(),
+        );
+        let (direct_shutdown_tx, direct_shutdown_rx) = tokio::sync::oneshot::channel();
+        let (identity_shutdown_tx, identity_shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown.await;
+            let _ = direct_shutdown_tx.send(());
+            let _ = identity_shutdown_tx.send(());
+        });
+        tokio::try_join!(
+            direct_server.with_graceful_shutdown(async move {
+                let _ = direct_shutdown_rx.await;
+            }),
+            identity_server.with_graceful_shutdown(async move {
+                let _ = identity_shutdown_rx.await;
+            }),
+        )?;
+    } else {
+        direct_server.with_graceful_shutdown(shutdown).await?;
+    }
     // Dropping the sender stops the sweeper now that the server is down.
     drop(sweeper_shutdown);
     Ok(())

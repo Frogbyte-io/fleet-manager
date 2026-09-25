@@ -47,6 +47,13 @@ onMounted(async () => {
       </dd>
 
       <dt class="text-muted-foreground">
+        You are
+      </dt>
+      <dd class="font-mono text-foreground">
+        {{ info.currentPrincipal }}
+      </dd>
+
+      <dt class="text-muted-foreground">
         Trust mode
       </dt>
       <dd class="font-mono text-fc-warn">

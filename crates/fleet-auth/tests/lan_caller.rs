@@ -10,7 +10,10 @@ use axum::{
     middleware as axum_middleware,
     routing::get,
 };
-use fleet_auth::{LAN_PRINCIPAL_ID, Principal, TrustMode, caller_of, resolve_lan_caller};
+use fleet_auth::{
+    LAN_PRINCIPAL_ID, Principal, TailscaleServePeer, TrustMode, caller_of, resolve_lan_caller,
+    resolve_tailscale_serve_caller,
+};
 use tower::ServiceExt as _;
 
 const PROXY_VALUES: [(&str, &str); 2] = [
@@ -28,10 +31,27 @@ async fn caller_handler(request: Request) -> String {
     )
 }
 
+async fn identity_handler(request: Request) -> String {
+    caller_of(request.extensions())
+        .map(|caller| caller.principal_id().to_owned())
+        .unwrap_or_else(|| "missing".to_owned())
+}
+
 fn app() -> Router {
     Router::new()
         .route("/whoami", get(caller_handler))
         .layer(axum_middleware::from_fn(resolve_lan_caller))
+}
+
+fn tailscale_app() -> Router {
+    Router::new().route("/whoami", get(identity_handler)).layer(
+        axum_middleware::from_fn_with_state(
+            TailscaleServePeer {
+                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            },
+            resolve_tailscale_serve_caller,
+        ),
+    )
 }
 
 async fn respond(request: HttpRequest<Body>) -> String {
@@ -143,4 +163,61 @@ fn a_very_long_proxy_value_is_bounded() {
     let bounded = "x".repeat(256);
     assert!(body.contains(&bounded), "the value is recorded");
     assert!(body.matches('x').count() <= 257, "the value is bounded");
+}
+
+#[tokio::test]
+async fn tailscale_identity_requires_one_login_from_the_loopback_peer() {
+    let mut valid = HttpRequest::builder()
+        .uri("/whoami")
+        .body(Body::empty())
+        .unwrap();
+    valid.headers_mut().insert(
+        "tailscale-user-login",
+        axum::http::HeaderValue::from_static("alice@example.com"),
+    );
+    valid
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = tailscale_app().clone().oneshot(valid).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"tailscale:alice@example.com");
+
+    let mut missing = HttpRequest::builder()
+        .uri("/whoami")
+        .body(Body::empty())
+        .unwrap();
+    missing
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = tailscale_app().clone().oneshot(missing).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"missing");
+
+    let mut forged = HttpRequest::builder()
+        .uri("/whoami")
+        .header("tailscale-user-login", "attacker@example.com")
+        .header("x-forwarded-for", "127.0.0.1")
+        .body(Body::empty())
+        .unwrap();
+    forged
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [10, 1, 2, 3],
+            5000,
+        ))));
+    let response = tailscale_app().oneshot(forged).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"missing");
 }

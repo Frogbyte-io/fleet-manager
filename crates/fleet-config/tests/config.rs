@@ -151,6 +151,40 @@ fn an_invalid_listen_value_fails() {
 }
 
 #[test]
+fn tailscale_listener_requires_both_loopback_and_distinct_addresses() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = fleet_config::load(
+        None,
+        &env_of(&[
+            (fleet_config::LISTEN_VAR, "0.0.0.0:8080"),
+            (fleet_config::TAILSCALE_SERVE_LISTEN_VAR, "127.0.0.1:8081"),
+            (fleet_config::DATA_DIR_VAR, dir.path().to_str().unwrap()),
+        ]),
+    )
+    .unwrap();
+    let error = config.validate().unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::IdentityModeRequiresLoopbackListener { .. }
+    ));
+
+    let config = fleet_config::load(
+        None,
+        &env_of(&[
+            (fleet_config::LISTEN_VAR, "127.0.0.1:8080"),
+            (fleet_config::TAILSCALE_SERVE_LISTEN_VAR, "127.0.0.1:8080"),
+            (fleet_config::DATA_DIR_VAR, dir.path().to_str().unwrap()),
+        ]),
+    )
+    .unwrap();
+    let error = config.validate().unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::ControllerListenersConflict { .. }
+    ));
+}
+
+#[test]
 fn validation_creates_the_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("nested").join("state");
@@ -159,6 +193,7 @@ fn validation_creates_the_state_directory() {
         web_dist: dir.path().to_path_buf(),
         data_dir: state.clone(),
         master_key_file: None,
+        tailscale_serve_listen: None,
     };
     config
         .validate()
@@ -176,6 +211,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         web_dist: dir.path().to_path_buf(),
         data_dir: blocker.join("state"),
         master_key_file: None,
+        tailscale_serve_listen: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::DataDirUnavailable { .. }));
@@ -189,6 +225,7 @@ fn a_missing_master_key_file_fails_validation() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().join("absent_key")),
+        tailscale_serve_listen: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyMissing { .. }));
@@ -202,6 +239,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().to_path_buf()),
+        tailscale_serve_listen: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyNotAFile { .. }));
@@ -221,6 +259,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             web_dist: dir.path().to_path_buf(),
             data_dir: dir.path().join("state"),
             master_key_file: Some(key.clone()),
+            tailscale_serve_listen: None,
         };
         let error = config.validate().unwrap_err();
         match error {
@@ -238,6 +277,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(key),
+        tailscale_serve_listen: None,
     };
     config
         .validate()
@@ -264,6 +304,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(key.clone()),
+        tailscale_serve_listen: None,
     };
     config
         .validate()

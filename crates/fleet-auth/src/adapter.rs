@@ -10,7 +10,7 @@
 
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, ReasonId};
 
-use crate::LAN_PRINCIPAL_ID;
+use crate::{LAN_PRINCIPAL_ID, is_tailscale_principal_id};
 
 /// Permits the full catalog to the anonymous LAN principal; denies everything
 /// else with stable reasons. This is the explicit allow-all adapter: its
@@ -21,7 +21,9 @@ pub struct LanAllowAllAuthorizer;
 
 impl Authorizer for LanAllowAllAuthorizer {
     fn decide(&self, request: AccessRequest<'_>) -> Decision {
-        if request.principal_id != LAN_PRINCIPAL_ID {
+        if request.principal_id != LAN_PRINCIPAL_ID
+            && !is_tailscale_principal_id(request.principal_id)
+        {
             return Decision::deny(ReasonId::UnknownPrincipal);
         }
         // The action is in the request as a catalog type, so it cannot name

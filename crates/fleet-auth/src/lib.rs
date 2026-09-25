@@ -28,12 +28,19 @@ pub use adapter::LanAllowAllAuthorizer;
 pub use node::HmacNodeCrypto;
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
-use axum::{extract::Request, http::header::HeaderName, middleware::Next, response::Response};
+use axum::{
+    extract::{Request, State},
+    http::header::HeaderName,
+    middleware::Next,
+    response::Response,
+};
 
 /// The stable principal id of the anonymous LAN administrator.
 pub const LAN_PRINCIPAL_ID: &str = "anonymous-lan-admin";
+/// Prefix for a Tailscale user principal id.
+pub const TAILSCALE_PRINCIPAL_PREFIX: &str = "tailscale:";
 
 /// Proxy headers whose presence is recorded as evidence. Their values never
 /// influence identity or authorization; a reverse proxy could claim anything,
@@ -43,6 +50,14 @@ pub const PROXY_EVIDENCE_HEADERS: [HeaderName; 4] = [
     HeaderName::from_static("x-forwarded-for"),
     HeaderName::from_static("x-forwarded-proto"),
     HeaderName::from_static("x-real-ip"),
+];
+
+/// Tailscale Serve identity headers. Only header names are retained as
+/// evidence; caller-supplied values are never copied into audit metadata.
+pub const TAILSCALE_IDENTITY_HEADERS: [HeaderName; 3] = [
+    HeaderName::from_static("tailscale-user-login"),
+    HeaderName::from_static("tailscale-user-name"),
+    HeaderName::from_static("tailscale-user-profile-pic"),
 ];
 
 /// The deployment's trust mode.
@@ -80,6 +95,8 @@ impl TrustMode {
 pub enum Principal {
     /// Every request the trusted-LAN listener accepts.
     AnonymousLanAdmin,
+    /// A user authenticated by Tailscale Serve.
+    TailscaleUser,
 }
 
 impl Principal {
@@ -91,6 +108,7 @@ impl Principal {
     pub fn id(self) -> &'static str {
         match self {
             Self::AnonymousLanAdmin => LAN_PRINCIPAL_ID,
+            Self::TailscaleUser => "tailscale-user",
         }
     }
 }
@@ -112,6 +130,9 @@ pub struct CallerEvidence {
     /// evidence that a proxy — or a forger — is involved; the values carry no
     /// authority.
     proxy_headers: Vec<(String, String)>,
+    /// Tailscale identity header names observed on the request. Values are
+    /// deliberately omitted because headers from untrusted peers are claims.
+    identity_headers_present: Vec<String>,
 }
 
 impl CallerEvidence {
@@ -127,6 +148,12 @@ impl CallerEvidence {
     pub fn proxy_headers(&self) -> &[(String, String)] {
         &self.proxy_headers
     }
+
+    /// Tailscale identity header names present on the request.
+    #[must_use]
+    pub fn identity_headers_present(&self) -> &[String] {
+        &self.identity_headers_present
+    }
 }
 
 /// A resolved caller: who the deployment says is acting, plus the evidence
@@ -134,6 +161,7 @@ impl CallerEvidence {
 #[derive(Clone, Debug)]
 pub struct Caller {
     principal: Principal,
+    principal_id: String,
     evidence: CallerEvidence,
 }
 
@@ -142,6 +170,12 @@ impl Caller {
     #[must_use]
     pub fn principal(&self) -> Principal {
         self.principal
+    }
+
+    /// The principal id stored in authorization and audit records.
+    #[must_use]
+    pub fn principal_id(&self) -> &str {
+        &self.principal_id
     }
 
     /// The request's evidence.
@@ -176,9 +210,11 @@ pub async fn resolve_lan_caller(mut request: Request, next: Next) -> Response {
     let principal = Principal::ANONYMOUS_LAN_ADMIN;
     let caller = Caller {
         principal,
+        principal_id: principal.id().to_owned(),
         evidence: CallerEvidence {
             remote_addr,
             proxy_headers,
+            identity_headers_present: identity_header_names(request.headers()),
         },
     };
     request.extensions_mut().insert(caller);
@@ -190,6 +226,109 @@ pub async fn resolve_lan_caller(mut request: Request, next: Next) -> Response {
             id: principal.id().to_owned(),
         });
     next.run(request).await
+}
+
+/// The exact IPv4 loopback peer expected to connect to the identity listener.
+#[derive(Clone, Copy, Debug)]
+pub struct TailscaleServePeer {
+    /// The configured peer address. Config validation pins this to 127.0.0.1.
+    pub ip: IpAddr,
+}
+
+/// Marker attached when a request reached the identity listener without a
+/// trustworthy, single Tailscale user login. The API adapter turns this into
+/// its normal 401 error envelope after assigning a correlation id.
+#[derive(Clone, Copy, Debug)]
+pub struct UnauthenticatedTailscaleRequest;
+
+/// Resolves a request proxied by Tailscale Serve. The network peer is checked
+/// before the identity claim; forwarded-address headers are never consulted.
+pub async fn resolve_tailscale_serve_caller(
+    State(peer): State<TailscaleServePeer>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let remote_addr = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+    let names = identity_header_names(request.headers());
+    let trusted_peer = remote_addr.is_some_and(|address| address.ip() == peer.ip);
+    let login = if trusted_peer {
+        single_header_value(request.headers(), "tailscale-user-login")
+            .filter(|login| valid_tailscale_login(login))
+    } else {
+        None
+    };
+
+    let (principal, principal_id) = match login {
+        Some(login) => (
+            Principal::TailscaleUser,
+            format!("{TAILSCALE_PRINCIPAL_PREFIX}{login}"),
+        ),
+        None => {
+            request
+                .extensions_mut()
+                .insert(UnauthenticatedTailscaleRequest);
+            return next.run(request).await;
+        }
+    };
+
+    let proxy_headers = PROXY_EVIDENCE_HEADERS
+        .iter()
+        .filter_map(|header| {
+            request
+                .headers()
+                .get(header)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| (header.as_str().to_owned(), truncate(value, 256)))
+        })
+        .collect();
+    request.extensions_mut().insert(Caller {
+        principal,
+        principal_id: principal_id.clone(),
+        evidence: CallerEvidence {
+            remote_addr,
+            proxy_headers,
+            identity_headers_present: names,
+        },
+    });
+    request
+        .extensions_mut()
+        .insert(fleet_application::authz::ActingPrincipal { id: principal_id });
+    next.run(request).await
+}
+
+/// Returns an identity header value only when the header occurs exactly once
+/// and contains a valid visible ASCII value.
+fn single_header_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?;
+    values.next().is_none().then_some(value)
+}
+
+/// Accepts bounded Tailscale login names, including RFC 2047 Q-encoded
+/// values. The original ASCII claim is kept as the principal key.
+fn valid_tailscale_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 512
+        && login.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        && !login.contains(',')
+}
+
+fn identity_header_names(headers: &axum::http::HeaderMap) -> Vec<String> {
+    TAILSCALE_IDENTITY_HEADERS
+        .iter()
+        .filter(|header| headers.contains_key(*header))
+        .map(|header| header.as_str().to_owned())
+        .collect()
+}
+
+/// Checks whether an acting-principal id has the validated Tailscale prefix.
+#[must_use]
+pub fn is_tailscale_principal_id(id: &str) -> bool {
+    id.strip_prefix(TAILSCALE_PRINCIPAL_PREFIX)
+        .is_some_and(valid_tailscale_login)
 }
 
 /// Extracts the resolved caller from request extensions.

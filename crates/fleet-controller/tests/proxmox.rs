@@ -173,6 +173,7 @@ async fn harness_with(transport: Arc<FixedTransport>) -> Harness {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: None,
+        tailscale_serve_listen: None,
     };
     let router = build_router(
         &settings,
@@ -746,6 +747,7 @@ async fn lifecycle_harness(outcome: TaskOutcome) -> Harness {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: None,
+        tailscale_serve_listen: None,
     };
     let router = build_router(
         &settings,

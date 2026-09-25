@@ -444,6 +444,7 @@ struct FakeSystemInfo;
 impl fleet_api::system::SystemInfoSource for FakeSystemInfo {
     async fn info(&self) -> Result<fleet_api::system::SystemInfo, String> {
         Ok(fleet_api::system::SystemInfo {
+            current_principal: String::new(),
             service: "fleet-controller".to_owned(),
             version: "0.1.0".to_owned(),
             trust_mode: "trusted-lan".to_owned(),
@@ -643,12 +644,36 @@ async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
     assert_eq!(parts.status, StatusCode::OK, "{body}");
     assert_eq!(body["service"], "fleet-controller");
     assert_eq!(body["trustMode"], "trusted-lan");
+    assert_eq!(body["currentPrincipal"], "anonymous-lan-admin");
     assert!(
         body["trustWarning"]
             .as_str()
             .unwrap()
             .contains("no accounts")
     );
+}
+
+#[tokio::test]
+async fn tailscale_listener_rejects_a_missing_identity_with_the_api_401_envelope() {
+    let router = fleet_api::tailscale_serve_router(
+        Arc::new(ApiState::for_document()),
+        fleet_auth::TailscaleServePeer {
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        },
+    );
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("{API_BASE_PATH}/system"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "authentication_required");
+    assert!(parts.headers.contains_key(CORRELATION_ID_HEADER));
 }
 
 #[tokio::test]

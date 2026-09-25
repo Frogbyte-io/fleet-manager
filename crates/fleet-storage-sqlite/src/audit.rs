@@ -56,6 +56,53 @@ impl AuditLedger {
         Self { pool: pool.clone() }
     }
 
+    /// Records that Tailscale identity headers arrived outside the trusted
+    /// Serve peer. Only the fixed header names and peer trust result persist.
+    ///
+    /// # Errors
+    ///
+    /// Fails when SQLite refuses the append.
+    pub async fn record_ignored_tailscale_identity(
+        &self,
+        header_names: &[String],
+        peer_is_loopback: bool,
+    ) -> Result<(), AuditError> {
+        let known = [
+            "tailscale-user-login",
+            "tailscale-user-name",
+            "tailscale-user-profile-pic",
+        ];
+        let names: Vec<&str> = header_names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| known.contains(name))
+            .collect();
+        if names.is_empty() {
+            return Ok(());
+        }
+        let metadata = serde_json::json!({
+            "identityHeaderNames": names,
+            "peerLoopback": peer_is_loopback,
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO audit_events \
+             (id, occurred_at, actor, action, resource, allowed, reason, correlation_id, operation_id, outcome, metadata_json) \
+             VALUES (?1, ?2, 'anonymous-lan-admin', 'auth.identity_header_ignored', NULL, 0, \
+                     'untrusted_proxy_peer', NULL, NULL, NULL, ?3)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(epoch_millis())
+        .bind(metadata)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| AuditError::Query {
+            context: "record_ignored_tailscale_identity",
+            detail: error.to_string(),
+        })?;
+        Ok(())
+    }
+
     /// Appends an intent event.
     ///
     /// # Errors

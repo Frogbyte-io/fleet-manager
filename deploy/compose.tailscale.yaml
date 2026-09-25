@@ -1,0 +1,10 @@
+# Opt-in host-network variant for Tailscale Serve identity. Serve and the
+# controller must share the same host network namespace so the proxy peer is
+# observed as 127.0.0.1. This is supported on Linux hosts.
+services:
+  controller:
+    network_mode: host
+    ports: !reset []
+    environment:
+      FLEET_LISTEN: 127.0.0.1:8080
+      FLEET_TAILSCALE_SERVE_LISTEN: 127.0.0.1:8081

@@ -38,12 +38,23 @@ refuses to start on a missing or unsafe setting.
 | Variable | Default | Meaning |
 |---|---|---|
 | `FLEET_LISTEN` | `127.0.0.1:8080` | Address the HTTP listener binds. Loopback is the default on purpose: the controller is a trusted-LAN service and must not face an untrusted network by accident. The container overrides this to `0.0.0.0:8080` because reachability is limited by the loopback publish instead. |
+| `FLEET_TAILSCALE_SERVE_LISTEN` | *(unset)* | Enables a dedicated loopback-only HTTP listener for Tailscale Serve identity. When set, `FLEET_LISTEN` must also be loopback and the two addresses must differ. Configure Serve to proxy to `http://127.0.0.1:<port>`. This mode is not supported by the default bridged Compose deployment; use host networking or run the controller directly on the host. |
 | `FLEET_WEB_DIST` | `./web` | Directory of the built web shell. The image sets `/opt/fleet/web`. |
 | `FLEET_DATA_DIR` | `./data` | Runtime state directory; created during startup validation. The container sets `/var/lib/fleet`. |
 | `FLEET_MASTER_KEY_FILE` | *(unset)* | Master key file for the secret store. Must exist, be a regular file, and be mode 0600; startup refuses a more exposed key. The container sets `/run/secrets/master_key`. |
 
 An unset master key source is reported in the startup summary as "secret store
 unavailable" rather than pointed at a file that does not exist.
+
+For Tailscale Serve identity on a Linux Docker host, use the opt-in host
+network override so Serve and the controller share the host namespace:
+`docker compose -f deploy/compose.yaml -f deploy/compose.tailscale.yaml up -d`.
+Then configure Serve to proxy to `http://127.0.0.1:8081`. Both controller
+listeners bind to host loopback in this override; the existing bridged
+`compose.yaml` intentionally cannot use this mode because the proxy would
+arrive from a container bridge address instead of loopback. Host networking is
+an explicit change to the default deployment posture and is supported only
+where Docker shares the Linux host network namespace.
 
 ## Mount locations
 

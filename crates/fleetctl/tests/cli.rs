@@ -379,6 +379,7 @@ fn fleetctl_talks_to_a_real_controller() {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
             artifacts_dir: None,
+            tailscale_serve_listen: None,
         };
         let router = fleet_controller::build_router(
             &settings,
@@ -503,6 +504,7 @@ fn fleetctl_machines_read_a_real_controller() {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
             artifacts_dir: None,
+            tailscale_serve_listen: None,
         };
         let router = fleet_controller::build_router(
             &settings,
@@ -681,6 +683,7 @@ async fn an_explicit_url_sends_status_straight_to_the_controller() {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: None,
+        tailscale_serve_listen: None,
     };
     let router = fleet_controller::build_router(
         &settings,
@@ -973,6 +976,7 @@ fn fleetctl_onboards_a_real_controller() {
             listen: "127.0.0.1:0".parse().unwrap(),
             web_dist: dist.path().to_path_buf(),
             artifacts_dir: None,
+            tailscale_serve_listen: None,
         };
         let router = fleet_controller::build_router(
             &settings,
