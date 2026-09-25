@@ -220,7 +220,7 @@ async function copySsh() {
             <OperationsTab />
           </TabsContent>
           <TabsContent value="audit">
-            <AuditTab />
+            <AuditTab :machine-id="machine.id" />
           </TabsContent>
           <TabsContent value="guest">
             <GuestTab

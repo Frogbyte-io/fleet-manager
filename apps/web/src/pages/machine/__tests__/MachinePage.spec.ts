@@ -30,6 +30,7 @@ const api = {
   listProxmoxGuests: vi.fn(),
   getTailnetStatus: vi.fn(),
   listTailnetDevices: vi.fn(),
+  listAuditEvents: vi.fn(),
 }
 
 vi.mock('@frogbyte-io/fleet-api-client', () =>
@@ -295,12 +296,30 @@ describe('MachinePage', () => {
     expect(wrapper.find('[data-testid="operation-status"]').text()).toContain('mise install')
   })
 
-  it('operations and audit explain what the API cannot answer yet', async () => {
-    const { wrapper, router } = await mountAt('/fleet/machines/m1?tab=operations')
+  it('operations explains that the API cannot filter by machine', async () => {
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
     expect(wrapper.find('[data-testid="no-operations"]').exists()).toBe(true)
-    await router.replace('/fleet/machines/m1?tab=audit')
-    await flushPromises()
-    expect(wrapper.text()).toContain('FM-943')
+  })
+
+  it('audit lists this machine\'s events and pages by cursor', async () => {
+    const event = (id: string, patch = {}) => ({ seq: 1, id, occurredAt: NOW, actor: 'anonymous-lan-admin', action: 'node.revoke', allowed: true, reason: 'allowed', metadata: {}, resource: 'm1', outcome: 'succeeded', ...patch })
+    api.listAuditEvents
+      .mockResolvedValueOnce(ok({ items: [event('a1'), event('a2', { allowed: false, reason: 'no_permission', outcome: null })], page: { nextCursor: 'c2', limit: 50 } }))
+      .mockResolvedValueOnce(ok({ items: [event('a3')], page: { nextCursor: null, limit: 50 } }))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=audit')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.findAll('[data-testid="audit-row"]')).toHaveLength(2)
+    })
+    expect(api.listAuditEvents).toHaveBeenCalledWith({ resource: 'm1', limit: 50, cursor: undefined })
+    expect(wrapper.text()).toContain('denied · no_permission')
+    await wrapper.find('[data-testid="audit-more"]').trigger('click')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.findAll('[data-testid="audit-row"]')).toHaveLength(3)
+    })
+    expect(api.listAuditEvents).toHaveBeenLastCalledWith({ resource: 'm1', limit: 50, cursor: 'c2' })
+    expect(wrapper.find('[data-testid="audit-more"]').exists()).toBe(false)
   })
 
   it('guest lifecycle asks for confirmation, then starts the operation', async () => {
