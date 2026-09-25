@@ -34,7 +34,12 @@ export function saveResume(target: ResumeTarget): void {
 }
 
 export function clearResume(): void {
-  localStorage.removeItem(RESUME_KEY)
+  try {
+    localStorage.removeItem(RESUME_KEY)
+  }
+  catch {
+    // Storage unavailable: nothing was stored either.
+  }
 }
 
 export type DraftStep = 'test' | 'verify' | 'discover' | 'finish'
@@ -79,5 +84,10 @@ export function saveStageOperation(draftId: string, operation: StageOperation): 
 }
 
 export function clearStageOperation(): void {
-  localStorage.removeItem(STAGE_KEY)
+  try {
+    localStorage.removeItem(STAGE_KEY)
+  }
+  catch {
+    // Storage unavailable: nothing was stored either.
+  }
 }

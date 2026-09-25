@@ -83,6 +83,18 @@ watch(() => stageQuery.data.value?.state, async (state) => {
     await draftQuery.refetch()
   }
 })
+// A remembered operation the API can no longer read (expired, or from
+// another controller) must not lock the step: forget it and re-read the
+// draft, which says where things stand.
+const lostStageOperation = ref(false)
+watch(() => stageQuery.error.value, async (err) => {
+  if (!err || !stageOperation.value)
+    return
+  stageOperation.value = null
+  clearStageOperation()
+  lostStageOperation.value = true
+  await draftQuery.refetch()
+})
 /** The operation to show on a step: only one started for that step. */
 function stageOperationFor(stage: 'test' | 'discover'): string | null {
   return stageOperation.value?.stage === stage ? stageOperation.value.id : null
@@ -91,6 +103,7 @@ function stageOperationFor(stage: 'test' | 'discover'): string | null {
 function runStage(stage: 'test' | 'discover') {
   return act(async () => {
     const response = stage === 'test' ? await testOnboardingDraft(props.draftId) : await discoverOnboardingDraft(props.draftId)
+    lostStageOperation.value = false
     stageOperation.value = { stage, id: unwrap<OperationDto>(response, [202]).id }
     saveStageOperation(props.draftId, stageOperation.value)
   })
@@ -449,6 +462,13 @@ const factPreview = computed(() => (draft.value?.facts ?? []).filter(f => f.stat
         </p>
       </section>
 
+      <p
+        v-if="lostStageOperation"
+        class="text-xs text-fc-warn"
+        data-testid="stage-lost"
+      >
+        The earlier run can no longer be read; the draft shows where it stands. Run the step again if needed.
+      </p>
       <p
         v-if="error"
         class="text-xs text-fc-err"

@@ -410,7 +410,7 @@ describe('Add dialog', () => {
   })
 })
 
-describe('Add dialog review fixes', () => {
+describe('Add dialog resume and error handling', () => {
   it('an explicit source wins over a stored resume, which stays listed', async () => {
     draft = newDraft({ user: 'pi', host: 'pi-4.lan', auth: { type: 'agent' } })
     localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'draft', id: 'd1' }))
@@ -459,6 +459,17 @@ describe('Add dialog review fixes', () => {
     expect($('[data-testid="operation-status"]').text()).toContain('op-test')
     expect($('[data-testid="run-test"]').attributes('disabled')).toBeDefined()
     expect(api.testOnboardingDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('a remembered operation the API cannot read no longer locks the step', async () => {
+    draft = newDraft({ user: 'pi', host: 'pi-4.lan', auth: { type: 'agent' } })
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'draft', id: 'd1' }))
+    localStorage.setItem('fleet-console-add-stage-operation', JSON.stringify({ draftId: 'd1', stage: 'test', id: 'op-expired' }))
+    api.getOperation.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no operation' }, headers: new Headers() })
+    await mountAt('/fleet/add')
+    await until('[data-testid="stage-lost"]')
+    expect($('[data-testid="run-test"]').attributes('disabled')).toBeUndefined()
+    expect(localStorage.getItem('fleet-console-add-stage-operation')).toBeNull()
   })
 
   it('reports a fleetd install that failed to start after the add, with a retry', async () => {

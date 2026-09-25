@@ -41,10 +41,7 @@ const accountsQuery = useQuery({
 })
 
 function invalidateAccounts() {
-  return Promise.all([
-    queryClient.invalidateQueries({ queryKey: ACCOUNTS_KEY }),
-    queryClient.invalidateQueries({ queryKey: ['fleet', 'proxmox-accounts'] }),
-  ])
+  return queryClient.invalidateQueries({ queryKey: ACCOUNTS_KEY })
 }
 const account = computed(() => accountsQuery.data.value?.find(a => a.id === props.accountId) ?? null)
 const confirmed = computed(() => account.value?.fingerprintState === 'confirmed')

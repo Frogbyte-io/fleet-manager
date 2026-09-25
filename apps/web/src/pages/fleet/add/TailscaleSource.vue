@@ -15,7 +15,7 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { onboardCreateCommand, tailnetImportCommand, type SshAuth } from '../../machine/fleetctl'
-import { allTailnetDevices, validPort } from './queries'
+import { allTailnetDevices, TAILNET_DEVICES_KEY, validPort } from './queries'
 import { connectHost, type ConnectVia } from './tailnet'
 
 // Pick a tailnet device, choose how the controller reaches it, and create
@@ -31,7 +31,7 @@ const statusQuery = useQuery({
 const configured = computed(() => statusQuery.data.value?.configured ?? false)
 
 const devicesQuery = useQuery({
-  queryKey: ['add', 'tailnet-devices'],
+  queryKey: TAILNET_DEVICES_KEY,
   queryFn: allTailnetDevices,
   enabled: configured,
 })
