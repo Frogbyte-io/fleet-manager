@@ -2,6 +2,7 @@
 //! through the documented CLI contract. This adapter decides nothing; it
 //! translates HTTP into operation creation and authorization calls.
 
+use std::str::FromStr as _;
 use std::sync::Arc;
 
 use axum::{
@@ -9,7 +10,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use fleet_core::CorrelationId;
+use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass, SystemClock};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -68,6 +69,148 @@ pub struct StartSkillsOperationRequest {
     pub direction: Option<SkillsDirectionDto>,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
+}
+
+/// One machine's observed skill inventory.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsSnapshotDto {
+    /// Machine identity.
+    pub machine_id: String,
+    /// `available`, `absent`, or `unsupported`.
+    pub availability: String,
+    /// Exact supported CLI version, when present.
+    pub cli_version: Option<String>,
+    /// Safe normalized skill, preset, and agent data.
+    pub data: serde_json::Value,
+    /// `complete`, `failed`, `unavailable`, or `unsupported`.
+    pub update_check: String,
+    /// When the inventory was collected (epoch milliseconds).
+    pub observed_at: i64,
+    /// True when older than the 24 hour freshness window.
+    pub stale: bool,
+}
+
+impl From<fleet_application::skills::SkillsView> for SkillsSnapshotDto {
+    fn from(view: fleet_application::skills::SkillsView) -> Self {
+        use fleet_application::skills::SkillsAvailability as A;
+        let snapshot = view.snapshot;
+        Self {
+            machine_id: snapshot.machine_id,
+            availability: match snapshot.availability {
+                A::Available => "available",
+                A::Absent => "absent",
+                A::Unsupported => "unsupported",
+            }
+            .into(),
+            cli_version: snapshot.cli_version,
+            data: snapshot.data,
+            update_check: snapshot.update_check,
+            observed_at: snapshot.observed_at,
+            stale: view.stale,
+        }
+    }
+}
+
+fn skills_or_error(
+    state: &crate::operations::ApiState,
+    correlation_id: CorrelationId,
+) -> Result<Arc<fleet_application::skills::Skills>, ApiErrorResponse> {
+    state.skills.clone().ok_or_else(|| {
+        let error = PublicError::new(
+            ErrorCode::from_str("skills_unavailable").expect("valid code"),
+            "the skills read model is not wired",
+            RetryClass::Backoff,
+        );
+        crate::error::ApiError::new(&error, correlation_id)
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)
+    })
+}
+
+fn map_skills_error(
+    error: &fleet_application::skills::SkillsError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
+    let (status, code, message) = match error {
+        fleet_application::skills::SkillsError::Denied(_) => (
+            StatusCode::FORBIDDEN,
+            "denied",
+            "the caller may not read skills on this machine",
+        ),
+        fleet_application::skills::SkillsError::Backend => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "the skills snapshot could not be read",
+        ),
+    };
+    let public = PublicError::new(
+        ErrorCode::from_str(code).expect("valid code"),
+        message,
+        RetryClass::Never,
+    );
+    crate::error::ApiError::new(&public, correlation_id).with_status(status)
+}
+
+/// Reads one machine's latest Skills Manager observation.
+///
+/// # Errors
+///
+/// Returns the standard envelope for denial, a missing snapshot, or an unavailable backend.
+#[utoipa::path(get, path = "/machines/{machineId}/skills", tag = "machines", operation_id = "getMachineSkills", params(("machineId" = String, Path)), responses((status = 200, body = Resource<SkillsSnapshotDto>), (status = 403, body = crate::error::ApiError), (status = 404, body = crate::error::ApiError)))]
+#[allow(clippy::missing_panics_doc)]
+pub async fn get_machine_skills(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(machine_id): Path<String>,
+) -> Result<Json<Resource<SkillsSnapshotDto>>, ApiErrorResponse> {
+    use std::str::FromStr as _;
+    let skills = skills_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let view = skills
+        .get(
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|e| map_skills_error(&e, correlation_id))?;
+    let Some(view) = view else {
+        let error = PublicError::new(
+            ErrorCode::from_str("not_found").expect("valid code"),
+            "no skills observation exists for this machine",
+            RetryClass::Never,
+        );
+        return Err(
+            crate::error::ApiError::new(&error, correlation_id).with_status(StatusCode::NOT_FOUND)
+        );
+    };
+    Ok(Json(Resource::new(view.into())))
+}
+
+/// Reads the fleet-wide matrix of observed skill inventories.
+///
+/// # Errors
+///
+/// Returns the standard envelope when the backend is unavailable.
+#[utoipa::path(get, path = "/skills/matrix", tag = "skills", operation_id = "getSkillsMatrix", responses((status = 200, body = [SkillsSnapshotDto]), (status = 403, body = crate::error::ApiError)))]
+pub async fn get_skills_matrix(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Vec<SkillsSnapshotDto>>, ApiErrorResponse> {
+    let skills = skills_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let views = skills
+        .matrix(
+            state.authorizer.as_ref(),
+            &principal,
+            SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|e| map_skills_error(&e, correlation_id))?;
+    Ok(Json(views.into_iter().map(Into::into).collect()))
 }
 
 /// Starts a skills operation: `probe` reads the CLI's state (and may

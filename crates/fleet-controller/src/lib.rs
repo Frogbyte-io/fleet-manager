@@ -213,6 +213,9 @@ fn api_state(
             onboarding,
             tailnet,
             projects,
+            skills: Some(std::sync::Arc::new(fleet_application::skills::Skills::new(
+                std::sync::Arc::new(fleet_storage_sqlite::SkillsRepository::new(pool.clone())),
+            ))),
             proxmox,
             images,
             lab,
@@ -233,6 +236,7 @@ fn api_state(
         onboarding: None,
         tailnet: None,
         projects: None,
+        skills: None,
         proxmox: None,
         images: None,
         lab: None,

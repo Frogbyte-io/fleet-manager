@@ -3268,6 +3268,40 @@ export interface ResourceRecipeVersionDto {
 }
 
 /**
+ * One machine's observed skill inventory.
+ */
+export type ResourceSkillsSnapshotDtoData = {
+  /** `available`, `absent`, or `unsupported`. */
+  availability: string;
+  /**
+     * Exact supported CLI version, when present.
+     * @nullable
+     */
+  cliVersion?: string | null;
+  /** Safe normalized skill, preset, and agent data. */
+  data: unknown;
+  /** Machine identity. */
+  machineId: string;
+  /** When the inventory was collected (epoch milliseconds). */
+  observedAt: number;
+  /** True when older than the 24 hour freshness window. */
+  stale: boolean;
+  /** `complete`, `failed`, `unavailable`, or `unsupported`. */
+  updateCheck: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceSkillsSnapshotDto {
+  /** One machine's observed skill inventory. */
+  data: ResourceSkillsSnapshotDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -3400,6 +3434,29 @@ export const SkillsDirectionDto = {
   deploy: 'deploy',
   undeploy: 'undeploy',
 } as const;
+
+/**
+ * One machine's observed skill inventory.
+ */
+export interface SkillsSnapshotDto {
+  /** `available`, `absent`, or `unsupported`. */
+  availability: string;
+  /**
+     * Exact supported CLI version, when present.
+     * @nullable
+     */
+  cliVersion?: string | null;
+  /** Safe normalized skill, preset, and agent data. */
+  data: unknown;
+  /** Machine identity. */
+  machineId: string;
+  /** When the inventory was collected (epoch milliseconds). */
+  observedAt: number;
+  /** True when older than the 24 hour freshness window. */
+  stale: boolean;
+  /** `complete`, `failed`, `unavailable`, or `unsupported`. */
+  updateCheck: string;
+}
 
 /**
  * The body of the start-apply-workflow request.
@@ -6534,6 +6591,64 @@ export const revokeNode = async (machineId: string, options?: RequestInit): Prom
 
 
 
+export type getMachineSkillsResponse200 = {
+  data: ResourceSkillsSnapshotDto
+  status: 200
+}
+
+export type getMachineSkillsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineSkillsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineSkillsResponseSuccess = (getMachineSkillsResponse200) & {
+  headers: Headers;
+};
+export type getMachineSkillsResponseError = (getMachineSkillsResponse403 | getMachineSkillsResponse404) & {
+  headers: Headers;
+};
+
+export type getMachineSkillsResponse = (getMachineSkillsResponseSuccess | getMachineSkillsResponseError)
+
+export const getGetMachineSkillsUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/skills`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the standard envelope for denial, a missing snapshot, or an unavailable backend.
+ * @summary Reads one machine's latest Skills Manager observation.
+ */
+export const getMachineSkills = async (machineId: string, options?: RequestInit): Promise<getMachineSkillsResponse> => {
+
+  const res = await fetch(getGetMachineSkillsUrl(machineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineSkillsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineSkillsResponse
+}
+
+
+
 export type startSkillsOperationResponse202 = {
   data: ResourceOperationDto
   status: 202
@@ -8197,6 +8312,59 @@ export const observeProxmoxFingerprint = async (accountId: string, options?: Req
 
   const data: observeProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as observeProxmoxFingerprintResponse
+}
+
+
+
+export type getSkillsMatrixResponse200 = {
+  data: SkillsSnapshotDto[]
+  status: 200
+}
+
+export type getSkillsMatrixResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getSkillsMatrixResponseSuccess = (getSkillsMatrixResponse200) & {
+  headers: Headers;
+};
+export type getSkillsMatrixResponseError = (getSkillsMatrixResponse403) & {
+  headers: Headers;
+};
+
+export type getSkillsMatrixResponse = (getSkillsMatrixResponseSuccess | getSkillsMatrixResponseError)
+
+export const getGetSkillsMatrixUrl = () => {
+
+
+
+
+  return `/api/v1/skills/matrix`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the standard envelope when the backend is unavailable.
+ * @summary Reads the fleet-wide matrix of observed skill inventories.
+ */
+export const getSkillsMatrix = async ( options?: RequestInit): Promise<getSkillsMatrixResponse> => {
+
+  const res = await fetch(getGetSkillsMatrixUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getSkillsMatrixResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getSkillsMatrixResponse
 }
 
 

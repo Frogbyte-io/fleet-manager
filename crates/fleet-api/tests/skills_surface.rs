@@ -178,6 +178,38 @@ impl fleet_application::operation::OperationPort for FakeOperations {
     }
 }
 
+#[derive(Debug)]
+struct FakeSkills;
+#[async_trait::async_trait]
+impl fleet_application::skills::SkillsPort for FakeSkills {
+    async fn get(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<fleet_application::skills::SkillsSnapshot>, PortFailure> {
+        Ok((machine_id == "m-1").then(|| snapshot("m-1")))
+    }
+    async fn list(&self) -> Result<Vec<fleet_application::skills::SkillsSnapshot>, PortFailure> {
+        Ok(vec![snapshot("m-1"), snapshot("m-2")])
+    }
+    async fn record(
+        &self,
+        _snapshot: &fleet_application::skills::SkillsSnapshot,
+    ) -> Result<(), PortFailure> {
+        Ok(())
+    }
+}
+
+fn snapshot(machine_id: &str) -> fleet_application::skills::SkillsSnapshot {
+    fleet_application::skills::SkillsSnapshot {
+        machine_id: machine_id.to_owned(),
+        availability: fleet_application::skills::SkillsAvailability::Available,
+        cli_version: Some("1.40.0".into()),
+        data: serde_json::json!({"skills": [], "agents": [], "presets": []}),
+        update_check: "complete".into(),
+        observed_at: 0,
+    }
+}
+
 use fleet_application::machine::{
     Endpoint, Machine, MachineFilter, MachinePort, NewEndpoint, RegisterMachine,
 };
@@ -327,6 +359,9 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         onboarding: None,
         tailnet: None,
         projects: None,
+        skills: Some(Arc::new(fleet_application::skills::Skills::new(Arc::new(
+            FakeSkills,
+        )))),
         proxmox: None,
         images: None,
         lab: None,
@@ -388,6 +423,29 @@ async fn a_probe_starts_a_durable_operation() {
     let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     assert_eq!(value["data"]["kind"], "skills.probe");
+}
+
+#[tokio::test]
+async fn skills_read_endpoints_use_machine_scoped_skills_permission() {
+    let authorizer = Arc::new(Recording::default());
+    let state = state_for(authorizer.clone());
+    let (status, value) = call(state.clone(), "GET", "/machines/m-1/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["data"]["availability"], "available");
+    assert_eq!(value["data"]["stale"], true);
+    let (status, rows) = call(state, "GET", "/skills/matrix", None).await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    let checks = authorizer.resources.lock().unwrap();
+    assert!(checks.iter().any(|(action, resource)| action == "skills.read" && resource.as_deref() == Some("m-1")));
+    assert!(checks.iter().any(|(action, resource)| action == "skills.read" && resource.as_deref() == Some("m-2")));
+}
+
+#[tokio::test]
+async fn skills_read_denial_does_not_fall_back_to_machine_read() {
+    let state = state_for(Arc::new(DenySkills));
+    let (status, value) = call(state, "GET", "/machines/m-1/skills", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
 }
 
 #[tokio::test]

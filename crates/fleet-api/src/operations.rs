@@ -56,6 +56,8 @@ pub struct ApiState {
     /// The project use cases, when the controller was composed with a
     /// database; `None` only in document/test states.
     pub projects: Option<Arc<fleet_application::project::Projects>>,
+    /// The sensitive Skills Manager read model, when the controller has a store.
+    pub skills: Option<Arc<fleet_application::skills::Skills>>,
     /// The Proxmox use cases, when the controller was composed with a
     /// database, a secret store, and the provider wired; `None` only in
     /// document/test states.
@@ -81,6 +83,7 @@ impl std::fmt::Debug for ApiState {
             .field("onboarding", &self.onboarding)
             .field("tailnet", &self.tailnet)
             .field("projects", &self.projects)
+            .field("skills", &self.skills)
             .field("proxmox", &self.proxmox)
             .field("images", &self.images)
             .field("lab", &self.lab)
@@ -261,6 +264,7 @@ impl ApiState {
             onboarding: None,
             tailnet: None,
             projects: None,
+            skills: None,
             proxmox: None,
             images: None,
             lab: None,
