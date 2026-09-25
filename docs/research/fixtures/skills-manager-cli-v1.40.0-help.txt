@@ -1,0 +1,116 @@
+$ skills-manager-cli --version
+skills-manager-cli 1.40.0
+$ skills-manager-cli skills --help
+Usage: skills-manager-cli skills [OPTIONS] <COMMAND>
+
+Commands:
+  list
+  show
+  export
+  install
+  update
+  check
+  remove
+  enable      Deprecated compatibility command: use skills deploy
+  disable     Deprecated compatibility command: use skills undeploy
+  deploy      Deploy library skills to one or more agents' global skill directories
+  undeploy    Remove managed deployments from one or more agents
+  status      Show preset membership and actual per-agent deployment state
+  sync
+  search
+  set-source  Re-point an installed skill at a git source in place, keeping its id, tags, preset membership and deployments
+  adopt
+  tag
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --json
+      --skills-root <SKILLS_ROOT>
+  -h, --help                       Print help
+$ skills-manager-cli skills update --help
+Usage: skills-manager-cli skills update [OPTIONS] [REFERENCE]
+
+Arguments:
+  [REFERENCE]  Skill ref (id / name / dir basename / central path). Omit for --all
+
+Options:
+      --all
+      --json
+      --skills-root <SKILLS_ROOT>
+  -h, --help                       Print help
+$ skills-manager-cli skills show --help
+Usage: skills-manager-cli skills show [OPTIONS] <REFERENCE>
+
+Arguments:
+  <REFERENCE>
+
+Options:
+      --json
+      --skills-root <SKILLS_ROOT>
+  -h, --help                       Print help
+$ skills-manager-cli skills install --help
+Usage: skills-manager-cli skills install [OPTIONS] <REFERENCE>
+
+Arguments:
+  <REFERENCE>  Ref: local path, git URL, or owner/repo[@skill] / owner/repo/skill
+
+Options:
+      --json
+      --local
+      --git
+      --skills-root <SKILLS_ROOT>
+      --skillssh
+      --name <NAME>
+      --sync                       Add to current active preset and sync agents
+      --sync-preset <REF>          Add to given preset (by id or name) and sync agents
+  -h, --help                       Print help
+$ skills-manager-cli skills deploy --help
+Deploy library skills to one or more agents' global skill directories
+
+Usage: skills-manager-cli skills deploy [OPTIONS] --agent <AGENT> <REFERENCES>...
+
+Arguments:
+  <REFERENCES>...
+
+Options:
+      --agent <AGENT>
+      --json
+      --dry-run
+      --skills-root <SKILLS_ROOT>
+  -h, --help                       Print help
+$ skills-manager-cli skills status --help
+Show preset membership and actual per-agent deployment state
+
+Usage: skills-manager-cli skills status [OPTIONS] <REFERENCE>
+
+Arguments:
+  <REFERENCE>
+
+Options:
+      --json
+      --skills-root <SKILLS_ROOT>
+  -h, --help                       Print help
+$ skills-manager-cli presets --help
+Usage: skills-manager-cli presets [OPTIONS] <COMMAND>
+
+Commands:
+  list
+  current
+  show
+  create
+  update
+  delete
+  preview
+  apply         Legacy exclusive switch: replaces the current active preset
+  deactivate    Legacy exclusive close operation. Prefer undeploy for additive presets
+  deploy        Additively deploy this preset without removing other deployed presets
+  undeploy      Remove this preset's deployed pairs without changing its membership
+  status
+  add-skill
+  remove-skill
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --json
+      --skills-root <SKILLS_ROOT>
+  -h, --help                       Print help
