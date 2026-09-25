@@ -2303,6 +2303,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         request_body.as_ref(),
         correlation_id,
     )?;
+    let body = follow_skills_matrix_pages(&client, invocation, body)?;
     let body = follow_wait_stage(&client, invocation, body)?;
     let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
@@ -2313,6 +2314,58 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         body.get("data").cloned().unwrap_or(body)
     };
     Ok(render(invocation, &payload))
+}
+
+fn follow_skills_matrix_pages(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    first_page: Value,
+) -> Result<Value, CliError> {
+    if invocation.command != Command::SkillsMatrix || invocation.output != Output::Text {
+        return Ok(first_page);
+    }
+    merge_skills_matrix_pages(first_page, |cursor, limit| {
+        send(
+            client,
+            invocation,
+            reqwest::Method::GET,
+            "/api/v1/skills/matrix",
+            &[("cursor", cursor.to_owned()), ("limit", limit.to_string())],
+            None,
+            uuid::Uuid::now_v7().to_string(),
+        )
+    })
+}
+
+fn merge_skills_matrix_pages(
+    mut page: Value,
+    mut fetch_page: impl FnMut(&str, u32) -> Result<Value, CliError>,
+) -> Result<Value, CliError> {
+    let Some(mut items) = page.get("items").and_then(Value::as_array).cloned() else {
+        return Ok(page);
+    };
+    let limit = page["page"]["limit"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50);
+    let mut cursor = page["page"]["nextCursor"].as_str().map(str::to_owned);
+    let mut seen_cursors = std::collections::HashSet::new();
+    while let Some(current) = cursor {
+        if !seen_cursors.insert(current.clone()) {
+            return Err(CliError {
+                message: "the controller repeated a skills matrix cursor".to_owned(),
+            });
+        }
+        page = fetch_page(&current, limit)?;
+        if let Some(next_items) = page.get("items").and_then(Value::as_array) {
+            items.extend(next_items.iter().cloned());
+        }
+        cursor = page["page"]["nextCursor"].as_str().map(str::to_owned);
+    }
+    page["items"] = Value::Array(items);
+    page["page"]["nextCursor"] = Value::Null;
+    Ok(page)
 }
 
 /// Follows the controller's bounded SSE stream, reconnecting from the last
@@ -2493,8 +2546,9 @@ fn render_stream_event(
 #[cfg(test)]
 mod event_output_tests {
     use super::{
-        Command, Output, event_stream_http_error, event_stream_request, parse, read_sse_events,
-        render_skills, render_stream_event, request_for, retryable_event_stream_status,
+        Command, Output, event_stream_http_error, event_stream_request, merge_skills_matrix_pages,
+        parse, read_sse_events, render_skills, render_stream_event, request_for,
+        retryable_event_stream_status,
     };
     use std::io::{BufRead as _, Write as _};
     use std::net::TcpListener;
@@ -2578,6 +2632,28 @@ mod event_output_tests {
         assert!(render_skills(&snapshot).contains("Hello (hello) → claude_code"));
         let page = serde_json::json!({"items": [snapshot]});
         assert!(render_skills(&page).contains("box: available"));
+    }
+
+    #[test]
+    fn skills_matrix_text_mode_collects_every_page() {
+        let first = serde_json::json!({
+            "items": [{"machineId": "m-1", "availability": "available", "data": {"skills": []}}],
+            "page": {"limit": 1, "nextCursor": "m-1"}
+        });
+        let merged = merge_skills_matrix_pages(first, |cursor, limit| {
+            assert_eq!(cursor, "m-1");
+            assert_eq!(limit, 1);
+            Ok(serde_json::json!({
+                "items": [{"machineId": "m-2", "availability": "absent", "data": {"skills": []}}],
+                "page": {"limit": 1, "nextCursor": null}
+            }))
+        })
+        .unwrap();
+        let rendered = render_skills(&merged);
+        assert!(rendered.contains("m-1: available"));
+        assert!(rendered.contains("m-2: absent"));
+        assert_eq!(merged["items"].as_array().unwrap().len(), 2);
+        assert!(merged["page"]["nextCursor"].is_null());
     }
 
     #[test]

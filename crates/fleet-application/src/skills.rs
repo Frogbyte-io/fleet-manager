@@ -143,35 +143,57 @@ impl Skills {
         limit: u32,
     ) -> Result<SkillsPage, SkillsError> {
         let limit = limit.clamp(1, MAX_SKILLS_MATRIX_PAGE);
-        let rows = self
-            .port
-            .list(after_machine_id, limit.saturating_add(1))
-            .await
-            .map_err(|_| SkillsError::Backend)?;
-        let has_more = rows.len() > usize::try_from(limit).unwrap_or(usize::MAX);
-        let next_cursor = has_more.then(|| {
-            rows[usize::try_from(limit).unwrap_or(usize::MAX) - 1]
-                .machine_id
-                .clone()
-        });
-        let rows = rows
-            .into_iter()
-            .take(usize::try_from(limit).unwrap_or(usize::MAX));
+        let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
+        let fetch_limit = limit.saturating_add(1);
+        let mut scan_cursor = after_machine_id.map(str::to_owned);
         let mut visible = Vec::new();
-        for row in rows {
-            if authorize(
-                authorizer,
-                AccessRequest {
-                    principal_id: &principal.id,
-                    action: Permission::SkillsRead,
-                    resource: Some(&row.machine_id),
-                },
-            )
-            .is_ok()
-            {
-                visible.push(view(row, now));
+        let mut has_more = false;
+
+        // Fill the public page with authorized rows. Advance an internal
+        // scan cursor over denied rows, but expose only a cursor for the last
+        // row returned to this caller.
+        loop {
+            let rows = self
+                .port
+                .list(scan_cursor.as_deref(), fetch_limit)
+                .await
+                .map_err(|_| SkillsError::Backend)?;
+            let count = rows.len();
+            if count == 0 {
+                break;
+            }
+            for row in rows {
+                if scan_cursor
+                    .as_deref()
+                    .is_some_and(|cursor| row.machine_id.as_str() <= cursor)
+                {
+                    return Err(SkillsError::Backend);
+                }
+                scan_cursor = Some(row.machine_id.clone());
+                if authorize(
+                    authorizer,
+                    AccessRequest {
+                        principal_id: &principal.id,
+                        action: Permission::SkillsRead,
+                        resource: Some(&row.machine_id),
+                    },
+                )
+                .is_ok()
+                {
+                    if visible.len() == page_size {
+                        has_more = true;
+                        break;
+                    }
+                    visible.push(view(row, now));
+                }
+            }
+            if has_more || count < usize::try_from(fetch_limit).unwrap_or(usize::MAX) {
+                break;
             }
         }
+        let next_cursor = has_more
+            .then(|| visible.last().map(|row| row.snapshot.machine_id.clone()))
+            .flatten();
         Ok(SkillsPage {
             items: visible,
             next_cursor,

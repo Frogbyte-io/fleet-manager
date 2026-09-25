@@ -653,18 +653,24 @@ if [ -z "${fleet_cli:-}" ] && [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_S
   fleet_cli="$HOME/.local/bin/skills-manager-cli"
 fi
 if [ -z "${fleet_cli:-}" ]; then fleet_emit_absent; exit 0; fi
-fleet_version=$("$fleet_cli" --version 2>/dev/null | head -n 1)
+fleet_version_output=$("$fleet_cli" --version 2>/dev/null | head -n 1)
+if [ -z "$fleet_version_output" ]; then printf '{"present":true,"unidentified":true}\n'; exit 0; fi
+case "$fleet_version_output" in
+  '{'*) fleet_version=$(printf '%s' "$fleet_version_output" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') ;;
+  *) fleet_version=$fleet_version_output ;;
+esac
 if [ -z "$fleet_version" ]; then printf '{"present":true,"unidentified":true}\n'; exit 0; fi
 fleet_version64=$(fleet_b64 "$fleet_version")
 case "$fleet_version" in
-  'skills-manager-cli 1.40.0'|'1.40.0') ;;
+  'skills-manager-cli 1.40.0'|'1.40.0') fleet_version='1.40.0'; fleet_version64=$(fleet_b64 "$fleet_version") ;;
   *) printf '{"present":true,"version64":"%s","unsupportedVersion":true}\n' "$fleet_version64"; exit 0 ;;
 esac
 fleet_json() {
   if [ -n "$fleet_root" ]; then "$fleet_cli" --skills-root "$fleet_root" --json "$@"; else "$fleet_cli" --json "$@"; fi
 }
-# Keep temporary upstream documents private, bound each one, and remove them
-# on normal exit or when the operation deadline kills this script.
+# Keep temporary upstream documents private and bounded. The EXIT trap
+# removes them on normal remote exit; a local SSH deadline cannot guarantee
+# that the remote process exits, so an interrupted command can leave a file.
 fleet_tmp=$(mktemp) || { printf '{"present":true,"version64":"%s","inventoryFailed":true}\n' "$fleet_version64"; exit 0; }
 trap 'rm -f "$fleet_tmp"' EXIT
 fleet_collect() {

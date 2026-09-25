@@ -143,7 +143,7 @@ fn install_stub_cli(home: &str, sha_of_stub: Option<&str>) -> String {
 echo "$@" >> /tmp/fleet-stub-cli.log
 [ "$1" = "--json" ] && shift
 case "$1" in
-  --version) echo "skills-manager-cli 1.40.0" ;;
+  --version) echo '{"version":"1.40.0"}' ;;
   agents) echo '[{"id":"claude_code","name":"Claude Code","skillsDir":"/secret/agent/path"}]' ;;
   presets) echo '[{"id":"default","name":"Default","description":"private","icon":"x","sort_order":0,"skill_count":1,"active":true}]' ;;
   skills)
