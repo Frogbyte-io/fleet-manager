@@ -76,6 +76,7 @@ impl LabRepository {
         Ok(ProvisionRecord {
             id: row.get("id"),
             template_version_id: row.get("template_version_id"),
+            lease_id: row.get("lease_id"),
             state: GuestState::from_id(&state)?,
             node: row.get("node"),
             vmid: row
@@ -253,13 +254,14 @@ impl ProvisionPort for LabRepository {
     async fn create(&self, new: &NewProvision, now: i64) -> Result<ProvisionRecord, String> {
         let id = Uuid::now_v7().to_string();
         let result = sqlx::query(
-            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at) \
-             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4)",
+            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at, lease_id) \
+             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4, ?5)",
         )
         .bind(&id)
         .bind(&new.template_version_id)
         .bind(&new.idempotency_key)
         .bind(now)
+        .bind(&new.lease_id)
         .execute(&self.pool)
         .await;
         match result {
@@ -321,6 +323,92 @@ impl ProvisionPort for LabRepository {
         Ok(())
     }
 
+    async fn complete_ready(
+        &self,
+        record: &ProvisionRecord,
+        lease_expires_at: Option<i64>,
+    ) -> Result<(), String> {
+        if record.state != fleet_core::GuestState::Ready || record.ready_at.is_none() {
+            return Err(
+                "a completed provision must carry its ready state and timestamp".to_owned(),
+            );
+        }
+        if record.lease_id.is_some() != lease_expires_at.is_some() {
+            return Err("a linked lease and its expiry must be completed together".to_owned());
+        }
+        let mut effective_ready_at = record.ready_at.expect("validated above");
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("begin readiness transaction failed: {error}"))?;
+        if let (Some(lease_id), Some(expires_at)) = (record.lease_id.as_deref(), lease_expires_at) {
+            let changed = sqlx::query(
+                "UPDATE lab_leases SET state = 'ready', ready_at = ?3, expires_at = ?4 \
+                 WHERE id = ?1 AND state = 'provisioning' AND provision_id = ?2 \
+                 AND ready_at IS NULL AND expires_at IS NULL \
+                 AND ?4 <= COALESCE(max_lifetime_at, created_at + ?5)",
+            )
+            .bind(lease_id)
+            .bind(&record.id)
+            .bind(effective_ready_at)
+            .bind(expires_at)
+            .bind(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("mark linked lease ready failed: {error}"))?;
+            if changed.rows_affected() == 0 {
+                let current = sqlx::query(
+                    "SELECT state, provision_id, ready_at, expires_at FROM lab_leases WHERE id = ?1",
+                )
+                .bind(lease_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|error| format!("read linked lease failed: {error}"))?
+                .ok_or_else(|| format!("lease {lease_id} not found"))?;
+                let current_ready_at = current.get::<Option<i64>, _>("ready_at");
+                let current_expires_at = current.get::<Option<i64>, _>("expires_at");
+                let already_ready = current.get::<String, _>("state") == "ready"
+                    && current.get::<Option<String>, _>("provision_id").as_deref()
+                        == Some(record.id.as_str())
+                    && current_ready_at.is_some()
+                    && current_expires_at.is_some();
+                if !already_ready {
+                    return Err(
+                        "the linked lease changed before readiness was committed".to_owned()
+                    );
+                }
+                effective_ready_at = current_ready_at.expect("checked above");
+            }
+        }
+        let updated = sqlx::query(
+            "UPDATE lab_provisions SET state = 'ready', node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8 \
+             WHERE id = ?1 AND lease_id IS ?2 \
+             AND (state = 'provisioning' OR (state = 'ready' AND ready_at = ?7))",
+        )
+        .bind(&record.id)
+        .bind(&record.lease_id)
+        .bind(&record.node)
+        .bind(record.vmid.map(i64::from))
+        .bind(&record.clone_upid)
+        .bind(&record.guest_ipv4)
+        .bind(effective_ready_at)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("complete provision readiness failed: {error}"))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!(
+                "provision {} was missing or linked to a different lease",
+                record.id
+            ));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit readiness transaction failed: {error}"))
+    }
+
     async fn list(&self) -> Result<Vec<ProvisionRecord>, String> {
         let rows = sqlx::query("SELECT * FROM lab_provisions ORDER BY created_at DESC, id DESC")
             .fetch_all(&self.pool)
@@ -356,6 +444,13 @@ impl LeaseRepository {
     fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, String> {
         let state: String = row.get("state");
         let cleanup: String = row.get("cleanup");
+        let created_at: i64 = row.get("created_at");
+        let max_lifetime_at = row
+            .try_get::<Option<i64>, _>("max_lifetime_at")
+            .map_err(|error| format!("lease maximum lifetime is unreadable: {error}"))?
+            .unwrap_or_else(|| {
+                created_at.saturating_add(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            });
         Ok(Lease {
             id: row.get("id"),
             template_version_id: row.get("template_version_id"),
@@ -365,7 +460,9 @@ impl LeaseRepository {
             state: LeaseState::from_id(&state)?,
             provision_id: row.get("provision_id"),
             cleanup: CleanupStrategy::from_id(&cleanup)?,
-            created_at: row.get("created_at"),
+            created_at,
+            max_lifetime_at,
+            ttl_seconds: u32::try_from(row.get::<i64, _>("ttl_seconds")).unwrap_or(0),
             ready_at: row.get("ready_at"),
             expires_at: row.get("expires_at"),
             cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
@@ -377,9 +474,14 @@ impl LeaseRepository {
 impl LeasePort for LeaseRepository {
     async fn create(&self, lease: &NewLease, owner: &str, now: i64) -> Result<Lease, String> {
         let id = Uuid::now_v7().to_string();
+        let max_lifetime_at = now
+            .checked_add(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            .ok_or_else(|| {
+                "the lease creation time exceeds the maximum lifetime range".to_owned()
+            })?;
         sqlx::query(
-            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7)",
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, max_lifetime_at, ttl_seconds) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7, ?8, ?9)",
         )
         .bind(&id)
         .bind(&lease.template_version_id)
@@ -388,6 +490,8 @@ impl LeasePort for LeaseRepository {
         .bind(&lease.project_id)
         .bind(lease.cleanup.id())
         .bind(now)
+        .bind(max_lifetime_at)
+        .bind(i64::from(lease.ttl_seconds))
         .execute(&self.pool)
         .await
         .map_err(|error| format!("create failed: {error}"))?;
@@ -443,16 +547,74 @@ impl LeasePort for LeaseRepository {
         rows.iter().map(Self::row_to_lease).collect()
     }
 
-    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String> {
-        // The compare-and-set: only the writer whose UPDATE lands while
-        // the row is still in the observed state wins the claim.
-        let claimed =
-            sqlx::query("UPDATE lab_leases SET state = 'releasing' WHERE id = ?1 AND state = ?2")
-                .bind(id)
-                .bind(observed.id())
-                .execute(&self.pool)
-                .await
-                .map_err(|error| format!("claim failed: {error}"))?;
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String> {
+        let updated = sqlx::query(
+            "UPDATE lab_leases SET expires_at = ?4 \
+             WHERE id = ?1 AND state = 'ready' AND expires_at = ?2 \
+             AND expires_at > ?3 \
+             AND ?4 <= COALESCE(max_lifetime_at, created_at + ?5)",
+        )
+        .bind(id)
+        .bind(observed_expires_at)
+        .bind(now)
+        .bind(new_expires_at)
+        .bind(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("extend failed: {error}"))?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String> {
+        let updated = sqlx::query(
+            "UPDATE lab_leases SET state = 'provisioning', provision_id = ?2 \
+             WHERE id = ?1 AND state = 'requested' AND provision_id IS NULL",
+        )
+        .bind(id)
+        .bind(provision_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("attach provision failed: {error}"))?;
+        if updated.rows_affected() == 1 {
+            return Ok(true);
+        }
+        let current = sqlx::query("SELECT state, provision_id FROM lab_leases WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("read linked provision failed: {error}"))?;
+        Ok(current.is_some_and(|row| {
+            row.get::<String, _>("state") == "provisioning"
+                && row.get::<Option<String>, _>("provision_id").as_deref() == Some(provision_id)
+        }))
+    }
+
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String> {
+        // Compare both state and deadline so a stale expiry scan cannot
+        // release a lease whose TTL was extended before this claim.
+        let claimed = sqlx::query(
+            "UPDATE lab_leases SET state = 'releasing' \
+             WHERE id = ?1 AND state = ?2 AND expires_at = ?3 AND expires_at <= ?4",
+        )
+        .bind(id)
+        .bind(observed.id())
+        .bind(observed_expires_at)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("claim failed: {error}"))?;
         Ok(claimed.rows_affected() == 1)
     }
 }

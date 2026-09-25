@@ -148,6 +148,8 @@ pub struct ProvisionRecord {
     pub id: String,
     /// The template version the guest was provisioned from.
     pub template_version_id: String,
+    /// The lease this saga provisions, when started from a lease.
+    pub lease_id: Option<String>,
     /// The guest's current state.
     pub state: GuestState,
     /// The PVE node the guest landed on, once cloned.
@@ -174,6 +176,8 @@ pub struct ProvisionRecord {
 pub struct NewProvision {
     /// The template version being provisioned.
     pub template_version_id: String,
+    /// The lease this saga provisions, when linked.
+    pub lease_id: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
 }
@@ -205,6 +209,18 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String>;
+    /// Atomically records provision readiness and, when linked, the lease's
+    /// ready state and expiry. This prevents either row from becoming the
+    /// sole source of truth after a partial write.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the record/lease link changed or the backend errors.
+    async fn complete_ready(
+        &self,
+        record: &ProvisionRecord,
+        lease_expires_at: Option<i64>,
+    ) -> Result<(), String>;
     /// Lists records, newest first.
     ///
     /// # Errors
@@ -261,14 +277,43 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn expired(&self, now: i64) -> Result<Vec<Lease>, String>;
-    /// Claims one lease for release, conditional on its observed state:
-    /// the compare-and-set that keeps concurrent sweeps from
-    /// double-claiming. Returns whether this caller won the claim.
+    /// Extends a ready lease's expiry if the observed deadline is still
+    /// current and unexpired. Returns false when the sweeper or another
+    /// extension changed the lease first.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors.
-    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String>;
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String>;
+    /// Attaches a provision record to a requested lease, moving it into
+    /// provisioning. A replay of the same link succeeds; a different link
+    /// or intervening state change returns false.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String>;
+    /// Claims one lease for release, conditional on its observed state:
+    /// the compare-and-set that keeps concurrent sweeps from
+    /// double-claiming or winning over an extension after an expiry scan.
+    /// Returns whether this caller won the claim.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String>;
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -356,7 +401,7 @@ impl Lab {
     ///
     /// # Errors
     ///
-    /// Fails on denial, an unknown version, or a backend failure.
+    /// Fails on denial, an unknown version/lease, a lifecycle conflict, or a backend failure.
     pub async fn create_lease(
         &self,
         authorizer: &dyn Authorizer,
@@ -564,6 +609,75 @@ impl Lab {
         Ok(updated)
     }
 
+    /// Extends a ready lease by adding seconds to its existing expiry. The
+    /// absolute maximum lifetime is measured from creation and cannot be
+    /// extended.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown or non-ready lease, an expired lease, an
+    /// extension beyond the absolute limit, or a concurrent state change.
+    pub async fn extend_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+        by_seconds: u32,
+        now: i64,
+    ) -> Result<Lease, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabExtend,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        let observed_expires_at = lease.expires_at.ok_or_else(|| LabUseCaseError::Invalid {
+            detail: "only ready leases with a TTL deadline can be extended".to_owned(),
+        })?;
+        let new_expires_at = lease
+            .extend_expiry(now, by_seconds)
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        self.audit_event(
+            principal,
+            Permission::LabExtend,
+            Some(id),
+            "lab_lease_extension_requested",
+            None,
+        )
+        .await?;
+        let extended = self
+            .leases
+            .extend_ready(id, observed_expires_at, now, new_expires_at)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        if !extended {
+            return Err(LabUseCaseError::Conflict {
+                detail: "the lease changed state or expiry before it could be extended".to_owned(),
+            });
+        }
+        let mut updated = lease;
+        updated.expires_at = Some(new_expires_at);
+        Ok(updated)
+    }
+
     /// The expiry sweeper's transition: every lease whose TTL has expired
     /// at `now` moves into `releasing` with the release intent recorded.
     /// The sweeper survives restart because the deadlines live in the
@@ -597,6 +711,9 @@ impl Lab {
                 })?;
         let mut released = Vec::new();
         for lease in expired {
+            let Some(observed_expires_at) = lease.expires_at else {
+                continue;
+            };
             self.audit_event(
                 principal,
                 Permission::LabLease,
@@ -612,7 +729,7 @@ impl Lab {
             claimed.state = LeaseState::Releasing;
             let claimed_ok = self
                 .leases
-                .claim_for_release(&lease.id, LeaseState::Ready)
+                .claim_for_release(&lease.id, LeaseState::Ready, observed_expires_at, now)
                 .await
                 .map_err(|detail| LabUseCaseError::Backend {
                     context: "leases",
@@ -920,23 +1037,55 @@ impl Lab {
     /// # Errors
     ///
     /// Fails on denial, an unknown version, or a backend failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn start_provision(
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         version_id: &str,
+        lease_id: Option<&str>,
         idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<ProvisionRecord, LabUseCaseError> {
+        let authorization_resource = lease_id.unwrap_or(version_id);
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::LabProvision,
-                resource: Some(version_id),
+                resource: Some(authorization_resource),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        let lease = if let Some(lease_id) = lease_id {
+            let lease = self.leases.get(lease_id).await.map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("lease {lease_id}"),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    }
+                }
+            })?;
+            if lease.template_version_id != version_id {
+                return Err(LabUseCaseError::Invalid {
+                    detail: "the lease uses a different template version".to_owned(),
+                });
+            }
+            if lease.state != LeaseState::Requested
+                && !(lease.state == LeaseState::Provisioning && lease.provision_id.is_some())
+            {
+                return Err(LabUseCaseError::Conflict {
+                    detail: format!("lease {lease_id} is not awaiting provisioning"),
+                });
+            }
+            Some(lease)
+        } else {
+            None
+        };
         // The version must exist and its image pin must still be
         // promoted: a demotion between publish and provision refuses.
         let version = self
@@ -959,14 +1108,16 @@ impl Lab {
         self.audit_event(
             principal,
             Permission::LabProvision,
-            Some(version_id),
+            Some(lease_id.unwrap_or(version_id)),
             "lab_provision_starting",
             Some(("digest", version.image_digest.as_str())),
         )
         .await?;
         // Idempotent replay: the caller-scoped key returns the in-flight
         // record instead of creating a second guest saga.
-        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        let scoped_key = lease_id
+            .map(|id| format!("{}:lab-lease:{id}", principal.id))
+            .or_else(|| idempotency_key.map(|key| format!("{}:{key}", principal.id)));
         if let Some(key) = &scoped_key
             && let Some(existing) =
                 self.provisions
@@ -977,12 +1128,26 @@ impl Lab {
                         detail,
                     })?
         {
+            if existing.lease_id.as_deref() != lease_id {
+                return Err(LabUseCaseError::Conflict {
+                    detail: "the idempotency key is already attached to another lease".to_owned(),
+                });
+            }
+            if existing.state == GuestState::NeverReady {
+                return Err(LabUseCaseError::Conflict {
+                    detail: "this lease's provision attempt is terminal; release it and request a replacement lease".to_owned(),
+                });
+            }
+            self.attach_lease_provision(lease.as_ref(), &existing)
+                .await?;
             return Ok(existing);
         }
-        self.provisions
+        let provision = self
+            .provisions
             .create(
                 &NewProvision {
                     template_version_id: version_id.to_owned(),
+                    lease_id: lease_id.map(str::to_owned),
                     idempotency_key: scoped_key,
                 },
                 now,
@@ -991,7 +1156,85 @@ impl Lab {
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "provisions",
                 detail,
-            })
+            })?;
+        self.attach_lease_provision(lease.as_ref(), &provision)
+            .await?;
+        Ok(provision)
+    }
+
+    /// Starts the provision saga attached to an existing lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, a mismatched/non-requested lease,
+    /// an unpromoted image pin, or a backend failure.
+    pub async fn start_lease_provision(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        lease_id: &str,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<ProvisionRecord, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabProvision,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(lease_id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {lease_id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        self.start_provision(
+            authorizer,
+            principal,
+            &lease.template_version_id,
+            Some(lease_id),
+            idempotency_key,
+            now,
+        )
+        .await
+    }
+
+    async fn attach_lease_provision(
+        &self,
+        lease: Option<&Lease>,
+        provision: &ProvisionRecord,
+    ) -> Result<(), LabUseCaseError> {
+        let Some(lease) = lease else {
+            return Ok(());
+        };
+        if provision.lease_id.as_deref() != Some(lease.id.as_str()) {
+            return Err(LabUseCaseError::Conflict {
+                detail: "the provision record is not linked to this lease".to_owned(),
+            });
+        }
+        let attached = self
+            .leases
+            .attach_provision(&lease.id, &provision.id)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        if !attached {
+            return Err(LabUseCaseError::Conflict {
+                detail: format!("lease {} changed before provisioning started", lease.id),
+            });
+        }
+        Ok(())
     }
 
     /// Lists the provisioning records.

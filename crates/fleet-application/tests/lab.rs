@@ -160,6 +160,16 @@ impl LabTemplatePort for FakeTemplates {
 #[derive(Debug, Default)]
 struct FakeProvisions {
     records: Mutex<Vec<fleet_application::lab::ProvisionRecord>>,
+    leases: Option<Arc<Mutex<Vec<fleet_application::lab::Lease>>>>,
+}
+
+impl FakeProvisions {
+    fn with_leases(leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>) -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+            leases: Some(leases),
+        }
+    }
 }
 
 #[async_trait]
@@ -173,6 +183,7 @@ impl ProvisionPort for FakeProvisions {
         let record = fleet_application::lab::ProvisionRecord {
             id: format!("prv-{}", records.len() + 1),
             template_version_id: new.template_version_id.clone(),
+            lease_id: new.lease_id.clone(),
             state: fleet_core::GuestState::Provisioning,
             node: None,
             vmid: None,
@@ -207,6 +218,65 @@ impl ProvisionPort for FakeProvisions {
         Ok(())
     }
 
+    async fn complete_ready(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        lease_expires_at: Option<i64>,
+    ) -> Result<(), String> {
+        if record.state != fleet_core::GuestState::Ready || record.ready_at.is_none() {
+            return Err("the provision is not ready".to_owned());
+        }
+        let mut records = self.records.lock().unwrap();
+        let record_index = records
+            .iter()
+            .position(|stored| stored.id == record.id)
+            .ok_or_else(|| format!("provision {} not found", record.id))?;
+        if records[record_index].lease_id != record.lease_id {
+            return Err("the provision link changed".to_owned());
+        }
+        if records[record_index].state != fleet_core::GuestState::Provisioning
+            && !(record.lease_id.is_some()
+                && records[record_index].state == fleet_core::GuestState::Ready)
+        {
+            return Err("the provision changed before readiness was committed".to_owned());
+        }
+        let mut completed_record = record.clone();
+        if let Some(lease_id) = record.lease_id.as_deref() {
+            let expires_at = lease_expires_at.ok_or("linked lease has no expiry")?;
+            let leases = self
+                .leases
+                .as_ref()
+                .ok_or("the fake provision port has no lease storage")?;
+            let mut leases = leases.lock().unwrap();
+            let lease = leases
+                .iter_mut()
+                .find(|lease| lease.id == lease_id)
+                .ok_or_else(|| format!("lease {lease_id} not found"))?;
+            if lease.state == fleet_core::LeaseState::Provisioning
+                && lease.provision_id.as_deref() == Some(record.id.as_str())
+                && lease.ready_at.is_none()
+                && lease.expires_at.is_none()
+                && expires_at <= lease.max_lifetime_at
+            {
+                lease.state = fleet_core::LeaseState::Ready;
+                lease.ready_at = record.ready_at;
+                lease.expires_at = Some(expires_at);
+            } else if lease.state == fleet_core::LeaseState::Ready
+                && lease.provision_id.as_deref() == Some(record.id.as_str())
+                && lease.ready_at.is_some()
+                && lease.expires_at.is_some()
+            {
+                completed_record.ready_at = lease.ready_at;
+            } else {
+                return Err("the linked lease changed before readiness".to_owned());
+            }
+        } else if lease_expires_at.is_some() {
+            return Err("an unlinked provision cannot carry a lease expiry".to_owned());
+        }
+        records[record_index] = completed_record;
+        Ok(())
+    }
+
     async fn list(&self) -> Result<Vec<fleet_application::lab::ProvisionRecord>, String> {
         Ok(self.records.lock().unwrap().clone())
     }
@@ -228,7 +298,7 @@ impl ProvisionPort for FakeProvisions {
 /// The lease port over an in-memory map.
 #[derive(Debug, Default)]
 struct FakeLeases {
-    leases: Mutex<Vec<fleet_application::lab::Lease>>,
+    leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>,
 }
 
 #[async_trait]
@@ -249,7 +319,9 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             state: fleet_core::LeaseState::Requested,
             provision_id: None,
             cleanup: lease.cleanup,
+            ttl_seconds: lease.ttl_seconds,
             created_at: now,
+            max_lifetime_at: now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS,
             ready_at: None,
             expires_at: None,
             cleanup_attempts: 0,
@@ -293,12 +365,57 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             .collect())
     }
 
-    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String> {
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String> {
         let mut leases = self.leases.lock().unwrap();
         let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
             return Ok(false);
         };
-        if stored.state != observed {
+        if stored.state != LeaseState::Ready
+            || stored.expires_at != Some(observed_expires_at)
+            || observed_expires_at <= now
+            || new_expires_at > stored.max_lifetime_at
+        {
+            return Ok(false);
+        }
+        stored.expires_at = Some(new_expires_at);
+        Ok(true)
+    }
+
+    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state == LeaseState::Requested && stored.provision_id.is_none() {
+            stored.state = LeaseState::Provisioning;
+            stored.provision_id = Some(provision_id.to_owned());
+            return Ok(true);
+        }
+        Ok(stored.state == LeaseState::Provisioning
+            && stored.provision_id.as_deref() == Some(provision_id))
+    }
+
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state != observed
+            || stored.expires_at != Some(observed_expires_at)
+            || observed_expires_at > now
+        {
             return Ok(false);
         }
         stored.state = LeaseState::Releasing;
@@ -375,14 +492,10 @@ impl AuditPort for FakeAudit {
 fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<FakeAudit>) {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(
-            templates.clone(),
-            Arc::new(FakeProvisions::default()),
-            Arc::new(FakeLeases::default()),
-            pins,
-            audit.clone(),
-        ),
+        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
         templates,
         audit,
     )
@@ -391,14 +504,10 @@ fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<Fa
 fn service_with_pins(pins: Arc<FakePins>) -> (Lab, Arc<FakeTemplates>, Arc<FakeAudit>) {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(
-            templates.clone(),
-            Arc::new(FakeProvisions::default()),
-            Arc::new(FakeLeases::default()),
-            pins,
-            audit.clone(),
-        ),
+        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
         templates,
         audit,
     )
@@ -494,7 +603,7 @@ async fn provisioning_starts_with_a_record_in_provisioning_state() {
         .unwrap();
 
     let record = lab
-        .start_provision(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .start_provision(&AllowAll, &principal(), &version.id, None, None, NOW + 2)
         .await
         .unwrap();
     assert_eq!(record.state, fleet_core::GuestState::Provisioning);
@@ -533,7 +642,7 @@ async fn provisioning_refuses_an_unpromoted_pin_at_start() {
     // The image is demoted after publish: provisioning refuses.
     pins.promoted.lock().unwrap().clear();
     let error = lab
-        .start_provision(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .start_provision(&AllowAll, &principal(), &version.id, None, None, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -650,6 +759,97 @@ async fn leases_walk_create_ready_and_expire() {
             .any(|(k, v)| k == "event" && v == "lab_lease_creating")),
         "{intents:?}"
     );
+}
+
+#[tokio::test]
+async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease() {
+    let templates = Arc::new(FakeTemplates::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        templates.clone(),
+        provisions,
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        audit.clone(),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let created = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id,
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    lab.start_lease_provision(&AllowAll, &principal(), &created.id, None, NOW + 3)
+        .await
+        .unwrap();
+    assert!(audit.intents.lock().unwrap().iter().any(|intent| {
+        intent.action == "lab.provision"
+            && intent.resource.as_deref() == Some(created.id.as_str())
+            && intent
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "event" && value == "lab_provision_starting")
+    }));
+    let mut ready = created.clone();
+    ready.state = LeaseState::Ready;
+    ready.ready_at = Some(NOW + 3);
+    ready.expires_at = Some(NOW + 10_000);
+    leases.update(&ready).await.unwrap();
+
+    let extended = lab
+        .extend_lease(&AllowAll, &principal(), &created.id, 3_600, NOW + 4)
+        .await
+        .unwrap();
+    assert_eq!(extended.expires_at, Some(NOW + 3_610_000));
+    assert_eq!(extended.max_lifetime_at, created.max_lifetime_at);
+    assert!(audit.intents.lock().unwrap().iter().any(|intent| {
+        intent.action == "lab.extend"
+            && intent.resource.as_deref() == Some(created.id.as_str())
+            && intent
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "event" && value == "lab_lease_extension_requested")
+    }));
+
+    let denied = lab
+        .extend_lease(&DenyAll, &principal(), &created.id, 60, NOW + 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(denied, LabUseCaseError::Denied(_)));
+
+    let mut near_cap = extended;
+    near_cap.expires_at = Some(near_cap.max_lifetime_at - 1_000);
+    leases.update(&near_cap).await.unwrap();
+    let capped = lab
+        .extend_lease(&AllowAll, &principal(), &created.id, 2, NOW + 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(capped, LabUseCaseError::Invalid { .. }));
 }
 
 #[tokio::test]
@@ -777,10 +977,11 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
     let (lab, _templates, _audit) = {
         let templates = Arc::new(FakeTemplates::default());
         let audit = Arc::new(FakeAudit::default());
+        let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
         (
             Lab::new(
                 templates.clone(),
-                Arc::new(FakeProvisions::default()),
+                provisions,
                 leases.clone(),
                 FakePins::with_promoted("rcp-1@abc"),
                 audit.clone(),
@@ -825,6 +1026,7 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
     ready.state = LeaseState::Ready;
     ready.ready_at = Some(NOW + 3);
     ready.expires_at = Some(NOW + 3);
+    ready.max_lifetime_at = NOW + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS;
     leases.update(&ready).await.unwrap();
 
     // The sweeper claims it into releasing.

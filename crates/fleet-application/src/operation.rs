@@ -530,6 +530,49 @@ impl Operations {
         principal_id: &str,
         new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
+        self.create_inner(authorizer, principal_id, new, false)
+            .await
+    }
+
+    /// Creates the one lease-scoped Lab provision operation from the
+    /// dedicated lease provisioning use case. Generic operation creation
+    /// refuses `lab.provision` so callers cannot queue duplicate sagas.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the payload does not name `lease_id`, authorization is
+    /// denied, the kind is invalid, or a backend fails.
+    pub async fn create_lab_provision(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked_lease_id = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+            .ok_or(OperationUseCaseError::Invalid {
+                detail: "the lab.provision payload must carry a leaseId".to_owned(),
+            })?;
+        if new.kind != "lab.provision" || linked_lease_id != lease_id {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the lab.provision payload must match its dedicated lease route".to_owned(),
+            });
+        }
+        self.create_inner(authorizer, principal_id, new, true).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn create_inner(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        new: &NewOperation,
+        allow_lab_provision: bool,
+    ) -> Result<Operation, OperationUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -585,6 +628,30 @@ impl Operations {
                     principal_id,
                     action: permission,
                     resource: Some(&machine_id),
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+        } else if new.kind == "lab.provision" {
+            if !allow_lab_provision {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.provision must use the dedicated lease provisioning route"
+                        .to_owned(),
+                });
+            }
+            let lease_id = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+                .ok_or(OperationUseCaseError::Invalid {
+                    detail: "the lab.provision payload must carry a leaseId".to_owned(),
+                })?;
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::LabProvision,
+                    resource: Some(&lease_id),
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;

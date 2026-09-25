@@ -48,8 +48,13 @@ Deadlines:
 - Queue deadline/optional caller wait limit
 - Provisioning/readiness deadline from request
 - Ready TTL beginning only when the lease reaches `ready`
-- Absolute maximum lifetime beginning at request to cap stuck workflows
+- Absolute maximum lifetime of 30 days beginning at request to cap stuck workflows
+- Ready TTL extensions can move the expiry only up to that creation-relative maximum
 - Cleanup retry/backoff horizon with persistent operator alert after exhaustion
+
+The current controller path attaches a provision record to a requested lease before queuing `lab.provision`. When the provision executor reaches guest readiness, it marks that same linked lease `ready`, starts its template TTL, and caps the expiry at the creation-relative maximum. Standalone template provisioning remains separate from lease lifecycle and does not make a lease ready.
+
+If the linked operation fails, the lease remains `provisioning` and the provision record retains any guest identifiers. A readiness timeout is terminal for that lease: another provision request returns a conflict directing the caller to release it and request a replacement. Provision failure cleanup remains part of the broader Lab saga work.
 
 Cleanup strategies:
 

@@ -1012,6 +1012,7 @@ pub struct ProvisionExecutor {
     accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
     credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
     provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+    leases: Arc<dyn fleet_application::lab::LeasePort>,
     templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
     client: fleet_provider_proxmox::ProxmoxClient,
 }
@@ -1023,6 +1024,7 @@ impl ProvisionExecutor {
         accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
         credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
         provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+        leases: Arc<dyn fleet_application::lab::LeasePort>,
         templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
         client: fleet_provider_proxmox::ProxmoxClient,
     ) -> Self {
@@ -1030,6 +1032,7 @@ impl ProvisionExecutor {
             accounts,
             credentials,
             provisions,
+            leases,
             templates,
             client,
         }
@@ -1093,10 +1096,13 @@ impl ProvisionExecutor {
     }
 }
 
-#[async_trait::async_trait]
-impl OperationExecutor for ProvisionExecutor {
+impl ProvisionExecutor {
     #[allow(clippy::too_many_lines)]
-    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+    async fn execute_linked(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
         if operation.kind != "lab.provision" {
             return Err("not a Lab provision kind".to_owned());
         }
@@ -1115,11 +1121,34 @@ impl OperationExecutor for ProvisionExecutor {
             .as_str()
             .ok_or("the payload carries no accountId")?
             .to_owned();
+        let lease_id = payload["leaseId"]
+            .as_str()
+            .ok_or("the payload carries no leaseId")?
+            .to_owned();
         let record = self
             .provisions
             .get(&record_id)
             .await
             .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .await
+            .map_err(|detail| format!("the linked lease is unreadable: {detail}"))?;
+        if record.lease_id.as_deref() != Some(lease_id.as_str())
+            || lease.provision_id.as_deref() != Some(record.id.as_str())
+        {
+            return Err("the provision record is not linked to the authorized lease".to_owned());
+        }
+        if !matches!(
+            lease.state,
+            fleet_core::LeaseState::Provisioning | fleet_core::LeaseState::Ready
+        ) {
+            return Err(format!(
+                "the linked lease is in {} and cannot be provisioned",
+                lease.state.id()
+            ));
+        }
         let version = self
             .templates
             .get_version(&record.template_version_id)
@@ -1284,15 +1313,51 @@ impl OperationExecutor for ProvisionExecutor {
         }
 
         // Ready: record the state; the TTL clock starts here.
+        let (ready_at, lease_expires_at) = if let Some(lease_id) = record.lease_id.as_deref() {
+            let lease = self
+                .leases
+                .get(lease_id)
+                .await
+                .map_err(|detail| format!("the linked lease is unreadable: {detail}"))?;
+            if lease.provision_id.as_deref() != Some(record.id.as_str()) {
+                return Err("the linked lease does not name this provision record".to_owned());
+            }
+            if lease.state == fleet_core::LeaseState::Ready {
+                (
+                    lease
+                        .ready_at
+                        .ok_or_else(|| "the ready lease has no readiness timestamp".to_owned())?,
+                    Some(
+                        lease
+                            .expires_at
+                            .ok_or_else(|| "the ready lease has no expiry timestamp".to_owned())?,
+                    ),
+                )
+            } else {
+                let mut ready_lease = lease;
+                ready_lease
+                    .mark_ready(fleet_core::SystemClock::now_unix_millis())
+                    .map_err(|detail| format!("the lease could not become ready: {detail}"))?;
+                let ready_at = ready_lease
+                    .ready_at
+                    .ok_or_else(|| "ready transition produced no ready_at".to_owned())?;
+                let expires_at = ready_lease
+                    .expires_at
+                    .ok_or_else(|| "ready transition produced no expires_at".to_owned())?;
+                (ready_at, Some(expires_at))
+            }
+        } else {
+            (fleet_core::SystemClock::now_unix_millis(), None)
+        };
         let mut updated = record.clone();
         updated.state = fleet_core::GuestState::Ready;
         updated.node = Some(node.clone());
         updated.vmid = Some(vmid);
-        updated.ready_at = Some(fleet_core::SystemClock::now_unix_millis());
+        updated.ready_at = Some(ready_at);
         self.provisions
-            .update(&updated)
+            .complete_ready(&updated, lease_expires_at)
             .await
-            .map_err(|detail| format!("the record update failed: {detail}"))?;
+            .map_err(|detail| format!("the readiness transaction failed: {detail}"))?;
         operations
             .complete(
                 &operation.id,
@@ -1311,6 +1376,13 @@ impl OperationExecutor for ProvisionExecutor {
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for ProvisionExecutor {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        self.execute_linked(operations, operation).await
     }
 }
 

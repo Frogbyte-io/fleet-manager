@@ -538,6 +538,21 @@ async fn an_unknown_kind_is_refused_with_the_invalid_request_code() {
 }
 
 #[tokio::test]
+async fn generic_operation_creation_cannot_start_lab_provision_sagas() {
+    let (parts, body) = post_json(
+        &format!("{API_BASE_PATH}/operations"),
+        serde_json::json!({
+            "kind": "lab.provision",
+            "idempotencyKey": "second-provision-attempt",
+            "payload": {"leaseId": "lease-owned", "recordId": "record-owned", "accountId": "pve-1"}
+        }),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
 async fn the_operation_list_is_a_page() {
     // One router for both calls: the in-memory backend is per router.
     let (router, _port, _audit) = test_router();
@@ -1327,4 +1342,86 @@ async fn an_unwired_machine_surface_answers_the_standard_envelope() {
 #[test]
 fn the_view_converts_into_the_documented_shape() {
     let _ = MachineView::assemble(example_machine(), 2_000, true);
+}
+
+#[derive(Debug)]
+struct NoPromotedVersions;
+
+#[async_trait::async_trait]
+impl fleet_application::lab::ImagePinValidator for NoPromotedVersions {
+    async fn promoted_version(
+        &self,
+        _version_id: &str,
+    ) -> Result<Option<fleet_core::RecipeVersion>, String> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn lab_lease_extension_returns_the_updated_deadline() {
+    use fleet_application::lab::{Lab, LeasePort, NewLease};
+    use fleet_core::{CleanupStrategy, LeaseState};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let repository = Arc::new(LabRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let mut lease = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            now,
+        )
+        .await
+        .unwrap();
+    lease.state = LeaseState::Ready;
+    lease.ready_at = Some(now);
+    lease.expires_at = Some(now + 3_600_000);
+    leases.update(&lease).await.unwrap();
+
+    let lab = Arc::new(Lab::new(
+        repository.clone(),
+        repository,
+        leases,
+        Arc::new(NoPromotedVersions),
+        Arc::new(FakeAudit),
+    ));
+    let base = test_state().0;
+    let mut state = (*base).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/{}/extend", lease.id))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"bySeconds":1800}"#))
+        .unwrap();
+    let (parts, body) = call_via(&router, request).await;
+
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["id"], lease.id);
+    assert_eq!(body["data"]["expiresAt"], now + 5_400_000);
+    assert_eq!(
+        body["data"]["maxLifetimeAt"],
+        now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS
+    );
+
+    let malformed = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/{}/extend", lease.id))
+        .header("content-type", "application/json")
+        .body(Body::from("{"))
+        .unwrap();
+    let (parts, body) = call_via(&router, malformed).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+    assert!(body["correlationId"].as_str().is_some());
 }

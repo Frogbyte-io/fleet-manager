@@ -160,6 +160,9 @@ pub enum Permission {
     /// Create, release, or sweep Lab leases. A mutation: it consumes or
     /// frees host resources.
     LabLease,
+    /// Extend the ready TTL of a Lab lease without changing its absolute
+    /// maximum lifetime.
+    LabExtend,
     /// Keep a Lab lease's VM out of automatic cleanup. An elevated
     /// mutation: it transfers a VM out of automatic cleanup.
     LabKeep,
@@ -216,6 +219,7 @@ impl Permission {
         Permission::LabConfig,
         Permission::LabProvision,
         Permission::LabLease,
+        Permission::LabExtend,
         Permission::LabKeep,
     ];
 
@@ -269,6 +273,7 @@ impl Permission {
             Permission::LabConfig => "lab.config",
             Permission::LabProvision => "lab.provision",
             Permission::LabLease => "lab.lease",
+            Permission::LabExtend => "lab.extend",
             Permission::LabKeep => "lab.keep",
         }
     }
@@ -325,6 +330,7 @@ impl Permission {
             | Permission::LabConfig
             | Permission::LabProvision
             | Permission::LabLease
+            | Permission::LabExtend
             | Permission::LabKeep => true,
         }
     }
@@ -381,6 +387,7 @@ impl Permission {
             | Permission::ProjectsReady
             | Permission::ApplyExecute
             | Permission::LabProvision
+            | Permission::LabExtend
             | Permission::LabKeep => true,
         }
     }
