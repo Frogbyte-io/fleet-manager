@@ -744,7 +744,7 @@ async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease(
             && intent
                 .metadata
                 .entries()
-                .any(|(key, value)| key == "event" && value == "lab_lease_extended")
+                .any(|(key, value)| key == "event" && value == "lab_lease_extension_requested")
     }));
 
     let denied = lab

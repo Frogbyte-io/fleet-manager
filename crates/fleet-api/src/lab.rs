@@ -843,10 +843,18 @@ pub async fn extend_lab_lease(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     Path(lease_id): Path<String>,
-    Json(request): Json<ExtendLeaseRequest>,
+    request: Result<Json<ExtendLeaseRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Resource<LeaseDto>>, ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(request) = request.map_err(|_| {
+        map_lab_error(
+            &LabUseCaseError::Invalid {
+                detail: "the request body must be valid JSON for a lease extension".to_owned(),
+            },
+            correlation_id,
+        )
+    })?;
     let lease = lab
         .extend_lease(
             state.authorizer.as_ref(),

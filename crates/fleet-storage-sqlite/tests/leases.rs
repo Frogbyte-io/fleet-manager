@@ -83,10 +83,35 @@ async fn extending_and_sweeping_compare_the_same_expiry_snapshot() {
 }
 
 #[tokio::test]
+async fn an_older_lease_without_a_persisted_cap_uses_its_creation_deadline() {
+    let (_dir, store, leases) = setup().await;
+    let lease = ready_lease(&leases, NOW + 1_000).await;
+    sqlx::query("UPDATE lab_leases SET max_lifetime_at = NULL WHERE id = ?1")
+        .bind(&lease.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let loaded = leases.get(&lease.id).await.unwrap();
+    assert_eq!(loaded.max_lifetime_at, NOW + MAX_LAB_LEASE_LIFETIME_MILLIS);
+    assert!(
+        !leases
+            .extend_ready(
+                &lease.id,
+                NOW + 1_000,
+                NOW + 500,
+                loaded.max_lifetime_at + 1,
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn storage_extension_refuses_expired_nonready_or_over_cap_rows() {
     let (_dir, _store, leases) = setup().await;
     let old_expiry = NOW + 1_000;
-    let lease = ready_lease(&leases, old_expiry).await;
+    let mut lease = ready_lease(&leases, old_expiry).await;
     assert!(
         !leases
             .extend_ready(&lease.id, old_expiry, old_expiry, NOW + 2_000)
@@ -102,6 +127,15 @@ async fn storage_extension_refuses_expired_nonready_or_over_cap_rows() {
     assert!(
         !leases
             .extend_ready(&lease.id, old_expiry + 1, NOW + 500, NOW + 2_000)
+            .await
+            .unwrap()
+    );
+
+    lease.state = LeaseState::Provisioning;
+    leases.update(&lease).await.unwrap();
+    assert!(
+        !leases
+            .extend_ready(&lease.id, old_expiry, NOW + 500, NOW + 2_000)
             .await
             .unwrap()
     );

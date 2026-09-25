@@ -632,7 +632,7 @@ impl Lab {
             principal,
             Permission::LabExtend,
             Some(id),
-            "lab_lease_extended",
+            "lab_lease_extension_requested",
             None,
         )
         .await?;

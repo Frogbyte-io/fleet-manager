@@ -1398,4 +1398,15 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
         body["data"]["maxLifetimeAt"],
         now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS
     );
+
+    let malformed = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases/{}/extend", lease.id))
+        .header("content-type", "application/json")
+        .body(Body::from("{"))
+        .unwrap();
+    let (parts, body) = call_via(&router, malformed).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+    assert!(body["correlationId"].as_str().is_some());
 }

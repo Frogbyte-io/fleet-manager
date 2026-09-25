@@ -1,7 +1,4 @@
--- FM-931: retain the creation-relative absolute lease lifetime cap so
--- extensions cannot be stacked indefinitely and the bound survives restart.
+-- FM-931: new leases persist their absolute lifetime cap. Older rows derive
+-- the same fixed cap from created_at when read, avoiding a table-wide rewrite.
 ALTER TABLE lab_leases
-    ADD COLUMN max_lifetime_at INTEGER NOT NULL DEFAULT 0;
-
-UPDATE lab_leases
-SET max_lifetime_at = created_at + 2592000000;
+    ADD COLUMN max_lifetime_at INTEGER;

@@ -356,6 +356,13 @@ impl LeaseRepository {
     fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, String> {
         let state: String = row.get("state");
         let cleanup: String = row.get("cleanup");
+        let created_at: i64 = row.get("created_at");
+        let max_lifetime_at = row
+            .try_get::<Option<i64>, _>("max_lifetime_at")
+            .map_err(|error| format!("lease maximum lifetime is unreadable: {error}"))?
+            .unwrap_or_else(|| {
+                created_at.saturating_add(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            });
         Ok(Lease {
             id: row.get("id"),
             template_version_id: row.get("template_version_id"),
@@ -365,8 +372,8 @@ impl LeaseRepository {
             state: LeaseState::from_id(&state)?,
             provision_id: row.get("provision_id"),
             cleanup: CleanupStrategy::from_id(&cleanup)?,
-            created_at: row.get("created_at"),
-            max_lifetime_at: row.get("max_lifetime_at"),
+            created_at,
+            max_lifetime_at,
             ready_at: row.get("ready_at"),
             expires_at: row.get("expires_at"),
             cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
@@ -460,12 +467,14 @@ impl LeasePort for LeaseRepository {
         let updated = sqlx::query(
             "UPDATE lab_leases SET expires_at = ?4 \
              WHERE id = ?1 AND state = 'ready' AND expires_at = ?2 \
-             AND expires_at > ?3 AND ?4 <= max_lifetime_at",
+             AND expires_at > ?3 \
+             AND ?4 <= COALESCE(max_lifetime_at, created_at + ?5)",
         )
         .bind(id)
         .bind(observed_expires_at)
         .bind(now)
         .bind(new_expires_at)
+        .bind(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("extend failed: {error}"))?;
