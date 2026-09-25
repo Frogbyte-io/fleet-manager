@@ -27,8 +27,10 @@ const identityPath = ref('')
 
 const auth = computed<SshAuth>(() => authType.value === 'agent' ? { type: 'agent' } : { type: 'identityFile', path: identityPath.value })
 const tagList = computed(() => tags.value.split(',').map(t => t.trim()).filter(Boolean))
+// A leading `-` would reach `ssh` as an option instead of a destination.
+const optionLike = computed(() => host.value.trim().startsWith('-') || user.value.trim().startsWith('-'))
 const valid = computed(() =>
-  host.value.trim() !== '' && user.value.trim() !== '' && validPort(port.value)
+  host.value.trim() !== '' && user.value.trim() !== '' && !optionLike.value && validPort(port.value)
   && (authType.value === 'agent' || identityPath.value.trim() !== ''),
 )
 const command = computed(() => valid.value
@@ -131,6 +133,13 @@ async function create() {
         >
       </label>
     </div>
+    <p
+      v-if="optionLike"
+      class="text-xs text-fc-err"
+      data-testid="ssh-option-like"
+    >
+      Host and user cannot start with "-".
+    </p>
     <p
       v-if="error"
       class="text-xs text-fc-err"

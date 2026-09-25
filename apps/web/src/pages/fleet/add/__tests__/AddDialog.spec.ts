@@ -38,7 +38,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () =>
   Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, (...args: unknown[]) => fn(...args)])))
 
 import { routes } from '@/router'
-import { RESUME_KEY } from '../resume'
+import { RESUME_KEY, STAGE_KEY } from '../resume'
 
 class ResizeObserverStub {
   observe() {}
@@ -464,12 +464,12 @@ describe('Add dialog resume and error handling', () => {
   it('a remembered operation the API cannot read no longer locks the step', async () => {
     draft = newDraft({ user: 'pi', host: 'pi-4.lan', auth: { type: 'agent' } })
     localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'draft', id: 'd1' }))
-    localStorage.setItem('fleet-console-add-stage-operation', JSON.stringify({ draftId: 'd1', stage: 'test', id: 'op-expired' }))
+    localStorage.setItem(STAGE_KEY, JSON.stringify({ draftId: 'd1', stage: 'test', id: 'op-expired' }))
     api.getOperation.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no operation' }, headers: new Headers() })
     await mountAt('/fleet/add')
     await until('[data-testid="stage-lost"]')
     expect($('[data-testid="run-test"]').attributes('disabled')).toBeUndefined()
-    expect(localStorage.getItem('fleet-console-add-stage-operation')).toBeNull()
+    expect(localStorage.getItem(STAGE_KEY)).toBeNull()
   })
 
   it('reports a fleetd install that failed to start after the add, with a retry', async () => {
@@ -529,5 +529,74 @@ describe('Add dialog resume and error handling', () => {
     await $('[data-slot="dialog-close"]').trigger('click')
     await vi.waitFor(() => expect(replace).toHaveBeenCalledWith('/fleet'))
     expect(push).not.toHaveBeenCalled()
+  })
+})
+
+describe('Add dialog review fixes', () => {
+  it('refuses an SSH host or user that starts with a dash', async () => {
+    await mountAt('/fleet/add?source=ssh')
+    await $('[data-testid="ssh-host"]').setValue('pi-4.lan')
+    await $('[data-testid="ssh-user"]').setValue('-oProxyCommand=x')
+    expect($('[data-testid="create-draft"]').attributes('disabled')).toBeDefined()
+    expect(exists('[data-testid="ssh-option-like"]')).toBe(true)
+    await $('[data-testid="ssh-user"]').setValue('pi')
+    expect($('[data-testid="create-draft"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('a rotated certificate leads back to TLS verification and re-pins', async () => {
+    accounts = [{ id: 'acc1', name: 'homelab', host: 'pve.lan', port: 8006, tokenId: 't', fingerprint: 'AB', fingerprintState: 'confirmed', createdAt: NOW }]
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'proxmox', id: 'acc1' }))
+    const preview = await api.discoverProxmoxCluster()
+    let rotated = true
+    api.discoverProxmoxCluster.mockImplementation(async () => rotated
+      ? { status: 409, data: { code: 'proxmox_fingerprint_mismatch', message: 'changed' }, headers: new Headers() }
+      : preview)
+    const confirm = api.confirmProxmoxFingerprint.getMockImplementation()!
+    api.confirmProxmoxFingerprint.mockImplementation(async (...args: [string, { fingerprint: string }]) => {
+      rotated = false
+      return confirm(...args)
+    })
+    await mountAt('/fleet/add')
+    await until('[data-testid="repin-pve"]')
+    expect(exists('[data-testid="retry-discovery"]')).toBe(false)
+    await $('[data-testid="repin-pve"]').trigger('click')
+    await until('[data-testid="observe-pve"]')
+    expect(exists('[data-testid="discard-pve"]')).toBe(false)
+    await $('[data-testid="observe-pve"]').trigger('click')
+    await until('[data-testid="pve-verified"]')
+    await $('[data-testid="pve-verified"]').setValue(true)
+    await $('[data-testid="confirm-pve"]').trigger('click')
+    await until('[data-testid="pve-preview"]')
+    expect(api.confirmProxmoxFingerprint).toHaveBeenCalledWith('acc1', { fingerprint: 'AB:CD:EF' })
+  })
+
+  it('offers a retry when discovery fails', async () => {
+    accounts = [{ id: 'acc1', name: 'homelab', host: 'pve.lan', port: 8006, tokenId: 't', fingerprint: 'AB', fingerprintState: 'confirmed', createdAt: NOW }]
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'proxmox', id: 'acc1' }))
+    const preview = await api.discoverProxmoxCluster()
+    let failing = true
+    api.discoverProxmoxCluster.mockImplementation(async () => failing
+      ? { status: 502, data: { code: 'proxmox_source', message: 'unreachable' }, headers: new Headers() }
+      : preview)
+    await mountAt('/fleet/add')
+    await until('[data-testid="retry-discovery"]')
+    expect($('[data-testid="pve-discovery-error"]').text()).toContain('proxmox_source: unreachable')
+    failing = false
+    await $('[data-testid="retry-discovery"]').trigger('click')
+    await until('[data-testid="pve-preview"]')
+  })
+
+  it('shows a failed Resume load with a retry instead of an empty list', async () => {
+    const draftItem = newDraft({ user: 'pi', host: 'pi-4.lan', auth: { type: 'agent' } })
+    api.listOnboardingDrafts
+      .mockResolvedValueOnce({ status: 500, data: { code: 'internal', message: 'down' }, headers: new Headers() })
+      .mockResolvedValue(page([draftItem]))
+    await mountAt('/fleet/add')
+    await until('[data-testid="resume-error"]')
+    expect($('[data-testid="resume-error"]').text()).toContain('Drafts unavailable')
+    await $('[data-testid="resume-retry"]').trigger('click')
+    await until('[data-testid="resume-draft-d1"]')
+    expect(exists('[data-testid="resume-error"]')).toBe(false)
+    expect(api.listOnboardingDrafts).toHaveBeenLastCalledWith({ limit: 200 })
   })
 })

@@ -9,6 +9,7 @@ import {
 } from '@frogbyte-io/fleet-api-client'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 
+import { errorMessage } from '../../machine/api'
 import DraftFlow from './DraftFlow.vue'
 import GuestSource from './GuestSource.vue'
 import ProxmoxSource from './ProxmoxSource.vue'
@@ -56,11 +57,13 @@ function pick(value: Source | 'lab') {
   source.value = value
 }
 
-// Pending durable work the operator can pick up again.
+// Pending durable work the operator can pick up again. The drafts endpoint
+// has no cursor; it returns the newest drafts, at most DRAFT_LIMIT.
+const DRAFT_LIMIT = 200
 const draftsQuery = useQuery({
   queryKey: ['add', 'drafts'],
   queryFn: async () => {
-    const response = await listOnboardingDrafts({ limit: 50 })
+    const response = await listOnboardingDrafts({ limit: DRAFT_LIMIT })
     if (response.status !== 200)
       throw new Error(`listOnboardingDrafts failed (${response.status})`)
     return response.data.items as OnboardingDraftDto[]
@@ -72,6 +75,18 @@ const accountsQuery = useQuery({
   queryFn: allProxmoxAccounts,
   enabled: computed(() => source.value === null),
 })
+const draftsCapped = computed(() => (draftsQuery.data.value?.length ?? 0) >= DRAFT_LIMIT)
+const resumeErrors = computed(() => [
+  draftsQuery.error.value && `Drafts unavailable: ${errorMessage(draftsQuery.error.value)}`,
+  accountsQuery.error.value && `Proxmox accounts unavailable: ${errorMessage(accountsQuery.error.value)}`,
+].filter((e): e is string => Boolean(e)))
+
+function retryResume() {
+  if (draftsQuery.error.value)
+    draftsQuery.refetch()
+  if (accountsQuery.error.value)
+    accountsQuery.refetch()
+}
 const unconfirmedAccounts = computed(() => (accountsQuery.data.value ?? []).filter(a => a.fingerprintState !== 'confirmed'))
 
 function resumeDraft(id: string) {
@@ -194,12 +209,34 @@ const title = computed(() => {
           </div>
 
           <section
-            v-if="(draftsQuery.data.value ?? []).length > 0 || unconfirmedAccounts.length > 0"
+            v-if="(draftsQuery.data.value ?? []).length > 0 || unconfirmedAccounts.length > 0 || resumeErrors.length > 0"
             class="mt-5 space-y-1.5"
           >
             <h4 class="fc-kicker">
               Resume
             </h4>
+            <div
+              v-if="resumeErrors.length > 0"
+              class="flex items-start gap-2 text-xs text-fc-err"
+              data-testid="resume-error"
+            >
+              <div>
+                <p
+                  v-for="message in resumeErrors"
+                  :key="message"
+                >
+                  {{ message }}
+                </p>
+              </div>
+              <button
+                type="button"
+                class="ml-auto font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+                data-testid="resume-retry"
+                @click="retryResume"
+              >
+                Retry
+              </button>
+            </div>
             <button
               v-for="draft in draftsQuery.data.value ?? []"
               :key="draft.id"
@@ -224,6 +261,13 @@ const title = computed(() => {
               <span class="font-mono text-fc-faint">{{ account.host }}:{{ account.port }}</span>
               <span class="ml-auto font-mono uppercase text-fc-warn">Proxmox · TLS {{ account.fingerprintState }}</span>
             </button>
+            <p
+              v-if="draftsCapped"
+              class="text-[11px] text-fc-faint"
+              data-testid="drafts-capped"
+            >
+              Showing the newest {{ DRAFT_LIMIT }} drafts, the most the controller returns.
+            </p>
           </section>
         </template>
 

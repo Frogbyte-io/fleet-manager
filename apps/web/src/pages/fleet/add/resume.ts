@@ -55,7 +55,7 @@ export function draftStep(draft: OnboardingDraftDetailDto): DraftStep {
 
 // The test or discover operation a draft is running, so a reopened dialog
 // follows it instead of starting a duplicate probe.
-const STAGE_KEY = 'fleet-console-add-stage-operation'
+export const STAGE_KEY = 'fleet-console-add-stage-operation'
 
 export interface StageOperation {
   stage: 'test' | 'discover'

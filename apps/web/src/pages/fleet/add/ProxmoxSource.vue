@@ -7,16 +7,15 @@ import {
   confirmProxmoxFingerprint,
   createProxmoxAccount,
   deleteProxmoxAccount,
-  discoverProxmoxCluster,
   observeProxmoxFingerprint,
   type ProxmoxAccountDto,
-  type ProxmoxDiscoveryDto,
   type ProxmoxFingerprintDto,
 } from '@frogbyte-io/fleet-api-client'
 
-import { errorMessage, unwrap } from '../../machine/api'
+import { ApiRequestError, errorMessage, retryTransient, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { proxmoxAccountCommand, proxmoxConfirmCommand, proxmoxCreateCommand } from '../../machine/fleetctl'
+import { proxmoxDiscovery } from '../useFleetInventory'
 import { ACCOUNTS_KEY, allProxmoxAccounts, validPort } from './queries'
 
 // Connect a Proxmox VE cluster: save the account (the token secret is
@@ -46,7 +45,10 @@ function invalidateAccounts() {
 const account = computed(() => accountsQuery.data.value?.find(a => a.id === props.accountId) ?? null)
 const confirmed = computed(() => account.value?.fingerprintState === 'confirmed')
 
-const step = computed(() => (props.accountId === null ? 'connect' : confirmed.value ? 'preview' : 'verify'))
+// A confirmed account whose certificate changed goes back through
+// observe → confirm; the controller refuses every call until it is re-pinned.
+const repinning = ref(false)
+const step = computed(() => (props.accountId === null ? 'connect' : confirmed.value && !repinning.value ? 'preview' : 'verify'))
 watch(step, s => emit('step', s), { immediate: true })
 
 const busy = ref(false)
@@ -111,6 +113,12 @@ function confirm() {
     unwrap<ProxmoxAccountDto>(await confirmProxmoxFingerprint(props.accountId!, { fingerprint }))
     // Invalidation refetches the active account query before resolving.
     await invalidateAccounts()
+    if (repinning.value) {
+      repinning.value = false
+      observed.value = null
+      verified.value = false
+      await discoveryQuery.refetch()
+    }
   })
 }
 
@@ -129,8 +137,13 @@ function discard() {
 // Preview
 const discoveryQuery = useQuery({
   queryKey: computed(() => ['fleet', 'proxmox-discovery', props.accountId]),
-  queryFn: async () => unwrap<ProxmoxDiscoveryDto>(await discoverProxmoxCluster(props.accountId!)),
+  queryFn: () => proxmoxDiscovery(props.accountId!),
+  retry: retryTransient,
   enabled: computed(() => step.value === 'preview'),
+})
+const certificateChanged = computed(() => {
+  const error = discoveryQuery.error.value
+  return error instanceof ApiRequestError && error.code === 'proxmox_fingerprint_mismatch'
 })
 const counts = computed(() => {
   const resources = discoveryQuery.data.value?.resources ?? []
@@ -292,7 +305,24 @@ const counts = computed(() => {
         </button>
         <CopyFleetctl :command="proxmoxConfirmCommand(account.id, observed)" />
       </template>
-      <div class="flex items-center gap-2 border-t border-fc-line pt-3 text-xs">
+      <div
+        v-if="repinning"
+        class="flex items-center gap-2 border-t border-fc-line pt-3 text-xs"
+      >
+        <span class="font-mono text-[10px] uppercase tracking-wider text-fc-warn">Certificate changed · the old pin stays until you pin the new one</span>
+        <button
+          type="button"
+          class="ml-auto text-fc-muted hover:text-fc-ink"
+          data-testid="cancel-repin"
+          @click="repinning = false"
+        >
+          Back
+        </button>
+      </div>
+      <div
+        v-else
+        class="flex items-center gap-2 border-t border-fc-line pt-3 text-xs"
+      >
         <span class="font-mono text-[10px] uppercase tracking-wider text-fc-faint">Unconfirmed account · resumes when reopened</span>
         <button
           v-if="!confirmingDiscard"
@@ -335,12 +365,33 @@ const counts = computed(() => {
       >
         Discovering…
       </p>
-      <p
-        v-else-if="discoveryQuery.error.value"
-        class="text-xs text-fc-err"
-      >
-        Discovery failed: {{ errorMessage(discoveryQuery.error.value) }}
-      </p>
+      <template v-else-if="discoveryQuery.error.value">
+        <p
+          class="text-xs text-fc-err"
+          data-testid="pve-discovery-error"
+        >
+          {{ certificateChanged ? 'The host now presents a different TLS certificate than the pinned one.' : `Discovery failed: ${errorMessage(discoveryQuery.error.value)}` }}
+        </p>
+        <button
+          v-if="certificateChanged"
+          type="button"
+          class="h-8 rounded-sm border border-fc-info/40 px-3 text-xs text-fc-info hover:bg-fc-info/10"
+          data-testid="repin-pve"
+          @click="repinning = true"
+        >
+          Verify the new certificate
+        </button>
+        <button
+          v-else
+          type="button"
+          class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink disabled:opacity-50"
+          :disabled="discoveryQuery.isFetching.value"
+          data-testid="retry-discovery"
+          @click="discoveryQuery.refetch()"
+        >
+          Retry
+        </button>
+      </template>
       <template v-else-if="discoveryQuery.data.value">
         <p
           class="font-mono text-xs text-fc-ink"
