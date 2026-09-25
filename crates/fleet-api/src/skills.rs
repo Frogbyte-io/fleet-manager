@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass, SystemClock};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::envelope::Resource;
+use crate::envelope::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, Page, PageInfo, Resource};
 use crate::error::ApiErrorResponse;
 
 /// The direction a skills operation takes.
@@ -131,22 +131,24 @@ fn map_skills_error(
     error: &fleet_application::skills::SkillsError,
     correlation_id: CorrelationId,
 ) -> ApiErrorResponse {
-    let (status, code, message) = match error {
+    let (status, code, message, retry) = match error {
         fleet_application::skills::SkillsError::Denied(_) => (
             StatusCode::FORBIDDEN,
             "denied",
             "the caller may not read skills on this machine",
+            RetryClass::Never,
         ),
         fleet_application::skills::SkillsError::Backend => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
             "the skills snapshot could not be read",
+            RetryClass::Backoff,
         ),
     };
     let public = PublicError::new(
         ErrorCode::from_str(code).expect("valid code"),
         message,
-        RetryClass::Never,
+        retry,
     );
     crate::error::ApiError::new(&public, correlation_id).with_status(status)
 }
@@ -156,7 +158,7 @@ fn map_skills_error(
 /// # Errors
 ///
 /// Returns the standard envelope for denial, a missing snapshot, or an unavailable backend.
-#[utoipa::path(get, path = "/machines/{machineId}/skills", tag = "machines", operation_id = "getMachineSkills", params(("machineId" = String, Path)), responses((status = 200, body = Resource<SkillsSnapshotDto>), (status = 403, body = crate::error::ApiError), (status = 404, body = crate::error::ApiError)))]
+#[utoipa::path(get, path = "/machines/{machineId}/skills", tag = "machines", operation_id = "getMachineSkills", params(("machineId" = String, Path)), responses((status = 200, body = Resource<SkillsSnapshotDto>), (status = 403, body = crate::error::ApiError), (status = 404, body = crate::error::ApiError), (status = 500, body = crate::error::ApiError), (status = 503, body = crate::error::ApiError)))]
 #[allow(clippy::missing_panics_doc)]
 pub async fn get_machine_skills(
     State(state): State<Arc<crate::operations::ApiState>>,
@@ -189,28 +191,52 @@ pub async fn get_machine_skills(
     Ok(Json(Resource::new(view.into())))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// Query parameters for the paginated skills matrix.
+pub struct SkillsMatrixParams {
+    /// The machine identity after which to continue.
+    pub cursor: Option<String>,
+    /// The maximum rows to return, clamped to the public maximum.
+    pub limit: Option<u32>,
+}
+
+#[utoipa::path(get, path = "/skills/matrix", tag = "skills", operation_id = "getSkillsMatrix", params(("cursor" = Option<String>, Query), ("limit" = Option<u32>, Query)), responses((status = 200, body = Page<SkillsSnapshotDto>), (status = 500, body = crate::error::ApiError), (status = 503, body = crate::error::ApiError)))]
 /// Reads the fleet-wide matrix of observed skill inventories.
 ///
 /// # Errors
 ///
-/// Returns the standard envelope when the backend is unavailable.
-#[utoipa::path(get, path = "/skills/matrix", tag = "skills", operation_id = "getSkillsMatrix", responses((status = 200, body = [SkillsSnapshotDto]), (status = 403, body = crate::error::ApiError)))]
+/// Returns the standard error envelope when authorization or the backend fails.
 pub async fn get_skills_matrix(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
-) -> Result<Json<Vec<SkillsSnapshotDto>>, ApiErrorResponse> {
+    Query(params): Query<SkillsMatrixParams>,
+) -> Result<Json<Page<SkillsSnapshotDto>>, ApiErrorResponse> {
     let skills = skills_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let views = skills
+    let limit = params
+        .limit
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_PAGE_LIMIT)
+        .min(MAX_PAGE_LIMIT);
+    let skills_page = skills
         .matrix(
             state.authorizer.as_ref(),
             &principal,
             SystemClock::now_unix_millis(),
+            params.cursor.as_deref(),
+            limit,
         )
         .await
         .map_err(|e| map_skills_error(&e, correlation_id))?;
-    Ok(Json(views.into_iter().map(Into::into).collect()))
+    Ok(Json(Page {
+        items: skills_page.items.into_iter().map(Into::into).collect(),
+        page: PageInfo {
+            next_cursor: skills_page.next_cursor,
+            limit: skills_page.limit,
+        },
+    }))
 }
 
 /// Starts a skills operation: `probe` reads the CLI's state (and may

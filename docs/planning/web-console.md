@@ -132,7 +132,7 @@ Proposed additions (each needs a plan/ADR decision because they widen the read-o
 
 The v1.40.0 CLI does expose skills show --json with Markdown content and
 absolute local paths, so that command is outside the safe read contract for
-Fleet's machine inventory. Fleet-920 uses only list, preset, agent, and update
+Fleet's machine inventory. FM-920 uses only list, preset, agent, and update
 check fields, dropping descriptions, paths, source references, errors, and
 content before persistence. Fleet-authored content remains in Fleet's own
 catalog and staging path.

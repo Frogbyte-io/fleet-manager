@@ -2685,6 +2685,26 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -4385,23 +4405,50 @@
           "skills"
         ],
         "summary": "Reads the fleet-wide matrix of observed skill inventories.",
-        "description": "# Errors\n\nReturns the standard envelope when the backend is unavailable.",
+        "description": "# Errors\n\nReturns the standard error envelope when authorization or the backend fails.",
         "operationId": "getSkillsMatrix",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/SkillsSnapshotDto"
-                  }
+                  "$ref": "#/components/schemas/Page_SkillsSnapshotDto"
                 }
               }
             }
           },
-          "403": {
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
             "description": "",
             "content": {
               "application/json": {
@@ -8301,6 +8348,69 @@
                       "description": "The structured view of the version's content, when it carries a\nProxmox builder block. `None` for non-JSON templates or builders\noutside the Proxmox family."
                     }
                   ]
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_SkillsSnapshotDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One machine's observed skill inventory.",
+              "required": [
+                "machineId",
+                "availability",
+                "data",
+                "updateCheck",
+                "observedAt",
+                "stale"
+              ],
+              "properties": {
+                "availability": {
+                  "type": "string",
+                  "description": "`available`, `absent`, or `unsupported`."
+                },
+                "cliVersion": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Exact supported CLI version, when present."
+                },
+                "data": {
+                  "description": "Safe normalized skill, preset, and agent data."
+                },
+                "machineId": {
+                  "type": "string",
+                  "description": "Machine identity."
+                },
+                "observedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the inventory was collected (epoch milliseconds)."
+                },
+                "stale": {
+                  "type": "boolean",
+                  "description": "True when older than the 24 hour freshness window."
+                },
+                "updateCheck": {
+                  "type": "string",
+                  "description": "`complete`, `failed`, `unavailable`, or `unsupported`."
                 }
               }
             },

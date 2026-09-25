@@ -4,6 +4,6 @@ CREATE TABLE skills_snapshots (
     availability TEXT NOT NULL CHECK (availability IN ('available', 'absent', 'unsupported')),
     cli_version TEXT,
     data_json TEXT NOT NULL,
-    update_check TEXT NOT NULL,
+    update_check TEXT NOT NULL CHECK (update_check IN ('complete', 'failed', 'unavailable', 'unsupported')),
     observed_at INTEGER NOT NULL
 ) STRICT;

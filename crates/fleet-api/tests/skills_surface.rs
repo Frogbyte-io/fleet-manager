@@ -59,6 +59,25 @@ impl fleet_application::authz::Authorizer for DenySkills {
 }
 
 #[derive(Debug)]
+struct DenySecondMachine;
+impl fleet_application::authz::Authorizer for DenySecondMachine {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        if request.action == fleet_application::authz::Permission::SkillsRead
+            && request.resource == Some("m-2")
+        {
+            fleet_application::authz::Decision::deny(
+                fleet_application::authz::ReasonId::UnknownPrincipal,
+            )
+        } else {
+            fleet_application::authz::Decision::allow()
+        }
+    }
+}
+
+#[derive(Debug)]
 struct FakeOperations;
 #[async_trait::async_trait]
 impl fleet_application::operation::OperationPort for FakeOperations {
@@ -188,8 +207,16 @@ impl fleet_application::skills::SkillsPort for FakeSkills {
     ) -> Result<Option<fleet_application::skills::SkillsSnapshot>, PortFailure> {
         Ok((machine_id == "m-1").then(|| snapshot("m-1")))
     }
-    async fn list(&self) -> Result<Vec<fleet_application::skills::SkillsSnapshot>, PortFailure> {
-        Ok(vec![snapshot("m-1"), snapshot("m-2")])
+    async fn list(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<fleet_application::skills::SkillsSnapshot>, PortFailure> {
+        Ok(vec![snapshot("m-1"), snapshot("m-2")]
+            .into_iter()
+            .filter(|row| after.is_none_or(|cursor| row.machine_id.as_str() > cursor))
+            .take(limit as usize)
+            .collect())
     }
     async fn record(
         &self,
@@ -435,10 +462,19 @@ async fn skills_read_endpoints_use_machine_scoped_skills_permission() {
     assert_eq!(value["data"]["stale"], true);
     let (status, rows) = call(state, "GET", "/skills/matrix", None).await;
     assert_eq!(status, StatusCode::OK, "{rows}");
-    assert_eq!(rows.as_array().unwrap().len(), 2);
+    assert_eq!(rows["items"].as_array().unwrap().len(), 2);
     let checks = authorizer.resources.lock().unwrap();
     assert!(checks.iter().any(|(action, resource)| action == "skills.read" && resource.as_deref() == Some("m-1")));
     assert!(checks.iter().any(|(action, resource)| action == "skills.read" && resource.as_deref() == Some("m-2")));
+}
+
+#[tokio::test]
+async fn the_matrix_omits_each_machine_denied_by_skills_read() {
+    let state = state_for(Arc::new(DenySecondMachine));
+    let (status, page) = call(state, "GET", "/skills/matrix", None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["machineId"], "m-1");
 }
 
 #[tokio::test]

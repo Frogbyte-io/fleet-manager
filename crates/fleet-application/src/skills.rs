@@ -12,6 +12,8 @@ use crate::operation::PortFailure;
 
 /// How long a Skills Manager observation remains fresh.
 pub const SKILLS_FRESHNESS_MS: i64 = 24 * 60 * 60 * 1000;
+/// Maximum number of machine observations in one skills matrix page.
+pub const MAX_SKILLS_MATRIX_PAGE: u32 = 200;
 
 /// Availability of the supported Skills Manager contract on a machine.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,8 +50,12 @@ pub struct SkillsSnapshot {
 pub trait SkillsPort: Send + Sync {
     /// Read one machine's latest observation.
     async fn get(&self, machine_id: &str) -> Result<Option<SkillsSnapshot>, PortFailure>;
-    /// Read all latest observations.
-    async fn list(&self) -> Result<Vec<SkillsSnapshot>, PortFailure>;
+    /// Read one ordered page of latest observations.
+    async fn list(
+        &self,
+        after_machine_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SkillsSnapshot>, PortFailure>;
     /// Persist a new observation, replacing only that machine's latest snapshot.
     async fn record(&self, snapshot: &SkillsSnapshot) -> Result<(), PortFailure>;
 }
@@ -63,6 +69,18 @@ pub struct SkillsView {
     pub snapshot: SkillsSnapshot,
     /// Whether the observation is older than the freshness window.
     pub stale: bool,
+}
+
+/// An authorized page of skills observations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsPage {
+    /// Visible observations on this page.
+    pub items: Vec<SkillsView>,
+    /// Cursor for the next database page, if any.
+    pub next_cursor: Option<String>,
+    /// Requested page size.
+    pub limit: u32,
 }
 
 /// Skills read use cases.
@@ -121,8 +139,24 @@ impl Skills {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         now: i64,
-    ) -> Result<Vec<SkillsView>, SkillsError> {
-        let rows = self.port.list().await.map_err(|_| SkillsError::Backend)?;
+        after_machine_id: Option<&str>,
+        limit: u32,
+    ) -> Result<SkillsPage, SkillsError> {
+        let limit = limit.clamp(1, MAX_SKILLS_MATRIX_PAGE);
+        let rows = self
+            .port
+            .list(after_machine_id, limit.saturating_add(1))
+            .await
+            .map_err(|_| SkillsError::Backend)?;
+        let has_more = rows.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+        let next_cursor = has_more.then(|| {
+            rows[usize::try_from(limit).unwrap_or(usize::MAX) - 1]
+                .machine_id
+                .clone()
+        });
+        let rows = rows
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX));
         let mut visible = Vec::new();
         for row in rows {
             if authorize(
@@ -138,7 +172,11 @@ impl Skills {
                 visible.push(view(row, now));
             }
         }
-        Ok(visible)
+        Ok(SkillsPage {
+            items: visible,
+            next_cursor,
+            limit,
+        })
     }
 
     /// Persist a normalized observation produced by the trusted probe adapter.

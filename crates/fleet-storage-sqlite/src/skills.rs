@@ -32,8 +32,13 @@ impl SkillsPort for SkillsRepository {
         row.map(|r| hydrate(&r)).transpose()
     }
 
-    async fn list(&self) -> Result<Vec<SkillsSnapshot>, PortFailure> {
-        let rows = sqlx::query("SELECT * FROM skills_snapshots ORDER BY machine_id")
+    async fn list(
+        &self,
+        after_machine_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SkillsSnapshot>, PortFailure> {
+        let rows = sqlx::query("SELECT * FROM skills_snapshots WHERE (?1 IS NULL OR machine_id > ?1) ORDER BY machine_id LIMIT ?2")
+            .bind(after_machine_id).bind(limit.clamp(1, 201))
             .fetch_all(&self.pool)
             .await
             .map_err(|_| PortFailure::Backend {

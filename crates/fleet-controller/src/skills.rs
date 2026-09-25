@@ -310,6 +310,15 @@ impl SkillsExecutor {
                 .await
             }
             (Some(result), _) if result.exit_code == Some(0) => {
+                if result.truncated_stdout {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "inventory_too_large",
+                        "the bounded skills inventory response was truncated; the previous observation was retained",
+                    )
+                    .await;
+                }
                 let parsed: Option<serde_json::Value> = result
                     .stdout
                     .lines()
@@ -325,6 +334,26 @@ impl SkillsExecutor {
                     )
                     .await;
                 };
+                if let Some(reason) = parsed["installFailed"].as_str() {
+                    let (code, detail) = match reason {
+                        "checksum_mismatch" => (
+                            "checksum_mismatch",
+                            "the pinned Skills Manager checksum did not match",
+                        ),
+                        "download_failed" => (
+                            "install_failed",
+                            "the pinned Skills Manager artifact could not be downloaded",
+                        ),
+                        _ => (
+                            "install_failed",
+                            "the pinned Skills Manager binary could not be installed",
+                        ),
+                    };
+                    return complete_failure(operations, &operation.id, code, detail).await;
+                }
+                if parsed["inventoryTooLarge"].as_bool() == Some(true) {
+                    return complete_failure(operations, &operation.id, "inventory_too_large", "the Skills Manager inventory exceeds the bounded probe response; the previous observation was retained").await;
+                }
                 let Some(snapshot) = normalize_probe(&payload.machine_id, &parsed) else {
                     return complete_failure(
                         operations,
@@ -601,52 +630,62 @@ printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
 /// one JSON line with base64 values. An absent CLI reports honestly.
 fn probe_script() -> String {
     r#"fleet_b64() { printf '%s' "$1" | base64 -w0; }
-# The CLI may live off-PATH (the app publishes it to ~/.local/bin).
+fleet_emit_absent() {
+  printf '{"present":false}\n'
+}
+fleet_emit_failure() {
+  printf '{"installFailed":"%s"}\n' "$1"
+}
+# Resolve the managed copy or a service-account PATH copy.
 for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
-# $1 is the skills root (empty means the default); FLEET_PIN_URL and
-# FLEET_PIN_SHA256 carry an optional pinned release to install when the
-# CLI is absent.
 fleet_root=$1
-if [ -n "$fleet_cli" ]; then
-  fleet_version=$("$fleet_cli" --version 2>/dev/null | head -n 1)
-  if [ -z "$fleet_version" ]; then
-    printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "the binary did not answer --version")"
-    exit 0
-  fi
-  fleet_json() { if [ -n "$fleet_root" ]; then "$fleet_cli" --skills-root "$fleet_root" --json "$@"; else "$fleet_cli" --json "$@"; fi; }
-  fleet_agents=$(fleet_json agents list 2>/dev/null) || fleet_agents_failed=1
-  fleet_skills=$(fleet_json skills list 2>/dev/null) || fleet_skills_failed=1
-  fleet_presets=$(fleet_json presets list 2>/dev/null) || fleet_presets_failed=1
-  fleet_checks=$(fleet_json skills check --all 2>/dev/null) || fleet_checks_failed=1
-  printf '{"present":true,"version64":"%s","agents64":"%s","skills64":"%s","presets64":"%s","checks64":"%s","agentsFailed":%s,"skillsFailed":%s,"presetsFailed":%s,"updateCheckFailed":%s}\n' \
-    "$(fleet_b64 "$fleet_version")" "$(fleet_b64 "${fleet_agents:-[]}")" "$(fleet_b64 "${fleet_skills:-[]}")" "$(fleet_b64 "${fleet_presets:-[]}")" "$(fleet_b64 "${fleet_checks:-[]}")" "$( [ "${fleet_agents_failed:-0}" = 1 ] && echo true || echo false )" "$( [ "${fleet_skills_failed:-0}" = 1 ] && echo true || echo false )" "$( [ "${fleet_presets_failed:-0}" = 1 ] && echo true || echo false )" "$( [ "${fleet_checks_failed:-0}" = 1 ] && echo true || echo false )"
-elif [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_SHA256:-}" ]; then
-  # Pinned install: verify the digest before the binary lands anywhere.
-  fleet_tmp=$(mktemp)
-  curl -fsSL --max-time 120 -o "$fleet_tmp" "$FLEET_PIN_URL" || { rm -f "$fleet_tmp"; printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "the pinned release could not be downloaded")"; exit 0; }
+if [ -z "${fleet_cli:-}" ] && [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_SHA256:-}" ]; then
+  fleet_tmp=$(mktemp) || { fleet_emit_failure download_failed; exit 0; }
+  trap 'rm -f "$fleet_tmp"' EXIT
+  curl -fsSL --max-time 120 -o "$fleet_tmp" "$FLEET_PIN_URL" || { fleet_emit_failure download_failed; exit 0; }
   fleet_digest=$(sha256sum "$fleet_tmp" | awk '{print $1}')
-  if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then
-    rm -f "$fleet_tmp"
-    printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "the pinned release's checksum did not match")"
-    exit 0
-  fi
+  if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then fleet_emit_failure checksum_mismatch; exit 0; fi
   chmod +x "$fleet_tmp"
-  mkdir -p "$HOME/.local/bin"
-  mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli"
-  fleet_version=$("$HOME/.local/bin/skills-manager-cli" --version 2>/dev/null | head -n 1)
+  mkdir -p "$HOME/.local/bin" || { fleet_emit_failure install_failed; exit 0; }
+  mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli" || { fleet_emit_failure install_failed; exit 0; }
   fleet_cli="$HOME/.local/bin/skills-manager-cli"
-  fleet_json() { if [ -n "$fleet_root" ]; then "$fleet_cli" --skills-root "$fleet_root" --json "$@"; else "$fleet_cli" --json "$@"; fi; }
-  fleet_agents=$(fleet_json agents list 2>/dev/null) || fleet_agents_failed=1
-  fleet_skills=$(fleet_json skills list 2>/dev/null) || fleet_skills_failed=1
-  fleet_presets=$(fleet_json presets list 2>/dev/null) || fleet_presets_failed=1
-  fleet_checks=$(fleet_json skills check --all 2>/dev/null) || fleet_checks_failed=1
-  printf '{"present":true,"installed":true,"version64":"%s","agents64":"%s","skills64":"%s","presets64":"%s","checks64":"%s","agentsFailed":%s,"skillsFailed":%s,"presetsFailed":%s,"updateCheckFailed":%s}\n' \
-    "$(fleet_b64 "$fleet_version")" "$(fleet_b64 "${fleet_agents:-[]}")" "$(fleet_b64 "${fleet_skills:-[]}")" "$(fleet_b64 "${fleet_presets:-[]}")" "$(fleet_b64 "${fleet_checks:-[]}")" "$( [ "${fleet_agents_failed:-0}" = 1 ] && echo true || echo false )" "$( [ "${fleet_skills_failed:-0}" = 1 ] && echo true || echo false )" "$( [ "${fleet_presets_failed:-0}" = 1 ] && echo true || echo false )" "$( [ "${fleet_checks_failed:-0}" = 1 ] && echo true || echo false )"
-else
-  printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "skills-manager-cli is not installed")"
 fi
+if [ -z "${fleet_cli:-}" ]; then fleet_emit_absent; exit 0; fi
+fleet_version=$("$fleet_cli" --version 2>/dev/null | head -n 1)
+if [ -z "$fleet_version" ]; then printf '{"present":true,"unidentified":true}\n'; exit 0; fi
+fleet_version64=$(fleet_b64 "$fleet_version")
+case "$fleet_version" in
+  'skills-manager-cli 1.40.0'|'1.40.0') ;;
+  *) printf '{"present":true,"version64":"%s","unsupportedVersion":true}\n' "$fleet_version64"; exit 0 ;;
+esac
+fleet_json() {
+  if [ -n "$fleet_root" ]; then "$fleet_cli" --skills-root "$fleet_root" --json "$@"; else "$fleet_cli" --json "$@"; fi
+}
+# Keep temporary upstream documents private, bound each one, and remove them
+# on normal exit or when the operation deadline kills this script.
+fleet_tmp=$(mktemp) || { printf '{"present":true,"version64":"%s","inventoryFailed":true}\n' "$fleet_version64"; exit 0; }
+trap 'rm -f "$fleet_tmp"' EXIT
+fleet_collect() {
+  fleet_max=$1; shift
+  : > "$fleet_tmp" || return 1
+  fleet_json "$@" > "$fleet_tmp" 2>/dev/null || return 1
+  fleet_bytes=$(wc -c < "$fleet_tmp")
+  [ "$fleet_bytes" -le "$fleet_max" ] || return 2
+  cat "$fleet_tmp"
+}
+fleet_agents_status=0; fleet_agents=$(fleet_collect 65536 agents list) || fleet_agents_status=$?
+fleet_skills_status=0; fleet_skills=$(fleet_collect 393216 skills list) || fleet_skills_status=$?
+fleet_presets_status=0; fleet_presets=$(fleet_collect 65536 presets list) || fleet_presets_status=$?
+fleet_checks_status=0; fleet_checks=$(fleet_collect 196608 skills check --all) || fleet_checks_status=$?
+if [ "$fleet_agents_status" = 2 ] || [ "$fleet_skills_status" = 2 ] || [ "$fleet_presets_status" = 2 ] || [ "$fleet_checks_status" = 2 ]; then
+  printf '{"present":true,"version64":"%s","inventoryTooLarge":true}\n' "$fleet_version64"
+  exit 0
+fi
+printf '{"present":true,"version64":"%s","agents64":"%s","skills64":"%s","presets64":"%s","checks64":"%s","agentsFailed":%s,"skillsFailed":%s,"presetsFailed":%s,"updateCheckFailed":%s}\n' \
+  "$fleet_version64" "$(fleet_b64 "${fleet_agents:-[]}")" "$(fleet_b64 "${fleet_skills:-[]}")" "$(fleet_b64 "${fleet_presets:-[]}")" "$(fleet_b64 "${fleet_checks:-[]}")" \
+  "$( [ "$fleet_agents_status" = 0 ] && echo false || echo true )" "$( [ "$fleet_skills_status" = 0 ] && echo false || echo true )" "$( [ "$fleet_presets_status" = 0 ] && echo false || echo true )" "$( [ "$fleet_checks_status" = 0 ] && echo false || echo true )"
 "#
     .to_owned()
 }
@@ -664,6 +703,16 @@ fn normalize_probe(
             cli_version: None,
             data: serde_json::json!({"skills": [], "presets": [], "agents": []}),
             update_check: "unavailable".into(),
+            observed_at: now,
+        });
+    }
+    if raw["unidentified"].as_bool() == Some(true) {
+        return Some(SkillsSnapshot {
+            machine_id: machine_id.to_owned(),
+            availability: SkillsAvailability::Unsupported,
+            cli_version: None,
+            data: serde_json::json!({"skills": [], "presets": [], "agents": []}),
+            update_check: "unsupported".into(),
             observed_at: now,
         });
     }
@@ -690,46 +739,65 @@ fn normalize_probe(
     let presets: serde_json::Value =
         serde_json::from_slice(&decode_field(raw, "presets64")?).ok()?;
     let checks: serde_json::Value = serde_json::from_slice(&decode_field(raw, "checks64")?).ok()?;
-    let agents = agents.as_array()?.clone();
-    let skills = skills.as_array()?.clone();
-    let presets = presets.as_array()?.clone();
+    let agents = agents.as_array()?;
+    let skills = skills.as_array()?;
+    let presets = presets.as_array()?;
     let checks = if raw["updateCheckFailed"].as_bool() == Some(true) {
-        Vec::new()
+        &[][..]
     } else {
-        checks.as_array()?.clone()
+        checks.as_array()?.as_slice()
     };
-    let agents = agents.into_iter().filter_map(|a| {
-        let id = a.get("id").or_else(|| a.get("key"))?.as_str()?;
-        Some(serde_json::json!({"id": id, "name": a.get("name").and_then(|v| v.as_str()).unwrap_or(id), "installed": a.get("installed").and_then(|v| v.as_bool()).unwrap_or(false), "enabled": a.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)}))
-    }).collect::<Vec<_>>();
-    let checks = checks
-        .into_iter()
-        .filter_map(|c| {
-            Some((
-                c.get("skill_id")?.as_str()?.to_owned(),
-                c.get("update_status")?.as_str()?.to_owned(),
-            ))
+    let mut check_status = std::collections::HashMap::new();
+    for check in checks {
+        let id = safe_json_text(check.get("skill_id")?, 255)?;
+        let status = safe_json_text(check.get("update_status")?, 64)?;
+        check_status.insert(id.to_owned(), status.to_owned());
+    }
+    let normalized_agents = agents
+        .iter()
+        .map(|agent| {
+            let id = safe_json_text(agent.get("id")?, 255)?;
+            let name = match agent.get("name") {
+                Some(value) => safe_json_text(value, 512)?,
+                None => id,
+            };
+            let installed = optional_bool(agent, "installed", false)?;
+            let enabled = optional_bool(agent, "enabled", false)?;
+            Some(serde_json::json!({"id": id, "name": name, "installed": installed, "enabled": enabled}))
         })
-        .collect::<std::collections::HashMap<_, _>>();
-    let skills = skills.into_iter().filter_map(|s| {
-        let id = s.get("id")?.as_str()?;
-        let name = s.get("name")?.as_str()?;
-        let deployed_to = s.get("deployed_to").and_then(|v| v.as_array()).cloned().unwrap_or_default().into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let preset_ids = s.get("preset_ids").and_then(|v| v.as_array()).cloned().unwrap_or_default().into_iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let update_status = match checks.get(id).map(String::as_str) {
-            Some("update_available") => "update_available",
-            Some("up_to_date") => "up_to_date",
-            Some("local_only") => "local_only",
-            _ => "unknown",
-        };
-        Some(serde_json::json!({"id": id, "name": name, "enabled": s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false), "presetIds": preset_ids, "deployedTo": deployed_to, "updateStatus": update_status}))
-    }).collect::<Vec<_>>();
-    let presets = presets.into_iter().filter_map(|p| Some(serde_json::json!({"id": p.get("id")?.as_str()?, "name": p.get("name")?.as_str()?, "skillCount": p.get("skill_count").and_then(|v| v.as_u64()).unwrap_or(0), "active": p.get("active").and_then(|v| v.as_bool()).unwrap_or(false)}))).collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
+    let normalized_skills = skills
+        .iter()
+        .map(|skill| {
+            let id = safe_json_text(skill.get("id")?, 255)?;
+            let name = safe_json_text(skill.get("name")?, 512)?;
+            let enabled = skill.get("enabled")?.as_bool()?;
+            let preset_ids = safe_string_array(skill.get("preset_ids")?, 255)?;
+            let deployed_to = safe_string_array(skill.get("deployed_to")?, 255)?;
+            let update_status = match check_status.get(id).map(String::as_str) {
+                Some("update_available") => "update_available",
+                Some("up_to_date") => "up_to_date",
+                Some("local_only") => "local_only",
+                _ => "unknown",
+            };
+            Some(serde_json::json!({"id": id, "name": name, "enabled": enabled, "presetIds": preset_ids, "deployedTo": deployed_to, "updateStatus": update_status}))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let normalized_presets = presets
+        .iter()
+        .map(|preset| {
+            let id = safe_json_text(preset.get("id")?, 255)?;
+            let name = safe_json_text(preset.get("name")?, 512)?;
+            let skill_count = preset.get("skill_count")?.as_u64()?;
+            let active = preset.get("active")?.as_bool()?;
+            Some(serde_json::json!({"id": id, "name": name, "skillCount": skill_count, "active": active}))
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(SkillsSnapshot {
         machine_id: machine_id.to_owned(),
         availability: SkillsAvailability::Available,
         cli_version: Some(version),
-        data: serde_json::json!({"skills": skills, "presets": presets, "agents": agents}),
+        data: serde_json::json!({"skills": normalized_skills, "presets": normalized_presets, "agents": normalized_agents}),
         update_check: if raw["updateCheckFailed"].as_bool() == Some(true) {
             "failed"
         } else {
@@ -738,6 +806,27 @@ fn normalize_probe(
         .into(),
         observed_at: now,
     })
+}
+
+fn safe_json_text(value: &serde_json::Value, max_bytes: usize) -> Option<&str> {
+    let text = value.as_str()?;
+    (!text.is_empty() && text.len() <= max_bytes && !text.chars().any(char::is_control))
+        .then_some(text)
+}
+
+fn optional_bool(object: &serde_json::Value, key: &str, default: bool) -> Option<bool> {
+    match object.get(key) {
+        None => Some(default),
+        Some(value) => value.as_bool(),
+    }
+}
+
+fn safe_string_array(value: &serde_json::Value, max_bytes: usize) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| safe_json_text(item, max_bytes).map(str::to_owned))
+        .collect()
 }
 
 fn decode_field(value: &serde_json::Value, field: &str) -> Option<Vec<u8>> {
@@ -1048,5 +1137,32 @@ mod tests {
         ));
         assert_eq!(snapshot.cli_version.as_deref(), Some("2.0.0"));
         assert_eq!(snapshot.data["skills"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn malformed_entries_reject_the_whole_inventory() {
+        let raw = serde_json::json!({
+            "present": true,
+            "version64": b64("skills-manager-cli 1.40.0"),
+            "agents64": b64("[]"),
+            "skills64": b64(r#"[{"id":"s","name":"Skill","enabled":true,"preset_ids":[],"deployed_to":"malformed"}]"#),
+            "presets64": b64("[]"),
+            "checks64": b64("[]"),
+        });
+        assert!(normalize_probe("m-1", &raw).is_none());
+    }
+
+    #[test]
+    fn unidentified_binaries_are_not_reported_as_absent() {
+        let snapshot = normalize_probe(
+            "m-1",
+            &serde_json::json!({"present": true, "unidentified": true}),
+        )
+        .unwrap();
+        assert!(matches!(
+            snapshot.availability,
+            fleet_application::skills::SkillsAvailability::Unsupported
+        ));
+        assert_eq!(snapshot.cli_version, None);
     }
 }

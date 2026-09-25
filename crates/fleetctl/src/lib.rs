@@ -2494,7 +2494,7 @@ fn render_stream_event(
 mod event_output_tests {
     use super::{
         Command, Output, event_stream_http_error, event_stream_request, parse, read_sse_events,
-        render_stream_event, request_for, retryable_event_stream_status,
+        render_skills, render_stream_event, request_for, retryable_event_stream_status,
     };
     use std::io::{BufRead as _, Write as _};
     use std::net::TcpListener;
@@ -2566,6 +2566,18 @@ mod event_output_tests {
             request_for(&matrix.command).unwrap().1,
             "/api/v1/skills/matrix"
         );
+    }
+
+    #[test]
+    fn skills_text_renderer_reads_the_snapshot_and_paginated_matrix() {
+        let snapshot = serde_json::json!({
+            "machineId": "box",
+            "availability": "available",
+            "data": {"skills": [{"id": "hello", "name": "Hello", "deployedTo": ["claude_code"]}]}
+        });
+        assert!(render_skills(&snapshot).contains("Hello (hello) → claude_code"));
+        let page = serde_json::json!({"items": [snapshot]});
+        assert!(render_skills(&page).contains("box: available"));
     }
 
     #[test]
@@ -2843,9 +2855,11 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
 fn render_skills(payload: &Value) -> String {
     use std::fmt::Write as _;
     let rows = payload
-        .as_array()
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array())
         .cloned()
-        .unwrap_or_else(|| vec![payload.get("data").cloned().unwrap_or(Value::Null)]);
+        .unwrap_or_else(|| vec![payload.clone()]);
     if rows.is_empty() {
         return "No skills observations.\n".to_owned();
     }
@@ -5093,11 +5107,6 @@ fn checkout_write_config_body(
 /// Parses one `fleetctl skills` subcommand.
 #[allow(clippy::too_many_lines)]
 fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<Command, CliError> {
-    if verb == "list" && rest.is_empty() {
-        return Ok(Command::SkillsList {
-            machine: machine_id.to_owned(),
-        });
-    }
     let mut endpoint: Option<String> = None;
     let mut auth: Option<String> = None;
     let mut identity: Option<String> = None;

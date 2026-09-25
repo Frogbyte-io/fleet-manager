@@ -391,11 +391,19 @@ async fn the_pinned_install_verifies_the_checksum() {
         "artifactSha256": "0".repeat(64),
         "timeoutSeconds": 60,
     });
-    let (state, result, _error) = fixture.run_kind("skills.probe", payload).await;
-    assert_eq!(state, "succeeded");
-    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-    assert_eq!(result["snapshotRecorded"], true);
-    assert_eq!(result["availability"], "absent");
+    let (state, result, error) = fixture.run_kind("skills.probe", payload).await;
+    assert_eq!(state, "failed");
+    assert!(result.is_none());
+    assert!(error.unwrap().contains("checksum did not match"));
+    let retained =
+        fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(
+        retained.availability,
+        fleet_application::skills::SkillsAvailability::Available
+    ));
 
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(format!("{home}/.local/bin/skills-manager-cli"));

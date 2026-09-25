@@ -2100,6 +2100,42 @@ export interface PageRecipeVersionDto {
 }
 
 /**
+ * One machine's observed skill inventory.
+ */
+export type PageSkillsSnapshotDtoItemsItem = {
+  /** `available`, `absent`, or `unsupported`. */
+  availability: string;
+  /**
+     * Exact supported CLI version, when present.
+     * @nullable
+     */
+  cliVersion?: string | null;
+  /** Safe normalized skill, preset, and agent data. */
+  data: unknown;
+  /** Machine identity. */
+  machineId: string;
+  /** When the inventory was collected (epoch milliseconds). */
+  observedAt: number;
+  /** True when older than the 24 hour freshness window. */
+  stale: boolean;
+  /** `complete`, `failed`, `unavailable`, or `unsupported`. */
+  updateCheck: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageSkillsSnapshotDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageSkillsSnapshotDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * A project as the detail view displays it.
  */
 export interface ProjectDto {
@@ -3869,6 +3905,14 @@ limit?: number;
  * The opaque cursor: the last guest's cluster id of the previous page.
  */
 cursor?: string;
+};
+
+export type GetSkillsMatrixParams = {
+cursor?: string;
+/**
+ * @minimum 0
+ */
+limit?: number;
 };
 
 export type ListTailnetDevicesParams = {
@@ -6606,10 +6650,20 @@ export type getMachineSkillsResponse404 = {
   status: 404
 }
 
+export type getMachineSkillsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getMachineSkillsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type getMachineSkillsResponseSuccess = (getMachineSkillsResponse200) & {
   headers: Headers;
 };
-export type getMachineSkillsResponseError = (getMachineSkillsResponse403 | getMachineSkillsResponse404) & {
+export type getMachineSkillsResponseError = (getMachineSkillsResponse403 | getMachineSkillsResponse404 | getMachineSkillsResponse500 | getMachineSkillsResponse503) & {
   headers: Headers;
 };
 
@@ -8317,41 +8371,53 @@ export const observeProxmoxFingerprint = async (accountId: string, options?: Req
 
 
 export type getSkillsMatrixResponse200 = {
-  data: SkillsSnapshotDto[]
+  data: PageSkillsSnapshotDto
   status: 200
 }
 
-export type getSkillsMatrixResponse403 = {
+export type getSkillsMatrixResponse500 = {
   data: ApiError
-  status: 403
+  status: 500
+}
+
+export type getSkillsMatrixResponse503 = {
+  data: ApiError
+  status: 503
 }
 
 export type getSkillsMatrixResponseSuccess = (getSkillsMatrixResponse200) & {
   headers: Headers;
 };
-export type getSkillsMatrixResponseError = (getSkillsMatrixResponse403) & {
+export type getSkillsMatrixResponseError = (getSkillsMatrixResponse500 | getSkillsMatrixResponse503) & {
   headers: Headers;
 };
 
 export type getSkillsMatrixResponse = (getSkillsMatrixResponseSuccess | getSkillsMatrixResponseError)
 
-export const getGetSkillsMatrixUrl = () => {
+export const getGetSkillsMatrixUrl = (params?: GetSkillsMatrixParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/skills/matrix`
+  return stringifiedParams.length > 0 ? `/api/v1/skills/matrix?${stringifiedParams}` : `/api/v1/skills/matrix`
 }
 
 /**
  * # Errors
  *
- * Returns the standard envelope when the backend is unavailable.
+ * Returns the standard error envelope when authorization or the backend fails.
  * @summary Reads the fleet-wide matrix of observed skill inventories.
  */
-export const getSkillsMatrix = async ( options?: RequestInit): Promise<getSkillsMatrixResponse> => {
+export const getSkillsMatrix = async (params?: GetSkillsMatrixParams, options?: RequestInit): Promise<getSkillsMatrixResponse> => {
 
-  const res = await fetch(getGetSkillsMatrixUrl(),
+  const res = await fetch(getGetSkillsMatrixUrl(params),
   {
     ...options,
     method: 'GET'
