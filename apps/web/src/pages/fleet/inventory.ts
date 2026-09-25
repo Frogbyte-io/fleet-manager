@@ -38,6 +38,8 @@ export interface GuestItem {
   status: string
   agentOnline: boolean | null
   osName: string | null
+  /** Routable addresses the guest agent reported (no loopback or link-local). */
+  addresses: string[]
   candidates: { machineId: string, machineName: string, evidence: string }[]
 }
 
@@ -259,6 +261,11 @@ function buildHosts(resources: ProxmoxResourceDto[], accountId: string, accountN
   })
 }
 
+function guestAddresses(guest: PageAssociatedGuestDtoItemsItem | undefined): string[] {
+  const all = (guest?.agent?.interfaces ?? []).flatMap(i => i.addresses.map(a => a.split('/')[0]!))
+  return [...new Set(all.filter(a => a && !/^(127\.|::1$|fe80:|169\.254\.)/i.test(a)))]
+}
+
 function buildGuests(
   resources: ProxmoxResourceDto[],
   guests: PageAssociatedGuestDtoItemsItem[] | null,
@@ -287,6 +294,7 @@ function buildGuests(
       status: resource.status ?? 'unknown',
       agentOnline: enriched?.agent ? enriched.agent.online : null,
       osName: enriched?.agent?.osName ?? null,
+      addresses: guestAddresses(enriched),
       candidates: (enriched?.candidates ?? []).map(c => ({
         machineId: c.machineId,
         machineName: c.machineName,

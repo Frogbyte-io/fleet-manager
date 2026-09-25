@@ -193,6 +193,24 @@ describe('buildInventory', () => {
     expect(built.guests[0].candidates[0].machineName).toBe('build-host')
   })
 
+  it('keeps only routable guest-agent addresses', () => {
+    const agent = {
+      online: true,
+      osName: null,
+      version: null,
+      kernel: null,
+      interfaces: [
+        { name: 'lo', addresses: ['127.0.0.1/8', '::1/128'] },
+        { name: 'eth0', addresses: ['192.168.1.50/24', 'fe80::1/64', '192.168.1.50/24'] },
+        { name: 'eth1', addresses: ['169.254.1.1/16', 'fd00::5/64'] },
+      ],
+    }
+    const built = buildInventory(inventoryInput({
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest({ agent })], discoveryError: null, guestsError: null, discoveryWarnings: null }],
+    }))
+    expect(built.guests[0].addresses).toEqual(['192.168.1.50', 'fd00::5'])
+  })
+
   it('does not enrich when no guest-list entry matches the discovered vmid', () => {
     const built = buildInventory(inventoryInput({
       proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest({ vmid: 999 })], discoveryError: null, guestsError: null, discoveryWarnings: null }],
