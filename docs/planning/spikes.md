@@ -9,7 +9,7 @@ Each spike must be created as a GitHub issue with the `type:spike` label under i
 | ID | Question | Milestone | Constrained by | Consumed by | Fallback if the preferred option fails |
 |---|---|---|---|---|---|
 | FM-S01 | Which Rust OpenAPI toolchain and TypeScript generator produce a reproducible spec and a compiling client from Axum handlers? | M0 | ADR-0002 | FM-006 | Hand-maintained OpenAPI document with a generated client and a spec-drift guard in CI |
-| FM-S02 | When authenticated deployment is introduced, is Cedar the right embedded authorization engine for Fleet's permission, resource, tag, and project policies? | M8 | — (expected to produce ADR-0009) | Authenticated deployment epic | Native Rust permission catalog with deny-by-default checks and no external policy language |
+| FM-S02 | When authenticated deployment is introduced, is Cedar the right embedded authorization engine for Fleet's permission, resource, tag, and project policies? | M8 | — (expected to produce ADR-0011) | Authenticated deployment epic | Native Rust permission catalog with deny-by-default checks and no external policy language |
 | FM-S03 | Can Effectum execute durable operations without owning Fleet's Operation domain records? | M1 | ADR-0008 | FM-109 | Purpose-built SQLite-backed worker over the existing Operation table |
 
 Spike outcomes:

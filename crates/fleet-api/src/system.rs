@@ -46,6 +46,9 @@ pub trait SystemInfoSource: Send + Sync {
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemInfo {
+    /// The resolved principal for the request showing this system view.
+    #[schema(example = "tailscale:alice@example.com")]
+    pub current_principal: String,
     /// The service that answered.
     #[schema(example = "fleet-controller")]
     pub service: String,
@@ -96,8 +99,9 @@ pub struct SystemInfo {
 pub async fn get_system_info(
     State(state): State<Arc<ApiState>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    principal: Option<Extension<fleet_application::authz::ActingPrincipal>>,
 ) -> Result<Json<SystemInfo>, ApiErrorResponse> {
-    let info = state.system.info().await.map_err(|_detail| {
+    let mut info = state.system.info().await.map_err(|_detail| {
         let public = PublicError::new(
             ErrorCode::from_str("system_unavailable")
                 .expect("the literal is valid error code syntax"),
@@ -106,6 +110,8 @@ pub async fn get_system_info(
         );
         ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
     })?;
+    info.current_principal =
+        principal.map_or_else(|| "unknown".to_owned(), |Extension(principal)| principal.id);
     Ok(Json(info))
 }
 

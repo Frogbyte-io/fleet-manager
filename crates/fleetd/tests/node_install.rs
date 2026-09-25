@@ -172,6 +172,7 @@ async fn harness() -> Harness {
         listen: "127.0.0.1:0".parse().unwrap(),
         web_dist: dist.path().to_path_buf(),
         artifacts_dir: Some(artifacts.path().to_path_buf()),
+        tailscale_serve_listen: None,
     };
     let router = build_router(
         &settings,

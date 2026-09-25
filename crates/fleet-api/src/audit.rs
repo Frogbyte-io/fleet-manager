@@ -128,6 +128,20 @@ impl From<AuditEvent> for AuditEventDto {
 /// Only expose fixed-format metadata facts. Free-form strings can contain
 /// credentials even when their key looks harmless (for example `purpose`).
 fn safe_metadata_entry(key: &str, value: &serde_json::Value) -> bool {
+    if key == "peerLoopback" {
+        return value.is_boolean();
+    }
+    if key == "identityHeaderNames" {
+        return value.as_array().is_some_and(|names| {
+            !names.is_empty()
+                && names.len() <= fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES.len()
+                && names.iter().all(|name| {
+                    name.as_str().is_some_and(|name| {
+                        fleet_core::TAILSCALE_IDENTITY_HEADER_NAMES.contains(&name)
+                    })
+                })
+        });
+    }
     let Some(value) = value.as_str() else {
         return false;
     };
@@ -202,6 +216,24 @@ mod tests {
         ));
 
         assert!(dto.metadata.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dto_exposes_only_fixed_tailscale_identity_evidence() {
+        let dto = AuditEventDto::from(event(
+            r#"{"identityHeaderNames":["tailscale-user-login"],"peerLoopback":false,"rawLogin":"alice@example.com"}"#,
+        ));
+        assert_eq!(
+            dto.metadata["identityHeaderNames"][0],
+            "tailscale-user-login"
+        );
+        assert_eq!(dto.metadata["peerLoopback"], false);
+        assert!(dto.metadata.get("rawLogin").is_none());
+
+        let untrusted = AuditEventDto::from(event(
+            r#"{"identityHeaderNames":["x-forwarded-for"],"peerLoopback":"false"}"#,
+        ));
+        assert!(untrusted.metadata.as_object().unwrap().is_empty());
     }
 }
 

@@ -54,6 +54,37 @@ async fn the_ledger_is_append_only_at_the_database_level() {
 }
 
 #[tokio::test]
+async fn ignored_tailscale_identity_evidence_keeps_only_known_header_names() {
+    let (_dir, store) = store().await;
+    let ledger = AuditLedger::new(store.pool());
+    ledger
+        .record_ignored_tailscale_identity(
+            &[
+                "tailscale-user-login".to_owned(),
+                "x-forwarded-for".to_owned(),
+            ],
+            false,
+            Some("00000000-0000-7000-8000-000000000001"),
+        )
+        .await
+        .unwrap();
+    let page = ledger.query(&Query::default()).await.unwrap();
+    let event = page
+        .events
+        .iter()
+        .find(|event| event.action == "auth.identity_header_ignored")
+        .unwrap();
+    assert!(!event.allowed);
+    assert_eq!(
+        event.correlation_id.as_deref(),
+        Some("00000000-0000-7000-8000-000000000001")
+    );
+    assert!(event.metadata_json.contains("tailscale-user-login"));
+    assert!(event.metadata_json.contains(r#""peerLoopback":false"#));
+    assert!(!event.metadata_json.contains("x-forwarded-for"));
+}
+
+#[tokio::test]
 async fn an_intent_rolled_back_with_its_transaction_leaves_no_event() {
     let (_dir, store) = store().await;
     let mut tx = store.begin_write().await.unwrap();

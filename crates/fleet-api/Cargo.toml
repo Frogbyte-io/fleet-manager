@@ -10,6 +10,7 @@ publish.workspace = true
 async-trait = "0.1.92"
 axum = "0.8.9"
 fleet-application = { version = "0.1.0", path = "../fleet-application" }
+fleet-auth = { version = "0.1.0", path = "../fleet-auth" }
 fleet-core = { path = "../fleet-core" }
 futures-util = "0.3.31"
 serde = { version = "1.0.229", features = ["derive"] }

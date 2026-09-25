@@ -10771,6 +10771,7 @@
         "type": "object",
         "description": "The system view served at `/api/v1/system`.",
         "required": [
+          "currentPrincipal",
           "service",
           "version",
           "trustMode",
@@ -10780,6 +10781,11 @@
           "queueRunning"
         ],
         "properties": {
+          "currentPrincipal": {
+            "type": "string",
+            "description": "The resolved principal for the request showing this system view.",
+            "example": "tailscale:alice@example.com"
+          },
           "queuePending": {
             "type": "integer",
             "format": "int64",

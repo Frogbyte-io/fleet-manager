@@ -11,8 +11,12 @@
 //!
 //! 1. Built-in defaults — deliberately the safe ones: loopback listener.
 //! 2. The configuration file, selected with `--config <path>` (TOML).
-//! 3. Environment variables (`FLEET_LISTEN`, `FLEET_WEB_DIST`,
-//!    `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`).
+//! 3. Environment variables (`FLEET_LISTEN`, `FLEET_TAILSCALE_SERVE_LISTEN`,
+//!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`).
+//!
+//! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
+//! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
+//! addresses fail configuration loading with [`ConfigError::TailscaleServeListenInvalid`].
 //!
 //! There is no default master-key path: an unset key source is a valid
 //! pre-secrets state that must degrade loudly rather than point at a file
@@ -37,6 +41,8 @@ pub const WEB_DIST_VAR: &str = "FLEET_WEB_DIST";
 pub const DATA_DIR_VAR: &str = "FLEET_DATA_DIR";
 /// Environment variable holding the master key file path.
 pub const MASTER_KEY_FILE_VAR: &str = "FLEET_MASTER_KEY_FILE";
+/// Environment variable enabling a dedicated Tailscale Serve identity listener.
+pub const TAILSCALE_SERVE_LISTEN_VAR: &str = "FLEET_TAILSCALE_SERVE_LISTEN";
 
 /// The default listen address: loopback only, because the controller is a
 /// trusted-LAN service and must not face an untrusted network by accident.
@@ -51,6 +57,8 @@ pub const DEFAULT_DATA_DIR: &str = "./data";
 pub struct ControllerConfig {
     /// The address the HTTP listener binds.
     pub listen: SocketAddr,
+    /// Optional loopback listener dedicated to requests proxied by Tailscale Serve.
+    pub tailscale_serve_listen: Option<SocketAddr>,
     /// The directory holding the built web shell; served at `/`.
     pub web_dist: PathBuf,
     /// The directory holding runtime state (database, backups, operations).
@@ -68,6 +76,7 @@ struct ConfigFile {
     /// Absent versions are reported as a version problem, not a parse one.
     version: Option<u32>,
     listen: Option<String>,
+    tailscale_serve_listen: Option<String>,
     web_dist: Option<String>,
     data_dir: Option<String>,
     master_key_file: Option<String>,
@@ -100,6 +109,28 @@ pub enum ConfigError {
     ListenInvalid {
         /// The value that failed to parse.
         value: String,
+    },
+    /// The configured Tailscale Serve listener is not a socket address.
+    TailscaleServeListenInvalid {
+        /// The value that failed to parse.
+        value: String,
+    },
+    /// The Tailscale Serve listener is not the documented IPv4 loopback target.
+    TailscaleServeListenerNotLoopback {
+        /// The configured address.
+        value: SocketAddr,
+    },
+    /// Port zero cannot be used because Tailscale Serve needs a stable target.
+    TailscaleServeListenerPortZero,
+    /// Identity mode requires the regular controller listener to remain local.
+    IdentityModeRequiresLoopbackListener {
+        /// The configured address.
+        value: SocketAddr,
+    },
+    /// The direct and Tailscale Serve listeners cannot bind the same address.
+    ControllerListenersConflict {
+        /// The conflicting address.
+        value: SocketAddr,
     },
     /// The runtime state directory could not be created or is not one.
     DataDirUnavailable {
@@ -147,6 +178,26 @@ impl fmt::Display for ConfigError {
             Self::ListenInvalid { value } => {
                 write!(f, "{LISTEN_VAR} is not a socket address: {value:?}")
             }
+            Self::TailscaleServeListenInvalid { value } => write!(
+                f,
+                "{TAILSCALE_SERVE_LISTEN_VAR} is not a socket address: {value:?}"
+            ),
+            Self::TailscaleServeListenerNotLoopback { value } => write!(
+                f,
+                "{TAILSCALE_SERVE_LISTEN_VAR} must use 127.0.0.1 for Tailscale Serve, got {value}"
+            ),
+            Self::TailscaleServeListenerPortZero => write!(
+                f,
+                "{TAILSCALE_SERVE_LISTEN_VAR} must use a fixed nonzero port for Tailscale Serve"
+            ),
+            Self::IdentityModeRequiresLoopbackListener { value } => write!(
+                f,
+                "{TAILSCALE_SERVE_LISTEN_VAR} is enabled, so {LISTEN_VAR} must also use a loopback address, got {value}"
+            ),
+            Self::ControllerListenersConflict { value } => write!(
+                f,
+                "{TAILSCALE_SERVE_LISTEN_VAR} must differ from {LISTEN_VAR}, both are {value}"
+            ),
             Self::DataDirUnavailable { path, error } => {
                 write!(
                     f,
@@ -195,6 +246,7 @@ pub fn load(
     env: EnvLookup<'_>,
 ) -> Result<ControllerConfig, ConfigError> {
     let mut listen: Option<String> = None;
+    let mut tailscale_serve_listen: Option<String> = None;
     let mut web_dist: Option<String> = None;
     let mut data_dir: Option<String> = None;
     let mut master_key_file: Option<String> = None;
@@ -214,12 +266,14 @@ pub fn load(
             });
         }
         listen = file.listen;
+        tailscale_serve_listen = file.tailscale_serve_listen;
         web_dist = file.web_dist;
         data_dir = file.data_dir;
         master_key_file = file.master_key_file;
     }
 
     listen = env(LISTEN_VAR).or(listen);
+    tailscale_serve_listen = env(TAILSCALE_SERVE_LISTEN_VAR).or(tailscale_serve_listen);
     web_dist = env(WEB_DIST_VAR).or(web_dist);
     data_dir = env(DATA_DIR_VAR).or(data_dir);
     master_key_file = env(MASTER_KEY_FILE_VAR).or(master_key_file);
@@ -228,9 +282,17 @@ pub fn load(
     let listen: SocketAddr = listen_raw
         .parse()
         .map_err(|_| ConfigError::ListenInvalid { value: listen_raw })?;
+    let tailscale_serve_listen = match tailscale_serve_listen {
+        Some(raw) => Some(
+            raw.parse()
+                .map_err(|_| ConfigError::TailscaleServeListenInvalid { value: raw })?,
+        ),
+        None => None,
+    };
 
     Ok(ControllerConfig {
         listen,
+        tailscale_serve_listen,
         web_dist: web_dist.map_or_else(|| PathBuf::from(DEFAULT_WEB_DIST), PathBuf::from),
         data_dir: data_dir.map_or_else(|| PathBuf::from(DEFAULT_DATA_DIR), PathBuf::from),
         master_key_file: master_key_file.map(PathBuf::from),
@@ -260,6 +322,27 @@ impl ControllerConfig {
             });
         }
 
+        if let Some(serve_listen) = self.tailscale_serve_listen {
+            if serve_listen.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+                return Err(ConfigError::TailscaleServeListenerNotLoopback {
+                    value: serve_listen,
+                });
+            }
+            if serve_listen.port() == 0 {
+                return Err(ConfigError::TailscaleServeListenerPortZero);
+            }
+            if !self.listen.ip().is_loopback() {
+                return Err(ConfigError::IdentityModeRequiresLoopbackListener {
+                    value: self.listen,
+                });
+            }
+            if self.listen == serve_listen {
+                return Err(ConfigError::ControllerListenersConflict {
+                    value: serve_listen,
+                });
+            }
+        }
+
         if let Some(key_file) = &self.master_key_file {
             validate_master_key_file(key_file)?;
         }
@@ -277,6 +360,9 @@ impl ControllerConfig {
             format!("data_dir = {}", self.data_dir.display()),
             format!("config_version = {CONFIG_VERSION}"),
         ];
+        if let Some(address) = self.tailscale_serve_listen {
+            lines.push(format!("tailscale_serve_listen = {address}"));
+        }
         match &self.master_key_file {
             Some(path) => lines.push(format!(
                 "master_key_file = {} (mode 0600 required)",

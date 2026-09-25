@@ -53,6 +53,8 @@ use tower_http::services::ServeDir;
 pub struct Settings {
     /// The address the HTTP listener binds.
     pub listen: SocketAddr,
+    /// Optional loopback HTTP listener for requests proxied by Tailscale Serve.
+    pub tailscale_serve_listen: Option<SocketAddr>,
     /// The directory holding the built web shell; served at `/`.
     pub web_dist: PathBuf,
     /// The directory holding downloadable node artifacts; when set,
@@ -206,6 +208,7 @@ impl fleet_api::system::SystemInfoSource for ControllerSystemInfo {
     async fn info(&self) -> Result<fleet_api::system::SystemInfo, String> {
         let (storage_ok, depths) = probe_pool(&self.pool).await;
         Ok(fleet_api::system::SystemInfo {
+            current_principal: String::new(),
             service: "fleet-controller".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             trust_mode: fleet_auth::TrustMode::TrustedLan.id().to_owned(),
@@ -299,6 +302,42 @@ pub fn build_router(
     images: Option<&Arc<fleet_application::images::Images>>,
     lab: Option<&Arc<fleet_application::lab::Lab>>,
 ) -> Router {
+    build_router_for_caller(
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_tailscale_serve_router(
+    settings: &Settings,
+    db: Option<SqlitePool>,
+    services: Option<&NodeServices>,
+    onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<&Arc<fleet_application::project::Projects>>,
+    proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<&Arc<fleet_application::images::Images>>,
+    lab: Option<&Arc<fleet_application::lab::Lab>>,
+) -> Router {
+    build_router_for_caller(
+        settings, db, services, onboarding, tailnet, projects, proxmox, images, lab, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_router_for_caller(
+    settings: &Settings,
+    db: Option<SqlitePool>,
+    services: Option<&NodeServices>,
+    onboarding: Option<&Arc<fleet_application::onboarding::Onboarding>>,
+    tailnet: Option<&Arc<fleet_application::tailnet::TailnetIntegration>>,
+    projects: Option<&Arc<fleet_application::project::Projects>>,
+    proxmox: Option<&Arc<fleet_application::proxmox::ProxmoxAccounts>>,
+    images: Option<&Arc<fleet_application::images::Images>>,
+    lab: Option<&Arc<fleet_application::lab::Lab>>,
+    tailscale_identity: bool,
+) -> Router {
+    let audit_db = db.clone();
     let probe = Probe {
         web_dist_ready: settings.web_dist.join("index.html").is_file(),
         db: db.clone(),
@@ -313,7 +352,8 @@ pub fn build_router(
         images.cloned(),
         lab.cloned(),
     ));
-    let shell = shell(settings).fallback(fleet_api::router(api_state.clone()));
+    let api_router = fleet_api::router(api_state.clone());
+    let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
         .ok()
         .map(Bytes::from);
@@ -322,8 +362,6 @@ pub fn build_router(
         .route("/readyz", get(readyz))
         .fallback_service(shell)
         .layer(axum::middleware::from_fn(browser::browser_mutation_guard))
-        .layer(axum::middleware::from_fn(browser::security_headers))
-        .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
         .with_state(probe);
     if let Some(artifacts_dir) = &settings.artifacts_dir {
         router = router.nest(
@@ -331,18 +369,71 @@ pub fn build_router(
             artifacts::artifacts_router(artifacts_dir.clone()),
         );
     }
-    let Some(services) = services else {
-        return router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
-    };
-    // The machine-facing node surface: versioned with the node protocol,
-    // documented in proto/README.md, and mounted beside the public API —
-    // not under it. The gateway route joins the enrollment routes in one
-    // nest so no path overlaps.
-    let node_routes = fleet_api::node::node_router(api_state)
-        .merge(gateway::gateway_router(services.gateway.clone()));
+    if let Some(services) = services {
+        // The machine-facing node surface: versioned with the node protocol,
+        // documented in proto/README.md, and mounted beside the public API —
+        // not under it. The gateway route joins the enrollment routes in one
+        // nest so no path overlaps. The Tailscale listener still gates entry
+        // to this route; node credentials remain an independent requirement.
+        let node_routes = fleet_api::node::node_router(api_state)
+            .merge(gateway::gateway_router(services.gateway.clone()));
+        router = router.nest("/api/node/v1", node_routes);
+    }
+    router = router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
+    if tailscale_identity {
+        router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
+    } else {
+        // Caller resolution covers every direct-listener route, including
+        // static, health, downloads, and the node surface. Public API
+        // correlation stays scoped to its router; the node protocol has its
+        // own correlation contract.
+        router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+    }
+    // Keep headers outside the identity gate so its early 401 responses keep
+    // the controller's browser protections.
+    router = router.layer(middleware::from_fn(browser::security_headers));
+    if let Some(db) = audit_db {
+        // Observe the response so API correlation IDs can be copied into the
+        // audit row without wrapping the node protocol in API correlation.
+        router = router.layer(middleware::from_fn_with_state(
+            db,
+            audit_untrusted_tailscale_identity_headers,
+        ));
+    }
     router
-        .nest("/api/node/v1", node_routes)
-        .layer(middleware::from_fn_with_state(web_index, spa_fallback))
+}
+
+/// Persists only the fixed Tailscale identity header names when they arrive
+/// from a peer outside loopback. Claim values are never logged or stored.
+async fn audit_untrusted_tailscale_identity_headers(
+    State(db): State<SqlitePool>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let remote_addr = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0);
+    let peer_is_loopback = remote_addr.is_some_and(|address| address.ip().is_loopback());
+    let names = fleet_auth::TAILSCALE_IDENTITY_HEADERS
+        .iter()
+        .filter(|header| request.headers().contains_key(*header))
+        .map(|header| header.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let response = next.run(request).await;
+    let correlation_id = response
+        .headers()
+        .get(fleet_api::CORRELATION_ID_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if !peer_is_loopback
+        && !names.is_empty()
+        && let Err(error) = fleet_storage_sqlite::AuditLedger::new(&db)
+            .record_ignored_tailscale_identity(&names, false, correlation_id)
+            .await
+    {
+        eprintln!("could not persist ignored Tailscale identity headers: {error}");
+    }
+    response
 }
 
 /// Rewrites eligible static/API 404s to the console entry point. The API and
@@ -517,6 +608,17 @@ pub async fn serve_on(
 ) -> io::Result<()> {
     eprintln!("{}", fleet_auth::TrustMode::TrustedLan.warning());
     eprintln!("fleet-controller listening on {}", listener.local_addr()?);
+    let tailscale_listener = match settings.tailscale_serve_listen {
+        Some(address) => {
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            eprintln!(
+                "Tailscale Serve identity listener on {}",
+                listener.local_addr()?
+            );
+            Some(listener)
+        }
+        None => None,
+    };
     if settings.web_dist.join("index.html").is_file() {
         eprintln!("serving web shell from {}", settings.web_dist.display());
     } else {
@@ -540,11 +642,11 @@ pub async fn serve_on(
     if sweeper_shutdown.is_none() {
         eprintln!("warning: node trust surface unavailable (no database or no master key)");
     }
-    axum::serve(
+    let direct_server = axum::serve(
         listener,
         build_router(
             &settings,
-            db,
+            db.clone(),
             services.as_ref(),
             onboarding.as_ref(),
             tailnet.as_ref(),
@@ -554,9 +656,41 @@ pub async fn serve_on(
             lab.as_ref(),
         )
         .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await?;
+    );
+    if let Some(tailscale_listener) = tailscale_listener {
+        let identity_server = axum::serve(
+            tailscale_listener,
+            build_tailscale_serve_router(
+                &settings,
+                db,
+                services.as_ref(),
+                onboarding.as_ref(),
+                tailnet.as_ref(),
+                projects.as_ref(),
+                proxmox.as_ref(),
+                images.as_ref(),
+                lab.as_ref(),
+            )
+            .into_make_service_with_connect_info::<SocketAddr>(),
+        );
+        let (direct_shutdown_tx, direct_shutdown_rx) = tokio::sync::oneshot::channel();
+        let (identity_shutdown_tx, identity_shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown.await;
+            let _ = direct_shutdown_tx.send(());
+            let _ = identity_shutdown_tx.send(());
+        });
+        tokio::try_join!(
+            direct_server.with_graceful_shutdown(async move {
+                let _ = direct_shutdown_rx.await;
+            }),
+            identity_server.with_graceful_shutdown(async move {
+                let _ = identity_shutdown_rx.await;
+            }),
+        )?;
+    } else {
+        direct_server.with_graceful_shutdown(shutdown).await?;
+    }
     // Dropping the sender stops the sweeper now that the server is down.
     drop(sweeper_shutdown);
     Ok(())
@@ -635,5 +769,191 @@ pub fn run_healthcheck(listen: SocketAddr) -> bool {
             eprintln!("healthcheck: {error}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tailscale_identity_tests {
+    use super::*;
+    use axum::{body::Body, extract::ConnectInfo, http::Request};
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn identity_listener_rejects_every_surface_without_a_user_login() {
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: Some(artifacts.path().to_path_buf()),
+        };
+        let router =
+            build_tailscale_serve_router(&settings, None, None, None, None, None, None, None, None);
+
+        for path in [
+            "/",
+            "/healthz",
+            "/readyz",
+            "/downloads/fleetd/fleetd",
+            "/api/node/v1/enroll",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            assert!(
+                response
+                    .headers()
+                    .contains_key(fleet_api::CORRELATION_ID_HEADER)
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::CONTENT_SECURITY_POLICY)
+                    .unwrap(),
+                "default-src 'self'; img-src 'self' data:; style-src 'self'"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                    .unwrap(),
+                "nosniff"
+            );
+        }
+
+        let mut request = Request::builder()
+            .uri("/")
+            .header("tailscale-user-login", "alice@example.com")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn identity_listener_audits_non_loopback_claims_before_rejecting_them() {
+        use sqlx::Row as _;
+
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&store_dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: None,
+        };
+        let router = build_tailscale_serve_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut request = Request::builder()
+            .uri("/api/v1/system")
+            .header("tailscale-user-login", "spoofed@example.invalid")
+            .header("x-correlation-id", "00000000-0000-7000-8000-000000000001")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45678))));
+
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(fleet_api::CORRELATION_ID_HEADER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "00000000-0000-7000-8000-000000000001"
+        );
+        let row = sqlx::query(
+            "SELECT correlation_id, metadata_json FROM audit_events \
+             WHERE action = 'auth.identity_header_ignored'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<String, _>("correlation_id"),
+            "00000000-0000-7000-8000-000000000001"
+        );
+        let metadata = row.get::<String, _>("metadata_json");
+        assert!(metadata.contains("tailscale-user-login"));
+        assert!(metadata.contains(r#""peerLoopback":false"#));
+        assert!(!metadata.contains("spoofed@example.invalid"));
+
+        let mut malformed_correlation = Request::builder()
+            .uri("/api/v1/system")
+            .header("tailscale-user-login", "second-spoof@example.invalid")
+            .header("x-correlation-id", "not-a-valid-correlation-id")
+            .body(Body::empty())
+            .unwrap();
+        malformed_correlation
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45679))));
+        let response = router.oneshot(malformed_correlation).await.unwrap();
+        let (response_parts, response_body) = response.into_parts();
+        assert_eq!(response_parts.status, StatusCode::BAD_REQUEST);
+        let response_correlation_id = response_parts
+            .headers
+            .get(fleet_api::CORRELATION_ID_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let response_body = axum::body::to_bytes(response_body, usize::MAX)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(error["code"], "malformed_correlation_id");
+        assert_eq!(error["correlationId"], response_correlation_id);
+        let rows = sqlx::query(
+            "SELECT correlation_id, metadata_json FROM audit_events \
+             WHERE action = 'auth.identity_header_ignored' ORDER BY seq",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        let second_row = rows.get(1).unwrap();
+        let second_correlation_id = second_row
+            .get::<Option<String>, _>("correlation_id")
+            .unwrap();
+        assert_eq!(second_correlation_id, response_correlation_id);
+        assert!(
+            second_correlation_id
+                .parse::<fleet_core::CorrelationId>()
+                .is_ok()
+        );
+        assert!(
+            second_row
+                .get::<String, _>("metadata_json")
+                .contains("tailscale-user-login")
+        );
+        assert!(
+            !second_row
+                .get::<String, _>("metadata_json")
+                .contains("second-spoof@example.invalid")
+        );
     }
 }

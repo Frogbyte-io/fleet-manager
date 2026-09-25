@@ -13,6 +13,7 @@
 
 pub mod apply;
 pub mod audit;
+pub mod auth;
 mod correlation;
 mod envelope;
 mod error;
@@ -302,16 +303,50 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
         )
         .split_for_parts();
 
-    let router = router
-        .fallback(not_found)
-        .layer(middleware::from_fn(correlation::correlate));
+    let router = router.fallback(not_found);
 
     (router, openapi)
 }
 
 /// Builds the API router over the given state.
 pub fn router(state: Arc<operations::ApiState>) -> Router {
+    correlate_router(unwrapped_router(state))
+}
+
+/// Builds the API routes without correlation middleware, for a controller
+/// composition root that applies a wider request gate and correlation layer.
+pub fn unwrapped_router(state: Arc<operations::ApiState>) -> Router {
     api(state).0
+}
+
+/// Applies the API correlation contract to a wider controller router.
+pub fn correlate_router(router: Router) -> Router {
+    router.layer(middleware::from_fn(correlation::correlate))
+}
+
+/// Builds the API router for a dedicated Tailscale Serve listener. A request
+/// must be resolved by the configured loopback caller middleware; rejected
+/// requests receive a correlated API error before reaching the route router.
+pub fn tailscale_serve_router(
+    state: Arc<operations::ApiState>,
+    peer: fleet_auth::TailscaleServePeer,
+) -> Router {
+    tailscale_serve_guard(router(state), peer)
+}
+
+/// Applies loopback Tailscale caller resolution and the corresponding 401
+/// rejection to a complete controller router. The public API can keep its
+/// correlation middleware scoped to its handlers; the node protocol retains
+/// its separate correlation contract.
+pub fn tailscale_serve_guard(router: Router, peer: fleet_auth::TailscaleServePeer) -> Router {
+    router
+        .layer(middleware::from_fn(
+            auth::reject_unauthenticated_tailscale_caller,
+        ))
+        .layer(middleware::from_fn_with_state(
+            peer,
+            fleet_auth::resolve_tailscale_serve_caller,
+        ))
 }
 
 /// Builds the `OpenAPI` document. The document describes the router's

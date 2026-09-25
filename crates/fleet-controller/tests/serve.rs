@@ -32,6 +32,7 @@ fn settings(web_dist: &Path) -> Settings {
             .expect("the test listen address must parse"),
         web_dist: web_dist.to_path_buf(),
         artifacts_dir: None,
+        tailscale_serve_listen: None,
     }
 }
 

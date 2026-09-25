@@ -561,6 +561,7 @@ dependencies = [
  "async-trait",
  "axum",
  "fleet-application",
+ "fleet-auth",
  "fleet-core",
  "futures-util",
  "http",

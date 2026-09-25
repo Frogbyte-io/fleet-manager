@@ -54,7 +54,7 @@ pub async fn correlate(mut request: Request, next: Next) -> Response {
     with_header(next.run(request).await, correlation_id)
 }
 
-fn malformed_correlation_id(assigned: CorrelationId) -> Response {
+pub(crate) fn malformed_correlation_id(assigned: CorrelationId) -> Response {
     let public = PublicError::new(
         ErrorCode::from_str("malformed_correlation_id")
             .expect("the literal is valid error code syntax"),
@@ -69,7 +69,7 @@ fn malformed_correlation_id(assigned: CorrelationId) -> Response {
         .into_response()
 }
 
-fn with_header(mut response: Response, correlation_id: CorrelationId) -> Response {
+pub(crate) fn with_header(mut response: Response, correlation_id: CorrelationId) -> Response {
     let name = HeaderName::from_static(CORRELATION_ID_HEADER);
     let value = HeaderValue::from_str(&correlation_id.to_string())
         .expect("an opaque identity is printable ASCII");

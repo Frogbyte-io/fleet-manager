@@ -3591,6 +3591,8 @@ export interface StartSkillsOperationRequest {
  * The system view served at `/api/v1/system`.
  */
 export interface SystemInfo {
+  /** The resolved principal for the request showing this system view. */
+  currentPrincipal: string;
   /** Operations accepted but not yet claimed. */
   queuePending: number;
   /** Operations claimed and executing. */

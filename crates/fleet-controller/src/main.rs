@@ -50,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
 fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
     let settings = Settings {
         listen: config.listen,
+        tailscale_serve_listen: config.tailscale_serve_listen,
         web_dist: config.web_dist,
         artifacts_dir: Some(config.data_dir.join("artifacts")),
     };
