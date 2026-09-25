@@ -483,6 +483,24 @@ async fn a_fresh_draft_is_untested_and_made_no_machine() {
     assert_eq!(fixture.machines.machine_count(), 0);
 }
 
+#[tokio::test]
+async fn draft_creation_rejects_option_like_ssh_users_and_hosts() {
+    let fixture = compose(FakeMachines::default());
+    for (user, host) in [("-oProxyCommand=bad", "host-one"), ("deploy", "-Fbad")] {
+        let mut draft = new_draft();
+        draft.endpoint.user = user.to_owned();
+        draft.endpoint.host = host.to_owned();
+        assert!(matches!(
+            fixture
+                .onboarding
+                .create_draft(&AllowAll, &principal(), draft)
+                .await,
+            Err(OnboardingUseCaseError::Invalid { .. })
+        ));
+    }
+    assert!(fixture.drafts.drafts.lock().unwrap().is_empty());
+}
+
 /// The trusted-LAN policy: the same allow-all the controller serves with.
 fn fleet_auth_allow_all() -> impl Authorizer {
     AllowAll

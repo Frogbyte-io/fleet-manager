@@ -184,6 +184,7 @@ impl SshProvider {
             .arg(port.to_string())
             .arg("-T")
             .arg(timeout.as_secs().to_string())
+            .arg("--")
             .arg(host)
             .output()
             .map_err(|error| SshProviderError::Tool {
@@ -330,9 +331,8 @@ impl SshProvider {
                 command.arg("-i").arg(path);
             }
         }
-        command
-            .arg(format!("{}@{}", endpoint.user, endpoint.host))
-            .arg("true");
+        add_ssh_destination(&mut command, endpoint);
+        command.arg("true");
 
         let output = command.output().map_err(|error| SshProviderError::Tool {
             tool: "ssh",
@@ -368,6 +368,12 @@ impl SshProvider {
         })?;
         Ok(path)
     }
+}
+
+pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectionSpec) {
+    command
+        .arg("--")
+        .arg(format!("{}@{}", endpoint.user, endpoint.host));
 }
 
 /// How Fleet authenticates to an SSH endpoint.
@@ -453,5 +459,25 @@ pub(crate) fn redact_failure(text: &str) -> String {
         format!("{}…", &line[..200])
     } else {
         (*line).to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SshAuth, SshConnectionSpec, add_ssh_destination};
+    use std::process::Command;
+
+    #[test]
+    fn ssh_destination_is_after_the_option_terminator() {
+        let endpoint = SshConnectionSpec {
+            host: "-Fmalicious".to_owned(),
+            port: 22,
+            user: "-oProxyCommand=malicious".to_owned(),
+            auth: SshAuth::Agent,
+        };
+        let mut command = Command::new("ssh");
+        add_ssh_destination(&mut command, &endpoint);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--", "-oProxyCommand=malicious@-Fmalicious"]);
     }
 }

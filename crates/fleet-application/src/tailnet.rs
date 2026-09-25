@@ -696,10 +696,8 @@ impl TailnetIntegration {
                 detail: "the device node id must be 1..=64 characters".to_owned(),
             });
         }
-        if user.is_empty() || user.len() > 64 {
-            return Err(TailnetUseCaseError::Invalid {
-                detail: "the SSH user must be 1..=64 characters".to_owned(),
-            });
+        if let Err(detail) = crate::onboarding::validate_ssh_user(user) {
+            return Err(TailnetUseCaseError::Invalid { detail });
         }
         // Idempotent replay BEFORE any network or store work: a retried
         // import returns the original draft even when the integration was

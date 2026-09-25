@@ -679,6 +679,41 @@ impl fleet_application::onboarding::OnboardTrustPort for ContractOnboardingTrust
     }
 }
 
+#[derive(Debug)]
+struct ContractTailnetSource;
+
+#[async_trait]
+impl fleet_application::tailnet::TailnetSource for ContractTailnetSource {
+    async fn list_devices(
+        &self,
+        _tailnet: &str,
+        _credentials: &fleet_application::tailnet::TailnetCredentials,
+    ) -> Result<
+        Vec<fleet_application::tailnet::TailnetDevice>,
+        fleet_application::tailnet::TailnetSourceError,
+    > {
+        unreachable!("invalid import input is rejected before source access")
+    }
+}
+
+#[derive(Debug)]
+struct ContractTailnetCredentials;
+
+#[async_trait]
+impl fleet_application::tailnet::TailnetCredentialStore for ContractTailnetCredentials {
+    async fn load(&self) -> Result<Option<fleet_application::tailnet::TailnetCredentials>, String> {
+        unreachable!("invalid import input is rejected before credential access")
+    }
+
+    async fn store(&self, _client_id: &str, _client_secret: &str) -> Result<(), String> {
+        unreachable!("not used by import")
+    }
+
+    async fn clear(&self) -> Result<(), String> {
+        unreachable!("not used by import")
+    }
+}
+
 #[tokio::test]
 async fn onboarding_events_cover_create_replay_and_machine_add() {
     use fleet_application::machine::Machines;
@@ -689,22 +724,35 @@ async fn onboarding_events_cover_create_replay_and_machine_add() {
     let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
     let drafts = Arc::new(OnboardingRepository::new(store.pool().clone()));
     let audit = Arc::new(FakeAudit);
+    let machines = Arc::new(Machines::new(
+        Arc::new(MachineRepository::new(store.pool().clone())),
+        audit.clone(),
+    ));
     let onboarding = Arc::new(Onboarding::new(
         drafts.clone(),
         Arc::new(ContractOnboardingTrust),
-        Arc::new(Machines::new(
-            Arc::new(MachineRepository::new(store.pool().clone())),
-            audit.clone(),
-        )),
+        machines.clone(),
+        audit.clone(),
+    ));
+    let tailnet = Arc::new(fleet_application::tailnet::TailnetIntegration::new(
+        Arc::new(ContractTailnetSource),
+        Arc::new(ContractTailnetCredentials),
+        onboarding.clone(),
+        machines,
         audit,
     ));
     let hub = Arc::new(fleet_application::events::EventHub::new(8));
     let mut events = hub.subscribe(None).receiver;
     let mut state = (*operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).clone();
     state.onboarding = Some(onboarding);
+    state.tailnet = Some(tailnet);
     let app = router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
         id: "anonymous-lan-admin".to_owned(),
     }));
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     let create = || {
         Request::builder()
             .method(Method::POST)
@@ -761,6 +809,75 @@ async fn onboarding_events_cover_create_replay_and_machine_add() {
         events.try_recv().unwrap().kind,
         fleet_application::events::EventKind::MachineChanged
     );
+}
+
+#[tokio::test]
+async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
+    use fleet_application::machine::Machines;
+    use fleet_application::onboarding::Onboarding;
+    use fleet_storage_sqlite::{MachineRepository, OnboardingRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let drafts = Arc::new(OnboardingRepository::new(store.pool().clone()));
+    let audit = Arc::new(FakeAudit);
+    let machines = Arc::new(Machines::new(
+        Arc::new(MachineRepository::new(store.pool().clone())),
+        audit.clone(),
+    ));
+    let onboarding = Arc::new(Onboarding::new(
+        drafts,
+        Arc::new(ContractOnboardingTrust),
+        machines.clone(),
+        audit.clone(),
+    ));
+    let tailnet = Arc::new(fleet_application::tailnet::TailnetIntegration::new(
+        Arc::new(ContractTailnetSource),
+        Arc::new(ContractTailnetCredentials),
+        onboarding.clone(),
+        machines,
+        audit,
+    ));
+    let mut state = (*operation_state_with_hub(
+        Arc::new(PermitAllAuthorizer),
+        Arc::new(fleet_application::events::EventHub::new(8)),
+    ))
+    .clone();
+    state.onboarding = Some(onboarding);
+    state.tailnet = Some(tailnet);
+    let app = router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
+        id: "anonymous-lan-admin".to_owned(),
+    }));
+
+    for request_body in [
+        r#"{"user":"-oProxyCommand=bad","host":"build-host","auth":{"type":"agent"},"name":"build-host"}"#,
+        r#"{"user":"ops","host":"-Fbad","auth":{"type":"agent"},"name":"build-host"}"#,
+    ] {
+        let (parts, body) = call_via(
+            &app,
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("{API_BASE_PATH}/machines/onboarding/drafts"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "invalid_request");
+    }
+    let (parts, body) = call_via(
+        &app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_BASE_PATH}/tailnet/devices/nABC/import"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"user":"-oProxyCommand=bad"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
 }
 
 #[tokio::test]
