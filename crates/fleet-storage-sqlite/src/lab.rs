@@ -545,31 +545,6 @@ impl LeasePort for LeaseRepository {
             && current.provision_id.as_deref() == Some(provision_id))
     }
 
-    async fn fail_provisioning(&self, id: &str, provision_id: &str) -> Result<bool, String> {
-        let updated = sqlx::query(
-            "UPDATE lab_leases SET state = 'failed' \
-             WHERE id = ?1 AND state = 'provisioning' AND provision_id = ?2",
-        )
-        .bind(id)
-        .bind(provision_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("fail provisioning failed: {error}"))?;
-        if updated.rows_affected() == 1 {
-            return Ok(true);
-        }
-        let current = Self::row_to_lease(
-            &sqlx::query("SELECT * FROM lab_leases WHERE id = ?1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| format!("read failed lease failed: {error}"))?
-                .ok_or_else(|| format!("lease {id} not found"))?,
-        )?;
-        Ok(current.state == LeaseState::Failed
-            && current.provision_id.as_deref() == Some(provision_id))
-    }
-
     async fn claim_for_release(
         &self,
         id: &str,

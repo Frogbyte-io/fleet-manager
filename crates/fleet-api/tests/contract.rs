@@ -538,6 +538,21 @@ async fn an_unknown_kind_is_refused_with_the_invalid_request_code() {
 }
 
 #[tokio::test]
+async fn generic_operation_creation_cannot_start_lab_provision_sagas() {
+    let (parts, body) = post_json(
+        &format!("{API_BASE_PATH}/operations"),
+        serde_json::json!({
+            "kind": "lab.provision",
+            "idempotencyKey": "second-provision-attempt",
+            "payload": {"leaseId": "lease-owned", "recordId": "record-owned", "accountId": "pve-1"}
+        }),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
 async fn the_operation_list_is_a_page() {
     // One router for both calls: the in-memory backend is per router.
     let (router, _port, _audit) = test_router();

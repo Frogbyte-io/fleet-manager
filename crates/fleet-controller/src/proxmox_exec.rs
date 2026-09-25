@@ -1270,7 +1270,6 @@ impl ProvisionExecutor {
                 .await
                 .unwrap_or(false);
             if cancelled {
-                self.fail_linked_lease(&record).await?;
                 return complete_failure(
                     operations,
                     &operation.id,
@@ -1300,7 +1299,6 @@ impl ProvisionExecutor {
                     .update(&updated)
                     .await
                     .map_err(|detail| format!("the record update failed: {detail}"))?;
-                self.fail_linked_lease(&record).await?;
                 return complete_failure(
                     operations,
                     &operation.id,
@@ -1394,80 +1392,12 @@ impl ProvisionExecutor {
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
-
-    async fn fail_linked_lease(
-        &self,
-        record: &fleet_application::lab::ProvisionRecord,
-    ) -> Result<(), String> {
-        let Some(lease_id) = record.lease_id.as_deref() else {
-            return Ok(());
-        };
-        if self
-            .leases
-            .fail_provisioning(lease_id, &record.id)
-            .await
-            .map_err(|detail| format!("the linked lease failure update failed: {detail}"))?
-        {
-            return Ok(());
-        }
-        let current = self
-            .leases
-            .get(lease_id)
-            .await
-            .map_err(|detail| format!("the linked lease is unreadable: {detail}"))?;
-        if matches!(
-            current.state,
-            fleet_core::LeaseState::Failed | fleet_core::LeaseState::Ready
-        ) && current.provision_id.as_deref() == Some(record.id.as_str())
-        {
-            Ok(())
-        } else {
-            Err("the linked lease changed before failure was recorded".to_owned())
-        }
-    }
 }
 
 #[async_trait::async_trait]
 impl OperationExecutor for ProvisionExecutor {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
-        let result = self.execute_linked(operations, operation).await;
-        let Err(detail) = result else {
-            return result;
-        };
-        let linked = operation
-            .payload_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|payload| {
-                Some((
-                    payload["leaseId"].as_str()?.to_owned(),
-                    payload["recordId"].as_str()?.to_owned(),
-                ))
-            });
-        if let Some((lease_id, record_id)) = linked {
-            match self.leases.fail_provisioning(&lease_id, &record_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    let current = self.leases.get(&lease_id).await.map_err(|failure| {
-                        format!("{detail}; linked lease state is unreadable: {failure}")
-                    })?;
-                    if current.state != fleet_core::LeaseState::Ready
-                        && current.state != fleet_core::LeaseState::Failed
-                    {
-                        return Err(format!(
-                            "{detail}; linked lease could not be marked failed from {}",
-                            current.state.id()
-                        ));
-                    }
-                }
-                Err(failure) => {
-                    return Err(format!(
-                        "{detail}; linked lease failure could not be persisted: {failure}"
-                    ));
-                }
-            }
-        }
-        Err(detail)
+        self.execute_linked(operations, operation).await
     }
 }
 

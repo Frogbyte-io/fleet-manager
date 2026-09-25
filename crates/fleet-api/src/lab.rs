@@ -661,9 +661,10 @@ pub async fn start_lab_lease_provision(
     .to_string();
     let operation = state
         .operations
-        .create(
+        .create_lab_provision(
             state.authorizer.as_ref(),
             &principal.id,
+            &lease_id,
             &fleet_application::operation::NewOperation {
                 kind: "lab.provision".to_owned(),
                 idempotency_key: Some(format!("{}:lab-lease-provision:{lease_id}", principal.id)),
