@@ -366,6 +366,7 @@ impl LeaseRepository {
             provision_id: row.get("provision_id"),
             cleanup: CleanupStrategy::from_id(&cleanup)?,
             created_at: row.get("created_at"),
+            max_lifetime_at: row.get("max_lifetime_at"),
             ready_at: row.get("ready_at"),
             expires_at: row.get("expires_at"),
             cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
@@ -377,9 +378,14 @@ impl LeaseRepository {
 impl LeasePort for LeaseRepository {
     async fn create(&self, lease: &NewLease, owner: &str, now: i64) -> Result<Lease, String> {
         let id = Uuid::now_v7().to_string();
+        let max_lifetime_at = now
+            .checked_add(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            .ok_or_else(|| {
+                "the lease creation time exceeds the maximum lifetime range".to_owned()
+            })?;
         sqlx::query(
-            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7)",
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, max_lifetime_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7, ?8)",
         )
         .bind(&id)
         .bind(&lease.template_version_id)
@@ -388,6 +394,7 @@ impl LeasePort for LeaseRepository {
         .bind(&lease.project_id)
         .bind(lease.cleanup.id())
         .bind(now)
+        .bind(max_lifetime_at)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("create failed: {error}"))?;
@@ -443,16 +450,48 @@ impl LeasePort for LeaseRepository {
         rows.iter().map(Self::row_to_lease).collect()
     }
 
-    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String> {
-        // The compare-and-set: only the writer whose UPDATE lands while
-        // the row is still in the observed state wins the claim.
-        let claimed =
-            sqlx::query("UPDATE lab_leases SET state = 'releasing' WHERE id = ?1 AND state = ?2")
-                .bind(id)
-                .bind(observed.id())
-                .execute(&self.pool)
-                .await
-                .map_err(|error| format!("claim failed: {error}"))?;
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String> {
+        let updated = sqlx::query(
+            "UPDATE lab_leases SET expires_at = ?4 \
+             WHERE id = ?1 AND state = 'ready' AND expires_at = ?2 \
+             AND expires_at > ?3 AND ?4 <= max_lifetime_at",
+        )
+        .bind(id)
+        .bind(observed_expires_at)
+        .bind(now)
+        .bind(new_expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("extend failed: {error}"))?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String> {
+        // Compare both state and deadline so a stale expiry scan cannot
+        // release a lease whose TTL was extended before this claim.
+        let claimed = sqlx::query(
+            "UPDATE lab_leases SET state = 'releasing' \
+             WHERE id = ?1 AND state = ?2 AND expires_at = ?3 AND expires_at <= ?4",
+        )
+        .bind(id)
+        .bind(observed.id())
+        .bind(observed_expires_at)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("claim failed: {error}"))?;
         Ok(claimed.rows_affected() == 1)
     }
 }

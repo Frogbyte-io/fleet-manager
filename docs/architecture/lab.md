@@ -48,7 +48,8 @@ Deadlines:
 - Queue deadline/optional caller wait limit
 - Provisioning/readiness deadline from request
 - Ready TTL beginning only when the lease reaches `ready`
-- Absolute maximum lifetime beginning at request to cap stuck workflows
+- Absolute maximum lifetime of 30 days beginning at request to cap stuck workflows
+- Ready TTL extensions can move the expiry only up to that creation-relative maximum
 - Cleanup retry/backoff horizon with persistent operator alert after exhaustion
 
 Cleanup strategies:

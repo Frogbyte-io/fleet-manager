@@ -147,6 +147,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         lab::CreateLeaseRequest,
         lab::LeaseDto,
         lab::ReleaseLeaseRequest,
+        lab::ExtendLeaseRequest,
         images::RecipeDto,
         images::RecipeVersionDto,
         images::SaveRecipeRequest,
@@ -297,6 +298,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::create_lab_lease))
                 .routes(routes!(lab::list_lab_leases))
                 .routes(routes!(lab::release_lab_lease))
+                .routes(routes!(lab::extend_lab_lease))
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),

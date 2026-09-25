@@ -2714,4 +2714,20 @@ fn parsing_walks_the_lease_forms() {
         fleetctl::parse(&args).unwrap().command,
         fleetctl::Command::LabSweep
     ));
+    let args: Vec<String> = ["lab", "extend", "lease-1", "--seconds", "1800"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeaseExtend {
+            lease_id: "lease-1".to_owned(),
+            by_seconds: 1_800,
+        }
+    );
+    let zero = ["lab", "extend", "lease-1", "--seconds", "0"]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(fleetctl::parse(&zero).is_err());
 }

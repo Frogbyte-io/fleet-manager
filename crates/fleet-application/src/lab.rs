@@ -261,14 +261,35 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn expired(&self, now: i64) -> Result<Vec<Lease>, String>;
-    /// Claims one lease for release, conditional on its observed state:
-    /// the compare-and-set that keeps concurrent sweeps from
-    /// double-claiming. Returns whether this caller won the claim.
+    /// Extends a ready lease's expiry if the observed deadline is still
+    /// current and unexpired. Returns false when the sweeper or another
+    /// extension changed the lease first.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors.
-    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String>;
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String>;
+    /// Claims one lease for release, conditional on its observed state:
+    /// the compare-and-set that keeps concurrent sweeps from
+    /// double-claiming or winning over an extension after an expiry scan.
+    /// Returns whether this caller won the claim.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String>;
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -564,6 +585,75 @@ impl Lab {
         Ok(updated)
     }
 
+    /// Extends a ready lease by adding seconds to its existing expiry. The
+    /// absolute maximum lifetime is measured from creation and cannot be
+    /// extended.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown or non-ready lease, an expired lease, an
+    /// extension beyond the absolute limit, or a concurrent state change.
+    pub async fn extend_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+        by_seconds: u32,
+        now: i64,
+    ) -> Result<Lease, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabExtend,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        let observed_expires_at = lease.expires_at.ok_or_else(|| LabUseCaseError::Invalid {
+            detail: "only ready leases with a TTL deadline can be extended".to_owned(),
+        })?;
+        let new_expires_at = lease
+            .extend_expiry(now, by_seconds)
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        self.audit_event(
+            principal,
+            Permission::LabExtend,
+            Some(id),
+            "lab_lease_extended",
+            None,
+        )
+        .await?;
+        let extended = self
+            .leases
+            .extend_ready(id, observed_expires_at, now, new_expires_at)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        if !extended {
+            return Err(LabUseCaseError::Conflict {
+                detail: "the lease changed state or expiry before it could be extended".to_owned(),
+            });
+        }
+        let mut updated = lease;
+        updated.expires_at = Some(new_expires_at);
+        Ok(updated)
+    }
+
     /// The expiry sweeper's transition: every lease whose TTL has expired
     /// at `now` moves into `releasing` with the release intent recorded.
     /// The sweeper survives restart because the deadlines live in the
@@ -597,6 +687,9 @@ impl Lab {
                 })?;
         let mut released = Vec::new();
         for lease in expired {
+            let Some(observed_expires_at) = lease.expires_at else {
+                continue;
+            };
             self.audit_event(
                 principal,
                 Permission::LabLease,
@@ -612,7 +705,7 @@ impl Lab {
             claimed.state = LeaseState::Releasing;
             let claimed_ok = self
                 .leases
-                .claim_for_release(&lease.id, LeaseState::Ready)
+                .claim_for_release(&lease.id, LeaseState::Ready, observed_expires_at, now)
                 .await
                 .map_err(|detail| LabUseCaseError::Backend {
                     context: "leases",

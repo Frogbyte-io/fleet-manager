@@ -637,6 +637,8 @@ pub struct LeaseDto {
     pub cleanup: String,
     /// When the lease was created.
     pub created_at: i64,
+    /// Absolute lifetime deadline measured from creation.
+    pub max_lifetime_at: i64,
     /// When the lease reached ready, when it did.
     pub ready_at: Option<i64>,
     /// When the lease's TTL expires, once ready.
@@ -654,6 +656,7 @@ impl From<fleet_application::lab::Lease> for LeaseDto {
             state: lease.state.id().to_owned(),
             cleanup: lease.cleanup.id().to_owned(),
             created_at: lease.created_at,
+            max_lifetime_at: lease.max_lifetime_at,
             ready_at: lease.ready_at,
             expires_at: lease.expires_at,
         }
@@ -803,6 +806,58 @@ pub struct ReleaseLeaseRequest {
     /// Whether to keep the VM out of automatic cleanup (elevated).
     #[serde(default)]
     pub keep: bool,
+}
+
+/// The requested ready-TTL extension.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtendLeaseRequest {
+    /// Seconds to add to the lease's existing expiry.
+    pub by_seconds: u32,
+}
+
+/// Extends the expiry of a ready lease within its absolute lifetime cap.
+///
+/// # Errors
+///
+/// Returns the standard error envelope for denial, an invalid or expired
+/// lease, a concurrent change, or backend failure.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/extend",
+    tag = "lab",
+    operation_id = "extendLabLease",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    request_body = ExtendLeaseRequest,
+    responses(
+        (status = 200, description = "The lease expiry was extended.", body = Resource<LeaseDto>),
+        (status = 400, description = "The lease is not ready, is expired, or would exceed its maximum lifetime.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not extend the lease.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The lease changed while the extension was being applied.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn extend_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+    Json(request): Json<ExtendLeaseRequest>,
+) -> Result<Json<Resource<LeaseDto>>, ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let lease = lab
+        .extend_lease(
+            state.authorizer.as_ref(),
+            &principal,
+            &lease_id,
+            request.by_seconds,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(lease.into())))
 }
 
 /// Runs the expiry sweeper: every lease whose TTL has expired moves into

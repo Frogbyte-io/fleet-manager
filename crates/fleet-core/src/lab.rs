@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The maximum age of a Lab lease, measured from its creation request.
+/// This matches the largest allowed template TTL and bounds all extensions.
+pub const MAX_LAB_LEASE_LIFETIME_MILLIS: i64 = 30 * 24 * 3_600_000;
+
 /// The readiness probe kinds a template can pin.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -412,6 +416,9 @@ pub struct Lease {
     pub cleanup: CleanupStrategy,
     /// When the lease was created (epoch millis).
     pub created_at: i64,
+    /// Absolute lifetime deadline measured from creation, regardless of
+    /// when the guest reaches ready.
+    pub max_lifetime_at: i64,
     /// When the lease reached ready (epoch millis), when it did — the TTL
     /// clock's start.
     pub ready_at: Option<i64>,
@@ -428,6 +435,40 @@ impl Lease {
     pub fn ttl_expired(&self, now: i64) -> bool {
         self.state == LeaseState::Ready
             && self.expires_at.is_some_and(|expires_at| now >= expires_at)
+    }
+
+    /// Computes a new expiry by adding seconds to the existing deadline.
+    /// Extending is limited to live ready leases and the fixed absolute
+    /// lifetime deadline.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lease is not ready, expired, has no expiry, the
+    /// extension is zero, arithmetic overflows, or the absolute cap would
+    /// be exceeded.
+    pub fn extend_expiry(&self, now: i64, by_seconds: u32) -> Result<i64, String> {
+        if self.state != LeaseState::Ready {
+            return Err("only ready leases can be extended".to_owned());
+        }
+        let current_expiry = self
+            .expires_at
+            .ok_or_else(|| "the ready lease has no expiry deadline".to_owned())?;
+        if current_expiry <= now {
+            return Err("the lease TTL has already expired".to_owned());
+        }
+        if by_seconds == 0 {
+            return Err("the extension must be greater than zero seconds".to_owned());
+        }
+        let extension_millis = i64::from(by_seconds)
+            .checked_mul(1_000)
+            .ok_or_else(|| "the extension is too large".to_owned())?;
+        let new_expiry = current_expiry
+            .checked_add(extension_millis)
+            .ok_or_else(|| "the extension deadline overflows".to_owned())?;
+        if new_expiry > self.max_lifetime_at {
+            return Err("the extension exceeds the lease's maximum lifetime".to_owned());
+        }
+        Ok(new_expiry)
     }
 }
 
@@ -446,6 +487,7 @@ mod lease_tests {
             provision_id: None,
             cleanup: CleanupStrategy::Destroy,
             created_at: 1_800_000_000_000,
+            max_lifetime_at: 1_800_000_000_000 + 30 * 24 * 3_600_000,
             ready_at: None,
             expires_at,
             cleanup_attempts: 0,
@@ -462,6 +504,27 @@ mod lease_tests {
         assert!(!lease(LeaseState::Ready, None).ttl_expired(now));
         // A non-ready lease never expires (the TTL starts at ready).
         assert!(!lease(LeaseState::Provisioning, Some(1_800_000_050_000)).ttl_expired(now));
+    }
+
+    #[test]
+    fn extending_a_lease_is_ready_unexpired_positive_and_within_its_absolute_cap() {
+        let created_at = 1_800_000_000_000;
+        let ready = lease(LeaseState::Ready, Some(created_at + 3_600_000));
+
+        assert_eq!(
+            ready.extend_expiry(created_at + 600_000, 3_600),
+            Ok(created_at + 7_200_000)
+        );
+        assert!(ready.extend_expiry(created_at + 3_600_000, 1).is_err());
+        assert!(ready.extend_expiry(created_at + 600_000, 0).is_err());
+
+        let mut too_close_to_cap = ready.clone();
+        too_close_to_cap.expires_at = Some(too_close_to_cap.max_lifetime_at - 1_000);
+        assert!(too_close_to_cap.extend_expiry(created_at, 2).is_err());
+
+        let mut provisioning = ready;
+        provisioning.state = LeaseState::Provisioning;
+        assert!(provisioning.extend_expiry(created_at, 1).is_err());
     }
 
     #[test]

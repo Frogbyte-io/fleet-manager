@@ -34,7 +34,10 @@ pub const TAILSCALE_IDENTITY_HEADER_NAMES: [&str; 3] = [
 pub use image::{
     MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe,
 };
-pub use lab::{CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState, ReadinessProbe};
+pub use lab::{
+    CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState,
+    MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe,
+};
 pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,

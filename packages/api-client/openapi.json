@@ -830,6 +830,99 @@
         }
       }
     },
+    "/api/v1/lab/leases/{leaseId}/extend": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Extends the expiry of a ready lease within its absolute lifetime cap.",
+        "description": "# Errors\n\nReturns the standard error envelope for denial, an invalid or expired\nlease, a concurrent change, or backend failure.",
+        "operationId": "extendLabLease",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtendLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The lease expiry was extended.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LeaseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is not ready, is expired, or would exceed its maximum lifetime.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not extend the lease.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The lease changed while the extension was being applied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases/{leaseId}/release": {
       "post": {
         "tags": [
@@ -5478,6 +5571,21 @@
           }
         }
       },
+      "ExtendLeaseRequest": {
+        "type": "object",
+        "description": "The requested ready-TTL extension.",
+        "required": [
+          "bySeconds"
+        ],
+        "properties": {
+          "bySeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds to add to the lease's existing expiry.",
+            "minimum": 0
+          }
+        }
+      },
       "FieldDifferenceDto": {
         "type": "object",
         "description": "One field difference, as the planner produced it.",
@@ -5877,7 +5985,8 @@
           "purpose",
           "state",
           "cleanup",
-          "createdAt"
+          "createdAt",
+          "maxLifetimeAt"
         ],
         "properties": {
           "cleanup": {
@@ -5900,6 +6009,11 @@
           "id": {
             "type": "string",
             "description": "The lease's identity."
+          },
+          "maxLifetimeAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Absolute lifetime deadline measured from creation."
           },
           "owner": {
             "type": "string",
@@ -7167,7 +7281,8 @@
                 "purpose",
                 "state",
                 "cleanup",
-                "createdAt"
+                "createdAt",
+                "maxLifetimeAt"
               ],
               "properties": {
                 "cleanup": {
@@ -7190,6 +7305,11 @@
                 "id": {
                   "type": "string",
                   "description": "The lease's identity."
+                },
+                "maxLifetimeAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Absolute lifetime deadline measured from creation."
                 },
                 "owner": {
                   "type": "string",
@@ -8910,7 +9030,8 @@
               "purpose",
               "state",
               "cleanup",
-              "createdAt"
+              "createdAt",
+              "maxLifetimeAt"
             ],
             "properties": {
               "cleanup": {
@@ -8933,6 +9054,11 @@
               "id": {
                 "type": "string",
                 "description": "The lease's identity."
+              },
+              "maxLifetimeAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Absolute lifetime deadline measured from creation."
               },
               "owner": {
                 "type": "string",

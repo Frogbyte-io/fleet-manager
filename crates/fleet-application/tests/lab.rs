@@ -250,6 +250,7 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             provision_id: None,
             cleanup: lease.cleanup,
             created_at: now,
+            max_lifetime_at: now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS,
             ready_at: None,
             expires_at: None,
             cleanup_attempts: 0,
@@ -293,12 +294,43 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             .collect())
     }
 
-    async fn claim_for_release(&self, id: &str, observed: LeaseState) -> Result<bool, String> {
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String> {
         let mut leases = self.leases.lock().unwrap();
         let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
             return Ok(false);
         };
-        if stored.state != observed {
+        if stored.state != LeaseState::Ready
+            || stored.expires_at != Some(observed_expires_at)
+            || observed_expires_at <= now
+            || new_expires_at > stored.max_lifetime_at
+        {
+            return Ok(false);
+        }
+        stored.expires_at = Some(new_expires_at);
+        Ok(true)
+    }
+
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state != observed
+            || stored.expires_at != Some(observed_expires_at)
+            || observed_expires_at > now
+        {
             return Ok(false);
         }
         stored.state = LeaseState::Releasing;
@@ -653,6 +685,85 @@ async fn leases_walk_create_ready_and_expire() {
 }
 
 #[tokio::test]
+async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease() {
+    let templates = Arc::new(FakeTemplates::default());
+    let leases = Arc::new(FakeLeases::default());
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        templates.clone(),
+        Arc::new(FakeProvisions::default()),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        audit.clone(),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let created = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id,
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    let mut ready = created.clone();
+    ready.state = LeaseState::Ready;
+    ready.ready_at = Some(NOW + 3);
+    ready.expires_at = Some(NOW + 10_000);
+    leases.update(&ready).await.unwrap();
+
+    let extended = lab
+        .extend_lease(&AllowAll, &principal(), &created.id, 3_600, NOW + 4)
+        .await
+        .unwrap();
+    assert_eq!(extended.expires_at, Some(NOW + 3_610_000));
+    assert_eq!(extended.max_lifetime_at, created.max_lifetime_at);
+    assert!(audit.intents.lock().unwrap().iter().any(|intent| {
+        intent.action == "lab.extend"
+            && intent.resource.as_deref() == Some(created.id.as_str())
+            && intent
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "event" && value == "lab_lease_extended")
+    }));
+
+    let denied = lab
+        .extend_lease(&DenyAll, &principal(), &created.id, 60, NOW + 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(denied, LabUseCaseError::Denied(_)));
+
+    let mut near_cap = extended;
+    near_cap.expires_at = Some(near_cap.max_lifetime_at - 1_000);
+    leases.update(&near_cap).await.unwrap();
+    let capped = lab
+        .extend_lease(&AllowAll, &principal(), &created.id, 2, NOW + 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(capped, LabUseCaseError::Invalid { .. }));
+}
+
+#[tokio::test]
 async fn keep_requires_the_elevated_permission() {
     // A principal denied lab.keep cannot keep; the release still works.
     #[derive(Debug, Default)]
@@ -825,6 +936,7 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
     ready.state = LeaseState::Ready;
     ready.ready_at = Some(NOW + 3);
     ready.expires_at = Some(NOW + 3);
+    ready.max_lifetime_at = NOW + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS;
     leases.update(&ready).await.unwrap();
 
     // The sweeper claims it into releasing.

@@ -760,6 +760,17 @@ export interface EnrollmentTokenListDto {
 }
 
 /**
+ * The requested ready-TTL extension.
+ */
+export interface ExtendLeaseRequest {
+  /**
+     * Seconds to add to the lease's existing expiry.
+     * @minimum 0
+     */
+  bySeconds: number;
+}
+
+/**
  * The Frogenv action a request names.
  */
 export type FrogenvActionDto = typeof FrogenvActionDto[keyof typeof FrogenvActionDto];
@@ -947,6 +958,8 @@ export interface LeaseDto {
   expiresAt?: number | null;
   /** The lease's identity. */
   id: string;
+  /** Absolute lifetime deadline measured from creation. */
+  maxLifetimeAt: number;
   /** The owner's principal id. */
   owner: string;
   /**
@@ -1587,6 +1600,8 @@ export type PageLeaseDtoItemsItem = {
   expiresAt?: number | null;
   /** The lease's identity. */
   id: string;
+  /** Absolute lifetime deadline measured from creation. */
+  maxLifetimeAt: number;
   /** The owner's principal id. */
   owner: string;
   /**
@@ -2566,6 +2581,8 @@ export type ResourceLeaseDtoData = {
   expiresAt?: number | null;
   /** The lease's identity. */
   id: string;
+  /** Absolute lifetime deadline measured from creation. */
+  maxLifetimeAt: number;
   /** The owner's principal id. */
   owner: string;
   /**
@@ -4662,6 +4679,87 @@ export const sweepLabLeases = async ( options?: RequestInit): Promise<sweepLabLe
 
   const data: sweepLabLeasesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as sweepLabLeasesResponse
+}
+
+
+
+export type extendLabLeaseResponse200 = {
+  data: ResourceLeaseDto
+  status: 200
+}
+
+export type extendLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type extendLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type extendLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type extendLabLeaseResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type extendLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type extendLabLeaseResponseSuccess = (extendLabLeaseResponse200) & {
+  headers: Headers;
+};
+export type extendLabLeaseResponseError = (extendLabLeaseResponse400 | extendLabLeaseResponse403 | extendLabLeaseResponse404 | extendLabLeaseResponse409 | extendLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type extendLabLeaseResponse = (extendLabLeaseResponseSuccess | extendLabLeaseResponseError)
+
+export const getExtendLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/extend`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the standard error envelope for denial, an invalid or expired
+ * lease, a concurrent change, or backend failure.
+ * @summary Extends the expiry of a ready lease within its absolute lifetime cap.
+ */
+export const extendLabLease = async (leaseId: string,
+    extendLeaseRequest: ExtendLeaseRequest, options?: RequestInit): Promise<extendLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExtendLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(extendLeaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: extendLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as extendLabLeaseResponse
 }
 
 

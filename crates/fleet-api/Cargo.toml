@@ -21,8 +21,10 @@ utoipa-axum = "0.2.0"
 
 [dev-dependencies]
 async-trait = "0.1.92"
+fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
 http = "1.3.1"
 http-body-util = "0.1.3"
+tempfile = "3.27.0"
 tokio = { version = "1.49.0", features = ["macros", "rt"] }
 tower = { version = "0.5.2", features = ["util"] }
 
