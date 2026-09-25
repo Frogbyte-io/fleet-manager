@@ -41,8 +41,11 @@ function selectSection(id: string): void {
 }
 
 const system = ref<SystemInfo | null>(null)
+const systemUnavailable = ref(false)
 const meta = ref<ResourceMetaData | null>(null)
 const machines = ref<MachineDto[]>([])
+const machinesUnavailable = ref(false)
+const machinesTruncated = ref(false)
 const proxmoxAccounts = ref<ProxmoxAccountDto[]>([])
 const proxmoxUnavailable = ref(false)
 const tailnet = ref<ResourceTailnetStatusDtoData | null>(null)
@@ -50,6 +53,13 @@ const tailnetUnavailable = ref(false)
 const failed = ref(false)
 const failure = ref('')
 const loaded = ref(false)
+
+/// The page size for list endpoints: the machines endpoint has no cursor
+/// and clamps at 200, so ask for the full bound in one page; Proxmox
+/// accounts paginate by cursor until exhausted, bounded so a broken cursor
+/// cannot spin.
+const PAGE_SIZE = 200
+const MAX_PAGES = 50
 
 const GAP_SECTIONS: Record<string, { title: string; detail: string }> = {
   general: {
@@ -96,27 +106,76 @@ const GAP_SECTIONS: Record<string, { title: string; detail: string }> = {
 
 const gap = computed(() => GAP_SECTIONS[section.value] ?? null)
 
+/// Walks a cursor-paginated list endpoint until it is exhausted (bounded),
+/// so a list larger than one page is not silently truncated. The fetcher
+/// narrows the response union to the success shape.
+async function listAllPages<Item>(
+  fetchPage: (
+    cursor?: string,
+  ) => Promise<{ status: number; data: { items: Item[]; page: { nextCursor?: string | null } } } | null>,
+): Promise<{ items: Item[]; complete: boolean } | null> {
+  const items: Item[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const response = await fetchPage(cursor)
+    if (response === null) return null
+    items.push(...response.data.items)
+    const next = response.data.page.nextCursor ?? null
+    if (!next) return { items, complete: true }
+    cursor = next
+  }
+  return { items, complete: false }
+}
+
+/// Reads the machine list with the largest page the API accepts. The
+/// machines endpoint has no cursor parameter, so a fleet larger than this
+/// page is surfaced as truncated rather than silently partial.
+async function listMachinesBounded(): Promise<{
+  items: MachineDto[]
+  complete: boolean
+} | null> {
+  const response = await listMachines({ limit: PAGE_SIZE })
+  if (response.status !== 200) return null
+  const next = response.data.page.nextCursor ?? null
+  return { items: response.data.items, complete: next === null }
+}
+
+/// Narrows the Proxmox accounts response to its success shape for the
+/// page walker; a non-200 is a null, not a fabricated page.
+async function listProxmoxAccountsPage(
+  cursor?: string,
+): Promise<{ status: number; data: { items: ProxmoxAccountDto[]; page: { nextCursor?: string | null } } } | null> {
+  const response = await listProxmoxAccounts({ limit: PAGE_SIZE, cursor })
+  if (response.status !== 200) return null
+  return { status: response.status, data: response.data }
+}
+
 async function load(): Promise<void> {
   failed.value = false
   const results = await Promise.allSettled([
     getSystemInfo(),
     getMeta(),
-    listMachines(),
-    listProxmoxAccounts(),
+    listMachinesBounded(),
+    listAllPages<ProxmoxAccountDto>(listProxmoxAccountsPage),
     getTailnetStatus(),
   ])
   const [systemResult, metaResult, machinesResult, proxmoxResult, tailnetResult] = results
   if (systemResult.status === 'fulfilled' && systemResult.value.status === 200) {
     system.value = systemResult.value.data
+  } else {
+    systemUnavailable.value = true
   }
   if (metaResult.status === 'fulfilled' && metaResult.value.status === 200) {
     meta.value = metaResult.value.data.data
   }
-  if (machinesResult.status === 'fulfilled' && machinesResult.value.status === 200) {
-    machines.value = machinesResult.value.data.items
+  if (machinesResult.status === 'fulfilled' && machinesResult.value !== null) {
+    machines.value = machinesResult.value.items
+    machinesTruncated.value = !machinesResult.value.complete
+  } else {
+    machinesUnavailable.value = true
   }
-  if (proxmoxResult.status === 'fulfilled' && proxmoxResult.value.status === 200) {
-    proxmoxAccounts.value = proxmoxResult.value.data.items
+  if (proxmoxResult.status === 'fulfilled' && proxmoxResult.value !== null) {
+    proxmoxAccounts.value = proxmoxResult.value.items
   } else {
     proxmoxUnavailable.value = true
   }
@@ -126,10 +185,12 @@ async function load(): Promise<void> {
     tailnetUnavailable.value = true
   }
   // A fulfilled non-2xx response is still a failed load: the generated
-  // client resolves errors, it does not reject them.
-  const ok = (result: PromiseSettledResult<{ status: number }>): boolean =>
-    result.status === 'fulfilled' && result.value.status === 200
-  if (results.every((result) => !ok(result as PromiseSettledResult<{ status: number }>))) {
+  // client resolves errors, it does not reject them. A paginated source
+  // that gave up mid-walk also failed.
+  const ok = (
+    result: PromiseSettledResult<{ status: number } | null>,
+  ): boolean => result.status === 'fulfilled' && result.value !== null && result.value.status === 200
+  if (results.every((result) => !ok(result as PromiseSettledResult<{ status: number } | null>))) {
     failed.value = true
     failure.value = 'every settings source refused the request'
   }
@@ -212,6 +273,8 @@ void load()
         <FleetdSection
           v-else-if="section === 'fleetd'"
           :machines="machines"
+          :machines-unavailable="machinesUnavailable"
+          :machines-truncated="machinesTruncated"
         />
         <DiagnosticsSection
           v-else-if="section === 'diagnostics'"

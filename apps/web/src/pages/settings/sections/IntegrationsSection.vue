@@ -24,8 +24,14 @@ const proxmoxChip = computed(() => {
   const accounts = props.proxmoxAccounts
   if (accounts.length === 0) return { text: 'not configured', class: 'bg-muted text-fc-muted' }
   const confirmed = accounts.filter((account) => account.fingerprintState === 'confirmed').length
+  if (confirmed < accounts.length) {
+    return {
+      text: `${accounts.length} account${accounts.length === 1 ? '' : 's'} · ${confirmed} confirmed`,
+      class: 'bg-fc-warn/15 text-fc-warn',
+    }
+  }
   return {
-    text: `${accounts.length} account${accounts.length === 1 ? '' : 's'} · ${confirmed} confirmed`,
+    text: `${accounts.length} account${accounts.length === 1 ? '' : 's'} · confirmed`,
     class: 'bg-fc-ok/15 text-fc-ok',
   }
 })
@@ -79,7 +85,7 @@ function formatCreated(at: number): string {
             v-else
             class="mt-1 text-xs text-fc-muted"
           >
-            No accounts; add one on the Proxmox page.
+            Proxmox account management is not built yet; accounts will be manageable here once it ships.
           </p>
         </div>
       </li>

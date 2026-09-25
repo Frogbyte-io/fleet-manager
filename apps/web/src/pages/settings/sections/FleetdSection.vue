@@ -5,6 +5,8 @@ import type { MachineDto } from '@frogbyte-io/fleet-api-client'
 
 const props = defineProps<{
   machines: MachineDto[]
+  machinesUnavailable: boolean
+  machinesTruncated: boolean
 }>()
 
 const nodes = computed(() =>
@@ -35,55 +37,69 @@ const nodes = computed(() =>
       This section summarizes which machines report the node daemon in their inventory.
     </p>
 
-    <table
-      v-if="nodes.length > 0"
-      class="mt-4 w-full text-sm"
-    >
-      <thead>
-        <tr class="text-left text-xs uppercase tracking-wide text-fc-muted">
-          <th class="py-2 font-medium">
-            Machine
-          </th>
-          <th class="py-2 font-medium">
-            fleetd
-          </th>
-          <th class="py-2 font-medium">
-            State
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr
-          v-for="node in nodes"
-          :key="node.id"
-          class="border-t border-border"
-        >
-          <td class="py-2 font-mono text-foreground">
-            {{ node.name }}
-          </td>
-          <td class="py-2 font-mono text-foreground">
-            <template v-if="node.fleetd">
-              {{ node.fleetd }}
-              <span
-                v-if="node.fleetdStatus && node.fleetdStatus !== 'known'"
-                class="text-xs text-fc-warn"
-              >({{ node.fleetdStatus }})</span>
-            </template>
-            <template v-else>
-              —
-            </template>
-          </td>
-          <td class="py-2">
-            <span :class="node.status === 'connected' ? 'text-fc-ok' : 'text-fc-muted'">{{ node.status }}</span>
-          </td>
-        </tr>
-      </tbody>
-    </table>
     <p
-      v-else
-      class="mt-4 text-sm text-fc-muted"
+      v-if="machinesUnavailable"
+      class="mt-4 text-sm text-fc-warn"
     >
-      No machines yet.
+      The machine list could not be read; the controller did not answer.
     </p>
+    <template v-else>
+      <p
+        v-if="machinesTruncated"
+        class="mt-4 text-sm text-fc-warn"
+      >
+        The list stopped at the pagination bound; some machines may be missing from this summary.
+      </p>
+      <table
+        v-if="nodes.length > 0"
+        class="mt-4 w-full text-sm"
+      >
+        <thead>
+          <tr class="text-left text-xs uppercase tracking-wide text-fc-muted">
+            <th class="py-2 font-medium">
+              Machine
+            </th>
+            <th class="py-2 font-medium">
+              fleetd
+            </th>
+            <th class="py-2 font-medium">
+              State
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="node in nodes"
+            :key="node.id"
+            class="border-t border-border"
+          >
+            <td class="py-2 font-mono text-foreground">
+              {{ node.name }}
+            </td>
+            <td class="py-2 font-mono text-foreground">
+              <template v-if="node.fleetd">
+                {{ node.fleetd }}
+                <span
+                  v-if="node.fleetdStatus && node.fleetdStatus !== 'known'"
+                  class="text-xs text-fc-warn"
+                >({{ node.fleetdStatus }})</span>
+              </template>
+              <template v-else>
+                —
+              </template>
+            </td>
+            <td class="py-2">
+              <span :class="node.status === 'connected' ? 'text-fc-ok' : 'text-fc-muted'">{{ node.status }}</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p
+        v-else
+        class="mt-4 text-sm text-fc-muted"
+      >
+        No machines yet.
+      </p>
+    </template>
   </section>
 </template>

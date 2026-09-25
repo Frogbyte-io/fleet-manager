@@ -42,7 +42,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
           capabilities: [],
         },
       ],
-      page: { cursor: null, size: 2 },
+      page: { limit: 100, nextCursor: null },
     },
   })),
   listProxmoxAccounts: vi.fn(async () => ({
@@ -60,7 +60,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
           createdAt: 1_757_000_000_000,
         },
       ],
-      page: { cursor: null, size: 1 },
+      page: { limit: 100, nextCursor: null },
     },
   })),
   getTailnetStatus: vi.fn(async () => ({
@@ -80,7 +80,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  vi.clearAllMocks()
+  // resetAllMocks, not clearAllMocks: clearAllMocks leaves queued
+  // mockImplementationOnce overrides in place, so a leaked once-override
+  // would flow into the next test.
+  vi.resetAllMocks()
 })
 
 async function mountAt(query: Record<string, string> = {}) {
@@ -105,13 +108,37 @@ describe('SettingsPage', () => {
     expect(wrapper.text()).toContain('Behaviour')
     expect(wrapper.text()).toContain('Integrations')
     expect(wrapper.text()).toContain('Proxmox VE')
-    expect(wrapper.text()).toContain('1 account · 1 confirmed')
+    expect(wrapper.text()).toContain('1 account · confirmed')
     expect(wrapper.text()).toContain('FLEET@PVE!CTRL')
     expect(wrapper.text()).toContain('not configured')
     // No secret-shaped value is ever rendered: the fingerprint is exactly
     // the kind of value the page must keep out of the DOM.
     expect(wrapper.text()).not.toContain('sha256:abc')
     expect(wrapper.text()).not.toContain('SECRET')
+  })
+
+  it('shows an unconfirmed account as a warning, not ready', async () => {
+    const { listProxmoxAccounts } = vi.mocked(await import('@frogbyte-io/fleet-api-client'))
+    listProxmoxAccounts.mockImplementation(async () => ({
+      status: 200,
+      data: {
+        items: [
+          {
+            id: 'acc1',
+            name: 'HOMELAB-PVE',
+            host: 'pve.lan',
+            port: 8006,
+            tokenId: 'FLEET@PVE!CTRL',
+            fingerprintState: 'unconfirmed',
+            createdAt: 1_757_000_000_000,
+          },
+        ],
+        page: { limit: 100, nextCursor: null },
+      },
+      headers: new Headers(),
+    }) as never)
+    wrapper = await mountAt()
+    expect(wrapper.text()).toContain('1 account · 0 confirmed')
   })
 
   it('shows the trusted-LAN warning in Security & access', async () => {
@@ -148,16 +175,27 @@ describe('SettingsPage', () => {
     expect(wrapper.text()).toContain('Proxmox VE')
   })
 
+  it('announces the loading state before any source answers', async () => {
+    const { getSystemInfo } = vi.mocked(await import('@frogbyte-io/fleet-api-client'))
+    getSystemInfo.mockImplementation(() => new Promise(() => undefined) as never)
+    await router.push({ path: '/settings' })
+    await router.isReady()
+    wrapper = mount(SettingsPage, { global: { plugins: [router] } })
+    expect(wrapper.find('[role="status"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-busy="true"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Loading settings…')
+  })
+
   it('distinguishes an unavailable integration source from an empty one', async () => {
     const { listProxmoxAccounts, getTailnetStatus } = vi.mocked(
       await import('@frogbyte-io/fleet-api-client'),
     )
-    listProxmoxAccounts.mockImplementationOnce(async () => ({
+    listProxmoxAccounts.mockImplementation(async () => ({
       status: 403,
       data: { code: 'forbidden', message: 'no', correlationId: 'c1', retry: 'never' },
       headers: new Headers(),
     }) as never)
-    getTailnetStatus.mockImplementationOnce(async () => {
+    getTailnetStatus.mockImplementation(async () => {
       throw new Error('refused')
     })
     wrapper = await mountAt()
@@ -174,7 +212,7 @@ describe('SettingsPage', () => {
       client.listProxmoxAccounts,
       client.getTailnetStatus,
     ]) {
-      vi.mocked(fn).mockImplementationOnce(async () => ({
+      vi.mocked(fn).mockImplementation(async () => ({
         status: 503,
         data: { code: 'unavailable', message: 'down', correlationId: 'c1', retry: 'never' },
         headers: new Headers(),
@@ -182,5 +220,30 @@ describe('SettingsPage', () => {
     }
     wrapper = await mountAt()
     expect(wrapper.text()).toContain('every settings source refused the request')
+  })
+
+  it('surfaces a full machine page as truncated rather than silent', async () => {
+    const { listMachines } = vi.mocked(await import('@frogbyte-io/fleet-api-client'))
+    listMachines.mockImplementation(async () => ({
+      status: 200,
+      data: {
+        items: [
+          {
+            id: 'm1',
+            name: 'homelab-pve',
+            machineStatus: 'connected',
+            capabilities: [
+              { namespace: 'agent', name: 'fleetd', value: '0.1.0', status: 'known' },
+            ],
+          },
+        ],
+        page: { limit: 200, nextCursor: 'm1' },
+      },
+      headers: new Headers(),
+    }) as never)
+    wrapper = await mountAt({ section: 'fleetd' })
+    expect(wrapper.text()).toContain('homelab-pve')
+    expect(wrapper.text()).toContain('pagination bound')
+    expect(listMachines).toHaveBeenCalledWith({ limit: 200 })
   })
 })
