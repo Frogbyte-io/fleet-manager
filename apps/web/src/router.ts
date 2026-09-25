@@ -87,7 +87,7 @@ export const routes: RouteRecordRaw[] = [
   },
   {
     path: '/audit',
-    component: () => import('./pages/NotYetAvailablePage.vue'),
+    component: () => import('./pages/audit/AuditPage.vue'),
     meta: { title: 'Audit log', group: 'Control' },
   },
   {
