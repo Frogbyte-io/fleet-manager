@@ -57,7 +57,12 @@ const projectsQuery = useQuery({
   queryFn: async () => {
     const result = await listAllPages<PageProjectDtoItemsItem>(async (cursor) => {
       const response = await listProjects({ limit: PAGE, cursor })
-      if (response.status !== 200) return null
+      if (response.status !== 200) {
+        throw new Error(
+          (response.data as { message?: string })?.message ??
+            `the project list failed (${response.status})`,
+        )
+      }
       return response
     })
     if (result === null) {
@@ -72,7 +77,12 @@ const machinesQuery = useQuery({
   queryFn: async () => {
     const result = await listAllPages<MachineDto>(async (cursor) => {
       const response = await listMachines({ limit: PAGE, cursor })
-      if (response.status !== 200) return null
+      if (response.status !== 200) {
+        throw new Error(
+          (response.data as { message?: string })?.message ??
+            `the machine list failed (${response.status})`,
+        )
+      }
       return response
     })
     if (result === null) {
