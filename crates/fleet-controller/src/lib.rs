@@ -352,7 +352,7 @@ fn build_router_for_caller(
         images.cloned(),
         lab.cloned(),
     ));
-    let api_router = fleet_api::unwrapped_router(api_state.clone());
+    let api_router = fleet_api::router(api_state.clone());
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
         .ok()
@@ -381,19 +381,22 @@ fn build_router_for_caller(
         router = router.nest("/api/node/v1", node_routes);
     }
     router = router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
+    if tailscale_identity {
+        router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
+    } else {
+        // Caller resolution covers every direct-listener route, including
+        // static, health, downloads, and the node surface. Public API
+        // correlation stays scoped to its router; the node protocol has its
+        // own correlation contract.
+        router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+    }
     if let Some(db) = audit_db {
+        // Observe the response so API correlation IDs can be copied into the
+        // audit row without wrapping the node protocol in API correlation.
         router = router.layer(middleware::from_fn_with_state(
             db,
             audit_untrusted_tailscale_identity_headers,
         ));
-    }
-    if tailscale_identity {
-        router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
-    } else {
-        // Correlation and caller resolution cover every direct-listener route,
-        // including static, health, downloads, and the node surface.
-        router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
-        router = fleet_api::correlate_router(router);
     }
     router
 }
@@ -415,19 +418,20 @@ async fn audit_untrusted_tailscale_identity_headers(
         .filter(|header| request.headers().contains_key(*header))
         .map(|header| header.as_str().to_owned())
         .collect::<Vec<_>>();
-    let correlation_id = request
-        .extensions()
-        .get::<fleet_core::CorrelationId>()
-        .map(ToString::to_string);
+    let response = next.run(request).await;
+    let correlation_id = response
+        .headers()
+        .get(fleet_api::CORRELATION_ID_HEADER)
+        .and_then(|value| value.to_str().ok());
     if !peer_is_loopback
         && !names.is_empty()
         && let Err(error) = fleet_storage_sqlite::AuditLedger::new(&db)
-            .record_ignored_tailscale_identity(&names, false, correlation_id.as_deref())
+            .record_ignored_tailscale_identity(&names, false, correlation_id)
             .await
     {
         eprintln!("could not persist ignored Tailscale identity headers: {error}");
     }
-    next.run(request).await
+    response
 }
 
 /// Rewrites eligible static/API 404s to the console entry point. The API and
@@ -816,5 +820,70 @@ mod tailscale_identity_tests {
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn identity_listener_audits_non_loopback_claims_before_rejecting_them() {
+        use sqlx::Row as _;
+
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&store_dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: None,
+        };
+        let router = build_tailscale_serve_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut request = Request::builder()
+            .uri("/api/v1/system")
+            .header("tailscale-user-login", "spoofed@example.invalid")
+            .header("x-correlation-id", "00000000-0000-7000-8000-000000000001")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45678))));
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(fleet_api::CORRELATION_ID_HEADER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "00000000-0000-7000-8000-000000000001"
+        );
+        let row = sqlx::query(
+            "SELECT correlation_id, metadata_json FROM audit_events \
+             WHERE action = 'auth.identity_header_ignored'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<String, _>("correlation_id"),
+            "00000000-0000-7000-8000-000000000001"
+        );
+        let metadata = row.get::<String, _>("metadata_json");
+        assert!(metadata.contains("tailscale-user-login"));
+        assert!(metadata.contains(r#""peerLoopback":false"#));
+        assert!(!metadata.contains("spoofed@example.invalid"));
     }
 }

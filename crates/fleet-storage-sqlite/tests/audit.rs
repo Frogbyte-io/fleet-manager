@@ -59,7 +59,10 @@ async fn ignored_tailscale_identity_evidence_keeps_only_known_header_names() {
     let ledger = AuditLedger::new(store.pool());
     ledger
         .record_ignored_tailscale_identity(
-            &["tailscale-user-login".to_owned()],
+            &[
+                "tailscale-user-login".to_owned(),
+                "x-forwarded-for".to_owned(),
+            ],
             false,
             Some("00000000-0000-7000-8000-000000000001"),
         )

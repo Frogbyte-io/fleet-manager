@@ -12,8 +12,8 @@ use std::str::FromStr as _;
 use crate::error::ApiError;
 
 /// Rejects a Tailscale listener request whose caller resolver did not accept
-/// exactly one trusted user identity. Correlation middleware wraps this layer,
-/// so the response uses the same standard error envelope as handler failures.
+/// exactly one trusted user identity. If the request did not pass through the
+/// public API correlation middleware, this rejection assigns its own id.
 ///
 /// # Panics
 ///
@@ -30,6 +30,13 @@ pub async fn reject_unauthenticated_tailscale_caller(request: Request, next: Nex
         .extensions()
         .get::<CorrelationId>()
         .copied()
+        .or_else(|| {
+            request
+                .headers()
+                .get(crate::correlation::CORRELATION_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| CorrelationId::from_str(value).ok())
+        })
         .unwrap_or_else(|| {
             let mut generator = fleet_core::UuidV7Generator;
             generator.next_correlation_id()
@@ -40,7 +47,8 @@ pub async fn reject_unauthenticated_tailscale_caller(request: Request, next: Nex
         "a valid Tailscale user identity is required on this listener",
         RetryClass::Never,
     );
-    ApiError::new(&error, correlation_id)
+    let response = ApiError::new(&error, correlation_id)
         .with_status(StatusCode::UNAUTHORIZED)
-        .into_response()
+        .into_response();
+    crate::correlation::with_header(response, correlation_id)
 }

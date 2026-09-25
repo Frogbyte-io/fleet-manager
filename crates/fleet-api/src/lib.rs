@@ -325,17 +325,19 @@ pub fn correlate_router(router: Router) -> Router {
 }
 
 /// Builds the API router for a dedicated Tailscale Serve listener. A request
-/// must be resolved by the configured loopback caller middleware; rejection
-/// remains inside the API correlation envelope.
+/// must be resolved by the configured loopback caller middleware; rejected
+/// requests receive a correlated API error before reaching the route router.
 pub fn tailscale_serve_router(
     state: Arc<operations::ApiState>,
     peer: fleet_auth::TailscaleServePeer,
 ) -> Router {
-    tailscale_serve_guard(unwrapped_router(state), peer)
+    tailscale_serve_guard(router(state), peer)
 }
 
-/// Applies one correlation identity, loopback Tailscale caller resolution,
-/// and the corresponding 401 rejection to a complete controller router.
+/// Applies loopback Tailscale caller resolution and the corresponding 401
+/// rejection to a complete controller router. The public API can keep its
+/// correlation middleware scoped to its handlers; the node protocol retains
+/// its separate correlation contract.
 pub fn tailscale_serve_guard(router: Router, peer: fleet_auth::TailscaleServePeer) -> Router {
     router
         .layer(middleware::from_fn(
@@ -345,7 +347,6 @@ pub fn tailscale_serve_guard(router: Router, peer: fleet_auth::TailscaleServePee
             peer,
             fleet_auth::resolve_tailscale_serve_caller,
         ))
-        .layer(middleware::from_fn(correlation::correlate))
 }
 
 /// Builds the `OpenAPI` document. The document describes the router's

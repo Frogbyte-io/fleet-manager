@@ -69,7 +69,7 @@ fn malformed_correlation_id(assigned: CorrelationId) -> Response {
         .into_response()
 }
 
-fn with_header(mut response: Response, correlation_id: CorrelationId) -> Response {
+pub(crate) fn with_header(mut response: Response, correlation_id: CorrelationId) -> Response {
     let name = HeaderName::from_static(CORRELATION_ID_HEADER);
     let value = HeaderValue::from_str(&correlation_id.to_string())
         .expect("an opaque identity is printable ASCII");
