@@ -189,10 +189,12 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
         .complete_ready(&provision, lease.expires_at)
         .await
         .expect("the provision and lease must complete atomically");
+    let mut stale_replay = provision.clone();
+    stale_replay.ready_at = Some(NOW + 240);
     provisions
-        .complete_ready(&provision, lease.expires_at)
+        .complete_ready(&stale_replay, Some(NOW + 3_600_240))
         .await
-        .expect("a readiness replay must be idempotent");
+        .expect("a concurrent readiness replay must use the committed lease timestamp");
     let stored = leases.get(&lease.id).await.expect("the lease must reload");
     assert_eq!(stored.state, LeaseState::Ready);
     assert_eq!(stored.provision_id.as_deref(), Some(provision.id.as_str()));

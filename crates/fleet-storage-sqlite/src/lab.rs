@@ -336,13 +336,13 @@ impl ProvisionPort for LabRepository {
         if record.lease_id.is_some() != lease_expires_at.is_some() {
             return Err("a linked lease and its expiry must be completed together".to_owned());
         }
+        let mut effective_ready_at = record.ready_at.expect("validated above");
         let mut transaction = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| format!("begin readiness transaction failed: {error}"))?;
         if let (Some(lease_id), Some(expires_at)) = (record.lease_id.as_deref(), lease_expires_at) {
-            let ready_at = record.ready_at.expect("validated above");
             let changed = sqlx::query(
                 "UPDATE lab_leases SET state = 'ready', ready_at = ?3, expires_at = ?4 \
                  WHERE id = ?1 AND state = 'provisioning' AND provision_id = ?2 \
@@ -351,7 +351,7 @@ impl ProvisionPort for LabRepository {
             )
             .bind(lease_id)
             .bind(&record.id)
-            .bind(ready_at)
+            .bind(effective_ready_at)
             .bind(expires_at)
             .bind(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
             .execute(&mut *transaction)
@@ -366,21 +366,25 @@ impl ProvisionPort for LabRepository {
                 .await
                 .map_err(|error| format!("read linked lease failed: {error}"))?
                 .ok_or_else(|| format!("lease {lease_id} not found"))?;
+                let current_ready_at = current.get::<Option<i64>, _>("ready_at");
+                let current_expires_at = current.get::<Option<i64>, _>("expires_at");
                 let already_ready = current.get::<String, _>("state") == "ready"
                     && current.get::<Option<String>, _>("provision_id").as_deref()
                         == Some(record.id.as_str())
-                    && current.get::<Option<i64>, _>("ready_at") == Some(ready_at)
-                    && current.get::<Option<i64>, _>("expires_at") == Some(expires_at);
+                    && current_ready_at.is_some()
+                    && current_expires_at.is_some();
                 if !already_ready {
                     return Err(
                         "the linked lease changed before readiness was committed".to_owned()
                     );
                 }
+                effective_ready_at = current_ready_at.expect("checked above");
             }
         }
         let updated = sqlx::query(
             "UPDATE lab_provisions SET state = 'ready', node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8 \
-             WHERE id = ?1 AND lease_id IS ?2",
+             WHERE id = ?1 AND lease_id IS ?2 \
+             AND (state = 'provisioning' OR (state = 'ready' AND ready_at = ?7))",
         )
         .bind(&record.id)
         .bind(&record.lease_id)
@@ -388,7 +392,7 @@ impl ProvisionPort for LabRepository {
         .bind(record.vmid.map(i64::from))
         .bind(&record.clone_upid)
         .bind(&record.guest_ipv4)
-        .bind(record.ready_at)
+        .bind(effective_ready_at)
         .bind(fleet_core::SystemClock::now_unix_millis())
         .execute(&mut *transaction)
         .await

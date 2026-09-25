@@ -160,6 +160,16 @@ impl LabTemplatePort for FakeTemplates {
 #[derive(Debug, Default)]
 struct FakeProvisions {
     records: Mutex<Vec<fleet_application::lab::ProvisionRecord>>,
+    leases: Option<Arc<Mutex<Vec<fleet_application::lab::Lease>>>>,
+}
+
+impl FakeProvisions {
+    fn with_leases(leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>) -> Self {
+        Self {
+            records: Mutex::new(Vec::new()),
+            leases: Some(leases),
+        }
+    }
 }
 
 #[async_trait]
@@ -211,9 +221,60 @@ impl ProvisionPort for FakeProvisions {
     async fn complete_ready(
         &self,
         record: &fleet_application::lab::ProvisionRecord,
-        _lease_expires_at: Option<i64>,
+        lease_expires_at: Option<i64>,
     ) -> Result<(), String> {
-        self.update(record).await
+        if record.state != fleet_core::GuestState::Ready || record.ready_at.is_none() {
+            return Err("the provision is not ready".to_owned());
+        }
+        let mut records = self.records.lock().unwrap();
+        let record_index = records
+            .iter()
+            .position(|stored| stored.id == record.id)
+            .ok_or_else(|| format!("provision {} not found", record.id))?;
+        if records[record_index].lease_id != record.lease_id {
+            return Err("the provision link changed".to_owned());
+        }
+        if records[record_index].state != fleet_core::GuestState::Provisioning
+            && !(record.lease_id.is_some()
+                && records[record_index].state == fleet_core::GuestState::Ready)
+        {
+            return Err("the provision changed before readiness was committed".to_owned());
+        }
+        let mut completed_record = record.clone();
+        if let Some(lease_id) = record.lease_id.as_deref() {
+            let expires_at = lease_expires_at.ok_or("linked lease has no expiry")?;
+            let leases = self
+                .leases
+                .as_ref()
+                .ok_or("the fake provision port has no lease storage")?;
+            let mut leases = leases.lock().unwrap();
+            let lease = leases
+                .iter_mut()
+                .find(|lease| lease.id == lease_id)
+                .ok_or_else(|| format!("lease {lease_id} not found"))?;
+            if lease.state == fleet_core::LeaseState::Provisioning
+                && lease.provision_id.as_deref() == Some(record.id.as_str())
+                && lease.ready_at.is_none()
+                && lease.expires_at.is_none()
+                && expires_at <= lease.max_lifetime_at
+            {
+                lease.state = fleet_core::LeaseState::Ready;
+                lease.ready_at = record.ready_at;
+                lease.expires_at = Some(expires_at);
+            } else if lease.state == fleet_core::LeaseState::Ready
+                && lease.provision_id.as_deref() == Some(record.id.as_str())
+                && lease.ready_at.is_some()
+                && lease.expires_at.is_some()
+            {
+                completed_record.ready_at = lease.ready_at;
+            } else {
+                return Err("the linked lease changed before readiness".to_owned());
+            }
+        } else if lease_expires_at.is_some() {
+            return Err("an unlinked provision cannot carry a lease expiry".to_owned());
+        }
+        records[record_index] = completed_record;
+        Ok(())
     }
 
     async fn list(&self) -> Result<Vec<fleet_application::lab::ProvisionRecord>, String> {
@@ -237,7 +298,7 @@ impl ProvisionPort for FakeProvisions {
 /// The lease port over an in-memory map.
 #[derive(Debug, Default)]
 struct FakeLeases {
-    leases: Mutex<Vec<fleet_application::lab::Lease>>,
+    leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>,
 }
 
 #[async_trait]
@@ -431,14 +492,10 @@ impl AuditPort for FakeAudit {
 fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<FakeAudit>) {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(
-            templates.clone(),
-            Arc::new(FakeProvisions::default()),
-            Arc::new(FakeLeases::default()),
-            pins,
-            audit.clone(),
-        ),
+        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
         templates,
         audit,
     )
@@ -447,14 +504,10 @@ fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<Fa
 fn service_with_pins(pins: Arc<FakePins>) -> (Lab, Arc<FakeTemplates>, Arc<FakeAudit>) {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(
-            templates.clone(),
-            Arc::new(FakeProvisions::default()),
-            Arc::new(FakeLeases::default()),
-            pins,
-            audit.clone(),
-        ),
+        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
         templates,
         audit,
     )
@@ -712,10 +765,11 @@ async fn leases_walk_create_ready_and_expire() {
 async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease() {
     let templates = Arc::new(FakeTemplates::default());
     let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     let audit = Arc::new(FakeAudit::default());
     let lab = Lab::new(
         templates.clone(),
-        Arc::new(FakeProvisions::default()),
+        provisions,
         leases.clone(),
         FakePins::with_promoted("rcp-1@abc"),
         audit.clone(),
@@ -912,10 +966,11 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
     let (lab, _templates, _audit) = {
         let templates = Arc::new(FakeTemplates::default());
         let audit = Arc::new(FakeAudit::default());
+        let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
         (
             Lab::new(
                 templates.clone(),
-                Arc::new(FakeProvisions::default()),
+                provisions,
                 leases.clone(),
                 FakePins::with_promoted("rcp-1@abc"),
                 audit.clone(),
