@@ -804,6 +804,17 @@ async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease(
         )
         .await
         .unwrap();
+    lab.start_lease_provision(&AllowAll, &principal(), &created.id, None, NOW + 3)
+        .await
+        .unwrap();
+    assert!(audit.intents.lock().unwrap().iter().any(|intent| {
+        intent.action == "lab.provision"
+            && intent.resource.as_deref() == Some(created.id.as_str())
+            && intent
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "event" && value == "lab_provision_starting")
+    }));
     let mut ready = created.clone();
     ready.state = LeaseState::Ready;
     ready.ready_at = Some(NOW + 3);

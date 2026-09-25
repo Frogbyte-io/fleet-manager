@@ -1108,7 +1108,7 @@ impl Lab {
         self.audit_event(
             principal,
             Permission::LabProvision,
-            Some(version_id),
+            Some(lease_id.unwrap_or(version_id)),
             "lab_provision_starting",
             Some(("digest", version.image_digest.as_str())),
         )
