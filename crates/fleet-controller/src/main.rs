@@ -362,6 +362,10 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                         store.pool().clone(),
                     ));
+                let lab_leases: std::sync::Arc<dyn fleet_application::lab::LeasePort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                        store.pool().clone(),
+                    ));
                 let lab_accounts: std::sync::Arc<
                     dyn fleet_application::proxmox::ProxmoxAccountPort,
                 > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
@@ -385,6 +389,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         lab_accounts,
                         lab_credentials,
                         lab_provisions,
+                        lab_leases,
                         lab_versions,
                         fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
                     )),

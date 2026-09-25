@@ -1,7 +1,7 @@
 //! Lab lease persistence, TTL extension, and the compare-and-set shared by
 //! extension requests and expiry sweeps.
 
-use fleet_application::lab::{LeasePort as _, NewLease};
+use fleet_application::lab::{LeasePort as _, NewLease, NewProvision, ProvisionPort as _};
 use fleet_core::{CleanupStrategy, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS};
 use fleet_storage_sqlite::{LeaseRepository, Store};
 
@@ -139,4 +139,62 @@ async fn storage_extension_refuses_expired_nonready_or_over_cap_rows() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
+    let (_dir, store, leases) = setup().await;
+    let mut lease = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "operator",
+            NOW,
+        )
+        .await
+        .expect("the lease must be created");
+    let provision = fleet_storage_sqlite::LabRepository::new(store.pool().clone())
+        .create(
+            &NewProvision {
+                template_version_id: lease.template_version_id.clone(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: Some("operator:lease-1".to_owned()),
+            },
+            NOW,
+        )
+        .await
+        .expect("the provision must be created");
+    assert!(
+        leases
+            .attach_provision(&lease.id, &provision.id)
+            .await
+            .expect("the provision must attach")
+    );
+    lease.provision_id = Some(provision.id.clone());
+    lease.state = LeaseState::Provisioning;
+    lease
+        .mark_ready(NOW + 120)
+        .expect("the lease must become ready");
+    assert_eq!(lease.expires_at, Some(NOW + 3_600_120));
+    assert!(
+        leases
+            .mark_ready(
+                &lease.id,
+                &provision.id,
+                lease.ready_at.unwrap(),
+                lease.expires_at.unwrap(),
+            )
+            .await
+            .expect("the ready transition must persist")
+    );
+    let stored = leases.get(&lease.id).await.expect("the lease must reload");
+    assert_eq!(stored.state, LeaseState::Ready);
+    assert_eq!(stored.provision_id.as_deref(), Some(provision.id.as_str()));
+    assert_eq!(stored.ready_at, Some(NOW + 120));
+    assert_eq!(stored.expires_at, Some(NOW + 3_600_120));
 }

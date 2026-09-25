@@ -2730,4 +2730,16 @@ fn parsing_walks_the_lease_forms() {
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     assert!(fleetctl::parse(&zero).is_err());
+
+    let provision = ["lab", "provision-lease", "lease-1", "--account", "pve-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fleetctl::parse(&provision).unwrap().command,
+        fleetctl::Command::LabLeaseProvision {
+            lease_id: "lease-1".to_owned(),
+            account_id: "pve-1".to_owned(),
+        }
+    );
 }

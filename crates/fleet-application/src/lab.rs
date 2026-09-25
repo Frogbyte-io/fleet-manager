@@ -148,6 +148,8 @@ pub struct ProvisionRecord {
     pub id: String,
     /// The template version the guest was provisioned from.
     pub template_version_id: String,
+    /// The lease this saga provisions, when started from a lease.
+    pub lease_id: Option<String>,
     /// The guest's current state.
     pub state: GuestState,
     /// The PVE node the guest landed on, once cloned.
@@ -174,6 +176,8 @@ pub struct ProvisionRecord {
 pub struct NewProvision {
     /// The template version being provisioned.
     pub template_version_id: String,
+    /// The lease this saga provisions, when linked.
+    pub lease_id: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
 }
@@ -274,6 +278,28 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         observed_expires_at: i64,
         now: i64,
         new_expires_at: i64,
+    ) -> Result<bool, String>;
+    /// Attaches a provision record to a requested lease, moving it into
+    /// provisioning. A replay of the same link succeeds; a different link
+    /// or intervening state change returns false.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String>;
+    /// Marks a linked lease ready, setting its ready timestamp and initial
+    /// expiry if the lease is still provisioning for the same record.
+    /// Returns false when a different transition won first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn mark_ready(
+        &self,
+        id: &str,
+        provision_id: &str,
+        ready_at: i64,
+        expires_at: i64,
     ) -> Result<bool, String>;
     /// Claims one lease for release, conditional on its observed state:
     /// the compare-and-set that keeps concurrent sweeps from
@@ -377,7 +403,7 @@ impl Lab {
     ///
     /// # Errors
     ///
-    /// Fails on denial, an unknown version, or a backend failure.
+    /// Fails on denial, an unknown version/lease, a lifecycle conflict, or a backend failure.
     pub async fn create_lease(
         &self,
         authorizer: &dyn Authorizer,
@@ -1013,23 +1039,55 @@ impl Lab {
     /// # Errors
     ///
     /// Fails on denial, an unknown version, or a backend failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn start_provision(
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         version_id: &str,
+        lease_id: Option<&str>,
         idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<ProvisionRecord, LabUseCaseError> {
+        let authorization_resource = lease_id.unwrap_or(version_id);
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::LabProvision,
-                resource: Some(version_id),
+                resource: Some(authorization_resource),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        let lease = if let Some(lease_id) = lease_id {
+            let lease = self.leases.get(lease_id).await.map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("lease {lease_id}"),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    }
+                }
+            })?;
+            if lease.template_version_id != version_id {
+                return Err(LabUseCaseError::Invalid {
+                    detail: "the lease uses a different template version".to_owned(),
+                });
+            }
+            if lease.state != LeaseState::Requested
+                && !(lease.state == LeaseState::Provisioning && lease.provision_id.is_some())
+            {
+                return Err(LabUseCaseError::Conflict {
+                    detail: format!("lease {lease_id} is not awaiting provisioning"),
+                });
+            }
+            Some(lease)
+        } else {
+            None
+        };
         // The version must exist and its image pin must still be
         // promoted: a demotion between publish and provision refuses.
         let version = self
@@ -1059,7 +1117,9 @@ impl Lab {
         .await?;
         // Idempotent replay: the caller-scoped key returns the in-flight
         // record instead of creating a second guest saga.
-        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        let scoped_key = lease_id
+            .map(|id| format!("{}:lab-lease:{id}", principal.id))
+            .or_else(|| idempotency_key.map(|key| format!("{}:{key}", principal.id)));
         if let Some(key) = &scoped_key
             && let Some(existing) =
                 self.provisions
@@ -1070,12 +1130,21 @@ impl Lab {
                         detail,
                     })?
         {
+            if existing.lease_id.as_deref() != lease_id {
+                return Err(LabUseCaseError::Conflict {
+                    detail: "the idempotency key is already attached to another lease".to_owned(),
+                });
+            }
+            self.attach_lease_provision(lease.as_ref(), &existing)
+                .await?;
             return Ok(existing);
         }
-        self.provisions
+        let provision = self
+            .provisions
             .create(
                 &NewProvision {
                     template_version_id: version_id.to_owned(),
+                    lease_id: lease_id.map(str::to_owned),
                     idempotency_key: scoped_key,
                 },
                 now,
@@ -1084,7 +1153,85 @@ impl Lab {
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "provisions",
                 detail,
-            })
+            })?;
+        self.attach_lease_provision(lease.as_ref(), &provision)
+            .await?;
+        Ok(provision)
+    }
+
+    /// Starts the provision saga attached to an existing lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, a mismatched/non-requested lease,
+    /// an unpromoted image pin, or a backend failure.
+    pub async fn start_lease_provision(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        lease_id: &str,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<ProvisionRecord, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabProvision,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(lease_id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {lease_id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        self.start_provision(
+            authorizer,
+            principal,
+            &lease.template_version_id,
+            Some(lease_id),
+            idempotency_key,
+            now,
+        )
+        .await
+    }
+
+    async fn attach_lease_provision(
+        &self,
+        lease: Option<&Lease>,
+        provision: &ProvisionRecord,
+    ) -> Result<(), LabUseCaseError> {
+        let Some(lease) = lease else {
+            return Ok(());
+        };
+        if provision.lease_id.as_deref() != Some(lease.id.as_str()) {
+            return Err(LabUseCaseError::Conflict {
+                detail: "the provision record is not linked to this lease".to_owned(),
+            });
+        }
+        let attached = self
+            .leases
+            .attach_provision(&lease.id, &provision.id)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        if !attached {
+            return Err(LabUseCaseError::Conflict {
+                detail: format!("lease {} changed before provisioning started", lease.id),
+            });
+        }
+        Ok(())
     }
 
     /// Lists the provisioning records.

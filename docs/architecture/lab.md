@@ -52,6 +52,8 @@ Deadlines:
 - Ready TTL extensions can move the expiry only up to that creation-relative maximum
 - Cleanup retry/backoff horizon with persistent operator alert after exhaustion
 
+The current controller path attaches a provision record to a requested lease before queuing `lab.provision`. When the provision executor reaches guest readiness, it marks that same linked lease `ready`, starts its template TTL, and caps the expiry at the creation-relative maximum. Standalone template provisioning remains separate from lease lifecycle and does not make a lease ready.
+
 Cleanup strategies:
 
 - `destroy` is the default and deletes the allocated clone.

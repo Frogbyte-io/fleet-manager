@@ -978,6 +978,11 @@ export interface LeaseDto {
   state: string;
   /** The template version the lease was created from. */
   templateVersionId: string;
+  /**
+     * The template's ready TTL, in seconds.
+     * @minimum 0
+     */
+  ttlSeconds: number;
 }
 
 /**
@@ -1620,6 +1625,11 @@ export type PageLeaseDtoItemsItem = {
   state: string;
   /** The template version the lease was created from. */
   templateVersionId: string;
+  /**
+     * The template's ready TTL, in seconds.
+     * @minimum 0
+     */
+  ttlSeconds: number;
 };
 
 /**
@@ -2601,6 +2611,11 @@ export type ResourceLeaseDtoData = {
   state: string;
   /** The template version the lease was created from. */
   templateVersionId: string;
+  /**
+     * The template's ready TTL, in seconds.
+     * @minimum 0
+     */
+  ttlSeconds: number;
 };
 
 /**
@@ -3458,6 +3473,14 @@ export interface StartFrogenvOperationRequest {
      * @minimum 0
      */
   timeoutSeconds: number;
+}
+
+/**
+ * The configured Proxmox account used to provision a lease.
+ */
+export interface StartLeaseProvisionRequest {
+  /** The identity of the explicitly configured Proxmox account. */
+  accountId: string;
 }
 
 /**
@@ -4760,6 +4783,87 @@ const res = await fetch(getExtendLabLeaseUrl(leaseId),
 
   const data: extendLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as extendLabLeaseResponse
+}
+
+
+
+export type startLabLeaseProvisionResponse201 = {
+  data: ResourceOperationDto
+  status: 201
+}
+
+export type startLabLeaseProvisionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type startLabLeaseProvisionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type startLabLeaseProvisionResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type startLabLeaseProvisionResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type startLabLeaseProvisionResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type startLabLeaseProvisionResponseSuccess = (startLabLeaseProvisionResponse201) & {
+  headers: Headers;
+};
+export type startLabLeaseProvisionResponseError = (startLabLeaseProvisionResponse400 | startLabLeaseProvisionResponse403 | startLabLeaseProvisionResponse404 | startLabLeaseProvisionResponse409 | startLabLeaseProvisionResponse500) & {
+  headers: Headers;
+};
+
+export type startLabLeaseProvisionResponse = (startLabLeaseProvisionResponseSuccess | startLabLeaseProvisionResponseError)
+
+export const getStartLabLeaseProvisionUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/provision`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the standard error envelope when the lease cannot be provisioned,
+ * the operation is denied, or a backend fails.
+ * @summary Starts provisioning the requested lease and queues its durable operation.
+ */
+export const startLabLeaseProvision = async (leaseId: string,
+    startLeaseProvisionRequest: StartLeaseProvisionRequest, options?: RequestInit): Promise<startLabLeaseProvisionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartLabLeaseProvisionUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(startLeaseProvisionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startLabLeaseProvisionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startLabLeaseProvisionResponse
 }
 
 

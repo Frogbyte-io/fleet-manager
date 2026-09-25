@@ -573,12 +573,109 @@ pub async fn start_lab_provision(
             state.authorizer.as_ref(),
             &principal,
             &version_id,
+            None,
             idempotency_key.as_deref(),
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     Ok((StatusCode::CREATED, Json(Resource::new(record.into()))))
+}
+
+/// The configured Proxmox account used to provision a lease.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLeaseProvisionRequest {
+    /// The identity of the explicitly configured Proxmox account.
+    pub account_id: String,
+}
+
+/// Starts provisioning the requested lease and queues its durable operation.
+///
+/// # Errors
+///
+/// Returns the standard error envelope when the lease cannot be provisioned,
+/// the operation is denied, or a backend fails.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/provision",
+    tag = "lab",
+    operation_id = "startLabLeaseProvision",
+    params(("leaseId" = String, Path, description = "The requested lease's identity.")),
+    request_body = StartLeaseProvisionRequest,
+    responses(
+        (status = 201, description = "The lease provision operation was queued.", body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The lease or request cannot be provisioned.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not provision this lease or create operations.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The lease already moved through a different lifecycle transition.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn start_lab_lease_provision(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+    Json(request): Json<StartLeaseProvisionRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    if request.account_id.trim().is_empty() {
+        return Err(map_lab_error(
+            &LabUseCaseError::Invalid {
+                detail: "accountId must not be empty".to_owned(),
+            },
+            correlation_id,
+        ));
+    }
+    fleet_application::authz::authorize(
+        state.authorizer.as_ref(),
+        fleet_application::authz::AccessRequest {
+            principal_id: &principal.id,
+            action: fleet_application::authz::Permission::OperationCreate,
+            resource: None,
+        },
+    )
+    .map_err(|decision| {
+        crate::operations::map_use_case_error(
+            &fleet_application::operation::OperationUseCaseError::Denied(decision),
+            correlation_id,
+        )
+    })?;
+    let provision = lab
+        .start_lease_provision(
+            state.authorizer.as_ref(),
+            &principal,
+            &lease_id,
+            None,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    let payload = serde_json::json!({
+        "recordId": provision.id,
+        "leaseId": lease_id,
+        "accountId": request.account_id,
+    })
+    .to_string();
+    let operation = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            &principal.id,
+            &fleet_application::operation::NewOperation {
+                kind: "lab.provision".to_owned(),
+                idempotency_key: Some(format!("{}:lab-lease-provision:{lease_id}", principal.id)),
+                deadline_at: None,
+                correlation_id: Some(correlation_id.to_string()),
+                payload_json: Some(payload),
+                review_token: None,
+            },
+        )
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((StatusCode::CREATED, Json(Resource::new(operation.into()))))
 }
 
 /// Lists the provisioning records.
@@ -637,6 +734,8 @@ pub struct LeaseDto {
     pub cleanup: String,
     /// When the lease was created.
     pub created_at: i64,
+    /// The template's ready TTL, in seconds.
+    pub ttl_seconds: u32,
     /// Absolute lifetime deadline measured from creation.
     pub max_lifetime_at: i64,
     /// When the lease reached ready, when it did.
@@ -656,6 +755,7 @@ impl From<fleet_application::lab::Lease> for LeaseDto {
             state: lease.state.id().to_owned(),
             cleanup: lease.cleanup.id().to_owned(),
             created_at: lease.created_at,
+            ttl_seconds: lease.ttl_seconds,
             max_lifetime_at: lease.max_lifetime_at,
             ready_at: lease.ready_at,
             expires_at: lease.expires_at,

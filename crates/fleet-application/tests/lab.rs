@@ -173,6 +173,7 @@ impl ProvisionPort for FakeProvisions {
         let record = fleet_application::lab::ProvisionRecord {
             id: format!("prv-{}", records.len() + 1),
             template_version_id: new.template_version_id.clone(),
+            lease_id: new.lease_id.clone(),
             state: fleet_core::GuestState::Provisioning,
             node: None,
             vmid: None,
@@ -249,6 +250,7 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             state: fleet_core::LeaseState::Requested,
             provision_id: None,
             cleanup: lease.cleanup,
+            ttl_seconds: lease.ttl_seconds,
             created_at: now,
             max_lifetime_at: now + fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS,
             ready_at: None,
@@ -314,6 +316,43 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         }
         stored.expires_at = Some(new_expires_at);
         Ok(true)
+    }
+
+    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state == LeaseState::Requested && stored.provision_id.is_none() {
+            stored.state = LeaseState::Provisioning;
+            stored.provision_id = Some(provision_id.to_owned());
+            return Ok(true);
+        }
+        Ok(stored.state == LeaseState::Provisioning
+            && stored.provision_id.as_deref() == Some(provision_id))
+    }
+
+    async fn mark_ready(
+        &self,
+        id: &str,
+        provision_id: &str,
+        ready_at: i64,
+        expires_at: i64,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state == LeaseState::Provisioning
+            && stored.provision_id.as_deref() == Some(provision_id)
+        {
+            stored.state = LeaseState::Ready;
+            stored.ready_at = Some(ready_at);
+            stored.expires_at = Some(expires_at);
+            return Ok(true);
+        }
+        Ok(stored.state == LeaseState::Ready
+            && stored.provision_id.as_deref() == Some(provision_id))
     }
 
     async fn claim_for_release(
@@ -526,7 +565,7 @@ async fn provisioning_starts_with_a_record_in_provisioning_state() {
         .unwrap();
 
     let record = lab
-        .start_provision(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .start_provision(&AllowAll, &principal(), &version.id, None, None, NOW + 2)
         .await
         .unwrap();
     assert_eq!(record.state, fleet_core::GuestState::Provisioning);
@@ -565,7 +604,7 @@ async fn provisioning_refuses_an_unpromoted_pin_at_start() {
     // The image is demoted after publish: provisioning refuses.
     pins.promoted.lock().unwrap().clear();
     let error = lab
-        .start_provision(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .start_provision(&AllowAll, &principal(), &version.id, None, None, NOW + 2)
         .await
         .unwrap_err();
     assert!(

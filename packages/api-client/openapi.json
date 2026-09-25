@@ -923,6 +923,99 @@
         }
       }
     },
+    "/api/v1/lab/leases/{leaseId}/provision": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Starts provisioning the requested lease and queues its durable operation.",
+        "description": "# Errors\n\nReturns the standard error envelope when the lease cannot be provisioned,\nthe operation is denied, or a backend fails.",
+        "operationId": "startLabLeaseProvision",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The requested lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartLeaseProvisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The lease provision operation was queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease or request cannot be provisioned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not provision this lease or create operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The lease already moved through a different lifecycle transition.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases/{leaseId}/release": {
       "post": {
         "tags": [
@@ -5986,6 +6079,7 @@
           "state",
           "cleanup",
           "createdAt",
+          "ttlSeconds",
           "maxLifetimeAt"
         ],
         "properties": {
@@ -6045,6 +6139,12 @@
           "templateVersionId": {
             "type": "string",
             "description": "The template version the lease was created from."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The template's ready TTL, in seconds.",
+            "minimum": 0
           }
         }
       },
@@ -7282,6 +7382,7 @@
                 "state",
                 "cleanup",
                 "createdAt",
+                "ttlSeconds",
                 "maxLifetimeAt"
               ],
               "properties": {
@@ -7341,6 +7442,12 @@
                 "templateVersionId": {
                   "type": "string",
                   "description": "The template version the lease was created from."
+                },
+                "ttlSeconds": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The template's ready TTL, in seconds.",
+                  "minimum": 0
                 }
               }
             },
@@ -9031,6 +9138,7 @@
               "state",
               "cleanup",
               "createdAt",
+              "ttlSeconds",
               "maxLifetimeAt"
             ],
             "properties": {
@@ -9090,6 +9198,12 @@
               "templateVersionId": {
                 "type": "string",
                 "description": "The template version the lease was created from."
+              },
+              "ttlSeconds": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The template's ready TTL, in seconds.",
+                "minimum": 0
               }
             }
           }
@@ -10543,6 +10657,19 @@
             "format": "int64",
             "description": "The deadline, in seconds. Bounded by the executor.",
             "minimum": 0
+          }
+        }
+      },
+      "StartLeaseProvisionRequest": {
+        "type": "object",
+        "description": "The configured Proxmox account used to provision a lease.",
+        "required": [
+          "accountId"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The identity of the explicitly configured Proxmox account."
           }
         }
       },

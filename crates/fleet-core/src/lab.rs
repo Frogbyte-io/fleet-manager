@@ -414,6 +414,8 @@ pub struct Lease {
     pub provision_id: Option<String>,
     /// The cleanup strategy inherited from the template.
     pub cleanup: CleanupStrategy,
+    /// The ready TTL inherited from the template, in seconds.
+    pub ttl_seconds: u32,
     /// When the lease was created (epoch millis).
     pub created_at: i64,
     /// Absolute lifetime deadline measured from creation, regardless of
@@ -429,6 +431,35 @@ pub struct Lease {
 }
 
 impl Lease {
+    /// Marks a provisioning lease ready and starts its TTL, capped by the
+    /// creation-relative absolute lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the lease is not provisioning, has no provision record, has
+    /// an invalid TTL, or the deadline arithmetic overflows.
+    pub fn mark_ready(&mut self, now: i64) -> Result<(), String> {
+        if self.state != LeaseState::Provisioning {
+            return Err("only provisioning leases can become ready".to_owned());
+        }
+        if self.provision_id.is_none() {
+            return Err("a ready lease must be linked to a provision record".to_owned());
+        }
+        if self.ttl_seconds == 0 {
+            return Err("the lease TTL must be greater than zero".to_owned());
+        }
+        let ttl_millis = i64::from(self.ttl_seconds)
+            .checked_mul(1_000)
+            .ok_or_else(|| "the lease TTL deadline overflows".to_owned())?;
+        let ttl_deadline = now
+            .checked_add(ttl_millis)
+            .ok_or_else(|| "the lease TTL deadline overflows".to_owned())?;
+        self.state = LeaseState::Ready;
+        self.ready_at = Some(now);
+        self.expires_at = Some(ttl_deadline.min(self.max_lifetime_at));
+        Ok(())
+    }
+
     /// Whether the lease's TTL has expired at `now`. Only a ready lease
     /// with a deadline can expire.
     #[must_use]
@@ -486,6 +517,7 @@ mod lease_tests {
             state,
             provision_id: None,
             cleanup: CleanupStrategy::Destroy,
+            ttl_seconds: 3_600,
             created_at: 1_800_000_000_000,
             max_lifetime_at: 1_800_000_000_000 + 30 * 24 * 3_600_000,
             ready_at: None,
@@ -525,6 +557,33 @@ mod lease_tests {
         let mut provisioning = ready;
         provisioning.state = LeaseState::Provisioning;
         assert!(provisioning.extend_expiry(created_at, 1).is_err());
+    }
+
+    #[test]
+    fn becoming_ready_starts_ttl_and_honors_the_creation_cap() {
+        let created_at = 1_800_000_000_000;
+        let mut provisioning = lease(LeaseState::Provisioning, None);
+        provisioning.provision_id = Some("provision-1".to_owned());
+        provisioning.ttl_seconds = 3_600;
+        provisioning.mark_ready(created_at + 500).unwrap();
+        assert_eq!(provisioning.state, LeaseState::Ready);
+        assert_eq!(provisioning.ready_at, Some(created_at + 500));
+        assert_eq!(provisioning.expires_at, Some(created_at + 3_600_500));
+
+        let mut nearly_expired = lease(LeaseState::Provisioning, None);
+        nearly_expired.provision_id = Some("provision-2".to_owned());
+        nearly_expired.ttl_seconds = 3_600;
+        nearly_expired
+            .mark_ready(nearly_expired.max_lifetime_at - 1_000)
+            .unwrap();
+        assert_eq!(
+            nearly_expired.expires_at,
+            Some(nearly_expired.max_lifetime_at)
+        );
+
+        let mut requested = lease(LeaseState::Requested, None);
+        requested.provision_id = Some("provision-3".to_owned());
+        assert!(requested.mark_ready(created_at).is_err());
     }
 
     #[test]

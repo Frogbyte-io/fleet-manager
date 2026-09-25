@@ -588,6 +588,24 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
+        } else if new.kind == "lab.provision" {
+            let lease_id = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+                .ok_or(OperationUseCaseError::Invalid {
+                    detail: "the lab.provision payload must carry a leaseId".to_owned(),
+                })?;
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action: Permission::LabProvision,
+                    resource: Some(&lease_id),
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
         } else if let Some(permission) = catalog_scoped_kind_permission(&new.kind) {
             // The destructive-adjacent Proxmox kinds never route through
             // the generic surface: their creation goes through the
