@@ -6,6 +6,7 @@
 
 use axum::{
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode, response::Parts},
 };
 use http::Method;
@@ -22,7 +23,7 @@ const SUPPLIED_CORRELATION_ID: &str = "01900a3c-b576-7287-a004-61d5b384a076";
 /// The test router: the in-memory operation state plus a resolved LAN
 /// principal, as the controller's caller middleware provides in production.
 /// The fake backend is returned so tests can drive its state directly.
-fn test_router() -> (axum::Router, Arc<FakePort>, Arc<RecordingAuditQuery>) {
+fn test_state() -> (Arc<ApiState>, Arc<FakePort>, Arc<RecordingAuditQuery>) {
     #[derive(Debug)]
     struct PermitAll;
     impl fleet_application::authz::Authorizer for PermitAll {
@@ -51,6 +52,11 @@ fn test_router() -> (axum::Router, Arc<FakePort>, Arc<RecordingAuditQuery>) {
         images: None,
         lab: None,
     });
+    (state, port, audit)
+}
+
+fn test_router() -> (axum::Router, Arc<FakePort>, Arc<RecordingAuditQuery>) {
+    let (state, port, audit) = test_state();
     (
         router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
             id: "anonymous-lan-admin".to_owned(),
@@ -657,9 +663,7 @@ async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
 async fn tailscale_listener_rejects_a_missing_identity_with_the_api_401_envelope() {
     let router = fleet_api::tailscale_serve_router(
         Arc::new(ApiState::for_document()),
-        fleet_auth::TailscaleServePeer {
-            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        },
+        fleet_auth::TailscaleServePeer,
     );
     let response = router
         .oneshot(
@@ -674,6 +678,70 @@ async fn tailscale_listener_rejects_a_missing_identity_with_the_api_401_envelope
     assert_eq!(parts.status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["code"], "authentication_required");
     assert!(parts.headers.contains_key(CORRELATION_ID_HEADER));
+}
+
+#[tokio::test]
+async fn tailscale_guard_protects_non_api_routes_too() {
+    let router = fleet_api::tailscale_serve_guard(
+        axum::Router::new().route("/", axum::routing::get(|| async { "shell" })),
+        fleet_auth::TailscaleServePeer,
+    );
+    let response = router
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(response.headers().contains_key(CORRELATION_ID_HEADER));
+}
+
+#[tokio::test]
+async fn tailscale_error_body_and_response_share_one_correlation_identity() {
+    let (state, _, _) = test_state();
+    let router = fleet_api::tailscale_serve_router(state, fleet_auth::TailscaleServePeer);
+    let mut request = Request::builder()
+        .uri(format!("{API_BASE_PATH}/missing"))
+        .header("tailscale-user-login", "alice@example.com")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = router.oneshot(request).await.unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        parts
+            .headers
+            .get(CORRELATION_ID_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        body["correlationId"]
+    );
+}
+
+#[tokio::test]
+async fn system_view_reports_the_verified_tailscale_principal() {
+    let (state, _, _) = test_state();
+    let router = fleet_api::tailscale_serve_router(state, fleet_auth::TailscaleServePeer);
+    let mut request = Request::builder()
+        .uri(format!("{API_BASE_PATH}/system"))
+        .header("tailscale-user-login", "alice@example.com")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = router.oneshot(request).await.unwrap();
+    let (parts, body) = into_parts_json(response).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["currentPrincipal"], "tailscale:alice@example.com");
 }
 
 #[tokio::test]

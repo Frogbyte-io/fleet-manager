@@ -48,13 +48,21 @@ unavailable" rather than pointed at a file that does not exist.
 
 For Tailscale Serve identity on a Linux Docker host, use the opt-in host
 network override so Serve and the controller share the host namespace:
-`docker compose -f deploy/compose.yaml -f deploy/compose.tailscale.yaml up -d`.
+`docker compose -f deploy/compose.yaml -f deploy/compose.tailscale.yaml up -d --build`.
 Then configure Serve to proxy to `http://127.0.0.1:8081`. Both controller
 listeners bind to host loopback in this override; the existing bridged
 `compose.yaml` intentionally cannot use this mode because the proxy would
 arrive from a container bridge address instead of loopback. Host networking is
 an explicit change to the default deployment posture and is supported only
 where Docker shares the Linux host network namespace.
+
+Identity mode keeps the regular controller listener loopback-only, so the
+existing node enrollment and gateway routes are host-local too. Remote
+`fleetd` clients cannot connect in this mode; leave it disabled if the
+controller needs remote node sessions until a separate node listener is
+available. On the Serve listener, a human Tailscale identity is required for
+the UI, downloads, health routes, and node routes; node operations still
+require their Fleet node credentials.
 
 ## Mount locations
 

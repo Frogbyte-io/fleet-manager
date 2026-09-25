@@ -18,6 +18,8 @@ An optional Tailscale Serve identity mode is a separate, explicit listener. It a
 
 Tailscale Serve must proxy to the identity listener at `http://127.0.0.1:<port>`. The default bridged Docker Compose deployment is incompatible: Serve connections arrive through a container bridge rather than from loopback, and identity mode intentionally rejects them. The opt-in Linux host-network Compose override or a host process shares Serve's network namespace; bind both controller listeners to loopback and configure Serve to target the dedicated port. Do not trust Docker gateway addresses or forwarded-address headers as a substitute for the loopback peer check.
 
+Because identity mode requires the regular controller listener to be loopback-only, its node enrollment and gateway routes are also host-local. Remote `fleetd` clients cannot reach those routes in this mode; keep identity mode disabled when the controller must accept remote node sessions until a separately scoped node listener is available. The dedicated Serve listener additionally requires a human Tailscale identity before serving its UI, downloads, health routes, or node routes; node protocol credentials remain an additional check for node operations.
+
 ## Initial trusted-LAN principal
 
 The initial controller recognizes one application principal, `anonymous-lan-admin`, for browser, CLI, and skill-driven requests received on the configured LAN listener. It grants the full initial permission vocabulary. Audit records include this principal plus correlation ID and available request-origin/client metadata; an IP address is evidence, not identity.

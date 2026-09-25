@@ -48,7 +48,7 @@ async fn a_spoofed_identity_header_is_audited_without_its_value() {
     .await
     .unwrap();
     assert_eq!(row.get::<String, _>("actor"), "anonymous-lan-admin");
-    assert_eq!(row.get::<bool, _>("allowed"), false);
+    assert!(!row.get::<bool, _>("allowed"));
     let metadata = row.get::<String, _>("metadata_json");
     assert!(metadata.contains("tailscale-user-login"));
     assert!(metadata.contains(r#""peerLoopback":false"#));

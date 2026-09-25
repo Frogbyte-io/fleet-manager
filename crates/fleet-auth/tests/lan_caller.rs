@@ -32,9 +32,10 @@ async fn caller_handler(request: Request) -> String {
 }
 
 async fn identity_handler(request: Request) -> String {
-    caller_of(request.extensions())
-        .map(|caller| caller.principal_id().to_owned())
-        .unwrap_or_else(|| "missing".to_owned())
+    caller_of(request.extensions()).map_or_else(
+        || "missing".to_owned(),
+        |caller| caller.principal_id().to_owned(),
+    )
 }
 
 fn app() -> Router {
@@ -45,12 +46,7 @@ fn app() -> Router {
 
 fn tailscale_app() -> Router {
     Router::new().route("/whoami", get(identity_handler)).layer(
-        axum_middleware::from_fn_with_state(
-            TailscaleServePeer {
-                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            },
-            resolve_tailscale_serve_caller,
-        ),
+        axum_middleware::from_fn_with_state(TailscaleServePeer, resolve_tailscale_serve_caller),
     )
 }
 
@@ -198,6 +194,50 @@ async fn tailscale_identity_requires_one_login_from_the_loopback_peer() {
             5000,
         ))));
     let response = tailscale_app().clone().oneshot(missing).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"missing");
+
+    let mut duplicate = HttpRequest::builder()
+        .uri("/whoami")
+        .body(Body::empty())
+        .unwrap();
+    duplicate.headers_mut().append(
+        "tailscale-user-login",
+        axum::http::HeaderValue::from_static("alice@example.com"),
+    );
+    duplicate.headers_mut().append(
+        "tailscale-user-login",
+        axum::http::HeaderValue::from_static("bob@example.com"),
+    );
+    duplicate
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = tailscale_app().clone().oneshot(duplicate).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"missing");
+
+    let mut oversized = HttpRequest::builder()
+        .uri("/whoami")
+        .body(Body::empty())
+        .unwrap();
+    oversized.headers_mut().insert(
+        "tailscale-user-login",
+        axum::http::HeaderValue::from_str(&"x".repeat(513)).unwrap(),
+    );
+    oversized
+        .extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            5000,
+        ))));
+    let response = tailscale_app().oneshot(oversized).await.unwrap();
     let body = axum::body::to_bytes(response.into_body(), 1024)
         .await
         .unwrap();

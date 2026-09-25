@@ -1,6 +1,10 @@
-# ADR-0009: Tailscale Serve identity as an optional request principal
+# ADR 0009: Tailscale Serve identity as an optional request principal
 
-Status: accepted for implementation with FM-944
+Status: Accepted
+
+Proposed: 2026-09-25
+
+Accepted: 2026-09-25 (FM-944)
 
 ## Context
 
@@ -18,7 +22,7 @@ The initial controller has no accounts and maps reachable callers to the fully p
 
 ## Consequences
 
-Missing identity on the dedicated listener is a deliberate 401, including for tagged devices. Operators must use a user-owned tailnet device for this entry point or continue to use the local listener. Docker Compose's default bridge deployment cannot enable this mode safely. This is caller attribution, not a security boundary against a compromised host or a replacement for scoped authorization.
+Missing identity on the dedicated listener is a deliberate 401, including for tagged devices. Operators must use a user-owned tailnet device for this entry point or continue to use the local listener. Docker Compose's default bridge deployment cannot enable this mode safely. Because the regular listener must remain loopback-only, remote `fleetd` node sessions are unavailable while identity mode is enabled; keep it disabled when remote nodes are required until a separate node listener is introduced. The Serve identity gate also covers static UI, downloads, health, and node routes; node operations still require their Fleet node credentials. This is caller attribution, not a security boundary against a compromised host or a replacement for scoped authorization.
 
 ## References
 

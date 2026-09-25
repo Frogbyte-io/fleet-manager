@@ -28,7 +28,7 @@ pub use adapter::LanAllowAllAuthorizer;
 pub use node::HmacNodeCrypto;
 
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use axum::{
     extract::{Request, State},
@@ -196,16 +196,7 @@ pub async fn resolve_lan_caller(mut request: Request, next: Next) -> Response {
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0);
-    let proxy_headers = PROXY_EVIDENCE_HEADERS
-        .iter()
-        .filter_map(|header| {
-            request
-                .headers()
-                .get(header)
-                .and_then(|value| value.to_str().ok())
-                .map(|value| (header.as_str().to_owned(), truncate(value, 256)))
-        })
-        .collect();
+    let proxy_headers = proxy_header_evidence(request.headers());
 
     let principal = Principal::ANONYMOUS_LAN_ADMIN;
     let caller = Caller {
@@ -230,10 +221,7 @@ pub async fn resolve_lan_caller(mut request: Request, next: Next) -> Response {
 
 /// The exact IPv4 loopback peer expected to connect to the identity listener.
 #[derive(Clone, Copy, Debug)]
-pub struct TailscaleServePeer {
-    /// The configured peer address. Config validation pins this to 127.0.0.1.
-    pub ip: IpAddr,
-}
+pub struct TailscaleServePeer;
 
 /// Marker attached when a request reached the identity listener without a
 /// trustworthy, single Tailscale user login. The API adapter turns this into
@@ -244,7 +232,7 @@ pub struct UnauthenticatedTailscaleRequest;
 /// Resolves a request proxied by Tailscale Serve. The network peer is checked
 /// before the identity claim; forwarded-address headers are never consulted.
 pub async fn resolve_tailscale_serve_caller(
-    State(peer): State<TailscaleServePeer>,
+    State(_peer): State<TailscaleServePeer>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -253,7 +241,8 @@ pub async fn resolve_tailscale_serve_caller(
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0);
     let names = identity_header_names(request.headers());
-    let trusted_peer = remote_addr.is_some_and(|address| address.ip() == peer.ip);
+    let trusted_peer = remote_addr
+        .is_some_and(|address| address.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let login = if trusted_peer {
         single_header_value(request.headers(), "tailscale-user-login")
             .filter(|login| valid_tailscale_login(login))
@@ -261,29 +250,16 @@ pub async fn resolve_tailscale_serve_caller(
         None
     };
 
-    let (principal, principal_id) = match login {
-        Some(login) => (
-            Principal::TailscaleUser,
-            format!("{TAILSCALE_PRINCIPAL_PREFIX}{login}"),
-        ),
-        None => {
-            request
-                .extensions_mut()
-                .insert(UnauthenticatedTailscaleRequest);
-            return next.run(request).await;
-        }
+    let Some(login) = login else {
+        request
+            .extensions_mut()
+            .insert(UnauthenticatedTailscaleRequest);
+        return next.run(request).await;
     };
+    let principal = Principal::TailscaleUser;
+    let principal_id = format!("{TAILSCALE_PRINCIPAL_PREFIX}{login}");
 
-    let proxy_headers = PROXY_EVIDENCE_HEADERS
-        .iter()
-        .filter_map(|header| {
-            request
-                .headers()
-                .get(header)
-                .and_then(|value| value.to_str().ok())
-                .map(|value| (header.as_str().to_owned(), truncate(value, 256)))
-        })
-        .collect();
+    let proxy_headers = proxy_header_evidence(request.headers());
     request.extensions_mut().insert(Caller {
         principal,
         principal_id: principal_id.clone(),
@@ -321,6 +297,18 @@ fn identity_header_names(headers: &axum::http::HeaderMap) -> Vec<String> {
         .iter()
         .filter(|header| headers.contains_key(*header))
         .map(|header| header.as_str().to_owned())
+        .collect()
+}
+
+fn proxy_header_evidence(headers: &axum::http::HeaderMap) -> Vec<(String, String)> {
+    PROXY_EVIDENCE_HEADERS
+        .iter()
+        .filter_map(|header| {
+            headers
+                .get(header)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| (header.as_str().to_owned(), truncate(value, 256)))
+        })
         .collect()
 }
 

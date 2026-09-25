@@ -116,6 +116,8 @@ pub enum ConfigError {
         /// The configured address.
         value: SocketAddr,
     },
+    /// Port zero cannot be used because Tailscale Serve needs a stable target.
+    TailscaleServeListenerPortZero,
     /// Identity mode requires the regular controller listener to remain local.
     IdentityModeRequiresLoopbackListener {
         /// The configured address.
@@ -179,6 +181,10 @@ impl fmt::Display for ConfigError {
             Self::TailscaleServeListenerNotLoopback { value } => write!(
                 f,
                 "{TAILSCALE_SERVE_LISTEN_VAR} must use 127.0.0.1 for Tailscale Serve, got {value}"
+            ),
+            Self::TailscaleServeListenerPortZero => write!(
+                f,
+                "{TAILSCALE_SERVE_LISTEN_VAR} must use a fixed nonzero port for Tailscale Serve"
             ),
             Self::IdentityModeRequiresLoopbackListener { value } => write!(
                 f,
@@ -317,6 +323,9 @@ impl ControllerConfig {
                 return Err(ConfigError::TailscaleServeListenerNotLoopback {
                     value: serve_listen,
                 });
+            }
+            if serve_listen.port() == 0 {
+                return Err(ConfigError::TailscaleServeListenerPortZero);
             }
             if !self.listen.ip().is_loopback() {
                 return Err(ConfigError::IdentityModeRequiresLoopbackListener {

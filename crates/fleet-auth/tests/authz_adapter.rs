@@ -22,6 +22,37 @@ fn the_lan_principal_may_perform_every_catalog_action() {
 }
 
 #[test]
+fn validated_tailscale_users_may_perform_the_catalog_but_malformed_ids_are_denied() {
+    let authorizer = LanAllowAllAuthorizer;
+    for action in Permission::ALL {
+        assert_eq!(
+            authorizer.decide(AccessRequest {
+                principal_id: "tailscale:alice@example.com",
+                action: *action,
+                resource: Some("resource-1"),
+            }),
+            Decision::allow(),
+        );
+    }
+    for principal_id in [
+        "tailscale:",
+        "tailscale:alice smith",
+        "tailscale:alice\nexample.com",
+        "tailscale-user:alice@example.com",
+    ] {
+        assert_eq!(
+            authorizer.decide(AccessRequest {
+                principal_id,
+                action: Permission::SystemRead,
+                resource: None,
+            }),
+            Decision::deny(ReasonId::UnknownPrincipal),
+            "{principal_id} must not be accepted as a Tailscale identity"
+        );
+    }
+}
+
+#[test]
 fn resourceless_catalog_actions_are_permitted_without_a_resource() {
     let authorizer = LanAllowAllAuthorizer;
     for action in Permission::ALL.iter().filter(|a| !a.requires_resource()) {

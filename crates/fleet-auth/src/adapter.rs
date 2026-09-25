@@ -1,21 +1,19 @@
 //! The trusted-LAN authorization adapter.
 //!
 //! The initial deployment grants the full permission catalog to the
-//! `anonymous-lan-admin` principal. "Full" is defined honestly here: the
-//! adapter permits exactly the actions in the application's catalog, for the
-//! one principal it recognizes, and answers every other request with a stable
-//! denial reason. It does not bypass the port — it is an implementation of
-//! the port, so the later authenticated mode can replace it without any call
-//! site changing.
+//! `anonymous-lan-admin` principal and, when enabled, Tailscale Serve user
+//! principals. "Full" is defined honestly here: the adapter permits exactly
+//! the actions in the application's catalog for those validated principal
+//! ids and answers every other request with a stable denial reason.
 
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, ReasonId};
 
 use crate::{LAN_PRINCIPAL_ID, is_tailscale_principal_id};
 
-/// Permits the full catalog to the anonymous LAN principal; denies everything
-/// else with stable reasons. This is the explicit allow-all adapter: its
-/// permissiveness is a reviewed property of the trusted-LAN deployment, not a
-/// default that authentication must first undo.
+/// Permits the full catalog to the anonymous LAN principal and validated
+/// `tailscale:<login>` principals; denies everything else with stable reasons.
+/// This explicit allow-all policy is shared by trusted-LAN and optional
+/// Tailscale identity mode; it does not implement per-user roles.
 #[derive(Debug)]
 pub struct LanAllowAllAuthorizer;
 

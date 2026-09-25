@@ -14,6 +14,10 @@ use crate::error::ApiError;
 /// Rejects a Tailscale listener request whose caller resolver did not accept
 /// exactly one trusted user identity. Correlation middleware wraps this layer,
 /// so the response uses the same standard error envelope as handler failures.
+///
+/// # Panics
+///
+/// Panics only if the pinned error-code literal becomes invalid syntax.
 pub async fn reject_unauthenticated_tailscale_caller(request: Request, next: Next) -> Response {
     if request
         .extensions()

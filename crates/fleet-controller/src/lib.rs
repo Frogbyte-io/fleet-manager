@@ -307,6 +307,7 @@ pub fn build_router(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_tailscale_serve_router(
     settings: &Settings,
     db: Option<SqlitePool>,
@@ -352,12 +353,7 @@ fn build_router_for_caller(
         lab.cloned(),
     ));
     let mut api_router = if tailscale_identity {
-        fleet_api::tailscale_serve_router(
-            api_state.clone(),
-            fleet_auth::TailscaleServePeer {
-                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            },
-        )
+        fleet_api::unwrapped_router(api_state.clone())
     } else {
         fleet_api::router(api_state.clone())
             .layer(axum::middleware::from_fn(fleet_auth::resolve_lan_caller))
@@ -385,18 +381,21 @@ fn build_router_for_caller(
             artifacts::artifacts_router(artifacts_dir.clone()),
         );
     }
-    let Some(services) = services else {
-        return router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
-    };
-    // The machine-facing node surface: versioned with the node protocol,
-    // documented in proto/README.md, and mounted beside the public API —
-    // not under it. The gateway route joins the enrollment routes in one
-    // nest so no path overlaps.
-    let node_routes = fleet_api::node::node_router(api_state)
-        .merge(gateway::gateway_router(services.gateway.clone()));
+    if let Some(services) = services {
+        // The machine-facing node surface: versioned with the node protocol,
+        // documented in proto/README.md, and mounted beside the public API —
+        // not under it. The gateway route joins the enrollment routes in one
+        // nest so no path overlaps. The Tailscale listener still gates entry
+        // to this route; node credentials remain an independent requirement.
+        let node_routes = fleet_api::node::node_router(api_state)
+            .merge(gateway::gateway_router(services.gateway.clone()));
+        router = router.nest("/api/node/v1", node_routes);
+    }
+    router = router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
+    if tailscale_identity {
+        router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
+    }
     router
-        .nest("/api/node/v1", node_routes)
-        .layer(middleware::from_fn_with_state(web_index, spa_fallback))
 }
 
 /// Persists only the fixed Tailscale identity header names when they arrive
@@ -416,13 +415,13 @@ async fn audit_untrusted_tailscale_identity_headers(
         .filter(|header| request.headers().contains_key(*header))
         .map(|header| header.as_str().to_owned())
         .collect::<Vec<_>>();
-    if !peer_is_loopback && !names.is_empty() {
-        if let Err(error) = fleet_storage_sqlite::AuditLedger::new(&db)
+    if !peer_is_loopback
+        && !names.is_empty()
+        && let Err(error) = fleet_storage_sqlite::AuditLedger::new(&db)
             .record_ignored_tailscale_identity(&names, false)
             .await
-        {
-            eprintln!("could not persist ignored Tailscale identity headers: {error}");
-        }
+    {
+        eprintln!("could not persist ignored Tailscale identity headers: {error}");
     }
     next.run(request).await
 }
@@ -760,5 +759,58 @@ pub fn run_healthcheck(listen: SocketAddr) -> bool {
             eprintln!("healthcheck: {error}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tailscale_identity_tests {
+    use super::*;
+    use axum::{body::Body, extract::ConnectInfo, http::Request};
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn identity_listener_rejects_every_surface_without_a_user_login() {
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: Some(artifacts.path().to_path_buf()),
+        };
+        let router =
+            build_tailscale_serve_router(&settings, None, None, None, None, None, None, None, None);
+
+        for path in [
+            "/",
+            "/healthz",
+            "/readyz",
+            "/downloads/fleetd/fleetd",
+            "/api/node/v1/enroll",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+            assert!(
+                response
+                    .headers()
+                    .contains_key(fleet_api::CORRELATION_ID_HEADER)
+            );
+        }
+
+        let mut request = Request::builder()
+            .uri("/")
+            .header("tailscale-user-login", "alice@example.com")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

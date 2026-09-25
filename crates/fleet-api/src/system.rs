@@ -110,9 +110,8 @@ pub async fn get_system_info(
         );
         ApiError::new(&public, correlation_id).with_status(StatusCode::INTERNAL_SERVER_ERROR)
     })?;
-    info.current_principal = principal
-        .map(|Extension(principal)| principal.id)
-        .unwrap_or_else(|| "unknown".to_owned());
+    info.current_principal =
+        principal.map_or_else(|| "unknown".to_owned(), |Extension(principal)| principal.id);
     Ok(Json(info))
 }
 

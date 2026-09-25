@@ -303,15 +303,19 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
         )
         .split_for_parts();
 
-    let router = router
-        .fallback(not_found)
-        .layer(middleware::from_fn(correlation::correlate));
+    let router = router.fallback(not_found);
 
     (router, openapi)
 }
 
 /// Builds the API router over the given state.
 pub fn router(state: Arc<operations::ApiState>) -> Router {
+    unwrapped_router(state).layer(middleware::from_fn(correlation::correlate))
+}
+
+/// Builds the API routes without correlation middleware, for a controller
+/// composition root that applies a wider request gate and correlation layer.
+pub fn unwrapped_router(state: Arc<operations::ApiState>) -> Router {
     api(state).0
 }
 
@@ -322,8 +326,13 @@ pub fn tailscale_serve_router(
     state: Arc<operations::ApiState>,
     peer: fleet_auth::TailscaleServePeer,
 ) -> Router {
-    api(state)
-        .0
+    tailscale_serve_guard(unwrapped_router(state), peer)
+}
+
+/// Applies one correlation identity, loopback Tailscale caller resolution,
+/// and the corresponding 401 rejection to a complete controller router.
+pub fn tailscale_serve_guard(router: Router, peer: fleet_auth::TailscaleServePeer) -> Router {
+    router
         .layer(middleware::from_fn(
             auth::reject_unauthenticated_tailscale_caller,
         ))

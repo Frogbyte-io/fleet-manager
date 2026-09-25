@@ -185,6 +185,38 @@ fn tailscale_listener_requires_both_loopback_and_distinct_addresses() {
 }
 
 #[test]
+fn tailscale_listener_requires_a_fixed_ipv4_loopback_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = fleet_config::load(
+        None,
+        &env_of(&[
+            (fleet_config::LISTEN_VAR, "127.0.0.1:8080"),
+            (fleet_config::TAILSCALE_SERVE_LISTEN_VAR, "0.0.0.0:8081"),
+            (fleet_config::DATA_DIR_VAR, dir.path().to_str().unwrap()),
+        ]),
+    )
+    .unwrap();
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::TailscaleServeListenerNotLoopback { .. })
+    ));
+
+    let config = fleet_config::load(
+        None,
+        &env_of(&[
+            (fleet_config::LISTEN_VAR, "127.0.0.1:8080"),
+            (fleet_config::TAILSCALE_SERVE_LISTEN_VAR, "127.0.0.1:0"),
+            (fleet_config::DATA_DIR_VAR, dir.path().to_str().unwrap()),
+        ]),
+    )
+    .unwrap();
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::TailscaleServeListenerPortZero)
+    ));
+}
+
+#[test]
 fn validation_creates_the_state_directory() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("nested").join("state");
