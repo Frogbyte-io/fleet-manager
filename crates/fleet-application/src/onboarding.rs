@@ -1153,16 +1153,8 @@ fn map_machine_error(error: crate::machine::MachineUseCaseError) -> OnboardingUs
 
 fn validate_new_draft(new: &NewDraft) -> Result<(), OnboardingUseCaseError> {
     let error = |detail: String| OnboardingUseCaseError::Invalid { detail };
-    if new.endpoint.user.is_empty() || new.endpoint.user.len() > 64 {
-        return Err(error(
-            "the endpoint user must be 1..=64 characters".to_owned(),
-        ));
-    }
-    if new.endpoint.host.is_empty() || new.endpoint.host.len() > 253 {
-        return Err(error(
-            "the endpoint host must be 1..=253 characters".to_owned(),
-        ));
-    }
+    validate_ssh_user(&new.endpoint.user).map_err(error)?;
+    validate_ssh_host(&new.endpoint.host).map_err(error)?;
     if new.endpoint.port == 0 {
         return Err(error("the endpoint port must be 1..=65535".to_owned()));
     }
@@ -1201,6 +1193,43 @@ fn validate_new_draft(new: &NewDraft) -> Result<(), OnboardingUseCaseError> {
         return Err(error(
             "the description must be at most 512 characters".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ssh_user(user: &str) -> Result<(), String> {
+    if user.is_empty() || user.len() > 64 {
+        return Err("the endpoint user must be 1..=64 characters".to_owned());
+    }
+    if user.starts_with('-') {
+        return Err("the endpoint user cannot start with '-'".to_owned());
+    }
+    if user.contains(['@', ':'])
+        || user.chars().any(char::is_whitespace)
+        || user.chars().any(char::is_control)
+    {
+        return Err(
+            "the endpoint user cannot contain '@', ':', whitespace, or control characters"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_ssh_host(host: &str) -> Result<(), String> {
+    if host.is_empty() || host.len() > 253 {
+        return Err("the endpoint host must be 1..=253 characters".to_owned());
+    }
+    if host.starts_with('-') {
+        return Err("the endpoint host cannot start with '-'".to_owned());
+    }
+    if host.contains('@')
+        || host.chars().any(char::is_whitespace)
+        || host.chars().any(char::is_control)
+    {
+        return Err(
+            "the endpoint host cannot contain '@', whitespace, or control characters".to_owned(),
+        );
     }
     Ok(())
 }

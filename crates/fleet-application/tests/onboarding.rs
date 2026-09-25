@@ -483,6 +483,41 @@ async fn a_fresh_draft_is_untested_and_made_no_machine() {
     assert_eq!(fixture.machines.machine_count(), 0);
 }
 
+#[tokio::test]
+async fn draft_creation_rejects_option_like_ssh_users_and_hosts() {
+    let fixture = compose(FakeMachines::default());
+    for (user, host) in [
+        ("-oProxyCommand=bad", "host-one"),
+        ("deploy", "-Fbad"),
+        ("deploy@example.com", "host-one"),
+        ("deploy:admin", "host-one"),
+        ("deploy", "host one"),
+        ("deploy", "host\nname"),
+        ("deploy", "host@example.com"),
+    ] {
+        let mut draft = new_draft();
+        draft.endpoint.user = user.to_owned();
+        draft.endpoint.host = host.to_owned();
+        assert!(matches!(
+            fixture
+                .onboarding
+                .create_draft(&AllowAll, &principal(), draft)
+                .await,
+            Err(OnboardingUseCaseError::Invalid { .. })
+        ));
+    }
+    assert!(fixture.drafts.drafts.lock().unwrap().is_empty());
+
+    let mut ipv6 = new_draft();
+    ipv6.endpoint.host = "2001:db8::10".to_owned();
+    let draft = fixture
+        .onboarding
+        .create_draft(&AllowAll, &principal(), ipv6)
+        .await
+        .unwrap();
+    assert_eq!(draft.endpoint.reference(), "deploy@2001:db8::10:22");
+}
+
 /// The trusted-LAN policy: the same allow-all the controller serves with.
 fn fleet_auth_allow_all() -> impl Authorizer {
     AllowAll

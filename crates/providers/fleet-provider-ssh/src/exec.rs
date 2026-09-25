@@ -268,8 +268,8 @@ fn execute_script_inner(
             command.arg("-i").arg(path);
         }
     }
+    crate::add_ssh_destination(&mut command, endpoint);
     command
-        .arg(format!("{}@{}", endpoint.user, endpoint.host))
         // The remote shell parses exactly this: `bash -s --` and the inert
         // blob.
         .arg(format!("bash -s -- {blob}"))

@@ -785,6 +785,29 @@ async fn tailnet_import_reports_idempotent_replays_without_a_new_draft() {
 }
 
 #[tokio::test]
+async fn tailnet_import_rejects_an_option_like_ssh_user_before_replay_or_io() {
+    let fixture = compose(
+        FakeMachines::default(),
+        vec![device("nABC", "build-host", "100.64.0.10")],
+    );
+    let error = fixture
+        .tailnet
+        .import_with_outcome(
+            &AllowAll,
+            &principal(),
+            "nABC",
+            "-oProxyCommand=bad",
+            None,
+            Some("retry-key"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, TailnetUseCaseError::Invalid { .. }));
+    assert_eq!(fixture.source.calls(), 0);
+    assert!(fixture.onboarding.drafts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn import_refuses_an_unknown_device_or_a_device_without_an_ipv4() {
     let fixture = compose(
         FakeMachines::default(),
