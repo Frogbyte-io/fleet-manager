@@ -913,22 +913,40 @@ mod tailscale_identity_tests {
             .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45679))));
         let response = router.oneshot(malformed_correlation).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response_correlation_id = response
+            .headers()
+            .get(fleet_api::CORRELATION_ID_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
         let rows = sqlx::query(
             "SELECT correlation_id, metadata_json FROM audit_events \
-             WHERE action = 'auth.identity_header_ignored' ORDER BY occurred_at",
+             WHERE action = 'auth.identity_header_ignored' ORDER BY seq",
         )
         .fetch_all(store.pool())
         .await
         .unwrap();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|row| {
-            let metadata = row.get::<String, _>("metadata_json");
-            metadata.contains("tailscale-user-login")
-                && !metadata.contains("second-spoof@example.invalid")
-                && row
-                    .get::<Option<String>, _>("correlation_id")
-                    .as_deref()
-                    .is_some_and(|id| id != "not-a-valid-correlation-id")
-        }));
+        let second_row = rows.get(1).unwrap();
+        let second_correlation_id = second_row
+            .get::<Option<String>, _>("correlation_id")
+            .unwrap();
+        assert_eq!(second_correlation_id, response_correlation_id);
+        assert!(
+            second_correlation_id
+                .parse::<fleet_core::CorrelationId>()
+                .is_ok()
+        );
+        assert!(
+            second_row
+                .get::<String, _>("metadata_json")
+                .contains("tailscale-user-login")
+        );
+        assert!(
+            !second_row
+                .get::<String, _>("metadata_json")
+                .contains("second-spoof@example.invalid")
+        );
     }
 }
