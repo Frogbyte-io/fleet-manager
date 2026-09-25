@@ -4,7 +4,7 @@ import { RouterLink } from 'vue-router'
 
 import type { OperationDto } from '@frogbyte-io/fleet-api-client'
 
-import { isTerminal } from '../api'
+import { ApiRequestError, isTerminal } from '../api'
 import OperationStatus from '../components/OperationStatus.vue'
 import { useMachineOperations } from '../operations'
 
@@ -13,13 +13,14 @@ import { useMachineOperations } from '../operations'
 const { operations, forget } = useMachineOperations()
 const queryClient = useQueryClient()
 
-// Settled operations, and ones the API can no longer read (e.g. gone),
-// leave the list; live ones stay.
+// Settled operations, and ones the API reports as gone (404), leave the
+// list. A transient read failure keeps the entry: it may still be running.
 function clearFinished() {
   forget(operations.value
     .filter((o) => {
       const state = queryClient.getQueryState<OperationDto>(['operation', o.id])
-      return state?.status === 'error' || (state?.data !== undefined && isTerminal(state.data.state))
+      const gone = state?.error instanceof ApiRequestError && state.error.status === 404
+      return gone || (state?.data !== undefined && isTerminal(state.data.state))
     })
     .map(o => o.id))
 }

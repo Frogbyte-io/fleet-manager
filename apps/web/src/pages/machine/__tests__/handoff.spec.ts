@@ -23,6 +23,8 @@ describe('parseSshReference', () => {
     expect(parseSshReference('dev@host;id:22')).toBeNull()
     expect(parseSshReference('dev@$(reboot):22')).toBeNull()
     expect(parseSshReference('a b@host:22')).toBeNull()
+    expect(parseSshReference('-A')).toBeNull()
+    expect(parseSshReference('-oProxyCommand=x@host:22')).toBeNull()
   })
 
   it('rejects references that are not an address', () => {
@@ -43,5 +45,6 @@ describe('handoffs', () => {
   it('builds a VS Code Remote-SSH link only for the default port', () => {
     expect(vscodeRemoteUrl({ user: 'dev', host: 'h', port: 22 })).toBe('vscode://vscode-remote/ssh-remote+dev@h/')
     expect(vscodeRemoteUrl({ user: 'dev', host: 'h', port: 2222 })).toBeNull()
+    expect(vscodeRemoteUrl({ user: null, host: 'fe80::1%eth0', port: 22 })).toBe('vscode://vscode-remote/ssh-remote+[fe80::1%25eth0]/')
   })
 })

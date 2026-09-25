@@ -26,7 +26,9 @@ function endpointFlags(endpointId: string, auth: SshAuth): string[] {
 }
 
 export function installNodeCommand(machineId: string, endpointId: string, auth: SshAuth, controllerUrl: string): string {
-  return join(['fleetctl', 'machines', 'install-node', machineId, ...endpointFlags(endpointId, auth), '--controller-url', controllerUrl, '--wait'])
+  // --timeout covers the install deadline plus fleetd's connect wait, so the
+  // copied command waits as long as the durable operation can run.
+  return join(['fleetctl', 'machines', 'install-node', machineId, ...endpointFlags(endpointId, auth), '--controller-url', controllerUrl, '--wait', '--timeout', '480'])
 }
 
 export type MiseAction = 'inventory' | 'status' | 'install'

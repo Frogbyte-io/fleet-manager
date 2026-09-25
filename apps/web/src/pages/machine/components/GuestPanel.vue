@@ -39,13 +39,18 @@ function refresh() {
   ])
 }
 
-// Proxmox operations the CLI also runs with `timeoutSeconds: 300`.
+// The deadline fleetctl sends for these calls: 300s for reviewed runs and
+// for lifecycle actions without `--timeout` (crates/fleetctl).
 const TIMEOUT_SECONDS = 300
 const queryClient = useQueryClient()
 const { track } = useMachineOperations()
 
 const ref_ = computed<GuestRef>(() => ({ accountId: props.guest.accountId, node: props.guest.node, vmid: props.guest.vmid }))
 const evidence = computed(() => props.guest.candidates.find(c => c.machineId === props.machineId) ?? null)
+
+// Until FM-913 confirms guest↔machine associations, the operator states
+// that this candidate guest is the one they mean before anything runs.
+const acknowledged = ref(false)
 
 // Record the guest's facts onto this machine.
 const observeBusy = ref(false)
@@ -61,7 +66,7 @@ async function observe() {
       unwrap(response, [204])
     observeFailed.value = false
     observeMessage.value = 'Guest facts recorded on this machine.'
-    await queryClient.invalidateQueries({ queryKey: ['machine', props.machineId] })
+    await refresh()
   }
   catch (error) {
     observeFailed.value = true
@@ -81,7 +86,7 @@ const lifecycleOperation = ref<string | null>(null)
 
 async function runLifecycle() {
   const action = lifecycleAction.value
-  if (!action)
+  if (!action || !acknowledged.value)
     return
   lifecycleBusy.value = true
   lifecycleError.value = ''
@@ -191,7 +196,7 @@ async function requestReview() {
 
 async function runReviewed() {
   const reviewed = review.value
-  if (!reviewed)
+  if (!reviewed || !acknowledged.value)
     return
   runBusy.value = true
   runError.value = ''
@@ -240,6 +245,14 @@ async function runReviewed() {
       </template>
       <span class="text-fc-faint">This is association evidence, not a confirmed link; confirming it arrives with FM-913.</span>
     </p>
+    <label class="flex items-center gap-2 rounded-sm border border-fc-warn/40 p-2 text-xs text-fc-ink">
+      <input
+        v-model="acknowledged"
+        type="checkbox"
+        data-testid="acknowledge-guest"
+      >
+      I checked that {{ guest.kind === 'lxc' ? 'LXC' : 'QEMU' }} {{ guest.vmid }} on {{ guest.node }} is this machine. Lifecycle and reviewed operations stay disabled until then.
+    </label>
 
     <section class="space-y-2">
       <h3 class="fc-kicker">
@@ -295,7 +308,7 @@ async function runReviewed() {
           <button
             type="button"
             class="h-8 rounded-sm border border-fc-info/40 bg-fc-info/10 px-3 text-fc-info disabled:opacity-50"
-            :disabled="lifecycleBusy"
+            :disabled="lifecycleBusy || !acknowledged"
             data-testid="confirm-lifecycle"
             @click="runLifecycle"
           >
@@ -436,7 +449,7 @@ async function runReviewed() {
           <button
             type="button"
             class="h-8 rounded-sm border border-fc-err bg-fc-err/10 px-3 text-xs text-fc-err disabled:opacity-50"
-            :disabled="runBusy"
+            :disabled="runBusy || !acknowledged"
             data-testid="run-reviewed"
             @click="runReviewed"
           >

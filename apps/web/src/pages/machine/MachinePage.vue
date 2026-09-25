@@ -72,9 +72,14 @@ const tab = computed({
 
 // Client handoffs: the operator's own SSH client and VS Code connect; Fleet
 // only hands over the address.
+// The first SSH endpoint whose reference parses as a target.
 const sshTarget = computed(() => {
-  const endpoint = machine.value?.endpoints.find(e => e.kind === 'ssh')
-  return endpoint ? parseSshReference(endpoint.reference) : null
+  for (const endpoint of machine.value?.endpoints ?? []) {
+    const target = endpoint.kind === 'ssh' ? parseSshReference(endpoint.reference) : null
+    if (target)
+      return target
+  }
+  return null
 })
 const sshLine = computed(() => (sshTarget.value ? sshCommand(sshTarget.value) : null))
 const vscodeUrl = computed(() => (sshTarget.value ? vscodeRemoteUrl(sshTarget.value) : null))
@@ -122,7 +127,7 @@ async function copySsh() {
     </div>
 
     <div
-      v-else-if="machineQuery.error.value"
+      v-else-if="machineQuery.error.value && !machine"
       class="mt-6 rounded-sm border border-fc-err/40 p-6"
       data-testid="machine-error"
     >

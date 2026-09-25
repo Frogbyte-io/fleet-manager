@@ -12,8 +12,9 @@ export interface SshTarget {
 // What may appear in a host or user: DNS names, IPv4/IPv6 literals (with a
 // zone id), and ordinary login names. Anything else (spaces, `;`, `$`,
 // quotes) gets no handoff at all.
-const HOST = /^[A-Za-z0-9._%:-]+$/
-const USER = /^[A-Za-z0-9._-]+$/
+// A leading `-` is refused too, so a target can never read as an ssh option.
+const HOST = /^[A-Za-z0-9._%:][A-Za-z0-9._%:-]*$/
+const USER = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/
 
 function isIpv6(host: string): boolean {
   if (!host.includes(':'))
@@ -88,5 +89,6 @@ export function sshCommand(target: SshTarget): string {
 export function vscodeRemoteUrl(target: SshTarget): string | null {
   if (target.port !== 22)
     return null
-  return `vscode://vscode-remote/ssh-remote+${destination(target)}/`
+  // A scoped IPv6 zone marker is a literal `%` inside a URI.
+  return `vscode://vscode-remote/ssh-remote+${destination(target).replace(/%/g, '%25')}/`
 }

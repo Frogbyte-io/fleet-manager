@@ -26,7 +26,7 @@ describe('shellQuote', () => {
 describe('fleetctl builders', () => {
   it('mirrors the documented install-node usage', () => {
     expect(installNodeCommand('m1', 'e2', { type: 'identityFile', path: '/home/op/.ssh/id' }, 'http://ctl:8080'))
-      .toBe('fleetctl machines install-node m1 --endpoint e2 --auth identity-file --identity /home/op/.ssh/id --controller-url http://ctl:8080 --wait')
+      .toBe('fleetctl machines install-node m1 --endpoint e2 --auth identity-file --identity /home/op/.ssh/id --controller-url http://ctl:8080 --wait --timeout 480')
   })
 
   it('adds tool and version only for mise install', () => {

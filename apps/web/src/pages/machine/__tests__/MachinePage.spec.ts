@@ -37,6 +37,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () =>
   Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, (...args: unknown[]) => fn(...args)])))
 
 import { routes } from '@/router'
+import { storageKey } from '../operations'
 
 class ResizeObserverStub {
   observe() {}
@@ -246,7 +247,7 @@ describe('MachinePage', () => {
     const { wrapper } = await mountAt('/fleet/machines/m1?tab=connections')
 
     const commands = wrapper.findAll('[data-testid="fleetctl-command"]').map(c => c.text())
-    expect(commands).toContain(`fleetctl machines install-node m1 --endpoint e2 --auth agent --controller-url ${window.location.origin} --wait`)
+    expect(commands).toContain(`fleetctl machines install-node m1 --endpoint e2 --auth agent --controller-url ${window.location.origin} --wait --timeout 480`)
 
     await wrapper.find('[data-testid="install-fleetd"]').trigger('click')
     await flushPromises()
@@ -301,25 +302,31 @@ describe('MachinePage', () => {
     expect(wrapper.find('[data-testid="no-operations"]').exists()).toBe(true)
   })
 
-  it('audit lists this machine\'s events and pages by cursor', async () => {
-    const event = (id: string, patch = {}) => ({ seq: 1, id, occurredAt: NOW, actor: 'anonymous-lan-admin', action: 'node.revoke', allowed: true, reason: 'allowed', metadata: {}, resource: 'm1', outcome: 'succeeded', ...patch })
+  it('audit reads a time window whole and shows it newest first', async () => {
+    const event = (id: string, at: number, patch = {}) => ({ seq: 1, id, occurredAt: at, actor: 'anonymous-lan-admin', action: `act-${id}`, allowed: true, reason: 'allowed', metadata: {}, resource: 'm1', outcome: 'succeeded', ...patch })
     api.listAuditEvents
-      .mockResolvedValueOnce(ok({ items: [event('a1'), event('a2', { allowed: false, reason: 'no_permission', outcome: null })], page: { nextCursor: 'c2', limit: 50 } }))
-      .mockResolvedValueOnce(ok({ items: [event('a3')], page: { nextCursor: null, limit: 50 } }))
+      .mockResolvedValueOnce(ok({ items: [event('a1', NOW - 3000), event('a2', NOW - 2000, { allowed: false, reason: 'no_permission', outcome: null })], page: { nextCursor: 'c2', limit: 200 } }))
+      .mockResolvedValueOnce(ok({ items: [event('a3', NOW - 1000)], page: { nextCursor: null, limit: 200 } }))
     const { wrapper } = await mountAt('/fleet/machines/m1?tab=audit')
-    await vi.waitFor(async () => {
-      await flushPromises()
-      expect(wrapper.findAll('[data-testid="audit-row"]')).toHaveLength(2)
-    })
-    expect(api.listAuditEvents).toHaveBeenCalledWith({ resource: 'm1', limit: 50, cursor: undefined })
-    expect(wrapper.text()).toContain('denied · no_permission')
-    await wrapper.find('[data-testid="audit-more"]').trigger('click')
     await vi.waitFor(async () => {
       await flushPromises()
       expect(wrapper.findAll('[data-testid="audit-row"]')).toHaveLength(3)
     })
-    expect(api.listAuditEvents).toHaveBeenLastCalledWith({ resource: 'm1', limit: 50, cursor: 'c2' })
-    expect(wrapper.find('[data-testid="audit-more"]').exists()).toBe(false)
+    const rows = wrapper.findAll('[data-testid="audit-row"]').map(r => r.text())
+    expect(rows[0]).toContain('act-a3')
+    expect(rows[2]).toContain('act-a1')
+    expect(wrapper.text()).toContain('denied · no_permission')
+    const first = api.listAuditEvents.mock.calls[0]![0]
+    expect(first).toMatchObject({ resource: 'm1', limit: 200, cursor: undefined })
+    expect(first.from).toBeGreaterThan(0)
+    expect(api.listAuditEvents.mock.calls[1]![0]).toMatchObject({ cursor: 'c2' })
+
+    api.listAuditEvents.mockResolvedValue(ok({ items: [], page: { nextCursor: null, limit: 200 } }))
+    await wrapper.find('[data-testid="audit-window"]').setValue('0')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(api.listAuditEvents.mock.lastCall![0].from).toBeUndefined()
+    })
   })
 
   it('guest lifecycle asks for confirmation, then starts the operation', async () => {
@@ -331,6 +338,8 @@ describe('MachinePage', () => {
     })
 
     await wrapper.find('[data-testid="lifecycle-shutdown"]').trigger('click')
+    expect(wrapper.find('[data-testid="confirm-lifecycle"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('[data-testid="acknowledge-guest"]').setValue(true)
     expect(api.startProxmoxLifecycle).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('fleetctl proxmox shutdown --account acc1 --node pve --vmid 100 --wait')
     await wrapper.find('[data-testid="confirm-lifecycle"]').trigger('click')
@@ -362,6 +371,8 @@ describe('MachinePage', () => {
     await wrapper.find('[data-testid="review-destructive"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="reviewed-payload"]').text()).toContain('"snapshot": "before-upgrade"')
+    expect(wrapper.find('[data-testid="run-reviewed"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('[data-testid="acknowledge-guest"]').setValue(true)
     await wrapper.find('[data-testid="run-reviewed"]').trigger('click')
     await flushPromises()
 
@@ -399,7 +410,7 @@ describe('MachinePage review fixes', () => {
       state = 'cancelling'
       return ok({ data: operation(id, 'mise.status', 'cancelling') })
     })
-    sessionStorage.setItem('fleet-console-machine-operations:m1', JSON.stringify([{ id: 'op-1', kind: 'mise.status', label: 'mise status', startedAt: NOW }]))
+    sessionStorage.setItem(storageKey('m1'), JSON.stringify([{ id: 'op-1', kind: 'mise.status', label: 'mise status', startedAt: NOW }]))
     const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
 
     const status = () => wrapper.find('[data-testid="operation-status"]')
@@ -411,23 +422,20 @@ describe('MachinePage review fixes', () => {
     // Still live: the cancel control stays visible (disabled) until it settles.
     expect(status().text()).toContain('Cancel requested')
 
-    state = 'cancelled'
-    await wrapper.find('[data-testid="clear-finished"]').trigger('click')
-    expect(wrapper.find('[data-testid="operation-status"]').exists()).toBe(true)
   })
 
   it('clears finished operations from the list', async () => {
     api.getOperation.mockImplementation(async (id: string) => ok({ data: operation(id, 'mise.status', 'succeeded') }))
-    sessionStorage.setItem('fleet-console-machine-operations:m1', JSON.stringify([{ id: 'op-1', kind: 'mise.status', label: 'mise status', startedAt: NOW }]))
+    sessionStorage.setItem(storageKey('m1'), JSON.stringify([{ id: 'op-1', kind: 'mise.status', label: 'mise status', startedAt: NOW }]))
     const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
     await wrapper.find('[data-testid="clear-finished"]').trigger('click')
     expect(wrapper.find('[data-testid="no-operations"]').exists()).toBe(true)
-    expect(sessionStorage.getItem('fleet-console-machine-operations:m1')).toBe('[]')
+    expect(sessionStorage.getItem(storageKey('m1'))).toBe('[]')
   })
 
   it('drops tracked operations the API can no longer read', async () => {
     api.getOperation.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no operation' }, headers: new Headers() })
-    sessionStorage.setItem('fleet-console-machine-operations:m1', JSON.stringify([
+    sessionStorage.setItem(storageKey('m1'), JSON.stringify([
       { id: 'op-gone', kind: 'mise.status', label: 'gone', startedAt: NOW },
       { id: 'op-gone-2', kind: 'mise.status', label: 'gone too', startedAt: NOW },
     ]))
@@ -496,5 +504,50 @@ describe('MachinePage review fixes', () => {
     const { wrapper } = await mountAt('/fleet/machines/m1')
     await vi.waitFor(() => expect(wrapper.text()).toContain('forbidden: denied'))
     expect(api.getMachine).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('MachinePage robustness', () => {
+  it('stops polling an operation the API cannot read, and clears only gone ones', async () => {
+    api.getOperation.mockImplementation(async (id: string) => (id === 'op-gone'
+      ? { status: 404, data: { code: 'not_found', message: 'gone' }, headers: new Headers() }
+      : { status: 503, data: { code: 'unavailable', message: 'try later' }, headers: new Headers() }))
+    sessionStorage.setItem(storageKey('m1'), JSON.stringify([
+      { id: 'op-gone', kind: 'k', label: 'gone', startedAt: NOW },
+      { id: 'op-flaky', kind: 'k', label: 'flaky', startedAt: NOW },
+    ]))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.findAll('[data-testid="operation-status"]').every(s => s.text().includes('unavailable'))).toBe(true)
+    }, { timeout: 5000 })
+    const calls = api.getOperation.mock.calls.length
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    expect(api.getOperation.mock.calls.length).toBe(calls)
+    await wrapper.find('[data-testid="clear-finished"]').trigger('click')
+    const left = wrapper.findAll('[data-testid="operation-status"]')
+    expect(left).toHaveLength(1)
+    expect(left[0]!.text()).toContain('op-flaky')
+  })
+
+  it('reports a failed token copy so the operator can copy it by hand', async () => {
+    api.createEnrollmentToken.mockResolvedValue(ok({ data: { id: 't1', machineId: 'm1', token: 'fm_once', expiresAt: NOW + 1 } }, 201))
+    writeText.mockRejectedValueOnce(new Error('denied'))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=connections')
+    await wrapper.find('[data-testid="create-token"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="copy-token"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="copy-token-failed"]').exists()).toBe(true)
+  })
+
+  it('hands off through the first SSH endpoint that parses', async () => {
+    api.getMachine.mockResolvedValue(ok({ data: { ...machine(), endpoints: [
+      { id: 'e1', kind: 'ssh', reference: 'bad;ref' },
+      { id: 'e2', kind: 'ssh', reference: 'dev@good.lan:22' },
+    ] } }))
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    await wrapper.find('[data-testid="copy-ssh"]').trigger('click')
+    expect(writeText).toHaveBeenLastCalledWith('ssh dev@good.lan')
   })
 })

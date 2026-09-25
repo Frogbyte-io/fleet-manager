@@ -62,9 +62,21 @@ async function enroll() {
   }
 }
 
+// The token is shown once, so the operator must know whether a copy worked.
+const tokenCopy = ref<'idle' | 'copied' | 'failed'>('idle')
+
 async function copyToken() {
-  if (created.value)
-    await navigator.clipboard.writeText(created.value.token).catch(() => {})
+  if (!created.value)
+    return
+  try {
+    if (!navigator.clipboard)
+      throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(created.value.token)
+    tokenCopy.value = 'copied'
+  }
+  catch {
+    tokenCopy.value = 'failed'
+  }
 }
 
 const confirmingRevoke = ref(false)
@@ -306,10 +318,18 @@ async function install() {
               <button
                 type="button"
                 class="mt-1 font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+                data-testid="copy-token"
                 @click="copyToken"
               >
-                Copy token
+                {{ tokenCopy === 'copied' ? 'Copied' : 'Copy token' }}
               </button>
+              <p
+                v-if="tokenCopy === 'failed'"
+                class="mt-1 text-fc-err"
+                data-testid="copy-token-failed"
+              >
+                Copy failed (the clipboard needs a secure context). Select the token above and copy it by hand.
+              </p>
             </div>
             <p
               v-if="enrollError"

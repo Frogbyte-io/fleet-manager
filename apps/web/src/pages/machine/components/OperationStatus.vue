@@ -5,7 +5,7 @@ import { computed, ref, watch } from 'vue'
 import { cancelOperation, getOperation, type OperationDto } from '@frogbyte-io/fleet-api-client'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 
-import { errorMessage, isTerminal, unwrap } from '../api'
+import { errorMessage, isTerminal, retryTransient, unwrap } from '../api'
 
 // Follows one durable operation until it reaches a terminal state.
 const props = defineProps<{ operationId: string, label?: string, dismissible?: boolean }>()
@@ -14,7 +14,10 @@ const emit = defineEmits<{ settled: [operation: OperationDto], dismiss: [] }>()
 const query = useQuery({
   queryKey: computed(() => ['operation', props.operationId]),
   queryFn: async () => unwrap<OperationDto>(await getOperation(props.operationId)),
-  refetchInterval: q => (q.state.data && isTerminal(q.state.data.state) ? false : 1000),
+  // Stop on a settled state or on an error (e.g. the operation is gone);
+  // only transient failures are retried.
+  refetchInterval: q => (q.state.status === 'error' || (q.state.data && isTerminal(q.state.data.state)) ? false : 1000),
+  retry: retryTransient,
 })
 
 const operation = computed(() => query.data.value ?? null)
@@ -27,10 +30,15 @@ watch(() => operation.value?.state, (state, previous) => {
 })
 const cancelError = ref('')
 
+const chipLabel = computed(() => operation.value?.state ?? (query.error.value ? 'unavailable' : 'loading'))
+
 const tone = computed(() => {
+  if (!operation.value && query.error.value)
+    return 'err' as const
   switch (operation.value?.state) {
     case 'succeeded': return 'ok' as const
-    case 'failed': return 'err' as const
+    case 'failed':
+    case 'timed_out': return 'err' as const
     case 'running': return 'info' as const
     case 'cancelled': return 'muted' as const
     default: return 'faint' as const
@@ -56,7 +64,7 @@ async function cancel() {
   >
     <div class="flex flex-wrap items-center gap-2">
       <StatusChip
-        :label="operation?.state ?? 'loading'"
+        :label="chipLabel"
         :tone="tone"
       />
       <span class="font-mono text-fc-ink">{{ label ?? operation?.kind ?? '' }}</span>
