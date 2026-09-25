@@ -425,6 +425,23 @@ describe('MachinePage review fixes', () => {
     expect(sessionStorage.getItem('fleet-console-machine-operations:m1')).toBe('[]')
   })
 
+  it('drops tracked operations the API can no longer read', async () => {
+    api.getOperation.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no operation' }, headers: new Headers() })
+    sessionStorage.setItem('fleet-console-machine-operations:m1', JSON.stringify([
+      { id: 'op-gone', kind: 'mise.status', label: 'gone', startedAt: NOW },
+      { id: 'op-gone-2', kind: 'mise.status', label: 'gone too', startedAt: NOW },
+    ]))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.findAll('[data-testid="dismiss-operation"]')).toHaveLength(2)
+    })
+    await wrapper.find('[data-testid="dismiss-operation"]').trigger('click')
+    expect(wrapper.findAll('[data-testid="operation-status"]')).toHaveLength(1)
+    await wrapper.find('[data-testid="clear-finished"]').trigger('click')
+    expect(wrapper.find('[data-testid="no-operations"]').exists()).toBe(true)
+  })
+
   it('still tracks an operation when session storage refuses writes', async () => {
     api.startMiseOperation.mockResolvedValue(ok({ data: operation('op-mise', 'mise.inventory') }, 202))
     const { wrapper } = await mountAt('/fleet/machines/m1?tab=tools')

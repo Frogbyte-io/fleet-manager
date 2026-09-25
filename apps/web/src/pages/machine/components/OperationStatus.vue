@@ -8,8 +8,8 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 import { errorMessage, isTerminal, unwrap } from '../api'
 
 // Follows one durable operation until it reaches a terminal state.
-const props = defineProps<{ operationId: string, label?: string }>()
-const emit = defineEmits<{ settled: [operation: OperationDto] }>()
+const props = defineProps<{ operationId: string, label?: string, dismissible?: boolean }>()
+const emit = defineEmits<{ settled: [operation: OperationDto], dismiss: [] }>()
 
 const query = useQuery({
   queryKey: computed(() => ['operation', props.operationId]),
@@ -69,6 +69,16 @@ async function cancel() {
         @click="cancel"
       >
         {{ operation.cancelRequested ? 'Cancel requested' : 'Cancel' }}
+      </button>
+      <button
+        v-if="dismissible && (!operation || isTerminal(operation.state))"
+        type="button"
+        class="ml-auto font-mono text-[10px] uppercase tracking-wider text-fc-faint hover:text-fc-ink"
+        :aria-label="`Dismiss ${operationId}`"
+        data-testid="dismiss-operation"
+        @click="emit('dismiss')"
+      >
+        Dismiss
       </button>
     </div>
     <p

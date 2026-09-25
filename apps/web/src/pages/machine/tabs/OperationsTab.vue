@@ -13,11 +13,13 @@ import { useMachineOperations } from '../operations'
 const { operations, forget } = useMachineOperations()
 const queryClient = useQueryClient()
 
+// Settled operations, and ones the API can no longer read (e.g. gone),
+// leave the list; live ones stay.
 function clearFinished() {
   forget(operations.value
     .filter((o) => {
-      const cached = queryClient.getQueryData<OperationDto>(['operation', o.id])
-      return cached !== undefined && isTerminal(cached.state)
+      const state = queryClient.getQueryState<OperationDto>(['operation', o.id])
+      return state?.status === 'error' || (state?.data !== undefined && isTerminal(state.data.state))
     })
     .map(o => o.id))
 }
@@ -58,6 +60,8 @@ function clearFinished() {
       :key="operation.id"
       :operation-id="operation.id"
       :label="operation.label"
+      dismissible
+      @dismiss="forget([operation.id])"
     />
   </div>
 </template>
