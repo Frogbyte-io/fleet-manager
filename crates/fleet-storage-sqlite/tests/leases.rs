@@ -207,6 +207,7 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
     assert_eq!(stored_provision.state, fleet_core::GuestState::Ready);
     assert_eq!(stored_provision.node.as_deref(), Some("pve-1"));
     assert_eq!(stored_provision.vmid, Some(123));
+    assert_eq!(stored_provision.ready_at, Some(NOW + 120));
 }
 
 #[tokio::test]
