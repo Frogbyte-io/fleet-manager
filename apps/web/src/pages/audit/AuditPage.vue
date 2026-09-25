@@ -220,7 +220,7 @@ function absolute(ms: number): string {
   </template>
   <template v-else>
     <p
-      v-if="truncated"
+      v-if="truncated && !cursor"
       class="mt-4 text-xs text-fc-warn"
       data-testid="audit-truncated"
     >
