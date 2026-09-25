@@ -535,6 +535,95 @@ async fn partially_committed_tailnet_credentials_are_invalidated_on_rollback_fai
 }
 
 #[tokio::test]
+async fn failed_tailnet_mutations_restore_prior_credentials_without_false_events() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    fixture
+        .credentials
+        .store("old-client", "old-secret")
+        .await
+        .unwrap();
+    let mut changes = fixture.events.subscribe(None).receiver;
+
+    *fixture.credentials.fail_next_store.lock().unwrap() = true;
+    let error = fixture
+        .tailnet
+        .configure(&AllowAll, &principal(), "new-client", "new-secret")
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("simulated partial store failure")
+    );
+    assert_eq!(
+        fixture.credentials.stored.lock().unwrap().as_ref().unwrap(),
+        &("old-client".to_owned(), "old-secret".to_owned())
+    );
+    assert!(matches!(
+        changes.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+    let error = fixture
+        .tailnet
+        .clear(&AllowAll, &principal())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert_eq!(
+        fixture.credentials.stored.lock().unwrap().as_ref().unwrap(),
+        &("old-client".to_owned(), "old-secret".to_owned())
+    );
+    assert!(matches!(
+        changes.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn failed_tailnet_clear_with_failed_rollback_reports_partial_state() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    fixture
+        .credentials
+        .store("old-client", "old-secret")
+        .await
+        .unwrap();
+    let mut changes = fixture.events.subscribe(None).receiver;
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+    *fixture.credentials.fail_next_store.lock().unwrap() = true;
+
+    let error = fixture
+        .tailnet
+        .clear(&AllowAll, &principal())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("credential clearing failed"));
+    assert_eq!(
+        changes.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::TailnetChanged
+    );
+}
+
+#[tokio::test]
+async fn failed_clear_of_an_empty_tailnet_store_preserves_the_original_error() {
+    let fixture = compose(FakeMachines::default(), Vec::new());
+    let mut changes = fixture.events.subscribe(None).receiver;
+    *fixture.credentials.fail_next_clear.lock().unwrap() = true;
+
+    let error = fixture
+        .tailnet
+        .clear(&AllowAll, &principal())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert!(matches!(
+        changes.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn listing_correlates_by_address_and_name_but_never_merges() {
     let fixture = compose(
         FakeMachines::default()

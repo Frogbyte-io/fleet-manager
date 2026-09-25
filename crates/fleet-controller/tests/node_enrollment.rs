@@ -60,6 +60,23 @@ struct TestController {
     router: Router,
     nodes: Arc<fleet_application::node::Nodes>,
     machines: fleet_storage_sqlite::MachineRepository,
+    events: tokio::sync::broadcast::Receiver<fleet_application::events::FleetEvent>,
+}
+
+impl TestController {
+    fn assert_machine_changed(&mut self) {
+        assert_eq!(
+            self.events.try_recv().unwrap().kind,
+            fleet_application::events::EventKind::MachineChanged
+        );
+    }
+
+    fn assert_no_event(&mut self) {
+        assert!(matches!(
+            self.events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
 }
 
 async fn controller() -> TestController {
@@ -75,7 +92,10 @@ async fn controller() -> TestController {
     let crypto = fleet_controller::node_crypto::NodeCryptoService::open(&secrets)
         .await
         .expect("the node signing key must provision");
-    let services = fleet_controller::compose_node_services(store.pool(), Arc::new(crypto));
+    let events = Arc::new(fleet_application::events::EventHub::new(32));
+    let receiver = events.subscribe(None).receiver;
+    let services =
+        fleet_controller::compose_node_services_with_events(store.pool(), Arc::new(crypto), events);
     let nodes = services.nodes.clone();
     let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
     let router = build_router(
@@ -97,6 +117,7 @@ async fn controller() -> TestController {
         router,
         nodes,
         machines,
+        events: receiver,
     }
 }
 
@@ -183,7 +204,7 @@ async fn register_machine(controller: &TestController, name: &str) -> String {
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
-    let controller = controller().await;
+    let mut controller = controller().await;
     let machine_id = register_machine(&controller, "enrolled").await;
 
     // The operator creates a token through the public API.
@@ -195,6 +216,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    controller.assert_machine_changed();
     let token = body["data"]["token"]
         .as_str()
         .expect("the token value")
@@ -218,6 +240,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    controller.assert_machine_changed();
     let machine = body["data"]["machineId"].as_str().unwrap().to_owned();
     let credential = body["data"]["credential"].as_str().unwrap().to_owned();
     assert_eq!(machine, machine_id);
@@ -238,6 +261,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::UNAUTHORIZED, "{body}");
+    controller.assert_no_event();
 
     // The node proves possession for a session.
     let (parts, body) = send(
@@ -266,6 +290,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::OK, "{body}");
+    controller.assert_machine_changed();
     let session = body["data"]["session"].as_str().unwrap().to_owned();
     assert!(session.starts_with("fmns1."), "{session}");
     assert!(body["data"]["sessionExpiresAt"].as_i64().unwrap() > 0);
@@ -305,6 +330,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::UNAUTHORIZED, "{body}");
+    controller.assert_no_event();
 
     // Rotation: a new key proves itself and takes over.
     let new_keys = NodeKeys::generate();
@@ -340,6 +366,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::OK, "{body}");
+    controller.assert_machine_changed();
     let rotated_credential = body["data"]["credential"].as_str().unwrap().to_owned();
     assert_eq!(body["data"]["nodeKeyVersion"], 2);
 
@@ -373,6 +400,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::OK, "{body}");
+    controller.assert_machine_changed();
     let (parts, _) = send(
         &controller.router,
         "POST",
@@ -390,6 +418,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    controller.assert_machine_changed();
     let rebind_token = body["data"]["token"].as_str().unwrap().to_owned();
     let (parts, body) = send(
         &controller.router,
@@ -405,6 +434,7 @@ async fn the_full_enrollment_flow_proves_possession_and_rotates_and_revokes() {
     )
     .await;
     assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    controller.assert_machine_changed();
     assert_eq!(body["data"]["rebind"], true, "{body}");
     assert_eq!(body["data"]["machineId"], machine_id);
 

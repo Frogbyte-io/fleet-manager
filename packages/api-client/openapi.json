@@ -840,7 +840,7 @@
         "operationId": "sweepLabLeases",
         "responses": {
           "200": {
-            "description": "The leases transitioned into releasing.",
+            "description": "All expired leases transitioned into releasing. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -860,7 +860,7 @@
             }
           },
           "500": {
-            "description": "A backend port failed.",
+            "description": "A backend port failed. Earlier claims in this sweep may already be committed; retry to process the remaining expired leases.",
             "content": {
               "application/json": {
                 "schema": {

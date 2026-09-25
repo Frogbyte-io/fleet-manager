@@ -994,9 +994,9 @@ pub async fn extend_lab_lease(
     tag = "lab",
     operation_id = "sweepLabLeases",
     responses(
-        (status = 200, description = "The leases transitioned into releasing.", body = Page<LeaseDto>),
+        (status = 200, description = "All expired leases transitioned into releasing. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.", body = Page<LeaseDto>),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
-        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed. Earlier claims in this sweep may already be committed; retry to process the remaining expired leases.", body = crate::error::ApiError),
     )
 )]
 pub async fn sweep_lab_leases(

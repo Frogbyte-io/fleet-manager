@@ -369,6 +369,9 @@ pub async fn rotate(
         )
         .await
         .map_err(|error| map_node_error(&error, fresh_correlation_id()))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok(Json(Resource::new(RotateResponse {
         machine_id: outcome.machine_id,
         credential: outcome.credential_token,

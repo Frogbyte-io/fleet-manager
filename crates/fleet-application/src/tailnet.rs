@@ -429,14 +429,7 @@ impl TailnetIntegration {
             },
         )
         .map_err(TailnetUseCaseError::Denied)?;
-        let stored =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
+        let stored = self.load_credentials().await?;
         Ok(TailnetStatus {
             configured: stored.is_some(),
             client_id: stored.map(|credentials| credentials.client_id),
@@ -501,7 +494,9 @@ impl TailnetIntegration {
                 self.publish_changed();
                 return Err(TailnetUseCaseError::Backend {
                     context: "credentials",
-                    detail: "credential replacement and rollback both failed".to_owned(),
+                    detail: format!(
+                        "credential replacement failed ({detail}); rollback also failed"
+                    ),
                 });
             }
             return Err(TailnetUseCaseError::Backend {
@@ -515,14 +510,7 @@ impl TailnetIntegration {
             .await?;
         // The mutator earned this decision already; re-asking tailscale.read
         // would fail a principal allowed to configure but not to list.
-        let stored =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
+        let stored = self.load_credentials().await?;
         Ok(TailnetStatus {
             configured: stored.is_some(),
             client_id: stored.map(|credentials| credentials.client_id),
@@ -566,13 +554,13 @@ impl TailnetIntegration {
                         .store(&previous.client_id, previous.client_secret.expose())
                         .await
                 }
-                None => Err("credential state was not readable before clear".to_owned()),
+                None => self.credentials.clear().await,
             };
             if rollback.is_err() {
                 self.publish_changed();
                 return Err(TailnetUseCaseError::Backend {
                     context: "credentials",
-                    detail: "credential clearing and rollback both failed".to_owned(),
+                    detail: format!("credential clearing failed ({detail}); rollback also failed"),
                 });
             }
             return Err(TailnetUseCaseError::Backend {
@@ -584,14 +572,7 @@ impl TailnetIntegration {
         self.publish_changed();
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;
-        let stored =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
+        let stored = self.load_credentials().await?;
         Ok(TailnetStatus {
             configured: stored.is_some(),
             client_id: stored.map(|credentials| credentials.client_id),
@@ -845,14 +826,20 @@ impl TailnetIntegration {
 
     /// Loads the stored credentials or refuses with [`TailnetUseCaseError::Unconfigured`].
     async fn require_credentials(&self) -> Result<TailnetCredentials, TailnetUseCaseError> {
+        self.load_credentials()
+            .await?
+            .ok_or(TailnetUseCaseError::Unconfigured)
+    }
+
+    async fn load_credentials(&self) -> Result<Option<TailnetCredentials>, TailnetUseCaseError> {
+        let _read = self.credential_mutation.lock().await;
         self.credentials
             .load()
             .await
             .map_err(|detail| TailnetUseCaseError::Backend {
                 context: "credentials",
                 detail,
-            })?
-            .ok_or(TailnetUseCaseError::Unconfigured)
+            })
     }
 
     async fn audit_event(

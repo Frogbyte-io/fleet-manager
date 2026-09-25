@@ -526,8 +526,36 @@ async fn committed_account_mutations_publish_through_the_attached_event_hub() {
     let mut events = hub.subscribe(None).receiver;
     let proxmox = proxmox.with_events(hub);
 
-    create_account(&proxmox).await;
+    let account = create_account(&proxmox).await;
 
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::ProxmoxChanged
+    );
+    assert!(
+        proxmox
+            .create(
+                &AllowAll,
+                &principal(),
+                NewProxmoxAccount {
+                    name: "pve-main".to_owned(),
+                    host: "192.168.68.224".to_owned(),
+                    port: Some(8006),
+                    token_id: "root@pam!GLM-AGENT".to_owned(),
+                },
+                "the-token-secret-material",
+            )
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    proxmox
+        .delete(&AllowAll, &principal(), &account.id)
+        .await
+        .unwrap();
     assert_eq!(
         events.try_recv().unwrap().kind,
         fleet_application::events::EventKind::ProxmoxChanged

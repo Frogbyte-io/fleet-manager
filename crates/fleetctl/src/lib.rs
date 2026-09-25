@@ -2344,7 +2344,6 @@ fn stream_events(invocation: &Invocation) -> Result<(), CliError> {
                     continue;
                 }
             };
-        retry = std::time::Duration::from_secs(1);
         let mut reader = BufReader::new(response);
         read_sse_events(&mut reader, |event_type, event_id| {
             if let Some(id) = event_id {
@@ -2362,6 +2361,7 @@ fn stream_events(invocation: &Invocation) -> Result<(), CliError> {
                     ),
                 });
             }
+            retry = std::time::Duration::from_secs(1);
             print_stream_event(invocation.output, event_type, last_event_id.as_deref())?;
             std::io::stdout().flush().map_err(|error| CliError {
                 message: format!("cannot write event output: {error}"),

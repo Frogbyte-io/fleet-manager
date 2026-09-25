@@ -299,6 +299,8 @@ impl ProvisionPort for FakeProvisions {
 #[derive(Debug, Default)]
 struct FakeLeases {
     leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>,
+    fail_claim_on_call: Mutex<Option<usize>>,
+    claim_calls: Mutex<usize>,
 }
 
 #[async_trait]
@@ -408,6 +410,14 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         observed_expires_at: i64,
         now: i64,
     ) -> Result<bool, String> {
+        let call = {
+            let mut calls = self.claim_calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if *self.fail_claim_on_call.lock().unwrap() == Some(call) {
+            return Err("simulated claim failure".to_owned());
+        }
         let mut leases = self.leases.lock().unwrap();
         let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
             return Ok(false);
@@ -1045,4 +1055,76 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
         .await
         .unwrap();
     assert!(again.is_empty(), "{again:?}");
+}
+
+#[tokio::test]
+async fn sweep_reports_each_committed_claim_before_a_later_failure() {
+    let leases = Arc::new(FakeLeases::default());
+    let templates = Arc::new(FakeTemplates::default());
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        templates,
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        audit,
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let mut created = Vec::new();
+    for purpose in ["first", "second"] {
+        let lease = lab
+            .create_lease(
+                &AllowAll,
+                &principal(),
+                fleet_application::lab::NewLease {
+                    template_version_id: version.id.clone(),
+                    purpose: purpose.to_owned(),
+                    project_id: None,
+                    cleanup: fleet_core::CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                NOW + 2,
+            )
+            .await
+            .unwrap();
+        let mut ready = lease.clone();
+        ready.state = LeaseState::Ready;
+        ready.ready_at = Some(NOW + 3);
+        ready.expires_at = Some(NOW + 3);
+        leases.update(&ready).await.unwrap();
+        created.push(lease.id);
+    }
+    *leases.fail_claim_on_call.lock().unwrap() = Some(2);
+
+    let mut published = 0;
+    let error = lab
+        .sweep_expired_with_progress(&AllowAll, &principal(), NOW + 4, || published += 1)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("simulated claim failure"));
+    assert_eq!(published, 1);
+    let first = lab
+        .get_lease(&AllowAll, &principal(), &created[0])
+        .await
+        .unwrap();
+    let second = lab
+        .get_lease(&AllowAll, &principal(), &created[1])
+        .await
+        .unwrap();
+    assert_eq!(first.state, LeaseState::Releasing);
+    assert_eq!(second.state, LeaseState::Ready);
 }

@@ -37,9 +37,6 @@ export default defineConfig({
           if (!ssePaths.some(([path]) => path === '/api/v1/events')) {
             throw new Error('the fleet event stream is missing its text/event-stream response');
           }
-          if (ssePaths.length === 0) {
-            throw new Error('no text/event-stream operations were found in OpenAPI');
-          }
           for (const [path] of ssePaths) delete paths[path];
           spec.paths = paths;
           return spec;
