@@ -171,7 +171,7 @@ async function mountAt(path: string) {
   // The route component is lazy-loaded; wait for it and its queries.
   await vi.waitFor(async () => {
     await flushPromises()
-    expect(wrapper.find('h1').exists() || wrapper.find('[data-testid="machine-not-found"]').exists()).toBe(true)
+    expect(['h1', '[data-testid="machine-not-found"]', '[data-testid="machine-error"]'].some(sel => wrapper.find(sel).exists())).toBe(true)
   })
   await flushPromises()
   return { wrapper, router }
@@ -369,5 +369,96 @@ describe('MachinePage', () => {
     await wrapper.find('[data-testid="clone-id"]').setValue('150')
     expect(wrapper.find('[data-testid="review-destructive"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.text()).toContain(`printf '%s' '{"newId":150,"name":"copy","fullCopy":false}' | fleetctl proxmox clone`)
+  })
+})
+
+describe('MachinePage review fixes', () => {
+  it('cancels a tracked operation and keeps following it while it is cancelling', async () => {
+    let state = 'running'
+    api.getOperation.mockImplementation(async (id: string) => ok({ data: { ...operation(id, 'mise.status', state), cancelRequested: state === 'cancelling' } }))
+    api.cancelOperation.mockImplementation(async (id: string) => {
+      state = 'cancelling'
+      return ok({ data: operation(id, 'mise.status', 'cancelling') })
+    })
+    sessionStorage.setItem('fleet-console-machine-operations:m1', JSON.stringify([{ id: 'op-1', kind: 'mise.status', label: 'mise status', startedAt: NOW }]))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
+
+    const status = () => wrapper.find('[data-testid="operation-status"]')
+    expect(status().text()).toContain('running')
+    await status().findAll('button').find(b => b.text() === 'Cancel')!.trigger('click')
+    await flushPromises()
+    expect(api.cancelOperation).toHaveBeenCalledWith('op-1')
+    expect(status().text()).toContain('cancelling')
+    // Still live: the cancel control stays visible (disabled) until it settles.
+    expect(status().text()).toContain('Cancel requested')
+
+    state = 'cancelled'
+    await wrapper.find('[data-testid="clear-finished"]').trigger('click')
+    expect(wrapper.find('[data-testid="operation-status"]').exists()).toBe(true)
+  })
+
+  it('clears finished operations from the list', async () => {
+    api.getOperation.mockImplementation(async (id: string) => ok({ data: operation(id, 'mise.status', 'succeeded') }))
+    sessionStorage.setItem('fleet-console-machine-operations:m1', JSON.stringify([{ id: 'op-1', kind: 'mise.status', label: 'mise status', startedAt: NOW }]))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=operations')
+    await wrapper.find('[data-testid="clear-finished"]').trigger('click')
+    expect(wrapper.find('[data-testid="no-operations"]').exists()).toBe(true)
+    expect(sessionStorage.getItem('fleet-console-machine-operations:m1')).toBe('[]')
+  })
+
+  it('still tracks an operation when session storage refuses writes', async () => {
+    api.startMiseOperation.mockResolvedValue(ok({ data: operation('op-mise', 'mise.inventory') }, 202))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=tools')
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('quota', 'QuotaExceededError')
+    })
+    await wrapper.find('[data-testid="run-mise"]').trigger('click')
+    await flushPromises()
+    setItem.mockRestore()
+    expect(wrapper.text()).not.toContain('quota')
+    expect(wrapper.find('[data-testid="operation-status"]').text()).toContain('op-mise')
+  })
+
+  it('warns that pending enrollment tokens outlive a revoke', async () => {
+    const view = (await api.getNode()).data.data
+    api.getNode.mockResolvedValue(ok({ data: { ...view, pendingTokens: [{ id: 't1', machineId: 'm1', status: 'pending', createdAt: NOW, expiresAt: NOW + 3_600_000 }] } }))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=connections')
+    expect(wrapper.find('[data-testid="pending-token-warning"]').text()).toContain('1 pending enrollment token(s) stay valid')
+  })
+
+  it('ignores a review answer when the form changed while it was in flight', async () => {
+    let answer: (value: unknown) => void = () => {}
+    api.reviewProxmoxOperation.mockImplementation(() => new Promise((resolve) => {
+      answer = resolve
+    }))
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=guest')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.find('[data-testid="guest-panel"]').exists()).toBe(true)
+    })
+    await wrapper.find('[data-testid="snapshot-name"]').setValue('before')
+    await wrapper.find('[data-testid="review-destructive"]').trigger('click')
+    await wrapper.find('[data-testid="snapshot-name"]').setValue('after')
+    answer(ok({ data: { reviewToken: 'tok', action: 'snapshot', node: 'pve', vmid: 100, accountId: 'acc1', params: { snapshot: 'before' } } }))
+    await flushPromises()
+    expect(wrapper.find('[data-testid="reviewed-payload"]').exists()).toBe(false)
+  })
+
+  it('shows a failed Proxmox source on the Guest tab instead of an empty state', async () => {
+    api.listProxmoxGuests.mockResolvedValue({ status: 502, data: { code: 'upstream', message: 'pve unreachable' }, headers: new Headers() })
+    api.discoverProxmoxCluster.mockResolvedValue({ status: 502, data: { code: 'upstream', message: 'pve unreachable' }, headers: new Headers() })
+    const { wrapper } = await mountAt('/fleet/machines/m1?tab=guest')
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.find('[data-testid="proxmox-problem"]').exists()).toBe(true)
+    })
+    expect(wrapper.text()).toContain('among the sources that answered')
+  })
+
+  it('does not retry a machine read the API refused', async () => {
+    api.getMachine.mockResolvedValue({ status: 403, data: { code: 'forbidden', message: 'denied' }, headers: new Headers() })
+    const { wrapper } = await mountAt('/fleet/machines/m1')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('forbidden: denied'))
+    expect(api.getMachine).toHaveBeenCalledTimes(1)
   })
 })

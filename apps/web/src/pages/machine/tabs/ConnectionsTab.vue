@@ -328,7 +328,15 @@ async function install() {
               Revoke node
             </p>
             <p class="text-xs text-fc-muted">
-              Revokes the node identity and its credentials. The node must enroll again with a new token.
+              Revokes the node identity and its credentials. Re-enrolling needs an enrollment token.
+            </p>
+            <p
+              v-if="node.pendingTokens.length > 0"
+              class="text-xs text-fc-warn"
+              data-testid="pending-token-warning"
+            >
+              {{ node.pendingTokens.length }} pending enrollment token(s) stay valid after a revoke until they expire
+              (last at {{ absoluteTime(Math.max(...node.pendingTokens.map(t => t.expiresAt))) }}) and could re-enroll this machine.
             </p>
             <template v-if="identity?.status === 'active'">
               <button

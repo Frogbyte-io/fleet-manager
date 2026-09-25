@@ -31,6 +31,14 @@ const props = defineProps<{
   machineId: string
 }>()
 
+// A settled operation changed the guest; re-read what the page shows.
+function refresh() {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['fleet'] }),
+    queryClient.invalidateQueries({ queryKey: ['machine', props.machineId] }),
+  ])
+}
+
 // Proxmox operations the CLI also runs with `timeoutSeconds: 300`.
 const TIMEOUT_SECONDS = 300
 const queryClient = useQueryClient()
@@ -159,13 +167,19 @@ const destructiveCmd = computed(() => params.value ? destructiveCommand(destruct
 async function requestReview() {
   if (!params.value)
     return
+  // What is being reviewed, captured before the request: an edit while the
+  // request is in flight must not install a review of the old values.
+  const action = destructiveAction.value
+  const requested = JSON.stringify(params.value)
   reviewBusy.value = true
   reviewError.value = ''
   try {
-    review.value = unwrap<ProxmoxReviewDto>(await reviewProxmoxOperation(props.guest.accountId, props.guest.vmid, destructiveAction.value, {
+    const result = unwrap<ProxmoxReviewDto>(await reviewProxmoxOperation(props.guest.accountId, props.guest.vmid, action, {
       node: props.guest.node,
       params: params.value,
     }))
+    if (destructiveAction.value === action && JSON.stringify(params.value) === requested)
+      review.value = result
   }
   catch (error) {
     reviewError.value = errorMessage(error)
@@ -306,6 +320,7 @@ async function runReviewed() {
       <OperationStatus
         v-if="lifecycleOperation"
         :operation-id="lifecycleOperation"
+        @settled="refresh"
       />
     </section>
 
@@ -445,6 +460,7 @@ async function runReviewed() {
       <OperationStatus
         v-if="destructiveOperation"
         :operation-id="destructiveOperation"
+        @settled="refresh"
       />
       <CopyFleetctl
         :command="destructiveCmd"

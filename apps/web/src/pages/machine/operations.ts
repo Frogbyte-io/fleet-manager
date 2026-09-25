@@ -16,6 +16,7 @@ export interface TrackedOperation {
 export interface MachineOperations {
   operations: Ref<TrackedOperation[]>
   track: (operation: OperationDto, label: string) => void
+  forget: (ids: string[]) => void
 }
 
 const KEY: InjectionKey<MachineOperations> = Symbol('machine-operations')
@@ -36,12 +37,26 @@ function load(machineId: string): TrackedOperation[] {
 
 export function provideMachineOperations(machineId: string): MachineOperations {
   const operations = ref<TrackedOperation[]>(load(machineId))
+  // Storage is best-effort: when it is unavailable or full, tracking stays
+  // in memory rather than failing the mutation that already succeeded.
+  function persist() {
+    try {
+      sessionStorage.setItem(storageKey(machineId), JSON.stringify(operations.value))
+    }
+    catch {
+      // Memory-only for this tab.
+    }
+  }
   function track(operation: OperationDto, label: string) {
     const entry = { id: operation.id, kind: operation.kind, label, startedAt: operation.createdAt }
     operations.value = [entry, ...operations.value.filter(o => o.id !== operation.id)].slice(0, 50)
-    sessionStorage.setItem(storageKey(machineId), JSON.stringify(operations.value))
+    persist()
   }
-  const value = { operations, track }
+  function forget(ids: string[]) {
+    operations.value = operations.value.filter(o => !ids.includes(o.id))
+    persist()
+  }
+  const value = { operations, track, forget }
   provide(KEY, value)
   return value
 }

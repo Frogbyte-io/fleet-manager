@@ -26,7 +26,21 @@ export function unwrap<T>(response: { status: number, data: unknown }, ok: numbe
   throw new ApiRequestError(response.status, body.code ?? null, body.code ? `${body.code}: ${detail}` : detail)
 }
 
-/** `pending` and `running` are the only non-terminal operation states. */
+/** The operation states that never change again (fleet-core `OperationState`). */
+const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'timed_out'])
+
+/**
+ * Whether an operation has settled. `cancelling` and
+ * `blocked_manual_approval` are still live, and so is any state this client
+ * does not know yet.
+ */
 export function isTerminal(state: string): boolean {
-  return state !== 'pending' && state !== 'running'
+  return TERMINAL.has(state)
+}
+
+/** Retries only failures a retry can fix: network errors and 5xx answers. */
+export function retryTransient(count: number, error: unknown): boolean {
+  if (error instanceof ApiRequestError && error.status < 500)
+    return false
+  return count < 2
 }

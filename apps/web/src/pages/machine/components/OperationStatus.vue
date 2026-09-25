@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { cancelOperation, getOperation, type OperationDto } from '@frogbyte-io/fleet-api-client'
 import StatusChip from '@/components/fleet/StatusChip.vue'
@@ -9,6 +9,7 @@ import { errorMessage, isTerminal, unwrap } from '../api'
 
 // Follows one durable operation until it reaches a terminal state.
 const props = defineProps<{ operationId: string, label?: string }>()
+const emit = defineEmits<{ settled: [operation: OperationDto] }>()
 
 const query = useQuery({
   queryKey: computed(() => ['operation', props.operationId]),
@@ -17,6 +18,13 @@ const query = useQuery({
 })
 
 const operation = computed(() => query.data.value ?? null)
+
+// Tells the owner once the operation settles, so it can refresh what the
+// operation changed.
+watch(() => operation.value?.state, (state, previous) => {
+  if (state && isTerminal(state) && previous !== state && operation.value)
+    emit('settled', operation.value)
+})
 const cancelError = ref('')
 
 const tone = computed(() => {

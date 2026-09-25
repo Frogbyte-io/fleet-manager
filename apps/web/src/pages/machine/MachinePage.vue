@@ -10,7 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 import { machineStatusTone } from '../fleet/inventory'
 import { useFleetInventory } from '../fleet/useFleetInventory'
-import { ApiRequestError, errorMessage, unwrap } from './api'
+import { ApiRequestError, errorMessage, retryTransient, unwrap } from './api'
 import { parseSshReference, sshCommand, vscodeRemoteUrl } from './handoff'
 import { provideMachineOperations } from './operations'
 import AuditTab from './tabs/AuditTab.vue'
@@ -33,7 +33,7 @@ provideMachineOperations(machineId)
 const machineQuery = useQuery({
   queryKey: ['machine', machineId],
   queryFn: async () => unwrap<MachineDto>(await getMachine(machineId)),
-  retry: (count, error) => !(error instanceof ApiRequestError && error.status === 404) && count < 2,
+  retry: retryTransient,
 })
 const machine = computed(() => machineQuery.data.value ?? null)
 const notFound = computed(() => machineQuery.error.value instanceof ApiRequestError && machineQuery.error.value.status === 404)
@@ -41,6 +41,11 @@ const notFound = computed(() => machineQuery.error.value instanceof ApiRequestEr
 const { inventory, isLoading: inventoryLoading } = useFleetInventory()
 const item = computed(() => inventory.value.machines.find(m => m.id === machineId) ?? null)
 const guests = computed(() => inventory.value.guests.filter(g => g.candidates.some(c => c.machineId === machineId)))
+// The Guest tab depends on the Proxmox sources only, not on tailnet state.
+const proxmoxSources = computed(() => inventory.value.sources.filter(s => s.key.startsWith('proxmox')))
+const proxmoxLoading = computed(() =>
+  proxmoxSources.value.some(s => s.state === 'loading') || (proxmoxSources.value.length === 0 && inventoryLoading.value),
+)
 
 const TABS = [
   { value: 'overview', label: 'Overview' },
@@ -119,6 +124,7 @@ async function copySsh() {
     <div
       v-else-if="machineQuery.error.value"
       class="mt-6 rounded-sm border border-fc-err/40 p-6"
+      data-testid="machine-error"
     >
       <p class="text-sm text-fc-err">
         Machine unavailable: {{ errorMessage(machineQuery.error.value) }}
@@ -220,7 +226,8 @@ async function copySsh() {
             <GuestTab
               :guests="guests"
               :machine-id="machine.id"
-              :loading="inventoryLoading"
+              :loading="proxmoxLoading"
+              :problems="proxmoxSources.filter(s => s.state !== 'ok' && s.state !== 'loading')"
             />
           </TabsContent>
         </div>
