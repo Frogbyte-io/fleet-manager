@@ -59,6 +59,44 @@ impl fleet_application::authz::Authorizer for DenySkills {
 }
 
 #[derive(Debug)]
+struct DenySecondMachine;
+impl fleet_application::authz::Authorizer for DenySecondMachine {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        if request.action == fleet_application::authz::Permission::SkillsRead
+            && request.resource == Some("m-2")
+        {
+            fleet_application::authz::Decision::deny(
+                fleet_application::authz::ReasonId::UnknownPrincipal,
+            )
+        } else {
+            fleet_application::authz::Decision::allow()
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DenyFirstMachine;
+impl fleet_application::authz::Authorizer for DenyFirstMachine {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        if request.action == fleet_application::authz::Permission::SkillsRead
+            && request.resource == Some("m-1")
+        {
+            fleet_application::authz::Decision::deny(
+                fleet_application::authz::ReasonId::UnknownPrincipal,
+            )
+        } else {
+            fleet_application::authz::Decision::allow()
+        }
+    }
+}
+
+#[derive(Debug)]
 struct FakeOperations;
 #[async_trait::async_trait]
 impl fleet_application::operation::OperationPort for FakeOperations {
@@ -175,6 +213,46 @@ impl fleet_application::operation::OperationPort for FakeOperations {
     }
     async fn queue_depths(&self) -> Result<fleet_application::operation::QueueDepths, PortFailure> {
         unimplemented!()
+    }
+}
+
+#[derive(Debug)]
+struct FakeSkills;
+#[async_trait::async_trait]
+impl fleet_application::skills::SkillsPort for FakeSkills {
+    async fn get(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<fleet_application::skills::SkillsSnapshot>, PortFailure> {
+        Ok((machine_id == "m-1").then(|| snapshot("m-1")))
+    }
+    async fn list(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<fleet_application::skills::SkillsSnapshot>, PortFailure> {
+        Ok(vec![snapshot("m-1"), snapshot("m-2"), snapshot("m-3")]
+            .into_iter()
+            .filter(|row| after.is_none_or(|cursor| row.machine_id.as_str() > cursor))
+            .take(limit as usize)
+            .collect())
+    }
+    async fn record(
+        &self,
+        _snapshot: &fleet_application::skills::SkillsSnapshot,
+    ) -> Result<(), PortFailure> {
+        Ok(())
+    }
+}
+
+fn snapshot(machine_id: &str) -> fleet_application::skills::SkillsSnapshot {
+    fleet_application::skills::SkillsSnapshot {
+        machine_id: machine_id.to_owned(),
+        availability: fleet_application::skills::SkillsAvailability::Available,
+        cli_version: Some("1.40.0".into()),
+        data: serde_json::json!({"skills": [], "agents": [], "presets": []}),
+        update_check: "complete".into(),
+        observed_at: 0,
     }
 }
 
@@ -327,6 +405,9 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         onboarding: None,
         tailnet: None,
         projects: None,
+        skills: Some(Arc::new(fleet_application::skills::Skills::new(Arc::new(
+            FakeSkills,
+        )))),
         proxmox: None,
         images: None,
         lab: None,
@@ -388,6 +469,56 @@ async fn a_probe_starts_a_durable_operation() {
     let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     assert_eq!(value["data"]["kind"], "skills.probe");
+}
+
+#[tokio::test]
+async fn skills_read_endpoints_use_machine_scoped_skills_permission() {
+    let authorizer = Arc::new(Recording::default());
+    let state = state_for(authorizer.clone());
+    let (status, value) = call(state.clone(), "GET", "/machines/m-1/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["data"]["availability"], "available");
+    assert_eq!(value["data"]["stale"], true);
+    let (status, rows) = call(state, "GET", "/skills/matrix", None).await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    assert_eq!(rows["items"].as_array().unwrap().len(), 3);
+    let checks = authorizer.resources.lock().unwrap();
+    assert!(checks.iter().any(|(action, resource)| action == "skills.read" && resource.as_deref() == Some("m-1")));
+    assert!(checks.iter().any(|(action, resource)| action == "skills.read" && resource.as_deref() == Some("m-2")));
+}
+
+#[tokio::test]
+async fn the_matrix_omits_each_machine_denied_by_skills_read() {
+    let state = state_for(Arc::new(DenySecondMachine));
+    let (status, page) = call(state, "GET", "/skills/matrix", None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["items"][0]["machineId"], "m-1");
+    assert_eq!(page["items"][1]["machineId"], "m-3");
+}
+
+#[tokio::test]
+async fn the_matrix_cursor_skips_denied_rows_without_exposing_their_ids() {
+    let state = state_for(Arc::new(DenyFirstMachine));
+    let (status, first) = call(state.clone(), "GET", "/skills/matrix?limit=1", None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["items"][0]["machineId"], "m-2");
+    assert_eq!(first["page"]["nextCursor"], "m-2");
+    assert_ne!(first["page"]["nextCursor"], "m-1");
+
+    let (status, second) = call(state, "GET", "/skills/matrix?cursor=m-2&limit=1", None).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_eq!(second["items"][0]["machineId"], "m-3");
+    assert!(second["page"]["nextCursor"].is_null());
+}
+
+#[tokio::test]
+async fn skills_read_denial_does_not_fall_back_to_machine_read() {
+    let state = state_for(Arc::new(DenySkills));
+    let (status, value) = call(state, "GET", "/machines/m-1/skills", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
 }
 
 #[tokio::test]

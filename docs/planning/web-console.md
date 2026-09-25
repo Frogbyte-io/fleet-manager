@@ -130,7 +130,12 @@ Proposed additions (each needs a plan/ADR decision because they widen the read-o
 - `git` backup
 - `--json` with stable error codes
 
-It still has **no command to read or write a skill's files**.
+The v1.40.0 CLI does expose skills show --json with Markdown content and
+absolute local paths, so that command is outside the safe read contract for
+Fleet's machine inventory. FM-920 uses only list, preset, agent, and update
+check fields, dropping descriptions, paths, source references, errors, and
+content before persistence. Fleet-authored content remains in Fleet's own
+catalog and staging path.
 
 **Model.** Keep Skills Manager's three states separate: library membership, preset membership, and per-agent deployment. Fleet adds two things on top:
 1. **Fleet skill catalog.** Skills Fleet authors or references:
@@ -150,7 +155,7 @@ It still has **no command to read or write a skill's files**.
 **Reconciliation:**
 - Assignments compose into desired state as a Fleet-managed skill set per machine. This is the "Fleet-managed preset" ownership rule already recorded in `docs/research/ecosystem.md`.
 - The M4 planner/apply engine (which already orders and compensates `skills.deploy`) produces install/update/deploy steps. Missing or extra deployments are **drift**, shown in the matrix and on the overview attention queue.
-- Stale or offline machines queue their steps. Machines without the CLI (e.g. aarch64, where no official build exists) report *unavailable* rather than guessing.
+- Stale or offline machines queue their steps. Machines without the CLI report *unavailable* rather than guessing. Skills Manager v1.40.0 publishes a Linux ARM64 artifact; Fleet's initial tested contract is pinned to v1.40.0 until fixtures are refreshed.
 
 **Console:**
 - **Fleet matrix**: skill × machine; cells show per-agent deployment, version, update-available and drift. Groups are *Global*, *assigned by group*, and *machine-local (not managed by Fleet)*.
@@ -158,7 +163,7 @@ It still has **no command to read or write a skill's files**.
 - **Catalog**: Fleet-authored skills with a Markdown editor (frontmatter validated), version history with diffs, assignment editor, a **rollout plan preview**, then publish & roll out.
 - **Presets**: list/CRUD Skills Manager presets per machine; Fleet-managed presets are marked as such.
 - **Search skills.sh** via `skills search --json`, then install into catalog or machine.
-- Reading or editing the content of *machine-local* skills (not authored by Fleet) waits for an upstream content contract (spike FM-S10). Until then, the UI offers "adopt into Fleet catalog" by re-authoring, never by reading library files.
+- Editing the content of *machine-local* skills (not authored by Fleet) remains out of scope. The CLI can expose content and local paths through show --json, but FM-920 deliberately does not query it; adoption into Fleet catalog remains a re-authoring flow.
 
 **Official `fleet` skill:**
 - Replaces the legacy `bootstrap/fleet-bootstrap` (which documents `agents-registry`).

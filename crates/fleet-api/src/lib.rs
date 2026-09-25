@@ -92,6 +92,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         projects::StartDiscoveryRequest,
         skills::SkillsAuthDto,
         skills::StartSkillsOperationRequest,
+        skills::SkillsSnapshotDto,
         frogenv::FrogenvActionDto,
         frogenv::FrogenvAuthDto,
         frogenv::StartFrogenvOperationRequest,
@@ -242,6 +243,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(projects::start_discovery))
                 .routes(routes!(projects::record_checkouts))
                 .routes(routes!(skills::start_skills_operation))
+                .routes(routes!(skills::get_machine_skills))
+                .routes(routes!(skills::get_skills_matrix))
                 .routes(routes!(frogenv::start_frogenv_operation))
                 .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(ready::start_ready_workflow))

@@ -24,9 +24,9 @@ use base64::Engine as _;
 
 use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 
-/// The per-stream output cap. Provider output is evidence, not a payload;
-/// anything larger belongs in an artifact store.
-pub const MAX_STREAM_BYTES: usize = 64 * 1024;
+/// The per-stream output cap. Structured inventory probes can return a
+/// bounded fleet read model; larger payloads belong in an artifact store.
+pub const MAX_STREAM_BYTES: usize = 1024 * 1024;
 
 /// The metadata the remote prologue decodes before running the script.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

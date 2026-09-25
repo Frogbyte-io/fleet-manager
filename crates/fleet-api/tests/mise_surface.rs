@@ -350,6 +350,7 @@ fn state_for(
             onboarding: None,
             tailnet: None,
             projects: None,
+            skills: None,
             proxmox: None,
             images: None,
             lab: None,

@@ -322,7 +322,7 @@ fn output_truncates_at_the_cap() {
         &ExecutionLimiter::new(4),
         &spec(&sshd),
         // Produce far more than the cap.
-        "i=0; while [ $i -lt 100000 ]; do echo 'x'; i=$((i+1)); done",
+        "i=0; while [ $i -lt 600000 ]; do echo 'x'; i=$((i+1)); done",
         &ScriptMetadata::default(),
         Duration::from_secs(60),
     )

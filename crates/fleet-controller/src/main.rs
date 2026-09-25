@@ -219,11 +219,16 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     ));
                 std::sync::Arc::new(fleet_controller::skills::SkillsDispatch::new(
                     with_frogenv.clone(),
-                    std::sync::Arc::new(fleet_controller::skills::SkillsExecutor::new(
-                        machines,
-                        config.data_dir.join("ssh"),
-                        limiter.clone(),
-                    )),
+                    std::sync::Arc::new(
+                        fleet_controller::skills::SkillsExecutor::new(
+                            machines,
+                            config.data_dir.join("ssh"),
+                            limiter.clone(),
+                        )
+                        .with_snapshot_port(std::sync::Arc::new(
+                            fleet_storage_sqlite::SkillsRepository::new(store.pool().clone()),
+                        )),
+                    ),
                 ))
             };
             // The mise executor handles the FM-304 kinds over the same

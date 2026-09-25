@@ -24,6 +24,7 @@ struct Fixture {
     _dir: tempfile::TempDir,
     operations: Operations,
     executor: fleet_controller::skills::SkillsExecutor,
+    snapshots: std::sync::Arc<fleet_storage_sqlite::SkillsRepository>,
     machine_id: String,
     endpoint_id: String,
     identity_file: String,
@@ -62,11 +63,13 @@ async fn compose(sshd: &TestSshd) -> Fixture {
 
     let executor_machines: std::sync::Arc<dyn MachinePort> =
         std::sync::Arc::new(MachineRepository::new(pool.clone()));
+    let snapshots = std::sync::Arc::new(fleet_storage_sqlite::SkillsRepository::new(pool.clone()));
     let executor = fleet_controller::skills::SkillsExecutor::new(
         executor_machines,
         dir.path().join("ssh"),
         ExecutionLimiter::new(4),
-    );
+    )
+    .with_snapshot_port(snapshots.clone());
     let operations = Operations::new(
         std::sync::Arc::new(OperationRepository::new(pool.clone())),
         std::sync::Arc::new(AuditSink::new(pool.clone())),
@@ -75,6 +78,7 @@ async fn compose(sshd: &TestSshd) -> Fixture {
         _dir: dir,
         operations,
         executor,
+        snapshots,
         machine_id: machine.id,
         endpoint_id,
         identity_file: format!("{}/user_ed25519", sshd.keys_dir.path().display()),
@@ -139,10 +143,14 @@ fn install_stub_cli(home: &str, sha_of_stub: Option<&str>) -> String {
 echo "$@" >> /tmp/fleet-stub-cli.log
 [ "$1" = "--json" ] && shift
 case "$1" in
-  --version) echo "skills-manager-cli 1.34.2" ;;
+  --version) echo '{"version":"1.40.0"}' ;;
+  agents) echo '[{"id":"claude_code","name":"Claude Code","skillsDir":"/secret/agent/path"}]' ;;
+  presets) echo '[{"id":"default","name":"Default","description":"private","icon":"x","sort_order":0,"skill_count":1,"active":true}]' ;;
   skills)
     shift
     case "$1" in
+      list) echo '[{"id":"hello","name":"Hello","description":"private text","path":"/secret/skill/path","enabled":true,"preset_ids":["default"],"deployed_to":["claude_code"],"source_ref":"private"}]' ;;
+      check) echo '[{"skill_id":"hello","update_status":"update_available","last_check_error":"/secret/error"}]' ;;
       deploy)
         skill=$2; shift 2
         agents=""
@@ -205,14 +213,25 @@ async fn the_probe_answers_presence_version_and_agents() {
     let (state, result, error) = fixture.run_kind("skills.probe", payload).await;
     assert_eq!(state, "succeeded", "{error:?}");
     let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-    assert_eq!(result["probe"]["present"], true);
-    let version = result["probe"]["version64"].as_str().unwrap();
-    assert!(
-        String::from_utf8(base64_decode(version).unwrap())
+    assert_eq!(result["snapshotRecorded"], true);
+    assert_eq!(result["availability"], "available");
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains("hello"));
+    let snapshot =
+        fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
+            .await
             .unwrap()
-            .contains("1.34.2"),
-        "the version travels as base64"
+            .unwrap();
+    assert_eq!(snapshot.cli_version.as_deref(), Some("1.40.0"));
+    assert_eq!(
+        snapshot.data["skills"][0]["updateStatus"],
+        "update_available"
     );
+    assert_eq!(snapshot.data["skills"][0]["deployedTo"][0], "claude_code");
+    let encoded = serde_json::to_string(&snapshot).unwrap();
+    assert!(!encoded.contains("/secret/"));
+    assert!(!encoded.contains("private text"));
+    assert!(!encoded.contains("private\""));
 }
 
 #[tokio::test]
@@ -235,10 +254,14 @@ async fn an_absent_cli_answers_honestly() {
     let (state, result, error) = fixture.run_kind("skills.probe", payload).await;
     assert_eq!(state, "succeeded", "{error:?}");
     let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-    assert_eq!(result["probe"]["present"], false);
-    let reason = result["probe"]["reason64"].as_str().unwrap();
-    let decoded = String::from_utf8(base64_decode(reason).unwrap()).unwrap();
-    assert!(decoded.contains("not installed"), "{decoded}");
+    assert_eq!(result["snapshotRecorded"], true);
+    assert_eq!(result["availability"], "absent");
+    let snapshot =
+        fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(snapshot.update_check, "unavailable");
 }
 
 #[tokio::test]
@@ -348,8 +371,8 @@ async fn the_pinned_install_verifies_the_checksum() {
     let (state, result, error) = fixture.run_kind("skills.probe", payload).await;
     assert_eq!(state, "succeeded", "{error:?}");
     let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-    assert_eq!(result["probe"]["present"], true);
-    assert_eq!(result["probe"]["installed"], true);
+    assert_eq!(result["snapshotRecorded"], true);
+    assert_eq!(result["availability"], "available");
     assert!(
         format!("{home}/.local/bin/skills-manager-cli")
             .lines()
@@ -368,13 +391,19 @@ async fn the_pinned_install_verifies_the_checksum() {
         "artifactSha256": "0".repeat(64),
         "timeoutSeconds": 60,
     });
-    let (state, result, _error) = fixture.run_kind("skills.probe", payload).await;
-    assert_eq!(state, "succeeded");
-    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
-    assert_eq!(result["probe"]["present"], false);
-    let reason = result["probe"]["reason64"].as_str().unwrap();
-    let decoded = String::from_utf8(base64_decode(reason).unwrap()).unwrap();
-    assert!(decoded.contains("checksum did not match"), "{decoded}");
+    let (state, result, error) = fixture.run_kind("skills.probe", payload).await;
+    assert_eq!(state, "failed");
+    assert!(result.is_none());
+    assert!(error.unwrap().contains("checksum did not match"));
+    let retained =
+        fleet_application::skills::SkillsPort::get(fixture.snapshots.as_ref(), &fixture.machine_id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(
+        retained.availability,
+        fleet_application::skills::SkillsAvailability::Available
+    ));
 
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(format!("{home}/.local/bin/skills-manager-cli"));
@@ -392,7 +421,7 @@ async fn credential_shaped_cli_output_is_redacted() {
     let path = format!("{bin_dir}/skills-manager-cli");
     std::fs::write(
         &path,
-        "#!/usr/bin/env bash\ncase \"$1\" in\n  --version) echo \"skills-manager-cli 1.34.2\"; exit 0 ;;\nesac\necho '{\"ok\":false,\"code\":\"TARGET_CONFLICT\",\"message\":\"refused https://user:secret@host.invalid/x\"}' >&2\nexit 2\n",
+        "#!/usr/bin/env bash\ncase \"$1\" in\n  --version) echo \"skills-manager-cli 1.40.0\"; exit 0 ;;\nesac\necho '{\"ok\":false,\"code\":\"TARGET_CONFLICT\",\"message\":\"refused https://user:secret@host.invalid/x\"}' >&2\nexit 2\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -415,11 +444,4 @@ async fn credential_shaped_cli_output_is_redacted() {
     assert!(!error.contains("secret"), "{error}");
     assert!(error.contains("***@host.invalid"), "{error}");
     let _ = std::fs::remove_file(&path);
-}
-
-fn base64_decode(encoded: &str) -> Option<Vec<u8>> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD
-        .decode(encoded.as_bytes())
-        .ok()
 }

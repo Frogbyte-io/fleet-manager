@@ -20,6 +20,7 @@ pub mod planner;
 pub mod project;
 pub mod proxmox;
 pub mod ready;
+pub mod skills;
 pub mod source;
 pub mod tailnet;
 pub mod worker;

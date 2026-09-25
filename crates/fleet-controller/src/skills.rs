@@ -53,9 +53,9 @@ enum GateOutcome {
     Deadline,
 }
 
-/// The highest CLI version the contract fixtures were recorded against.
-/// A CLI answering a higher major version degrades explicitly.
-pub const TESTED_CLI_VERSION: &str = "1.34.2";
+/// The exact CLI version the read contract fixtures were recorded against.
+/// Other versions degrade explicitly until fixtures are refreshed.
+pub const TESTED_CLI_VERSION: &str = "1.40.0";
 
 /// The deadline bound for one skills operation.
 pub const MAX_SKILLS_TIMEOUT: u64 = MAX_SCRIPT_TIMEOUT;
@@ -130,14 +130,20 @@ struct UndeployPayload {
 }
 
 /// The kind-dispatching skills executor.
-#[derive(Debug)]
 pub struct SkillsExecutor {
     machines: Arc<dyn MachinePort>,
     provider: fleet_provider_ssh::SshProvider,
     limiter: Arc<ExecutionLimiter>,
+    snapshots: Option<Arc<dyn fleet_application::skills::SkillsPort>>,
     /// Retained for the provider's isolated directory lifetime.
     #[allow(dead_code)]
     work_dir: std::path::PathBuf,
+}
+
+impl std::fmt::Debug for SkillsExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SkillsExecutor").finish_non_exhaustive()
+    }
 }
 
 impl SkillsExecutor {
@@ -159,8 +165,19 @@ impl SkillsExecutor {
             machines,
             provider,
             limiter,
+            snapshots: None,
             work_dir,
         }
+    }
+
+    /// Attach durable storage for normalized skill observations.
+    #[must_use]
+    pub fn with_snapshot_port(
+        mut self,
+        snapshots: Arc<dyn fleet_application::skills::SkillsPort>,
+    ) -> Self {
+        self.snapshots = Some(snapshots);
+        self
     }
 
     async fn resolve(
@@ -293,6 +310,15 @@ impl SkillsExecutor {
                 .await
             }
             (Some(result), _) if result.exit_code == Some(0) => {
+                if result.truncated_stdout {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "inventory_too_large",
+                        "the bounded skills inventory response was truncated; the previous observation was retained",
+                    )
+                    .await;
+                }
                 let parsed: Option<serde_json::Value> = result
                     .stdout
                     .lines()
@@ -308,7 +334,52 @@ impl SkillsExecutor {
                     )
                     .await;
                 };
-                let result_json = serde_json::json!({ "probe": parsed }).to_string();
+                if let Some(reason) = parsed["installFailed"].as_str() {
+                    let (code, detail) = match reason {
+                        "checksum_mismatch" => (
+                            "checksum_mismatch",
+                            "the pinned Skills Manager checksum did not match",
+                        ),
+                        "download_failed" => (
+                            "install_failed",
+                            "the pinned Skills Manager artifact could not be downloaded",
+                        ),
+                        _ => (
+                            "install_failed",
+                            "the pinned Skills Manager binary could not be installed",
+                        ),
+                    };
+                    return complete_failure(operations, &operation.id, code, detail).await;
+                }
+                if parsed["inventoryTooLarge"].as_bool() == Some(true) {
+                    return complete_failure(operations, &operation.id, "inventory_too_large", "the Skills Manager inventory exceeds the bounded probe response; the previous observation was retained").await;
+                }
+                let Some(snapshot) = normalize_probe(&payload.machine_id, &parsed) else {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "unsupported_version",
+                        "the CLI's skills contract did not answer in the documented shape",
+                    )
+                    .await;
+                };
+                if let Some(port) = &self.snapshots {
+                    port.record(&snapshot)
+                        .await
+                        .map_err(|_| "skills snapshot persistence failed".to_owned())?;
+                }
+                // Operation results are readable with operations.read. Keep
+                // the sensitive inventory behind the skills.read endpoints.
+                let result_json = serde_json::json!({
+                    "snapshotRecorded": self.snapshots.is_some(),
+                    "availability": match snapshot.availability {
+                        fleet_application::skills::SkillsAvailability::Available => "available",
+                        fleet_application::skills::SkillsAvailability::Absent => "absent",
+                        fleet_application::skills::SkillsAvailability::Unsupported => "unsupported",
+                    },
+                    "observedAt": snapshot.observed_at,
+                })
+                .to_string();
                 operations
                     .complete(&operation.id, "succeeded", Some(&result_json), None)
                     .await
@@ -547,7 +618,7 @@ printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
         if !version_acceptable(&version) {
             return GateOutcome::Unsupported {
                 detail: format!(
-                    "the CLI reports {version}, which is outside the tested range (up to {TESTED_CLI_VERSION})"
+                    "the CLI reports {version}, but the tested contract version is exactly {TESTED_CLI_VERSION}"
                 ),
             };
         }
@@ -559,51 +630,216 @@ printf '{"version64":"%s"}\n' "$(printf '%s' "$fleet_version" | base64 -w0)"
 /// one JSON line with base64 values. An absent CLI reports honestly.
 fn probe_script() -> String {
     r#"fleet_b64() { printf '%s' "$1" | base64 -w0; }
-# The CLI may live off-PATH (the app publishes it to ~/.local/bin).
+fleet_emit_absent() {
+  printf '{"present":false}\n'
+}
+fleet_emit_failure() {
+  printf '{"installFailed":"%s"}\n' "$1"
+}
+# Resolve the managed copy or a service-account PATH copy.
 for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
-# $1 is the skills root (empty means the default); FLEET_PIN_URL and
-# FLEET_PIN_SHA256 carry an optional pinned release to install when the
-# CLI is absent.
 fleet_root=$1
-if [ -n "$fleet_cli" ]; then
-  fleet_version=$("$fleet_cli" --version 2>/dev/null | head -n 1)
-  if [ -z "$fleet_version" ]; then
-    printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "the binary did not answer --version")"
-    exit 0
-  fi
-  if [ -n "$fleet_root" ]; then
-    fleet_agents=$("$fleet_cli" --skills-root "$fleet_root" --json agents list 2>/dev/null | head -c 65536) || {{ fleet_agents=""; fleet_agents_failed=1; }}
-  else
-    fleet_agents=$("$fleet_cli" --json agents list 2>/dev/null | head -c 65536) || {{ fleet_agents=""; fleet_agents_failed=1; }}
-  fi
-  if [ "${fleet_agents_failed:-0}" = "1" ]; then
-    printf '{"present":true,"version64":"%s","agentsFailed":true}\n' "$(fleet_b64 "$fleet_version")"
-    exit 0
-  fi
-  printf '{"present":true,"version64":"%s","agents64":"%s"}\n' \
-    "$(fleet_b64 "$fleet_version")" "$(fleet_b64 "$fleet_agents")"
-elif [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_SHA256:-}" ]; then
-  # Pinned install: verify the digest before the binary lands anywhere.
-  fleet_tmp=$(mktemp)
-  curl -fsSL --max-time 120 -o "$fleet_tmp" "$FLEET_PIN_URL" || { rm -f "$fleet_tmp"; printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "the pinned release could not be downloaded")"; exit 0; }
+if [ -z "${fleet_cli:-}" ] && [ -n "${FLEET_PIN_URL:-}" ] && [ -n "${FLEET_PIN_SHA256:-}" ]; then
+  fleet_tmp=$(mktemp) || { fleet_emit_failure download_failed; exit 0; }
+  trap 'rm -f "$fleet_tmp"' EXIT
+  curl -fsSL --max-time 120 -o "$fleet_tmp" "$FLEET_PIN_URL" || { fleet_emit_failure download_failed; exit 0; }
   fleet_digest=$(sha256sum "$fleet_tmp" | awk '{print $1}')
-  if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then
-    rm -f "$fleet_tmp"
-    printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "the pinned release's checksum did not match")"
-    exit 0
-  fi
+  if [ "$fleet_digest" != "$FLEET_PIN_SHA256" ]; then fleet_emit_failure checksum_mismatch; exit 0; fi
   chmod +x "$fleet_tmp"
-  mkdir -p "$HOME/.local/bin"
-  mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli"
-  fleet_version=$("$HOME/.local/bin/skills-manager-cli" --version 2>/dev/null | head -n 1)
-  printf '{"present":true,"installed":true,"version64":"%s","agents64":""}\n' "$(fleet_b64 "$fleet_version")"
-else
-  printf '{"present":false,"reason64":"%s"}\n' "$(fleet_b64 "skills-manager-cli is not installed")"
+  mkdir -p "$HOME/.local/bin" || { fleet_emit_failure install_failed; exit 0; }
+  mv "$fleet_tmp" "$HOME/.local/bin/skills-manager-cli" || { fleet_emit_failure install_failed; exit 0; }
+  fleet_cli="$HOME/.local/bin/skills-manager-cli"
 fi
+if [ -z "${fleet_cli:-}" ]; then fleet_emit_absent; exit 0; fi
+fleet_version_output=$("$fleet_cli" --version 2>/dev/null | head -n 1)
+if [ -z "$fleet_version_output" ]; then printf '{"present":true,"unidentified":true}\n'; exit 0; fi
+case "$fleet_version_output" in
+  '{'*) fleet_version=$(printf '%s' "$fleet_version_output" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') ;;
+  *) fleet_version=$fleet_version_output ;;
+esac
+if [ -z "$fleet_version" ]; then printf '{"present":true,"unidentified":true}\n'; exit 0; fi
+fleet_version64=$(fleet_b64 "$fleet_version")
+case "$fleet_version" in
+  'skills-manager-cli 1.40.0'|'1.40.0') fleet_version='1.40.0'; fleet_version64=$(fleet_b64 "$fleet_version") ;;
+  *) printf '{"present":true,"version64":"%s","unsupportedVersion":true}\n' "$fleet_version64"; exit 0 ;;
+esac
+fleet_json() {
+  if [ -n "$fleet_root" ]; then "$fleet_cli" --skills-root "$fleet_root" --json "$@"; else "$fleet_cli" --json "$@"; fi
+}
+# Keep temporary upstream documents private and bounded. The EXIT trap
+# removes them on normal remote exit; a local SSH deadline cannot guarantee
+# that the remote process exits, so an interrupted command can leave a file.
+fleet_tmp=$(mktemp) || { printf '{"present":true,"version64":"%s","inventoryFailed":true}\n' "$fleet_version64"; exit 0; }
+trap 'rm -f "$fleet_tmp"' EXIT
+fleet_collect() {
+  fleet_max=$1; shift
+  : > "$fleet_tmp" || return 1
+  fleet_json "$@" > "$fleet_tmp" 2>/dev/null || return 1
+  fleet_bytes=$(wc -c < "$fleet_tmp")
+  [ "$fleet_bytes" -le "$fleet_max" ] || return 2
+  cat "$fleet_tmp"
+}
+fleet_agents_status=0; fleet_agents=$(fleet_collect 65536 agents list) || fleet_agents_status=$?
+fleet_skills_status=0; fleet_skills=$(fleet_collect 393216 skills list) || fleet_skills_status=$?
+fleet_presets_status=0; fleet_presets=$(fleet_collect 65536 presets list) || fleet_presets_status=$?
+fleet_checks_status=0; fleet_checks=$(fleet_collect 196608 skills check --all) || fleet_checks_status=$?
+if [ "$fleet_agents_status" = 2 ] || [ "$fleet_skills_status" = 2 ] || [ "$fleet_presets_status" = 2 ] || [ "$fleet_checks_status" = 2 ]; then
+  printf '{"present":true,"version64":"%s","inventoryTooLarge":true}\n' "$fleet_version64"
+  exit 0
+fi
+printf '{"present":true,"version64":"%s","agents64":"%s","skills64":"%s","presets64":"%s","checks64":"%s","agentsFailed":%s,"skillsFailed":%s,"presetsFailed":%s,"updateCheckFailed":%s}\n' \
+  "$fleet_version64" "$(fleet_b64 "${fleet_agents:-[]}")" "$(fleet_b64 "${fleet_skills:-[]}")" "$(fleet_b64 "${fleet_presets:-[]}")" "$(fleet_b64 "${fleet_checks:-[]}")" \
+  "$( [ "$fleet_agents_status" = 0 ] && echo false || echo true )" "$( [ "$fleet_skills_status" = 0 ] && echo false || echo true )" "$( [ "$fleet_presets_status" = 0 ] && echo false || echo true )" "$( [ "$fleet_checks_status" = 0 ] && echo false || echo true )"
 "#
     .to_owned()
+}
+
+fn normalize_probe(
+    machine_id: &str,
+    raw: &serde_json::Value,
+) -> Option<fleet_application::skills::SkillsSnapshot> {
+    use fleet_application::skills::{SkillsAvailability, SkillsSnapshot};
+    let now = fleet_core::SystemClock::now_unix_millis();
+    if raw["present"].as_bool() == Some(false) {
+        return Some(SkillsSnapshot {
+            machine_id: machine_id.to_owned(),
+            availability: SkillsAvailability::Absent,
+            cli_version: None,
+            data: serde_json::json!({"skills": [], "presets": [], "agents": []}),
+            update_check: "unavailable".into(),
+            observed_at: now,
+        });
+    }
+    if raw["unidentified"].as_bool() == Some(true) {
+        return Some(SkillsSnapshot {
+            machine_id: machine_id.to_owned(),
+            availability: SkillsAvailability::Unsupported,
+            cli_version: None,
+            data: serde_json::json!({"skills": [], "presets": [], "agents": []}),
+            update_check: "unsupported".into(),
+            observed_at: now,
+        });
+    }
+    let version = decoded_field(raw, "version64")?;
+    let version = parse_version_text(&version)?;
+    if !version_acceptable(&version) {
+        return Some(SkillsSnapshot {
+            machine_id: machine_id.to_owned(),
+            availability: SkillsAvailability::Unsupported,
+            cli_version: Some(version),
+            data: serde_json::json!({"skills": [], "presets": [], "agents": []}),
+            update_check: "unsupported".into(),
+            observed_at: now,
+        });
+    }
+    if raw["agentsFailed"].as_bool() == Some(true)
+        || raw["skillsFailed"].as_bool() == Some(true)
+        || raw["presetsFailed"].as_bool() == Some(true)
+    {
+        return None;
+    }
+    let agents: serde_json::Value = serde_json::from_slice(&decode_field(raw, "agents64")?).ok()?;
+    let skills: serde_json::Value = serde_json::from_slice(&decode_field(raw, "skills64")?).ok()?;
+    let presets: serde_json::Value =
+        serde_json::from_slice(&decode_field(raw, "presets64")?).ok()?;
+    let checks: serde_json::Value = serde_json::from_slice(&decode_field(raw, "checks64")?).ok()?;
+    let agents = agents.as_array()?;
+    let skills = skills.as_array()?;
+    let presets = presets.as_array()?;
+    let checks = if raw["updateCheckFailed"].as_bool() == Some(true) {
+        &[][..]
+    } else {
+        checks.as_array()?.as_slice()
+    };
+    let mut check_status = std::collections::HashMap::new();
+    for check in checks {
+        let id = safe_json_text(check.get("skill_id")?, 255)?;
+        let status = safe_json_text(check.get("update_status")?, 64)?;
+        check_status.insert(id.to_owned(), status.to_owned());
+    }
+    let normalized_agents = agents
+        .iter()
+        .map(|agent| {
+            let id = safe_json_text(agent.get("id")?, 255)?;
+            let name = match agent.get("name") {
+                Some(value) => safe_json_text(value, 512)?,
+                None => id,
+            };
+            let installed = optional_bool(agent, "installed", false)?;
+            let enabled = optional_bool(agent, "enabled", false)?;
+            Some(serde_json::json!({"id": id, "name": name, "installed": installed, "enabled": enabled}))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let normalized_skills = skills
+        .iter()
+        .map(|skill| {
+            let id = safe_json_text(skill.get("id")?, 255)?;
+            let name = safe_json_text(skill.get("name")?, 512)?;
+            let enabled = skill.get("enabled")?.as_bool()?;
+            let preset_ids = safe_string_array(skill.get("preset_ids")?, 255)?;
+            let deployed_to = safe_string_array(skill.get("deployed_to")?, 255)?;
+            let update_status = match check_status.get(id).map(String::as_str) {
+                Some("update_available") => "update_available",
+                Some("up_to_date") => "up_to_date",
+                Some("local_only") => "local_only",
+                _ => "unknown",
+            };
+            Some(serde_json::json!({"id": id, "name": name, "enabled": enabled, "presetIds": preset_ids, "deployedTo": deployed_to, "updateStatus": update_status}))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let normalized_presets = presets
+        .iter()
+        .map(|preset| {
+            let id = safe_json_text(preset.get("id")?, 255)?;
+            let name = safe_json_text(preset.get("name")?, 512)?;
+            let skill_count = preset.get("skill_count")?.as_u64()?;
+            let active = preset.get("active")?.as_bool()?;
+            Some(serde_json::json!({"id": id, "name": name, "skillCount": skill_count, "active": active}))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(SkillsSnapshot {
+        machine_id: machine_id.to_owned(),
+        availability: SkillsAvailability::Available,
+        cli_version: Some(version),
+        data: serde_json::json!({"skills": normalized_skills, "presets": normalized_presets, "agents": normalized_agents}),
+        update_check: if raw["updateCheckFailed"].as_bool() == Some(true) {
+            "failed"
+        } else {
+            "complete"
+        }
+        .into(),
+        observed_at: now,
+    })
+}
+
+fn safe_json_text(value: &serde_json::Value, max_bytes: usize) -> Option<&str> {
+    let text = value.as_str()?;
+    (!text.is_empty() && text.len() <= max_bytes && !text.chars().any(char::is_control))
+        .then_some(text)
+}
+
+fn optional_bool(object: &serde_json::Value, key: &str, default: bool) -> Option<bool> {
+    match object.get(key) {
+        None => Some(default),
+        Some(value) => value.as_bool(),
+    }
+}
+
+fn safe_string_array(value: &serde_json::Value, max_bytes: usize) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| safe_json_text(item, max_bytes).map(str::to_owned))
+        .collect()
+}
+
+fn decode_field(value: &serde_json::Value, field: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(value.get(field)?.as_str()?)
+        .ok()
 }
 
 /// The fixed mutation script: `$1` is the skill id, `$2` onwards the
@@ -694,38 +930,9 @@ fn parse_version_text(text: &str) -> Option<String> {
     None
 }
 
-/// Whether the CLI's reported version is within the tested range: same
-/// major and a minor at or below the tested minor, or an older one.
+/// Only the exact fixture version is accepted until fixtures are refreshed.
 fn version_acceptable(version: &str) -> bool {
-    let (tested_major, tested_minor) =
-        TESTED_CLI_VERSION
-            .split_once('.')
-            .map_or((1, 34), |(major, minor)| {
-                (
-                    major.parse::<u64>().unwrap_or(0),
-                    minor
-                        .split('.')
-                        .next()
-                        .and_then(|minor| minor.parse::<u64>().ok())
-                        .unwrap_or(0),
-                )
-            });
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() < 2 {
-        return false;
-    }
-    let Ok(major) = parts[0].parse::<u64>() else {
-        return false;
-    };
-    let Ok(minor) = parts[1]
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(parts[1])
-        .parse::<u64>()
-    else {
-        return false;
-    };
-    major < tested_major || (major == tested_major && minor <= tested_minor)
+    version == TESTED_CLI_VERSION
 }
 
 /// Decodes one base64 field from a probe JSON line.
@@ -898,7 +1105,12 @@ impl OperationExecutor for SkillsDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version_text;
+    use super::{normalize_probe, parse_version_text};
+
+    fn b64(value: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(value)
+    }
 
     #[test]
     fn both_documented_version_shapes_normalize_identically() {
@@ -918,5 +1130,45 @@ mod tests {
             Some("1.34.2".to_owned())
         );
         assert_eq!(parse_version_text(r#"{"foo":"bar"}"#), None);
+    }
+
+    #[test]
+    fn unsupported_cli_versions_are_recorded_without_guessing_at_the_contract() {
+        let raw =
+            serde_json::json!({ "present": true, "version64": b64("skills-manager-cli 2.0.0") });
+        let snapshot = normalize_probe("m-1", &raw).unwrap();
+        assert!(matches!(
+            snapshot.availability,
+            fleet_application::skills::SkillsAvailability::Unsupported
+        ));
+        assert_eq!(snapshot.cli_version.as_deref(), Some("2.0.0"));
+        assert_eq!(snapshot.data["skills"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn malformed_entries_reject_the_whole_inventory() {
+        let raw = serde_json::json!({
+            "present": true,
+            "version64": b64("skills-manager-cli 1.40.0"),
+            "agents64": b64("[]"),
+            "skills64": b64(r#"[{"id":"s","name":"Skill","enabled":true,"preset_ids":[],"deployed_to":"malformed"}]"#),
+            "presets64": b64("[]"),
+            "checks64": b64("[]"),
+        });
+        assert!(normalize_probe("m-1", &raw).is_none());
+    }
+
+    #[test]
+    fn unidentified_binaries_are_not_reported_as_absent() {
+        let snapshot = normalize_probe(
+            "m-1",
+            &serde_json::json!({"present": true, "unidentified": true}),
+        )
+        .unwrap();
+        assert!(matches!(
+            snapshot.availability,
+            fleet_application::skills::SkillsAvailability::Unsupported
+        ));
+        assert_eq!(snapshot.cli_version, None);
     }
 }
