@@ -77,3 +77,57 @@ export function destructiveCommand(action: DestructiveAction, guest: GuestRef, p
 export function observeGuestCommand(guest: GuestRef, machineId: string): string {
   return join(['fleetctl', 'proxmox', 'observe-guest', guest.accountId, String(guest.vmid), '--machine', machineId])
 }
+
+// Onboarding (`fleetctl machines onboard …`), tailnet import, and Proxmox
+// accounts, as the guided Add dialog drives them.
+
+export interface DraftInput {
+  user: string
+  host: string
+  port: number
+  name: string
+  description?: string
+  tags: string[]
+  auth: SshAuth
+}
+
+export function onboardCreateCommand(input: DraftInput): string {
+  return join([
+    'fleetctl', 'machines', 'onboard', 'create',
+    '--user', input.user,
+    '--host', input.host,
+    ...(input.port !== 22 ? ['--port', String(input.port)] : []),
+    ...(input.name ? ['--name', input.name] : []),
+    ...(input.description ? ['--description', input.description] : []),
+    ...input.tags.flatMap(tag => ['--tag', tag]),
+    ...authFlags(input.auth),
+  ])
+}
+
+export type DraftStage = 'test' | 'discover' | 'add' | 'cancel'
+
+export function onboardStageCommand(stage: DraftStage, draftId: string): string {
+  const wait = stage === 'test' || stage === 'discover' ? ['--wait'] : []
+  return join(['fleetctl', 'machines', 'onboard', stage, draftId, ...wait])
+}
+
+export function onboardConfirmCommand(draftId: string, fingerprint: string): string {
+  return join(['fleetctl', 'machines', 'onboard', 'confirm', draftId, '--fingerprint', fingerprint])
+}
+
+export function tailnetImportCommand(nodeId: string, user: string, port: number): string {
+  return join(['fleetctl', 'tailnet', 'import', nodeId, '--user', user, ...(port !== 22 ? ['--port', String(port)] : [])])
+}
+
+/** The token secret is read from stdin; it never appears in the command. */
+export function proxmoxCreateCommand(name: string, host: string, port: number, tokenId: string): string {
+  return `${join(['fleetctl', 'proxmox', 'create', '--name', name, '--host', host, ...(port !== 8006 ? ['--port', String(port)] : []), '--token-id', tokenId])}  # token secret on stdin`
+}
+
+export function proxmoxAccountCommand(verb: 'observe' | 'discover', accountId: string): string {
+  return join(['fleetctl', 'proxmox', verb, accountId])
+}
+
+export function proxmoxConfirmCommand(accountId: string, fingerprint: string): string {
+  return join(['fleetctl', 'proxmox', 'confirm', accountId, '--fingerprint', fingerprint])
+}

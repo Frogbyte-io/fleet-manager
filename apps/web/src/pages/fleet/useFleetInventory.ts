@@ -14,6 +14,7 @@ import {
   type ProxmoxDiscoveryDto,
 } from '@frogbyte-io/fleet-api-client'
 
+import { unwrap } from '../machine/api'
 import { buildInventory, type Inventory, type ProxmoxSourceInput } from './inventory'
 
 const MAX_PAGES = 20
@@ -22,14 +23,23 @@ function errorOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-interface Paged<T> {
+/**
+ * One account's discovery snapshot. The Add dialog shares this cache entry,
+ * so the thrown error keeps the API code (e.g. a fingerprint mismatch).
+ */
+export async function proxmoxDiscovery(accountId: string): Promise<ProxmoxDiscoveryDto> {
+  return unwrap<ProxmoxDiscoveryDto>(await discoverProxmoxCluster(accountId))
+}
+
+export interface Paged<T> {
   items: T[]
   page: { nextCursor?: string | null }
 }
 
-type PagedResponse<T> = { status: number, data: Paged<T> }
+export type PagedResponse<T> = { status: number, data: Paged<T> }
 
-async function fetchAllPages<T>(
+/** Follows `page.nextCursor` up to a safety cap; `truncated` reports hitting it. */
+export async function fetchAllPages<T>(
   fetchPage: (cursor?: string) => Promise<PagedResponse<T>>,
 ): Promise<{ items: T[], truncated: boolean }> {
   const items: T[] = []
@@ -107,12 +117,7 @@ export function useFleetInventory(): {
     queries: computed(() =>
       confirmedAccountIds.value.map(accountId => ({
         queryKey: ['fleet', 'proxmox-discovery', accountId],
-        queryFn: async () => {
-          const response = await discoverProxmoxCluster(accountId)
-          if (response.status === 200)
-            return response.data.data as ProxmoxDiscoveryDto
-          throw new Error(`discoverProxmoxCluster failed (${response.status})`)
-        },
+        queryFn: () => proxmoxDiscovery(accountId),
       })),
     ),
   })

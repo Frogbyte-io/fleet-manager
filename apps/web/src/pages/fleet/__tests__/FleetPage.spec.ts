@@ -224,6 +224,17 @@ describe('FleetPage', () => {
     expect(wrapper.find('[data-testid="copy-import"]').exists()).toBe(true)
   })
 
+  it('a tailnet card\'s Add to fleet opens the Add dialog on that device', async () => {
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+    const link = wrapper.get('[data-testid="add-tailnet-device"]')
+    const router = wrapper.vm.$router
+    await link.trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/fleet/add'))
+    expect(router.currentRoute.value.query).toEqual({ source: 'tailscale', device: 'ts2' })
+  })
+
   it('excludes templates from the guest section', async () => {
     const wrapper = await mountPage()
     await flushPromises()

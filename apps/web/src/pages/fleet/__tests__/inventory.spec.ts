@@ -5,6 +5,7 @@ import type { MachineDto, PageAssociatedGuestDtoItemsItem, PageCorrelatedDeviceD
 import {
   buildInventory,
   formatBytes,
+  isRoutableAddress,
   guestStatusTone,
   machineStatusTone,
   relativeTime,
@@ -191,6 +192,34 @@ describe('buildInventory', () => {
     expect(built.guests[0].osName).toBe('Debian 12')
     expect(built.guests[0].agentOnline).toBe(true)
     expect(built.guests[0].candidates[0].machineName).toBe('build-host')
+  })
+
+  it('keeps only routable guest-agent addresses', () => {
+    const agent = {
+      online: true,
+      osName: null,
+      version: null,
+      kernel: null,
+      interfaces: [
+        { name: 'lo', addresses: ['127.0.0.1/8', '::1/128'] },
+        { name: 'eth0', addresses: ['192.168.1.50/24', 'fe80::1/64', '192.168.1.50/24'] },
+        { name: 'eth1', addresses: ['169.254.1.1/16', 'fd00::5/64'] },
+      ],
+    }
+    const built = buildInventory(inventoryInput({
+      proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest({ agent })], discoveryError: null, guestsError: null, discoveryWarnings: null }],
+    }))
+    expect(built.guests[0].addresses).toEqual(['192.168.1.50', 'fd00::5'])
+  })
+
+  it('treats expanded loopback and all of fe80::/10 as unroutable', () => {
+    expect(isRoutableAddress('0:0:0:0:0:0:0:1')).toBe(false)
+    expect(isRoutableAddress('feb0::1')).toBe(false)
+    expect(isRoutableAddress('FE80::1%eth0')).toBe(false)
+    expect(isRoutableAddress('fec0::1')).toBe(true)
+    expect(isRoutableAddress('2001:db8::1')).toBe(true)
+    expect(isRoutableAddress('10.0.0.5')).toBe(true)
+    expect(isRoutableAddress('not-an-ip')).toBe(false)
   })
 
   it('does not enrich when no guest-list entry matches the discovered vmid', () => {

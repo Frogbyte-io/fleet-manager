@@ -2,6 +2,7 @@
 import KindIcon from '@/components/fleet/KindIcon.vue'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 import { toast } from 'vue-sonner'
+import { RouterLink } from 'vue-router'
 import { tailnetStatusLabel, type TailnetItem } from '../inventory'
 
 const props = defineProps<{ device: TailnetItem }>()
@@ -36,14 +37,13 @@ async function copyImportCommand() {
     </div>
 
     <div class="mt-auto flex items-center gap-2 border-t border-fc-line pt-2">
-      <button
-        type="button"
-        disabled
-        title="Guided tailnet import lands with FM-912"
-        class="cursor-not-allowed rounded-sm border border-fc-line px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-fc-faint opacity-60"
+      <RouterLink
+        :to="{ path: '/fleet/add', query: { source: 'tailscale', device: device.nodeId } }"
+        data-testid="add-tailnet-device"
+        class="rounded-sm border border-fc-line px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
       >
         Add to fleet
-      </button>
+      </RouterLink>
       <button
         type="button"
         data-testid="copy-import"
