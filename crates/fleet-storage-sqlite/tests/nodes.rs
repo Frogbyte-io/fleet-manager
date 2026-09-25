@@ -537,7 +537,7 @@ async fn revocation_stops_renewal_and_sessions_and_allows_explicit_rebind() {
 }
 
 #[tokio::test]
-async fn revocation_consumes_pending_tokens_and_records_the_count_atomically() {
+async fn revocation_consumes_pending_tokens_and_records_the_count() {
     let setup = setup().await;
     let (machine_id, _) = enrolled_machine(&setup, "revoked-tokens", KEY_A).await;
     let now = fleet_core::SystemClock::now_unix_millis();
@@ -582,6 +582,43 @@ async fn revocation_consumes_pending_tokens_and_records_the_count_atomically() {
     .await
     .expect("the token statuses must be readable");
     assert_eq!(statuses, vec!["consumed", "consumed"]);
+}
+
+#[tokio::test]
+async fn a_failed_revoke_audit_rolls_back_identity_and_pending_token_changes() {
+    let setup = setup().await;
+    let (machine_id, _) = enrolled_machine(&setup, "revoke-audit-failure", KEY_A).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    new_token(&setup, &machine_id, "hash-revoke-rollback", 60_000, now).await;
+    sqlx::query(
+        "CREATE TRIGGER reject_node_revoke_audit BEFORE INSERT ON audit_events \
+         WHEN NEW.action = 'node.revoke' BEGIN SELECT RAISE(FAIL, 'injected audit failure'); END",
+    )
+    .execute(setup.store.pool())
+    .await
+    .expect("the audit failure trigger must be installed");
+
+    let error = setup
+        .nodes
+        .revoke_identity(&revoke_claim(&machine_id, now + 1))
+        .await
+        .expect_err("the injected audit failure must abort revocation");
+    assert!(matches!(error, NodePortError::Backend { .. }), "{error:?}");
+
+    let identity = setup
+        .nodes
+        .identity(&machine_id)
+        .await
+        .expect("the identity read must succeed")
+        .expect("the identity must remain recorded");
+    assert_eq!(identity.status, NodeStatus::Active);
+    let token = setup
+        .nodes
+        .token_facts("hash-revoke-rollback")
+        .await
+        .expect("the token read must succeed")
+        .expect("the token must remain recorded");
+    assert_eq!(token.status, "pending");
 }
 
 #[tokio::test]
