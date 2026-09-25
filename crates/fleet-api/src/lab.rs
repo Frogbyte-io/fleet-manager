@@ -643,7 +643,7 @@ pub async fn start_lab_lease_provision(
             correlation_id,
         )
     })?;
-    let provision = lab
+    let (provision, lease_changed) = lab
         .start_lease_provision(
             state.authorizer.as_ref(),
             &principal,
@@ -653,9 +653,11 @@ pub async fn start_lab_lease_provision(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
-    state
-        .events
-        .publish(fleet_application::events::EventKind::LeaseChanged);
+    if lease_changed {
+        state
+            .events
+            .publish(fleet_application::events::EventKind::LeaseChanged);
+    }
     let payload = serde_json::json!({
         "recordId": provision.id,
         "leaseId": lease_id,

@@ -527,6 +527,12 @@ async fn partially_committed_tailnet_credentials_are_invalidated_on_rollback_fai
         .unwrap_err();
 
     assert!(matches!(error, TailnetUseCaseError::Backend { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("simulated partial store failure")
+    );
+    assert!(error.to_string().contains("simulated clear failure"));
     assert_eq!(
         changes.try_recv().unwrap().kind,
         fleet_application::events::EventKind::TailnetChanged
@@ -598,7 +604,12 @@ async fn failed_tailnet_clear_with_failed_rollback_reports_partial_state() {
         .clear(&AllowAll, &principal())
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("credential clearing failed"));
+    assert!(error.to_string().contains("simulated clear failure"));
+    assert!(
+        error
+            .to_string()
+            .contains("simulated partial store failure")
+    );
     assert_eq!(
         changes.try_recv().unwrap().kind,
         fleet_application::events::EventKind::TailnetChanged

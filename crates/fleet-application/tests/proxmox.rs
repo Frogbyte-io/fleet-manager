@@ -532,22 +532,24 @@ async fn committed_account_mutations_publish_through_the_attached_event_hub() {
         events.try_recv().unwrap().kind,
         fleet_application::events::EventKind::ProxmoxChanged
     );
-    assert!(
-        proxmox
-            .create(
-                &AllowAll,
-                &principal(),
-                NewProxmoxAccount {
-                    name: "pve-main".to_owned(),
-                    host: "192.168.68.224".to_owned(),
-                    port: Some(8006),
-                    token_id: "root@pam!GLM-AGENT".to_owned(),
-                },
-                "the-token-secret-material",
-            )
-            .await
-            .is_err()
-    );
+    let conflict = proxmox
+        .create(
+            &AllowAll,
+            &principal(),
+            NewProxmoxAccount {
+                name: "pve-main".to_owned(),
+                host: "192.168.68.224".to_owned(),
+                port: Some(8006),
+                token_id: "root@pam!GLM-AGENT".to_owned(),
+            },
+            "the-token-secret-material",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        ProxmoxUseCaseError::Conflict { ref detail } if detail.contains("taken")
+    ));
     assert!(matches!(
         events.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)

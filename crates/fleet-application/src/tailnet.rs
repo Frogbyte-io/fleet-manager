@@ -470,42 +470,8 @@ impl TailnetIntegration {
                 detail: "the client secret must be 1..=256 characters".to_owned(),
             });
         }
-        let mutation = self.credential_mutation.lock().await;
-        let previous =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
-        if let Err(detail) = self.credentials.store(client_id, client_secret).await {
-            let rollback = match previous.as_ref() {
-                Some(previous) => {
-                    self.credentials
-                        .store(&previous.client_id, previous.client_secret.expose())
-                        .await
-                }
-                None => self.credentials.clear().await,
-            };
-            if rollback.is_err() {
-                // The port may have committed one of the credential writes
-                // before failing; notify clients if restoration also fails.
-                self.publish_changed();
-                return Err(TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail: format!(
-                        "credential replacement failed ({detail}); rollback also failed"
-                    ),
-                });
-            }
-            return Err(TailnetUseCaseError::Backend {
-                context: "credentials",
-                detail,
-            });
-        }
-        drop(mutation);
-        self.publish_changed();
+        self.replace_credentials(Some((client_id, client_secret)))
+            .await?;
         self.audit_event(principal, "tailscale_configured", Some(client_id))
             .await?;
         // The mutator earned this decision already; re-asking tailscale.read
@@ -538,38 +504,7 @@ impl TailnetIntegration {
             },
         )
         .map_err(TailnetUseCaseError::Denied)?;
-        let mutation = self.credential_mutation.lock().await;
-        let previous =
-            self.credentials
-                .load()
-                .await
-                .map_err(|detail| TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail,
-                })?;
-        if let Err(detail) = self.credentials.clear().await {
-            let rollback = match previous.as_ref() {
-                Some(previous) => {
-                    self.credentials
-                        .store(&previous.client_id, previous.client_secret.expose())
-                        .await
-                }
-                None => self.credentials.clear().await,
-            };
-            if rollback.is_err() {
-                self.publish_changed();
-                return Err(TailnetUseCaseError::Backend {
-                    context: "credentials",
-                    detail: format!("credential clearing failed ({detail}); rollback also failed"),
-                });
-            }
-            return Err(TailnetUseCaseError::Backend {
-                context: "credentials",
-                detail,
-            });
-        }
-        drop(mutation);
-        self.publish_changed();
+        self.replace_credentials(None).await?;
         self.audit_event(principal, "tailscale_cleared", None)
             .await?;
         let stored = self.load_credentials().await?;
@@ -840,6 +775,55 @@ impl TailnetIntegration {
                 context: "credentials",
                 detail,
             })
+    }
+
+    async fn replace_credentials(
+        &self,
+        replacement: Option<(&str, &str)>,
+    ) -> Result<(), TailnetUseCaseError> {
+        let mutation = self.credential_mutation.lock().await;
+        let previous =
+            self.credentials
+                .load()
+                .await
+                .map_err(|detail| TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail,
+                })?;
+        let result = match replacement {
+            Some((client_id, client_secret)) => {
+                self.credentials.store(client_id, client_secret).await
+            }
+            None => self.credentials.clear().await,
+        };
+        if let Err(detail) = result {
+            let rollback = match previous.as_ref() {
+                Some(previous) => {
+                    self.credentials
+                        .store(&previous.client_id, previous.client_secret.expose())
+                        .await
+                }
+                None => self.credentials.clear().await,
+            };
+            if let Err(rollback_detail) = rollback {
+                // A failed mutation and failed restoration leave the committed
+                // state uncertain, so notify readers and report both failures.
+                self.publish_changed();
+                return Err(TailnetUseCaseError::Backend {
+                    context: "credentials",
+                    detail: format!(
+                        "credential mutation failed ({detail}); rollback failed ({rollback_detail})"
+                    ),
+                });
+            }
+            return Err(TailnetUseCaseError::Backend {
+                context: "credentials",
+                detail,
+            });
+        }
+        drop(mutation);
+        self.publish_changed();
+        Ok(())
     }
 
     async fn audit_event(

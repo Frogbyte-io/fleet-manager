@@ -1,7 +1,9 @@
 //! Lab lease persistence, TTL extension, and the compare-and-set shared by
 //! extension requests and expiry sweeps.
 
-use fleet_application::lab::{LeasePort as _, NewLease, NewProvision, ProvisionPort as _};
+use fleet_application::lab::{
+    AttachProvisionOutcome, LeasePort as _, NewLease, NewProvision, ProvisionPort as _,
+};
 use fleet_core::{CleanupStrategy, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS};
 use fleet_storage_sqlite::{LeaseRepository, Store};
 
@@ -170,11 +172,12 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
         )
         .await
         .expect("the provision must be created");
-    assert!(
+    assert_eq!(
         leases
             .attach_provision(&lease.id, &provision.id)
             .await
-            .expect("the provision must attach")
+            .expect("the provision must attach"),
+        AttachProvisionOutcome::Attached
     );
     lease = leases.get(&lease.id).await.expect("the lease must reload");
     lease

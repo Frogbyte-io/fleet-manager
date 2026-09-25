@@ -389,18 +389,29 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         Ok(true)
     }
 
-    async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String> {
+    async fn attach_provision(
+        &self,
+        id: &str,
+        provision_id: &str,
+    ) -> Result<fleet_application::lab::AttachProvisionOutcome, String> {
         let mut leases = self.leases.lock().unwrap();
         let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
-            return Ok(false);
+            return Ok(fleet_application::lab::AttachProvisionOutcome::Conflict);
         };
         if stored.state == LeaseState::Requested && stored.provision_id.is_none() {
             stored.state = LeaseState::Provisioning;
             stored.provision_id = Some(provision_id.to_owned());
-            return Ok(true);
+            return Ok(fleet_application::lab::AttachProvisionOutcome::Attached);
         }
-        Ok(stored.state == LeaseState::Provisioning
-            && stored.provision_id.as_deref() == Some(provision_id))
+        Ok(
+            if stored.state == LeaseState::Provisioning
+                && stored.provision_id.as_deref() == Some(provision_id)
+            {
+                fleet_application::lab::AttachProvisionOutcome::AlreadyAttached
+            } else {
+                fleet_application::lab::AttachProvisionOutcome::Conflict
+            },
+        )
     }
 
     async fn claim_for_release(
@@ -814,9 +825,17 @@ async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease(
         )
         .await
         .unwrap();
-    lab.start_lease_provision(&AllowAll, &principal(), &created.id, None, NOW + 3)
+    let (started, attached) = lab
+        .start_lease_provision(&AllowAll, &principal(), &created.id, None, NOW + 3)
         .await
         .unwrap();
+    assert!(attached);
+    let (replayed, attached) = lab
+        .start_lease_provision(&AllowAll, &principal(), &created.id, None, NOW + 3)
+        .await
+        .unwrap();
+    assert!(!attached);
+    assert_eq!(started.id, replayed.id);
     assert!(audit.intents.lock().unwrap().iter().any(|intent| {
         intent.action == "lab.provision"
             && intent.resource.as_deref() == Some(created.id.as_str())
