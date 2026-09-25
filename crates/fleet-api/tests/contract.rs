@@ -86,7 +86,7 @@ impl AuditQueryPort for RecordingAuditQuery {
                 correlation_id: Some("flow-1".to_owned()),
                 operation_id: None,
                 outcome: Some(AuditOutcome::Succeeded),
-                metadata_json: r#"{"event":"machine_updated","machine":"machine-1","purpose":"operator supplied access phrase"}"#.to_owned(),
+                metadata_json: r#"{"event":"machine_updated","machine":"machine-1","invalidatedEnrollmentCount":"2","purpose":"operator supplied access phrase"}"#.to_owned(),
             }],
             next_seq: Some(12),
         })
@@ -156,7 +156,7 @@ async fn audit_api_forwards_filters_and_returns_a_metadata_only_page() {
     assert_eq!(parts.status, StatusCode::OK, "{body}");
     assert_eq!(
         body["items"][0]["metadata"],
-        serde_json::json!({"event": "machine_updated"})
+        serde_json::json!({"event": "machine_updated", "invalidatedEnrollmentCount": "2"})
     );
     assert!(body["items"][0].get("metadataJson").is_none());
     assert_eq!(body["page"]["nextCursor"], "12");
