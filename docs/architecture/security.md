@@ -24,6 +24,8 @@ Because identity mode requires the regular controller listener to be loopback-on
 
 The initial controller recognizes one application principal, `anonymous-lan-admin`, for browser, CLI, and skill-driven requests received on the configured LAN listener. It grants the full initial permission vocabulary. Audit records include this principal plus correlation ID and available request-origin/client metadata; an IP address is evidence, not identity.
 
+The fleet-wide SSE stream separately requires the centralized `events.read` permission. It carries only event names and opaque cursors, never resource data; clients refetch through the normal authorized read endpoints after notifications or a `gap`.
+
 Nodes retain Fleet-owned asymmetric identity because controller-to-node replay and impersonation risks exist even on a trusted LAN. Provider credentials remain encrypted secrets. Centralized authorization is not removed: the initial policy is an explicit allow-all policy for the LAN principal that authenticated deployment can replace later.
 
 The dashboard must prominently state that anyone who can reach it can control the fleet. The controller must not default to an Internet-facing deployment, and documentation must not present reverse-proxy publication as supported before authenticated mode exists.

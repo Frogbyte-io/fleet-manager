@@ -94,7 +94,7 @@ Handlers, CLI commands, skill-driven CLI calls, and workers invoke this layer. N
 - Mutations return or reference an `Operation`; they do not hold an HTTP request for a long infrastructure workflow.
 - Errors use a stable code, message, retry classification, correlation ID, and optional field violations. Internal/provider secrets never enter the envelope.
 - List endpoints use stable cursor pagination and explicit filters.
-- SSE carries ordered, resumable operation/audit/resource notifications. Clients recover gaps by refetching canonical resources.
+- Fleet-wide SSE carries only typed change notifications and opaque, process-scoped cursors; it never includes resource payloads. The controller bounds both replay history and live fan-out. Clients refetch canonical resources through authorized reads after a `gap`; stale cursors and slow subscribers receive a gap and the stream closes.
 - Logs use bounded/resumable streams; bulk artifacts use separate upload/download endpoints.
 - `fleetctl` offers human output by default and `--output json` with the API schema. JSON goes to stdout; diagnostics/progress go to stderr.
 - Official Fleet skills orchestrate the JSON CLI contract. They do not call providers directly or define another authorization surface.

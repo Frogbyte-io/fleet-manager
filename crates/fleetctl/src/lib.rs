@@ -77,6 +77,8 @@ pub enum Command {
     Status,
     /// The system view.
     System,
+    /// Tail payload-free fleet invalidation events from the controller.
+    Events,
     /// List operations.
     OperationsList {
         /// Maximum entries to request.
@@ -824,6 +826,11 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     let command = match words.as_slice() {
         ["status"] => Command::Status,
         ["system"] => Command::System,
+        ["events"] => Command::Events,
+        ["events", "--output", "json"] => {
+            output = Output::Json;
+            Command::Events
+        }
         ["operations", "list"] => Command::OperationsList { limit: None },
         ["operations", "list", "--limit", value] => Command::OperationsList {
             limit: Some(value.parse().map_err(|_| CliError {
@@ -1933,7 +1940,7 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` is the explicit direct-controller override. Other commands talk to the controller, which defaults to {DEFAULT_URL}."
     )
 }
 
@@ -2216,6 +2223,10 @@ fn parse_onboard_stage(id: &str, rest: &[&str], discover: bool) -> Result<Comman
 /// error's envelope code, when the controller produced one, is included so
 /// scripts can branch on it.
 pub fn run(invocation: &Invocation) -> Result<String, CliError> {
+    if invocation.command == Command::Events {
+        stream_events(invocation)?;
+        return Ok(String::new());
+    }
     if invocation.command == Command::Status && !invocation.url_explicit {
         // The local route: the daemon's constrained status surface, reached
         // without controller credentials. The override is explicit --url.
@@ -2278,6 +2289,131 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         body.get("data").cloned().unwrap_or(body)
     };
     Ok(render(invocation, &payload))
+}
+
+/// Follows the controller's bounded SSE stream, reconnecting from the last
+/// cursor after transport failures. Event records contain only cursor and type.
+fn stream_events(invocation: &Invocation) -> Result<(), CliError> {
+    use std::io::{BufRead as _, BufReader, Write as _};
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(None)
+        .build()
+        .map_err(|error| CliError {
+            message: format!("cannot build an HTTP client: {error}"),
+        })?;
+    let mut last_event_id: Option<String> = None;
+    let mut retry = std::time::Duration::from_secs(1);
+    loop {
+        let mut request = client
+            .get(format!("{}/api/v1/events", invocation.url))
+            .header("accept", "text/event-stream")
+            .header("x-correlation-id", uuid::Uuid::now_v7().to_string());
+        if let Some(cursor) = &last_event_id {
+            request = request.header("last-event-id", cursor);
+        }
+        let response = match request.send() {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().unwrap_or_default();
+                let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                return Err(CliError {
+                    message: format!(
+                        "the controller refused the event stream ({}, {}): {}",
+                        status.as_u16(),
+                        body["code"].as_str().unwrap_or("unknown"),
+                        body["message"].as_str().unwrap_or("no detail")
+                    ),
+                });
+            }
+            Err(error) => {
+                eprintln!("fleetctl: event stream disconnected: {error}; reconnecting");
+                std::thread::sleep(retry);
+                retry = (retry * 2).min(std::time::Duration::from_secs(10));
+                continue;
+            }
+        };
+        retry = std::time::Duration::from_secs(1);
+        let mut reader = BufReader::new(response);
+        let mut line = String::new();
+        let mut event_type = String::from("message");
+        let mut event_id = None;
+        let mut has_data = false;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                if has_data || event_id.is_some() {
+                    if let Some(id) = event_id.take() {
+                        last_event_id = Some(id);
+                    }
+                    print_stream_event(invocation.output, &event_type, last_event_id.as_deref())?;
+                    std::io::stdout().flush().map_err(|error| CliError {
+                        message: format!("cannot write event output: {error}"),
+                    })?;
+                }
+                event_type.clear();
+                event_type.push_str("message");
+                has_data = false;
+            } else if let Some(value) = line.strip_prefix("event:") {
+                value.trim_start().clone_into(&mut event_type);
+            } else if let Some(value) = line.strip_prefix("id:") {
+                let id = value.trim_start();
+                if !id.contains('\0') && !id.is_empty() {
+                    event_id = Some(id.to_owned());
+                }
+            } else if line.starts_with("data:") {
+                has_data = true;
+            }
+        }
+        eprintln!("fleetctl: event stream closed; reconnecting");
+        std::thread::sleep(retry);
+        retry = (retry * 2).min(std::time::Duration::from_secs(10));
+    }
+}
+
+fn print_stream_event(
+    output: Output,
+    event_type: &str,
+    event_id: Option<&str>,
+) -> Result<(), CliError> {
+    println!("{}", render_stream_event(output, event_type, event_id)?);
+    Ok(())
+}
+
+fn render_stream_event(
+    output: Output,
+    event_type: &str,
+    event_id: Option<&str>,
+) -> Result<String, CliError> {
+    match output {
+        Output::Json => serde_json::to_string(&serde_json::json!({
+            "id": event_id,
+            "type": event_type,
+        }))
+        .map_err(|error| CliError {
+            message: format!("cannot encode event output: {error}"),
+        }),
+        Output::Text => Ok(format!("{} {}", event_type, event_id.unwrap_or(""))),
+    }
+}
+
+#[cfg(test)]
+mod event_output_tests {
+    use super::{Output, render_stream_event};
+
+    #[test]
+    fn fleet_events_json_output_snapshot_contains_only_type_and_cursor() {
+        assert_eq!(
+            render_stream_event(Output::Json, "machine.changed", Some("epoch:17")).unwrap(),
+            r#"{"id":"epoch:17","type":"machine.changed"}"#
+        );
+    }
 }
 
 /// The install command's `--wait`: chase the install operation to a terminal
@@ -2478,6 +2614,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
     Ok(match command {
         // `status` took one of the two routes above.
         Command::Status => unreachable!("the status command returned before dispatch"),
+        Command::Events => unreachable!("the events command streams before request dispatch"),
         Command::System => (
             reqwest::Method::GET,
             "/api/v1/system".to_owned(),

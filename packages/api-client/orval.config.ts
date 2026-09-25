@@ -9,6 +9,14 @@ export default defineConfig({
   fleet: {
     input: {
       target: './openapi.json',
+      // The raw SSE endpoint is documented in OpenAPI but must be consumed
+      // with EventSource; Orval's fetch wrapper assumes JSON responses.
+      override: {
+        transformer: (spec) => {
+          delete spec.paths?.['/api/v1/events'];
+          return spec;
+        },
+      },
     },
     output: {
       target,

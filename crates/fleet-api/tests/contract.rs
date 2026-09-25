@@ -43,6 +43,9 @@ fn test_state() -> (Arc<ApiState>, Arc<FakePort>, Arc<RecordingAuditQuery>) {
         audit: Some(Arc::new(fleet_application::audit::AuditQueries::new(
             audit.clone(),
         ))),
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: None,
         onboarding: None,
@@ -483,6 +486,16 @@ impl AuditPort for FakeAudit {
 }
 
 fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<ApiState> {
+    operation_state_with_hub(
+        authorizer,
+        Arc::new(fleet_application::events::EventHub::new(8)),
+    )
+}
+
+fn operation_state_with_hub(
+    authorizer: Arc<dyn fleet_application::authz::Authorizer>,
+    hub: Arc<fleet_application::events::EventHub>,
+) -> Arc<ApiState> {
     Arc::new(ApiState {
         operations: Arc::new(Operations::new(
             Arc::new(FakePort::default()),
@@ -491,6 +504,7 @@ fn operation_state(authorizer: Arc<dyn fleet_application::authz::Authorizer>) ->
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(hub)),
         nodes: None,
         machines: None,
         onboarding: None,
@@ -672,6 +686,116 @@ async fn the_system_view_is_a_plain_object_with_the_trust_warning() {
             .unwrap()
             .contains("no accounts")
     );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_replays_payload_free_changes_from_last_event_id() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(4));
+    let first = hub.publish(fleet_application::events::EventKind::MachineChanged);
+    let second = hub.publish(fleet_application::events::EventKind::LeaseChanged);
+    let app = router(operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).layer(
+        axum::Extension(fleet_api::ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        }),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/events"))
+                .header("last-event-id", first.id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let frame = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        response.into_body().frame(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap()
+    .into_data()
+    .unwrap();
+    let frame = String::from_utf8_lossy(&frame);
+    assert!(frame.contains("event: lease.changed"), "{frame}");
+    assert!(frame.contains(&format!("id: {}", second.id)), "{frame}");
+    assert!(
+        frame.contains("data:  \n"),
+        "empty data dispatches EventSource events: {frame}"
+    );
+    assert!(
+        !frame.contains("data: {"),
+        "events carry no resource payloads"
+    );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_reports_a_gap_and_closes_for_expired_cursors() {
+    let hub = Arc::new(fleet_application::events::EventHub::new(1));
+    let expired = hub.publish(fleet_application::events::EventKind::MachineChanged);
+    hub.publish(fleet_application::events::EventKind::LeaseChanged);
+    hub.publish(fleet_application::events::EventKind::OperationChanged);
+    hub.publish(fleet_application::events::EventKind::OnboardingChanged);
+    let latest = hub.current_id();
+    let app = router(operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).layer(
+        axum::Extension(fleet_api::ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        }),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{API_BASE_PATH}/events"))
+                .header("last-event-id", expired.id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    let frame = String::from_utf8_lossy(&frame);
+    assert!(frame.contains("event: gap"), "{frame}");
+    assert!(frame.contains(&format!("id: {latest}")), "{frame}");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn fleet_event_stream_requires_events_read_authorization() {
+    #[derive(Debug)]
+    struct DenyAll;
+    impl fleet_application::authz::Authorizer for DenyAll {
+        fn decide(&self, _request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+            Decision::deny(ReasonId::UnknownPrincipal)
+        }
+    }
+    let app = router(operation_state(Arc::new(DenyAll))).layer(axum::Extension(
+        fleet_api::ActingPrincipal {
+            id: "not-authorized".to_owned(),
+        },
+    ));
+    let response = app
+        .oneshot(get(&format!("{API_BASE_PATH}/events")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -1092,6 +1216,9 @@ fn machine_state(
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: Some(Arc::new(Machines::new(backend, Arc::new(FakeAudit)))),
         onboarding: None,

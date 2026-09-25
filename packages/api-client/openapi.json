@@ -150,6 +150,48 @@
         }
       }
     },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Streams payload-free notifications for fleet-wide query invalidation.",
+        "description": "Reconnects replay events still in the bounded process buffer. An expired,\nforeign, malformed, or lagged cursor produces a `gap` event so clients\nrefetch through authorized resource reads. Slow live subscribers are then\ndisconnected instead of accumulating memory.\n\n# Errors\n\nReturns the standard API error when the caller has no resolved principal\nor lacks `events.read`.",
+        "operationId": "streamFleetEvents",
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "description": "The last event cursor received by this client.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A resumable stream of payload-free fleet change notifications.",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "403": {
+            "description": "The caller may not subscribe to fleet event metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/builds": {
       "post": {
         "tags": [
@@ -11160,6 +11202,10 @@
     {
       "name": "system",
       "description": "The controller's own view of itself."
+    },
+    {
+      "name": "events",
+      "description": "Payload-free SSE invalidation notifications."
     },
     {
       "name": "audit",

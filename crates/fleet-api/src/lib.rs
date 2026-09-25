@@ -166,6 +166,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
     tags(
         (name = "meta", description = "Service and contract description."),
         (name = "system", description = "The controller's own view of itself."),
+        (name = "events", description = "Payload-free SSE invalidation notifications."),
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (
@@ -231,6 +232,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(system::get_system_info))
                 .routes(routes!(audit::list_audit_events))
                 .routes(routes!(system::stream_operation_events))
+                .routes(routes!(system::stream_fleet_events))
                 .routes(routes!(machines::list_machines))
                 .routes(routes!(machines::get_machine))
                 .routes(routes!(projects::create_project, projects::list_projects))

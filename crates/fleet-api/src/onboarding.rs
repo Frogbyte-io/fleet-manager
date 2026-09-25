@@ -450,6 +450,9 @@ pub async fn create_onboarding_draft(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(OnboardingDraftDto::from(draft))),
@@ -707,6 +710,9 @@ async fn start_onboarding_operation(
         )
         .await
         .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok((
         StatusCode::ACCEPTED,
         Json(Resource::new(OperationDto::from(operation))),
@@ -770,6 +776,9 @@ pub async fn confirm_onboarding_host_key(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok(Json(Resource::new(OnboardingDraftDetailDto::from(view))))
 }
 
@@ -829,6 +838,9 @@ pub async fn add_onboarding_machine(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(AddedMachineDto {
@@ -895,5 +907,8 @@ pub async fn cancel_onboarding_draft(
         )
         .await
         .map_err(|error| map_onboarding_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok(StatusCode::NO_CONTENT)
 }

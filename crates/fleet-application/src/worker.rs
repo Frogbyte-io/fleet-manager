@@ -105,7 +105,11 @@ impl Operations {
             .map_err(|failure| crate::operation::OperationUseCaseError::Backend {
                 context: "record_progress",
                 detail: failure.to_string(),
-            })
+            })?;
+        if let Some(events) = &self.events {
+            events.publish(crate::events::EventKind::OperationChanged);
+        }
+        Ok(())
     }
 
     /// Runs one worker tick.
@@ -184,6 +188,9 @@ impl Operations {
                 .unwrap_or(false)
             {
                 report.recovered += 1;
+                if let Some(events) = &self.events {
+                    events.publish(crate::events::EventKind::OperationChanged);
+                }
             }
         }
 
@@ -228,6 +235,7 @@ impl Operations {
             .map_err(|failure| failure.to_string())?;
         if let Some(claimed) = claimed {
             report.claimed = true;
+            self.publish_operation(&claimed, false);
             Ok(Some(claimed))
         } else {
             Ok(None)

@@ -676,6 +676,9 @@ pub async fn start_lab_lease_provision(
         )
         .await
         .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(operation.into()))))
 }
 
@@ -818,6 +821,9 @@ pub async fn create_lab_lease(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(lease.into()))))
 }
 
@@ -897,6 +903,9 @@ pub async fn release_lab_lease(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok(Json(Resource::new(lease.into())))
 }
 
@@ -966,6 +975,9 @@ pub async fn extend_lab_lease(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok(Json(Resource::new(lease.into())))
 }
 
@@ -1002,6 +1014,11 @@ pub async fn sweep_lab_leases(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    if !released.is_empty() {
+        state
+            .events
+            .publish(fleet_application::events::EventKind::LeaseChanged);
+    }
     let items: Vec<LeaseDto> = released.into_iter().map(Into::into).collect();
     Ok(Json(Page {
         page: PageInfo {

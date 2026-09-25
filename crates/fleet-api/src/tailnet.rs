@@ -235,6 +235,9 @@ pub async fn get_tailnet_status(
         .status(state.authorizer.as_ref(), &principal)
         .await
         .map_err(|error| map_tailnet_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::TailnetChanged);
     Ok(Json(Resource::new(TailnetStatusDto {
         configured: status.configured,
         client_id: status.client_id,
@@ -288,6 +291,9 @@ pub async fn configure_tailnet(
         )
         .await
         .map_err(|error| map_tailnet_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::TailnetChanged);
     Ok(Json(Resource::new(TailnetStatusDto {
         configured: status.configured,
         client_id: status.client_id,
@@ -501,6 +507,9 @@ pub async fn import_tailnet_device(
         )
         .await
         .map_err(|error| map_tailnet_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::OnboardingChanged);
     Ok((
         StatusCode::CREATED,
         Json(Resource::new(

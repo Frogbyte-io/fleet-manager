@@ -316,6 +316,9 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         authorizer,
         system: Arc::new(FakeSystemInfo),
         audit: None,
+        events: Arc::new(fleet_application::events::Events::new(Arc::new(
+            fleet_application::events::EventHub::new(8),
+        ))),
         nodes: None,
         machines: Some(Arc::new(fleet_application::machine::Machines::new(
             Arc::new(FakeMachines),

@@ -38,6 +38,8 @@ pub struct ApiState {
     pub system: Arc<dyn crate::system::SystemInfoSource>,
     /// The authorized audit query use case, when the controller has a store.
     pub audit: Option<Arc<fleet_application::audit::AuditQueries>>,
+    /// The authorized fleet change event stream.
+    pub events: Arc<fleet_application::events::Events>,
     /// The node trust use cases, when the controller was composed with a
     /// database and a master key; `None` only in document/test states.
     pub nodes: Option<Arc<fleet_application::node::Nodes>>,
@@ -73,6 +75,7 @@ impl std::fmt::Debug for ApiState {
             .field("authorizer", &"dyn Authorizer")
             .field("system", &"dyn SystemInfoSource")
             .field("audit", &self.audit)
+            .field("events", &self.events)
             .field("nodes", &self.nodes)
             .field("machines", &self.machines)
             .field("onboarding", &self.onboarding)
@@ -248,6 +251,11 @@ impl ApiState {
             authorizer: Arc::new(PermitAllForDocument),
             system: Arc::new(UnavailableSystemInfo),
             audit: None,
+            events: Arc::new(fleet_application::events::Events::new(Arc::new(
+                fleet_application::events::EventHub::new(
+                    fleet_application::events::DEFAULT_EVENT_CAPACITY,
+                ),
+            ))),
             nodes: None,
             machines: None,
             onboarding: None,
