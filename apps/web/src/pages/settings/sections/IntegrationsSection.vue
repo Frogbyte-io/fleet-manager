@@ -79,7 +79,7 @@ function formatCreated(at: number): string {
             v-else-if="proxmoxUnavailable"
             class="mt-1 text-xs text-fc-warn"
           >
-            The account list could not be read; the controller did not answer.
+            The account list could not be read; the summary may be incomplete.
           </p>
           <p
             v-else
@@ -110,7 +110,7 @@ function formatCreated(at: number): string {
             v-else-if="tailnetUnavailable"
             class="mt-1 text-xs text-fc-warn"
           >
-            The integration status could not be read; the controller did not answer.
+            The integration status could not be read; the summary may be incomplete.
           </p>
           <p
             v-else-if="tailnet"

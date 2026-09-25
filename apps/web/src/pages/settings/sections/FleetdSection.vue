@@ -41,7 +41,7 @@ const nodes = computed(() =>
       v-if="machinesUnavailable"
       class="mt-4 text-sm text-fc-warn"
     >
-      The machine list could not be read; the controller did not answer.
+      The machine list could not be read; the summary may be incomplete.
     </p>
     <template v-else>
       <p
