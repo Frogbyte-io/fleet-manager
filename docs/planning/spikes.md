@@ -44,6 +44,7 @@ Spike outcomes:
 | FM-S07 | Which Frogenv commands can run non-interactively with machine-readable output, and which approval ceremonies must stay manual? | M3 | ADR-0005 | M3 Frogenv epic | Report `blocked: manual approval required` and hand off to the operator |
 | FM-S08 | Does the experimental `proxmox-client` crate satisfy authentication, UPID task polling, custom TLS trust and pinning, unknown-field tolerance, and cancellation against PVE 8.x and 9.x? | M6 | ADR-0005 | M6 Proxmox epic | Small `reqwest` transport plus typed provider DTOs, borrowing Purple's parsing patterns |
 | FM-S09 | Which Packer/Proxmox-plugin version range supports modern `.pkr.json`, required template builds, stable machine-readable diagnostics, cancellation, and acceptable redistribution/deployment terms? | M7 | ADR-0005 | Image recipe/build/version epic | Require an operator-installed supported CLI and keep the image-build port available for another implementation |
+| FM-S10 | What changed in the Skills Manager v1.34.2→v1.40.0 public CLI contract, and can Fleet roll out authored content or read local skills without a new upstream API? | M9 | ADR-0005 | FM-920–923 | Pin one tested release; keep Fleet-authored content in Fleet storage and use only documented local install/update operations |
 
 - **FM-S09 (resolved 2026-09-22, fallback confirmed).** Packer 1.16.1 with the
   MPL-2.0 `packer-plugin-proxmox` v1.2.4 covers everything Fleet needs — modern
@@ -83,6 +84,33 @@ Spike outcomes:
   archive, and the live 8.x validation moves to the M6 real-cluster suite.
   The spike's decisive evidence is TLS behavior, which is client-side and
   version-independent.
+
+- **FM-S10 (resolved 2026-09-25, existing CLI contract is sufficient).** The
+  v1.34.2 and v1.40.0 Linux x64 binaries both expose the required `skills`
+  and `presets` command groups, including local install/update, show/export,
+  explicit deployment, status, and machine-readable errors. v1.40.0's
+  `skills update` re-imports `local`/`import` skills from their recorded source
+  directory while preserving the skill's identity and deployment metadata;
+  removal of paths absent from the new source is reported as
+  `held_back_removals` and cannot be approved through the CLI. Same-path edits
+  can still be replaced, so Fleet must own the staged source and treat it as
+  authoritative. `skills show --json` returns the SKILL.md body (`markdown`),
+  file lists, and absolute paths; `skills export --dest` exports content to a
+  caller-selected directory. Fleet's current reads do not need either path:
+  FM-920 explicitly excludes reading machine-local skill content, while
+  FM-922 owns its source content in Fleet storage. No upstream content API
+  request is needed now. A future read requirement should first define a
+  bounded, path-neutral response rather than consuming absolute machine paths.
+
+  Both investigated releases are MIT. v1.40.0 publishes Linux x64 and Linux
+  arm64 CLI assets; the earlier v1.34.2 release had Linux x64 but no Linux
+  arm64 CLI asset. The spike executed the x64 binaries only. Start Fleet's
+  provider at the exact verified `=1.40.0` release, verify its published
+  SHA-256, and refresh the fixtures before expanding the accepted version
+  range. Raw help and invalid-argument JSON captures are in
+  [the candidate CLI fixtures](../research/fixtures/skills-manager-cli-v1.40.0-help.txt)
+  and the sibling v1.34.2 files. See the
+  [full evidence and decision](../research/ecosystem.md#fm-s10-skills-manager-v140-contract-refresh).
 
 ## Rules
 
