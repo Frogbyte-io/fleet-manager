@@ -6,6 +6,7 @@ import { createOnboardingDraft, type OnboardingDraftDto } from '@frogbyte-io/fle
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { onboardCreateCommand, type SshAuth } from '../../machine/fleetctl'
+import { validPort } from './queries'
 
 // A machine reached over SSH by address or name: any Linux host, laptop, or
 // Raspberry Pi. Creates the onboarding draft the rest of the flow works on.
@@ -27,11 +28,11 @@ const identityPath = ref('')
 const auth = computed<SshAuth>(() => authType.value === 'agent' ? { type: 'agent' } : { type: 'identityFile', path: identityPath.value })
 const tagList = computed(() => tags.value.split(',').map(t => t.trim()).filter(Boolean))
 const valid = computed(() =>
-  host.value.trim() !== '' && user.value.trim() !== '' && Number.isInteger(port.value) && port.value > 0 && port.value < 65536
+  host.value.trim() !== '' && user.value.trim() !== '' && validPort(port.value)
   && (authType.value === 'agent' || identityPath.value.trim() !== ''),
 )
 const command = computed(() => valid.value
-  ? onboardCreateCommand({ user: user.value.trim(), host: host.value.trim(), port: port.value, name: name.value.trim(), tags: tagList.value, auth: auth.value })
+  ? onboardCreateCommand({ user: user.value.trim(), host: host.value.trim(), port: port.value, name: name.value.trim(), description: props.description, tags: tagList.value, auth: auth.value })
   : null)
 
 const busy = ref(false)

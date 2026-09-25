@@ -22,14 +22,15 @@ function errorOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-interface Paged<T> {
+export interface Paged<T> {
   items: T[]
   page: { nextCursor?: string | null }
 }
 
-type PagedResponse<T> = { status: number, data: Paged<T> }
+export type PagedResponse<T> = { status: number, data: Paged<T> }
 
-async function fetchAllPages<T>(
+/** Follows `page.nextCursor` up to a safety cap; `truncated` reports hitting it. */
+export async function fetchAllPages<T>(
   fetchPage: (cursor?: string) => Promise<PagedResponse<T>>,
 ): Promise<{ items: T[], truncated: boolean }> {
   const items: T[] = []

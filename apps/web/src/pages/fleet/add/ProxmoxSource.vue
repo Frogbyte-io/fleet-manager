@@ -8,7 +8,6 @@ import {
   createProxmoxAccount,
   deleteProxmoxAccount,
   discoverProxmoxCluster,
-  listProxmoxAccounts,
   observeProxmoxFingerprint,
   type ProxmoxAccountDto,
   type ProxmoxDiscoveryDto,
@@ -18,6 +17,7 @@ import {
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { proxmoxAccountCommand, proxmoxConfirmCommand, proxmoxCreateCommand } from '../../machine/fleetctl'
+import { ACCOUNTS_KEY, allProxmoxAccounts, validPort } from './queries'
 
 // Connect a Proxmox VE cluster: save the account (the token secret is
 // write-only), observe the TLS certificate, have the operator confirm the
@@ -28,20 +28,24 @@ const emit = defineEmits<{
   created: [accountId: string]
   step: [step: 'connect' | 'verify' | 'preview']
   discarded: []
+  /** The resumed account no longer exists. */
+  missing: []
 }>()
 
 const queryClient = useQueryClient()
 
 const accountsQuery = useQuery({
-  queryKey: ['fleet', 'proxmox-accounts'],
-  queryFn: async () => {
-    const response = await listProxmoxAccounts({ limit: 200 })
-    if (response.status !== 200)
-      throw new Error(`listProxmoxAccounts failed (${response.status})`)
-    return response.data.items as ProxmoxAccountDto[]
-  },
+  queryKey: ACCOUNTS_KEY,
+  queryFn: allProxmoxAccounts,
   enabled: computed(() => props.accountId !== null),
 })
+
+function invalidateAccounts() {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ACCOUNTS_KEY }),
+    queryClient.invalidateQueries({ queryKey: ['fleet', 'proxmox-accounts'] }),
+  ])
+}
 const account = computed(() => accountsQuery.data.value?.find(a => a.id === props.accountId) ?? null)
 const confirmed = computed(() => account.value?.fingerprintState === 'confirmed')
 
@@ -71,7 +75,8 @@ const host = ref('')
 const port = ref(8006)
 const tokenId = ref('')
 const tokenSecret = ref('')
-const formValid = computed(() => name.value.trim() && host.value.trim() && /^[^@\s]+@[^!\s]+![^\s]+$/.test(tokenId.value.trim()) && tokenSecret.value !== '')
+const formValid = computed(() => name.value.trim() !== '' && host.value.trim() !== '' && validPort(port.value)
+  && /^[^@\s]+@[^!\s]+![^\s]+$/.test(tokenId.value.trim()) && tokenSecret.value !== '')
 const createCmd = computed(() => (formValid.value ? proxmoxCreateCommand(name.value.trim(), host.value.trim(), port.value, tokenId.value.trim()) : null))
 
 function create() {
@@ -85,7 +90,7 @@ function create() {
     }), [201])
     // The secret leaves component state as soon as the controller has it.
     tokenSecret.value = ''
-    await queryClient.invalidateQueries({ queryKey: ['fleet', 'proxmox-accounts'] })
+    await invalidateAccounts()
     emit('created', created.id)
   })
 }
@@ -107,8 +112,8 @@ function confirm() {
     return
   return act(async () => {
     unwrap<ProxmoxAccountDto>(await confirmProxmoxFingerprint(props.accountId!, { fingerprint }))
-    await queryClient.invalidateQueries({ queryKey: ['fleet', 'proxmox-accounts'] })
-    await accountsQuery.refetch()
+    // Invalidation refetches the active account query before resolving.
+    await invalidateAccounts()
   })
 }
 
@@ -119,7 +124,7 @@ function discard() {
     const response = await deleteProxmoxAccount(props.accountId!)
     if (response.status !== 204)
       unwrap(response, [204])
-    await queryClient.invalidateQueries({ queryKey: ['fleet', 'proxmox-accounts'] })
+    await invalidateAccounts()
     emit('discarded')
   })
 }
@@ -170,7 +175,10 @@ const counts = computed(() => {
           <input
             v-model.number="port"
             type="number"
+            min="1"
+            max="65535"
             class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
+            data-testid="pve-port"
           >
         </label>
         <label class="col-span-3 flex flex-col gap-1">
@@ -214,10 +222,34 @@ const counts = computed(() => {
       </p>
     </template>
 
-    <template v-else-if="!account">
+    <template v-else-if="accountsQuery.error.value">
       <p class="text-xs text-fc-err">
+        Proxmox accounts unavailable: {{ errorMessage(accountsQuery.error.value) }}
+      </p>
+      <button
+        type="button"
+        class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+        @click="accountsQuery.refetch()"
+      >
+        Retry
+      </button>
+    </template>
+
+    <template v-else-if="!account">
+      <p
+        class="text-xs text-fc-err"
+        data-testid="pve-missing"
+      >
         This Proxmox account no longer exists.
       </p>
+      <button
+        type="button"
+        class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+        data-testid="pve-missing-restart"
+        @click="emit('missing')"
+      >
+        Start over
+      </button>
     </template>
 
     <template v-else-if="step === 'verify'">

@@ -86,6 +86,7 @@ export interface DraftInput {
   host: string
   port: number
   name: string
+  description?: string
   tags: string[]
   auth: SshAuth
 }
@@ -97,6 +98,7 @@ export function onboardCreateCommand(input: DraftInput): string {
     '--host', input.host,
     ...(input.port !== 22 ? ['--port', String(input.port)] : []),
     ...(input.name ? ['--name', input.name] : []),
+    ...(input.description ? ['--description', input.description] : []),
     ...input.tags.flatMap(tag => ['--tag', tag]),
     ...authFlags(input.auth),
   ])

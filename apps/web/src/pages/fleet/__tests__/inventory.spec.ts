@@ -5,6 +5,7 @@ import type { MachineDto, PageAssociatedGuestDtoItemsItem, PageCorrelatedDeviceD
 import {
   buildInventory,
   formatBytes,
+  isRoutableAddress,
   guestStatusTone,
   machineStatusTone,
   relativeTime,
@@ -209,6 +210,16 @@ describe('buildInventory', () => {
       proxmox: [{ accountId: 'acc1', accountName: 'homelab', confirmed: true, loading: false, discovery: discovery(), guests: [guest({ agent })], discoveryError: null, guestsError: null, discoveryWarnings: null }],
     }))
     expect(built.guests[0].addresses).toEqual(['192.168.1.50', 'fd00::5'])
+  })
+
+  it('treats expanded loopback and all of fe80::/10 as unroutable', () => {
+    expect(isRoutableAddress('0:0:0:0:0:0:0:1')).toBe(false)
+    expect(isRoutableAddress('feb0::1')).toBe(false)
+    expect(isRoutableAddress('FE80::1%eth0')).toBe(false)
+    expect(isRoutableAddress('fec0::1')).toBe(true)
+    expect(isRoutableAddress('2001:db8::1')).toBe(true)
+    expect(isRoutableAddress('10.0.0.5')).toBe(true)
+    expect(isRoutableAddress('not-an-ip')).toBe(false)
   })
 
   it('does not enrich when no guest-list entry matches the discovered vmid', () => {

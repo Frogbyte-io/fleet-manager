@@ -25,7 +25,12 @@ export function loadResume(): ResumeTarget | null {
 }
 
 export function saveResume(target: ResumeTarget): void {
-  localStorage.setItem(RESUME_KEY, JSON.stringify(target))
+  try {
+    localStorage.setItem(RESUME_KEY, JSON.stringify(target))
+  }
+  catch {
+    // Best-effort: the draft is still durable and listed under Resume.
+  }
 }
 
 export function clearResume(): void {
@@ -41,4 +46,38 @@ export function draftStep(draft: OnboardingDraftDetailDto): DraftStep {
   if ((draft.hostKeyStage === 'observed' || draft.hostKeyStage === 'changed') && draft.hostKey)
     return 'verify'
   return 'test'
+}
+
+// The test or discover operation a draft is running, so a reopened dialog
+// follows it instead of starting a duplicate probe.
+const STAGE_KEY = 'fleet-console-add-stage-operation'
+
+export interface StageOperation {
+  stage: 'test' | 'discover'
+  id: string
+}
+
+export function loadStageOperation(draftId: string): StageOperation | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STAGE_KEY) ?? 'null') as ({ draftId: string } & StageOperation) | null
+    if (parsed && parsed.draftId === draftId && (parsed.stage === 'test' || parsed.stage === 'discover') && typeof parsed.id === 'string')
+      return { stage: parsed.stage, id: parsed.id }
+  }
+  catch {
+    // A corrupt entry is treated as absent.
+  }
+  return null
+}
+
+export function saveStageOperation(draftId: string, operation: StageOperation): void {
+  try {
+    localStorage.setItem(STAGE_KEY, JSON.stringify({ draftId, ...operation }))
+  }
+  catch {
+    // Best-effort: without storage, a reopened dialog just re-reads the draft.
+  }
+}
+
+export function clearStageOperation(): void {
+  localStorage.removeItem(STAGE_KEY)
 }

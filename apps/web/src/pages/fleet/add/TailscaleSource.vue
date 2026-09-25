@@ -7,8 +7,6 @@ import {
   createOnboardingDraft,
   getTailnetStatus,
   importTailnetDevice,
-  listTailnetDevices,
-  type CorrelatedDeviceDto,
   type OnboardingDraftDetailDto,
   type OnboardingDraftDto,
 } from '@frogbyte-io/fleet-api-client'
@@ -17,6 +15,7 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { onboardCreateCommand, tailnetImportCommand, type SshAuth } from '../../machine/fleetctl'
+import { allTailnetDevices, validPort } from './queries'
 import { connectHost, type ConnectVia } from './tailnet'
 
 // Pick a tailnet device, choose how the controller reaches it, and create
@@ -33,12 +32,7 @@ const configured = computed(() => statusQuery.data.value?.configured ?? false)
 
 const devicesQuery = useQuery({
   queryKey: ['add', 'tailnet-devices'],
-  queryFn: async () => {
-    const response = await listTailnetDevices({ limit: 200 })
-    if (response.status !== 200)
-      throw new Error(`listTailnetDevices failed (${response.status})`)
-    return response.data.items as CorrelatedDeviceDto[]
-  },
+  queryFn: allTailnetDevices,
   enabled: configured,
 })
 const devices = computed(() =>
@@ -62,7 +56,7 @@ watch(selectedId, () => {
 
 const host = computed(() => (selected.value ? connectHost(selected.value, via.value, lanIp.value) : null))
 const useImport = computed(() => via.value === 'tailnet-ip' && authType.value === 'agent')
-const valid = computed(() => selected.value !== null && host.value !== null && user.value.trim() !== ''
+const valid = computed(() => selected.value !== null && host.value !== null && user.value.trim() !== '' && validPort(port.value)
   && (authType.value === 'agent' || identityPath.value.trim() !== ''))
 
 const command = computed(() => {
@@ -70,8 +64,13 @@ const command = computed(() => {
     return null
   if (useImport.value)
     return tailnetImportCommand(selected.value.nodeId, user.value.trim(), port.value)
-  return onboardCreateCommand({ user: user.value.trim(), host: host.value, port: port.value, name: selected.value.hostname, tags: [], auth: auth.value })
+  return onboardCreateCommand({ user: user.value.trim(), host: host.value, port: port.value, name: selected.value.hostname, description: provenance(selected.value), tags: [], auth: auth.value })
 })
+
+// The same provenance note `tailnet import` writes on its drafts.
+function provenance(device: { nodeId: string, name: string }): string {
+  return `Imported from tailnet device ${device.nodeId} (${device.name})`
+}
 
 const busy = ref(false)
 const error = ref('')
@@ -94,7 +93,7 @@ async function create() {
         port: port.value,
         auth: auth.value,
         name: device.hostname,
-        description: `Imported from tailnet device ${device.nodeId} (${device.name})`,
+        description: provenance(device),
         tags: [],
         groups: [],
       }), [201])
@@ -252,6 +251,9 @@ async function create() {
             <input
               v-model.number="port"
               type="number"
+              min="1"
+              max="65535"
+              data-testid="tailnet-port"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
             >
           </label>

@@ -5,9 +5,7 @@ import { useRouter } from 'vue-router'
 
 import {
   listOnboardingDrafts,
-  listProxmoxAccounts,
   type OnboardingDraftDto,
-  type ProxmoxAccountDto,
 } from '@frogbyte-io/fleet-api-client'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 
@@ -15,6 +13,7 @@ import DraftFlow from './DraftFlow.vue'
 import GuestSource from './GuestSource.vue'
 import ProxmoxSource from './ProxmoxSource.vue'
 import { clearResume, loadResume, saveResume, type DraftStep, type Source } from './resume'
+import { ACCOUNTS_KEY, allProxmoxAccounts } from './queries'
 import SshSource from './SshSource.vue'
 import TailscaleSource from './TailscaleSource.vue'
 
@@ -29,7 +28,9 @@ const open = defineModel<boolean>('open', { required: true })
 
 const router = useRouter()
 
-const resume = loadResume()
+// An explicit request (e.g. a tailnet card's "Add to fleet") wins over a
+// stored resume; the stored draft stays listed under Resume.
+const resume = props.initialSource ? null : loadResume()
 const source = ref<Source | null>(resume ? (resume.kind === 'proxmox' ? 'proxmox' : 'ssh') : props.initialSource ?? null)
 const draftId = ref<string | null>(resume?.kind === 'draft' ? resume.id : null)
 const proxmoxId = ref<string | null>(resume?.kind === 'proxmox' ? resume.id : null)
@@ -67,13 +68,8 @@ const draftsQuery = useQuery({
   enabled: computed(() => source.value === null),
 })
 const accountsQuery = useQuery({
-  queryKey: ['fleet', 'proxmox-accounts'],
-  queryFn: async () => {
-    const response = await listProxmoxAccounts({ limit: 200 })
-    if (response.status !== 200)
-      throw new Error(`listProxmoxAccounts failed (${response.status})`)
-    return response.data.items as ProxmoxAccountDto[]
-  },
+  queryKey: ACCOUNTS_KEY,
+  queryFn: allProxmoxAccounts,
   enabled: computed(() => source.value === null),
 })
 const unconfirmedAccounts = computed(() => (accountsQuery.data.value ?? []).filter(a => a.fingerprintState !== 'confirmed'))
@@ -239,6 +235,7 @@ const title = computed(() => {
             @step="draftStep = $event"
             @added="draftStep = 'added'; finished()"
             @cancelled="startOver"
+            @missing="startOver"
           />
           <TailscaleSource
             v-else-if="source === 'tailscale'"
@@ -258,6 +255,7 @@ const title = computed(() => {
             @created="onAccountCreated"
             @step="onProxmoxStep"
             @discarded="startOver"
+            @missing="startOver"
           />
           <GuestSource
             v-else-if="source === 'guest'"

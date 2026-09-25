@@ -96,13 +96,13 @@ function onboard() {
           :key="guest.key"
           class="grid cursor-pointer grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-sm border p-2 text-sm"
           :class="selectedKey === guest.key ? 'border-fc-ink' : 'border-fc-line'"
-          :data-testid="`guest-${guest.vmid}`"
+          :data-testid="`guest-${guest.key}`"
         >
           <input
             v-model="selectedKey"
             type="radio"
             :value="guest.key"
-            @change="emit('step', 'link'); linked = null"
+            @change="emit('step', 'link'); linked = null; error = ''"
           >
           <span class="min-w-0">
             <b class="font-semibold text-fc-ink">{{ guest.name }}</b>
@@ -146,7 +146,7 @@ function onboard() {
               type="button"
               class="ml-auto h-7 rounded-sm border border-fc-info/40 px-2 text-fc-info hover:bg-fc-info/10 disabled:opacity-50"
               :disabled="linking !== null"
-              :data-testid="`link-${candidate.machineId}`"
+              :data-testid="`link-${selected.key}-${candidate.machineId}`"
               @click="link(candidate.machineId)"
             >
               Record facts on this machine

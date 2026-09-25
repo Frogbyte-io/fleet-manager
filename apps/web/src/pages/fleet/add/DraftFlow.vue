@@ -17,11 +17,11 @@ import {
   type OperationDto,
 } from '@frogbyte-io/fleet-api-client'
 
-import { errorMessage, isTerminal, unwrap } from '../../machine/api'
+import { ApiRequestError, errorMessage, isTerminal, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
 import { installNodeCommand, onboardConfirmCommand, onboardStageCommand } from '../../machine/fleetctl'
-import { draftStep, type DraftStep } from './resume'
+import { clearStageOperation, draftStep, loadStageOperation, saveStageOperation, type DraftStep } from './resume'
 
 // One onboarding draft, from connection test to "Add to fleet". Every step
 // is a call on the draft, so leaving and returning resumes where the
@@ -31,6 +31,8 @@ const emit = defineEmits<{
   step: [step: DraftStep]
   cancelled: []
   added: [machineId: string]
+  /** The resumed draft no longer exists. */
+  missing: []
 }>()
 
 const queryClient = useQueryClient()
@@ -40,6 +42,7 @@ const draftQuery = useQuery({
   queryFn: async () => unwrap<OnboardingDraftDetailDto>(await getOnboardingDraft(props.draftId)),
 })
 const draft = computed(() => draftQuery.data.value ?? null)
+const draftMissing = computed(() => draftQuery.error.value instanceof ApiRequestError && draftQuery.error.value.status === 404)
 const step = computed<DraftStep | null>(() => (draft.value ? draftStep(draft.value) : null))
 watch(step, s => s && emit('step', s), { immediate: true })
 
@@ -61,11 +64,12 @@ async function act(fn: () => Promise<void>) {
 }
 
 // Test and discover are durable operations; the draft is re-read when one
-// reaches a terminal state.
-const stageOperation = ref<string | null>(null)
+// reaches a terminal state. The running operation is remembered with the
+// draft, so a reopened dialog follows it instead of starting another probe.
+const stageOperation = ref<{ stage: 'test' | 'discover', id: string } | null>(loadStageOperation(props.draftId))
 const stageQuery = useQuery({
-  queryKey: computed(() => ['operation', stageOperation.value]),
-  queryFn: async () => unwrap<OperationDto>(await getOperation(stageOperation.value!)),
+  queryKey: computed(() => ['operation', stageOperation.value?.id]),
+  queryFn: async () => unwrap<OperationDto>(await getOperation(stageOperation.value!.id)),
   enabled: computed(() => stageOperation.value !== null),
   refetchInterval: q => (q.state.data && isTerminal(q.state.data.state) ? false : 1000),
 })
@@ -74,14 +78,21 @@ const stageRunning = computed(() => {
   return stageOperation.value !== null && (!op || !isTerminal(op.state))
 })
 watch(() => stageQuery.data.value?.state, async (state) => {
-  if (state && isTerminal(state))
+  if (state && isTerminal(state)) {
+    clearStageOperation()
     await draftQuery.refetch()
+  }
 })
+/** The operation to show on a step: only one started for that step. */
+function stageOperationFor(stage: 'test' | 'discover'): string | null {
+  return stageOperation.value?.stage === stage ? stageOperation.value.id : null
+}
 
 function runStage(stage: 'test' | 'discover') {
   return act(async () => {
     const response = stage === 'test' ? await testOnboardingDraft(props.draftId) : await discoverOnboardingDraft(props.draftId)
-    stageOperation.value = unwrap<OperationDto>(response, [202]).id
+    stageOperation.value = { stage, id: unwrap<OperationDto>(response, [202]).id }
+    saveStageOperation(props.draftId, stageOperation.value)
   })
 }
 
@@ -105,6 +116,11 @@ function confirmHostKey() {
 const management = ref<'agentless' | 'fleetd'>('agentless')
 const added = ref<AddedMachineDto | null>(null)
 const installOperation = ref<string | null>(null)
+const installError = ref('')
+const addedSsh = computed(() => added.value?.machine.endpoints.find(e => e.kind === 'ssh') ?? null)
+const installCmd = computed(() => (added.value && addedSsh.value && draft.value
+  ? installNodeCommand(added.value.machine.id, addedSsh.value.id, draft.value.auth, controllerUrl)
+  : null))
 const INSTALL_TIMEOUT_SECONDS = 300
 const controllerUrl = window.location.origin
 
@@ -112,24 +128,41 @@ function addToFleet() {
   return act(async () => {
     const result = unwrap<AddedMachineDto>(await addOnboardingMachine(props.draftId), [201])
     added.value = result
-    await queryClient.invalidateQueries({ queryKey: ['fleet', 'machines'] })
-    const ssh = result.machine.endpoints.find(e => e.kind === 'ssh')
-    if (management.value === 'fleetd' && ssh && draft.value) {
-      const operation = unwrap<OperationDto>(await createOperation({
-        kind: 'machine.install-fleetd',
-        payloadJson: JSON.stringify({
-          machineId: result.machine.id,
-          endpointId: ssh.id,
-          auth: draft.value.auth,
-          timeoutSeconds: INSTALL_TIMEOUT_SECONDS,
-          controllerUrl,
-        }),
-        deadlineAt: Date.now() + (INSTALL_TIMEOUT_SECONDS + 180) * 1000,
-      }), [201])
-      installOperation.value = operation.id
-    }
     emit('added', result.machine.id)
+    await queryClient.invalidateQueries({ queryKey: ['fleet', 'machines'] })
+    if (management.value === 'fleetd')
+      await installFleetd()
   })
+}
+
+// Runs after the add; a failure here leaves an agentless machine, which the
+// added view reports with a retry and the machine page's install form.
+async function installFleetd() {
+  const ssh = addedSsh.value
+  if (!added.value || !draft.value)
+    return
+  installError.value = ''
+  if (!ssh) {
+    installError.value = 'The new machine has no SSH endpoint, so fleetd cannot be installed from here.'
+    return
+  }
+  try {
+    const operation = unwrap<OperationDto>(await createOperation({
+      kind: 'machine.install-fleetd',
+      payloadJson: JSON.stringify({
+        machineId: added.value.machine.id,
+        endpointId: ssh.id,
+        auth: draft.value.auth,
+        timeoutSeconds: INSTALL_TIMEOUT_SECONDS,
+        controllerUrl,
+      }),
+      deadlineAt: Date.now() + (INSTALL_TIMEOUT_SECONDS + 180) * 1000,
+    }), [201])
+    installOperation.value = operation.id
+  }
+  catch (e) {
+    installError.value = errorMessage(e)
+  }
 }
 
 const confirmingCancel = ref(false)
@@ -154,12 +187,22 @@ const factPreview = computed(() => (draft.value?.facts ?? []).filter(f => f.stat
     >
       Loading draft…
     </p>
-    <p
-      v-else-if="draftQuery.error.value"
-      class="text-xs text-fc-err"
-    >
-      Draft unavailable: {{ errorMessage(draftQuery.error.value) }}
-    </p>
+    <template v-else-if="draftQuery.error.value">
+      <p
+        class="text-xs text-fc-err"
+        data-testid="draft-unavailable"
+      >
+        {{ draftMissing ? 'This draft no longer exists; it was added or cancelled elsewhere.' : `Draft unavailable: ${errorMessage(draftQuery.error.value)}` }}
+      </p>
+      <button
+        type="button"
+        class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+        data-testid="draft-restart"
+        @click="draftMissing ? emit('missing') : draftQuery.refetch()"
+      >
+        {{ draftMissing ? 'Start over' : 'Retry' }}
+      </button>
+    </template>
 
     <template v-else-if="added">
       <h3 class="text-base font-bold text-fc-ink">
@@ -175,6 +218,29 @@ const factPreview = computed(() => (draft.value?.facts ?? []).filter(f => f.stat
         v-if="installOperation"
         :operation-id="installOperation"
         label="Install fleetd"
+      />
+      <div
+        v-if="installError"
+        class="space-y-1 text-xs"
+        data-testid="install-error"
+      >
+        <p class="text-fc-err">
+          The machine was added, but fleetd installation did not start: {{ installError }}
+        </p>
+        <button
+          v-if="addedSsh"
+          type="button"
+          class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+          data-testid="retry-install"
+          @click="installFleetd"
+        >
+          Retry install
+        </button>
+      </div>
+      <CopyFleetctl
+        v-if="management === 'fleetd'"
+        :command="installCmd"
+        missing="The new machine has no SSH endpoint."
       />
       <RouterLink
         :to="`/fleet/machines/${added.machine.id}`"
@@ -220,8 +286,8 @@ const factPreview = computed(() => (draft.value?.facts ?? []).filter(f => f.stat
           {{ draft.lastTest ? 'Test again' : 'Test connection' }}
         </button>
         <OperationStatus
-          v-if="stageOperation"
-          :operation-id="stageOperation"
+          v-if="stageOperationFor('test')"
+          :operation-id="stageOperationFor('test')!"
           label="Connection test"
         />
         <CopyFleetctl :command="onboardStageCommand('test', draft.id)" />
@@ -296,8 +362,8 @@ const factPreview = computed(() => (draft.value?.facts ?? []).filter(f => f.stat
           Discover
         </button>
         <OperationStatus
-          v-if="stageOperation"
-          :operation-id="stageOperation"
+          v-if="stageOperationFor('discover')"
+          :operation-id="stageOperationFor('discover')!"
           label="Discovery"
         />
         <CopyFleetctl :command="onboardStageCommand('discover', draft.id)" />
@@ -374,11 +440,13 @@ const factPreview = computed(() => (draft.value?.facts ?? []).filter(f => f.stat
         >
           Add to fleet →
         </button>
-        <CopyFleetctl
-          :command="management === 'fleetd'
-            ? `${onboardStageCommand('add', draft.id)} && ${installNodeCommand('<machine-id>', '<ssh-endpoint-id>', draft.auth, controllerUrl)}`
-            : onboardStageCommand('add', draft.id)"
-        />
+        <CopyFleetctl :command="onboardStageCommand('add', draft.id)" />
+        <p
+          v-if="management === 'fleetd'"
+          class="text-[11px] text-fc-faint"
+        >
+          The fleetd install command appears once the machine exists and has an id.
+        </p>
       </section>
 
       <p

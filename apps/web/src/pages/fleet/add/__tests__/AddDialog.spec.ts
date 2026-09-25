@@ -388,12 +388,12 @@ describe('Add dialog', () => {
   it('Existing VM/LXC: records facts on a candidate or onboards over SSH', async () => {
     accounts = [{ id: 'acc1', name: 'homelab', host: 'pve.lan', port: 8006, tokenId: 't', fingerprint: 'AB', fingerprintState: 'confirmed', createdAt: NOW }]
     await mountAt('/fleet/add?source=guest')
-    await until('[data-testid="guest-100"]')
-    expect($('[data-testid="guest-100"]').text()).toContain('192.168.1.50')
-    expect($('[data-testid="guest-100"]').text()).not.toContain('127.0.0.1')
-    await $('[data-testid="guest-100"] input').setValue(true)
-    await until('[data-testid="link-m7"]')
-    await $('[data-testid="link-m7"]').trigger('click')
+    await until('[data-testid="guest-acc1:q-100"]')
+    expect($('[data-testid="guest-acc1:q-100"]').text()).toContain('192.168.1.50')
+    expect($('[data-testid="guest-acc1:q-100"]').text()).not.toContain('127.0.0.1')
+    await $('[data-testid="guest-acc1:q-100"] input').setValue(true)
+    await until('[data-testid="link-acc1:q-100-m7"]')
+    await $('[data-testid="link-acc1:q-100-m7"]').trigger('click')
     await settle()
     expect(api.observeProxmoxGuest).toHaveBeenCalledWith('acc1', 100, { machineId: 'm7' })
 
@@ -407,5 +407,116 @@ describe('Add dialog', () => {
     const { router } = await mountAt('/fleet/add')
     await $('[data-testid="source-lab"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/lab'))
+  })
+})
+
+describe('Add dialog review fixes', () => {
+  it('an explicit source wins over a stored resume, which stays listed', async () => {
+    draft = newDraft({ user: 'pi', host: 'pi-4.lan', auth: { type: 'agent' } })
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'draft', id: 'd1' }))
+    await mountAt('/fleet/add?source=tailscale&device=nA')
+    await until('[data-testid="tailnet-user"]')
+    expect(exists('[data-testid="step-test"]')).toBe(false)
+    expect(($('[data-testid="device-nA"] input').element as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('a resumed draft that no longer exists offers a way back to the sources', async () => {
+    api.getOnboardingDraft.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no draft' }, headers: new Headers() })
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'draft', id: 'gone' }))
+    await mountAt('/fleet/add')
+    await until('[data-testid="draft-restart"]')
+    expect($('[data-testid="draft-unavailable"]').text()).toContain('no longer exists')
+    await $('[data-testid="draft-restart"]').trigger('click')
+    await until('[data-testid="source-ssh"]')
+    expect(localStorage.getItem(RESUME_KEY)).toBeNull()
+  })
+
+  it('a resumed Proxmox account that no longer exists offers a way back', async () => {
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'proxmox', id: 'gone' }))
+    await mountAt('/fleet/add')
+    await until('[data-testid="pve-missing-restart"]')
+    await $('[data-testid="pve-missing-restart"]').trigger('click')
+    await until('[data-testid="source-proxmox"]')
+    expect(localStorage.getItem(RESUME_KEY)).toBeNull()
+  })
+
+  it('reopening while a test runs follows that operation instead of starting another', async () => {
+    api.getOperation.mockImplementation(async (id: string) => ok({ data: { id, kind: 'onboarding.test', state: 'running', cancelRequested: false, createdAt: NOW, updatedAt: NOW } }))
+    const first = await mountAt('/fleet/add?source=ssh')
+    await $('[data-testid="ssh-host"]').setValue('pi-4.lan')
+    await $('[data-testid="ssh-user"]').setValue('pi')
+    await $('[data-testid="create-draft"]').trigger('click')
+    await until('[data-testid="step-test"]')
+    // The probe is still running on the controller: the draft has not moved.
+    api.testOnboardingDraft.mockImplementation(async () => ok({ data: { id: 'op-test', kind: 'onboarding.test', state: 'pending', cancelRequested: false, createdAt: NOW, updatedAt: NOW } }, 202))
+    await $('[data-testid="run-test"]').trigger('click')
+    await settle()
+    first.wrapper.unmount()
+
+    await mountAt('/fleet/add')
+    await until('[data-testid="step-test"]')
+    await until('[data-testid="operation-status"]')
+    expect($('[data-testid="operation-status"]').text()).toContain('op-test')
+    expect($('[data-testid="run-test"]').attributes('disabled')).toBeDefined()
+    expect(api.testOnboardingDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a fleetd install that failed to start after the add, with a retry', async () => {
+    draft = { ...newDraft({ user: 'pi', host: 'pi-4.lan', auth: { type: 'agent' } }), hostKeyStage: 'confirmed', discoveredAt: NOW }
+    localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'draft', id: 'd1' }))
+    api.createOperation.mockResolvedValueOnce({ status: 403, data: { code: 'forbidden', message: 'no install permission' }, headers: new Headers() })
+    await mountAt('/fleet/add')
+    await until('[data-testid="step-finish"]')
+    await $('[data-testid="manage-fleetd"]').setValue(true)
+    expect(document.body.textContent).toContain('appears once the machine exists')
+    await $('[data-testid="add-to-fleet"]').trigger('click')
+    await until('[data-testid="install-error"]')
+    expect($('[data-testid="install-error"]').text()).toContain('forbidden: no install permission')
+    expect(document.body.textContent).toContain('fleetctl machines install-node m1 --endpoint e-ssh --auth agent')
+    await $('[data-testid="retry-install"]').trigger('click')
+    await until('[data-testid="operation-status"]')
+    expect(api.createOperation).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses out-of-range ports before calling the API', async () => {
+    await mountAt('/fleet/add?source=proxmox')
+    await $('[data-testid="pve-name"]').setValue('homelab')
+    await $('[data-testid="pve-host"]').setValue('pve.lan')
+    await $('[data-testid="pve-token-id"]').setValue('fleet@pve!console')
+    await $('[data-testid="pve-token-secret"]').setValue('x')
+    await $('[data-testid="pve-port"]').setValue('70000')
+    expect($('[data-testid="create-pve"]').attributes('disabled')).toBeDefined()
+    await $('[data-testid="pve-port"]').setValue('8006')
+    expect($('[data-testid="create-pve"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('lists tailnet devices and accounts beyond the first page', async () => {
+    api.listTailnetDevices
+      .mockResolvedValueOnce(ok({ items: [{ id: 'n1', nodeId: 'nA', name: 'a.ts.net', hostname: 'a', os: 'linux', addresses: ['100.64.0.1'], tags: [], user: 'op', online: true, candidates: [] }], page: { nextCursor: 'p2', limit: 200 } }))
+      .mockResolvedValueOnce(ok({ items: [{ id: 'n9', nodeId: 'nZ', name: 'z.ts.net', hostname: 'z', os: 'linux', addresses: ['100.64.0.9'], tags: [], user: 'op', online: true, candidates: [] }], page: { nextCursor: null, limit: 200 } }))
+    await mountAt('/fleet/add?source=tailscale')
+    await until('[data-testid="device-nZ"]')
+    expect(api.listTailnetDevices).toHaveBeenLastCalledWith({ limit: 200, cursor: 'p2' })
+  })
+
+  it('carries the guest provenance into the copied onboard command', async () => {
+    accounts = [{ id: 'acc1', name: 'homelab', host: 'pve.lan', port: 8006, tokenId: 't', fingerprint: 'AB', fingerprintState: 'confirmed', createdAt: NOW }]
+    await mountAt('/fleet/add?source=guest')
+    await until('[data-testid="guest-acc1:q-100"]')
+    await $('[data-testid="guest-acc1:q-100"] input').setValue(true)
+    await until('[data-testid="onboard-guest"]')
+    await $('[data-testid="onboard-guest"]').trigger('click')
+    await until('[data-testid="ssh-user"]')
+    await $('[data-testid="ssh-user"]').setValue('root')
+    expect(document.body.textContent).toContain(`--description 'Proxmox VM 100 on pve (homelab)'`)
+  })
+
+  it('closing replaces the history entry instead of pushing a new one', async () => {
+    const { router } = await mountAt('/fleet/add')
+    const replace = vi.spyOn(router, 'replace')
+    const push = vi.spyOn(router, 'push')
+    await $('[data-slot="dialog-close"]').trigger('click')
+    await vi.waitFor(() => expect(replace).toHaveBeenCalledWith('/fleet'))
+    expect(push).not.toHaveBeenCalled()
   })
 })

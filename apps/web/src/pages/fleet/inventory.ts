@@ -261,9 +261,28 @@ function buildHosts(resources: ProxmoxResourceDto[], accountId: string, accountN
   })
 }
 
+/** Whether an address can reach the guest from elsewhere: no loopback or link-local. */
+export function isRoutableAddress(address: string): boolean {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address))
+    return !address.startsWith('127.') && !address.startsWith('169.254.') && address !== '0.0.0.0'
+  let normalized: string
+  try {
+    // The URL parser canonicalizes IPv6 (compresses zeros, lowercases).
+    normalized = new URL(`http://[${address.replace(/%.*$/, '')}]/`).hostname.slice(1, -1)
+  }
+  catch {
+    return false
+  }
+  if (normalized === '::1' || normalized === '::')
+    return false
+  // fe80::/10: the first hextet is fe80 through febf.
+  const first = Number.parseInt(normalized.split(':')[0] || '0', 16)
+  return !(first >= 0xFE80 && first <= 0xFEBF)
+}
+
 function guestAddresses(guest: PageAssociatedGuestDtoItemsItem | undefined): string[] {
   const all = (guest?.agent?.interfaces ?? []).flatMap(i => i.addresses.map(a => a.split('/')[0]!))
-  return [...new Set(all.filter(a => a && !/^(127\.|::1$|fe80:|169\.254\.)/i.test(a)))]
+  return [...new Set(all.filter(a => a && isRoutableAddress(a)))]
 }
 
 function buildGuests(
