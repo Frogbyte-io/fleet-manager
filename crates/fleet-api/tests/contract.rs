@@ -692,7 +692,19 @@ impl fleet_application::tailnet::TailnetSource for ContractTailnetSource {
         Vec<fleet_application::tailnet::TailnetDevice>,
         fleet_application::tailnet::TailnetSourceError,
     > {
-        unreachable!("invalid import input is rejected before source access")
+        Ok(vec![fleet_application::tailnet::TailnetDevice {
+            node_id: "nABC".to_owned(),
+            id: None,
+            name: "build-host.example.ts.net".to_owned(),
+            hostname: "build-host".to_owned(),
+            os: "linux".to_owned(),
+            addresses: vec!["100.64.0.10".to_owned()],
+            tags: Vec::new(),
+            user: "operator@example.com".to_owned(),
+            online: Some(true),
+            connected_to_control: Some(true),
+            last_seen: None,
+        }])
     }
 }
 
@@ -702,7 +714,10 @@ struct ContractTailnetCredentials;
 #[async_trait]
 impl fleet_application::tailnet::TailnetCredentialStore for ContractTailnetCredentials {
     async fn load(&self) -> Result<Option<fleet_application::tailnet::TailnetCredentials>, String> {
-        unreachable!("invalid import input is rejected before credential access")
+        Ok(Some(fleet_application::tailnet::TailnetCredentials {
+            client_id: "contract-client".to_owned(),
+            client_secret: fleet_core::SensitiveString::new("contract-secret"),
+        }))
     }
 
     async fn store(&self, _client_id: &str, _client_secret: &str) -> Result<(), String> {
@@ -838,11 +853,9 @@ async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
         machines,
         audit,
     ));
-    let mut state = (*operation_state_with_hub(
-        Arc::new(PermitAllAuthorizer),
-        Arc::new(fleet_application::events::EventHub::new(8)),
-    ))
-    .clone();
+    let hub = Arc::new(fleet_application::events::EventHub::new(8));
+    let mut events = hub.subscribe(None).receiver;
+    let mut state = (*operation_state_with_hub(Arc::new(PermitAllAuthorizer), hub)).clone();
     state.onboarding = Some(onboarding);
     state.tailnet = Some(tailnet);
     let app = router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
@@ -852,6 +865,8 @@ async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
     for request_body in [
         r#"{"user":"-oProxyCommand=bad","host":"build-host","auth":{"type":"agent"},"name":"build-host"}"#,
         r#"{"user":"ops","host":"-Fbad","auth":{"type":"agent"},"name":"build-host"}"#,
+        r#"{"user":"deploy@example.com","host":"build-host","auth":{"type":"agent"},"name":"build-host"}"#,
+        r#"{"user":"ops","host":"build host","auth":{"type":"agent"},"name":"build-host"}"#,
     ] {
         let (parts, body) = call_via(
             &app,
@@ -866,18 +881,45 @@ async fn onboarding_endpoints_reject_dash_prefixed_ssh_user_and_host() {
         assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["code"], "invalid_request");
     }
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
     let (parts, body) = call_via(
         &app,
         Request::builder()
             .method(Method::POST)
             .uri(format!("{API_BASE_PATH}/tailnet/devices/nABC/import"))
             .header("content-type", "application/json")
+            .header("idempotency-key", "tailnet-replay")
+            .body(Body::from(r#"{"user":"ops"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        events.try_recv().unwrap().kind,
+        fleet_application::events::EventKind::OnboardingChanged
+    );
+
+    let (parts, body) = call_via(
+        &app,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_BASE_PATH}/tailnet/devices/nABC/import"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", "tailnet-replay")
             .body(Body::from(r#"{"user":"-oProxyCommand=bad"}"#))
             .unwrap(),
     )
     .await;
     assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_request");
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]

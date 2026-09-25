@@ -177,20 +177,19 @@ impl SshProvider {
         port: u16,
         timeout: Duration,
     ) -> Result<HostKeyObservation, SshProviderError> {
-        let raw = Command::new("ssh-keyscan")
+        let mut command = Command::new("ssh-keyscan");
+        command
             .arg("-t")
             .arg("ed25519,rsa")
             .arg("-p")
             .arg(port.to_string())
             .arg("-T")
-            .arg(timeout.as_secs().to_string())
-            .arg("--")
-            .arg(host)
-            .output()
-            .map_err(|error| SshProviderError::Tool {
-                tool: "ssh-keyscan",
-                detail: format!("cannot start: {error}"),
-            })?;
+            .arg(timeout.as_secs().to_string());
+        add_ssh_keyscan_host(&mut command, host);
+        let raw = command.output().map_err(|error| SshProviderError::Tool {
+            tool: "ssh-keyscan",
+            detail: format!("cannot start: {error}"),
+        })?;
         let stdout = String::from_utf8_lossy(&raw.stdout);
         let line = stdout
             .lines()
@@ -376,6 +375,10 @@ pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectio
         .arg(format!("{}@{}", endpoint.user, endpoint.host));
 }
 
+pub(crate) fn add_ssh_keyscan_host(command: &mut Command, host: &str) {
+    command.arg("--").arg(host);
+}
+
 /// How Fleet authenticates to an SSH endpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SshAuth {
@@ -464,7 +467,7 @@ pub(crate) fn redact_failure(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SshAuth, SshConnectionSpec, add_ssh_destination};
+    use super::{SshAuth, SshConnectionSpec, add_ssh_destination, add_ssh_keyscan_host};
     use std::process::Command;
 
     #[test]
@@ -479,5 +482,13 @@ mod tests {
         add_ssh_destination(&mut command, &endpoint);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["--", "-oProxyCommand=malicious@-Fmalicious"]);
+    }
+
+    #[test]
+    fn ssh_keyscan_host_is_after_the_option_terminator() {
+        let mut command = Command::new("ssh-keyscan");
+        add_ssh_keyscan_host(&mut command, "-Fmalicious");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--", "-Fmalicious"]);
     }
 }

@@ -1204,6 +1204,15 @@ pub(crate) fn validate_ssh_user(user: &str) -> Result<(), String> {
     if user.starts_with('-') {
         return Err("the endpoint user cannot start with '-'".to_owned());
     }
+    if user.contains(['@', ':'])
+        || user.chars().any(char::is_whitespace)
+        || user.chars().any(char::is_control)
+    {
+        return Err(
+            "the endpoint user cannot contain '@', ':', whitespace, or control characters"
+                .to_owned(),
+        );
+    }
     Ok(())
 }
 
@@ -1213,6 +1222,14 @@ fn validate_ssh_host(host: &str) -> Result<(), String> {
     }
     if host.starts_with('-') {
         return Err("the endpoint host cannot start with '-'".to_owned());
+    }
+    if host.contains('@')
+        || host.chars().any(char::is_whitespace)
+        || host.chars().any(char::is_control)
+    {
+        return Err(
+            "the endpoint host cannot contain '@', whitespace, or control characters".to_owned(),
+        );
     }
     Ok(())
 }
