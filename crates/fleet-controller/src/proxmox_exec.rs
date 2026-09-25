@@ -1313,7 +1313,7 @@ impl ProvisionExecutor {
         }
 
         // Ready: record the state; the TTL clock starts here.
-        let ready_at = if let Some(lease_id) = record.lease_id.as_deref() {
+        let (ready_at, lease_expires_at) = if let Some(lease_id) = record.lease_id.as_deref() {
             let lease = self
                 .leases
                 .get(lease_id)
@@ -1323,9 +1323,16 @@ impl ProvisionExecutor {
                 return Err("the linked lease does not name this provision record".to_owned());
             }
             if lease.state == fleet_core::LeaseState::Ready {
-                lease
-                    .ready_at
-                    .ok_or_else(|| "the ready lease has no readiness timestamp".to_owned())?
+                (
+                    lease
+                        .ready_at
+                        .ok_or_else(|| "the ready lease has no readiness timestamp".to_owned())?,
+                    Some(
+                        lease
+                            .expires_at
+                            .ok_or_else(|| "the ready lease has no expiry timestamp".to_owned())?,
+                    ),
+                )
             } else {
                 let mut ready_lease = lease;
                 ready_lease
@@ -1337,32 +1344,10 @@ impl ProvisionExecutor {
                 let expires_at = ready_lease
                     .expires_at
                     .ok_or_else(|| "ready transition produced no expires_at".to_owned())?;
-                let marked = self
-                    .leases
-                    .mark_ready(lease_id, &record.id, ready_at, expires_at)
-                    .await
-                    .map_err(|detail| format!("the ready lease update failed: {detail}"))?;
-                if !marked {
-                    let current =
-                        self.leases.get(lease_id).await.map_err(|detail| {
-                            format!("the linked lease is unreadable: {detail}")
-                        })?;
-                    if current.state != fleet_core::LeaseState::Ready
-                        || current.provision_id.as_deref() != Some(record.id.as_str())
-                    {
-                        return Err(
-                            "the linked lease changed before readiness was recorded".to_owned()
-                        );
-                    }
-                    current
-                        .ready_at
-                        .ok_or_else(|| "the ready lease has no readiness timestamp".to_owned())?
-                } else {
-                    ready_at
-                }
+                (ready_at, Some(expires_at))
             }
         } else {
-            fleet_core::SystemClock::now_unix_millis()
+            (fleet_core::SystemClock::now_unix_millis(), None)
         };
         let mut updated = record.clone();
         updated.state = fleet_core::GuestState::Ready;
@@ -1370,9 +1355,9 @@ impl ProvisionExecutor {
         updated.vmid = Some(vmid);
         updated.ready_at = Some(ready_at);
         self.provisions
-            .update(&updated)
+            .complete_ready(&updated, lease_expires_at)
             .await
-            .map_err(|detail| format!("the record update failed: {detail}"))?;
+            .map_err(|detail| format!("the readiness transaction failed: {detail}"))?;
         operations
             .complete(
                 &operation.id,

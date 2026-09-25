@@ -209,6 +209,18 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String>;
+    /// Atomically records provision readiness and, when linked, the lease's
+    /// ready state and expiry. This prevents either row from becoming the
+    /// sole source of truth after a partial write.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the record/lease link changed or the backend errors.
+    async fn complete_ready(
+        &self,
+        record: &ProvisionRecord,
+        lease_expires_at: Option<i64>,
+    ) -> Result<(), String>;
     /// Lists records, newest first.
     ///
     /// # Errors
@@ -287,20 +299,6 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn attach_provision(&self, id: &str, provision_id: &str) -> Result<bool, String>;
-    /// Marks a linked lease ready, setting its ready timestamp and initial
-    /// expiry if the lease is still provisioning for the same record.
-    /// Returns false when a different transition won first.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the backend errors.
-    async fn mark_ready(
-        &self,
-        id: &str,
-        provision_id: &str,
-        ready_at: i64,
-        expires_at: i64,
-    ) -> Result<bool, String>;
     /// Claims one lease for release, conditional on its observed state:
     /// the compare-and-set that keeps concurrent sweeps from
     /// double-claiming or winning over an extension after an expiry scan.

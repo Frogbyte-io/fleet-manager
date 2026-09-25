@@ -323,6 +323,88 @@ impl ProvisionPort for LabRepository {
         Ok(())
     }
 
+    async fn complete_ready(
+        &self,
+        record: &ProvisionRecord,
+        lease_expires_at: Option<i64>,
+    ) -> Result<(), String> {
+        if record.state != fleet_core::GuestState::Ready || record.ready_at.is_none() {
+            return Err(
+                "a completed provision must carry its ready state and timestamp".to_owned(),
+            );
+        }
+        if record.lease_id.is_some() != lease_expires_at.is_some() {
+            return Err("a linked lease and its expiry must be completed together".to_owned());
+        }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin readiness transaction failed: {error}"))?;
+        if let (Some(lease_id), Some(expires_at)) = (record.lease_id.as_deref(), lease_expires_at) {
+            let ready_at = record.ready_at.expect("validated above");
+            let changed = sqlx::query(
+                "UPDATE lab_leases SET state = 'ready', ready_at = ?3, expires_at = ?4 \
+                 WHERE id = ?1 AND state = 'provisioning' AND provision_id = ?2 \
+                 AND ready_at IS NULL AND expires_at IS NULL \
+                 AND ?4 <= COALESCE(max_lifetime_at, created_at + ?5)",
+            )
+            .bind(lease_id)
+            .bind(&record.id)
+            .bind(ready_at)
+            .bind(expires_at)
+            .bind(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("mark linked lease ready failed: {error}"))?;
+            if changed.rows_affected() == 0 {
+                let current = sqlx::query(
+                    "SELECT state, provision_id, ready_at, expires_at FROM lab_leases WHERE id = ?1",
+                )
+                .bind(lease_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|error| format!("read linked lease failed: {error}"))?
+                .ok_or_else(|| format!("lease {lease_id} not found"))?;
+                let already_ready = current.get::<String, _>("state") == "ready"
+                    && current.get::<Option<String>, _>("provision_id").as_deref()
+                        == Some(record.id.as_str())
+                    && current.get::<Option<i64>, _>("ready_at") == Some(ready_at)
+                    && current.get::<Option<i64>, _>("expires_at") == Some(expires_at);
+                if !already_ready {
+                    return Err(
+                        "the linked lease changed before readiness was committed".to_owned()
+                    );
+                }
+            }
+        }
+        let updated = sqlx::query(
+            "UPDATE lab_provisions SET state = 'ready', node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8 \
+             WHERE id = ?1 AND lease_id IS ?2",
+        )
+        .bind(&record.id)
+        .bind(&record.lease_id)
+        .bind(&record.node)
+        .bind(record.vmid.map(i64::from))
+        .bind(&record.clone_upid)
+        .bind(&record.guest_ipv4)
+        .bind(record.ready_at)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("complete provision readiness failed: {error}"))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!(
+                "provision {} was missing or linked to a different lease",
+                record.id
+            ));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit readiness transaction failed: {error}"))
+    }
+
     async fn list(&self) -> Result<Vec<ProvisionRecord>, String> {
         let rows = sqlx::query("SELECT * FROM lab_provisions ORDER BY created_at DESC, id DESC")
             .fetch_all(&self.pool)
@@ -507,42 +589,6 @@ impl LeasePort for LeaseRepository {
             row.get::<String, _>("state") == "provisioning"
                 && row.get::<Option<String>, _>("provision_id").as_deref() == Some(provision_id)
         }))
-    }
-
-    async fn mark_ready(
-        &self,
-        id: &str,
-        provision_id: &str,
-        ready_at: i64,
-        expires_at: i64,
-    ) -> Result<bool, String> {
-        let updated = sqlx::query(
-            "UPDATE lab_leases SET state = 'ready', ready_at = ?3, expires_at = ?4 \
-             WHERE id = ?1 AND state = 'provisioning' AND provision_id = ?2 \
-             AND expires_at IS NULL AND ready_at IS NULL \
-             AND ?4 <= COALESCE(max_lifetime_at, created_at + ?5)",
-        )
-        .bind(id)
-        .bind(provision_id)
-        .bind(ready_at)
-        .bind(expires_at)
-        .bind(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("mark ready failed: {error}"))?;
-        if updated.rows_affected() == 1 {
-            return Ok(true);
-        }
-        let current = Self::row_to_lease(
-            &sqlx::query("SELECT * FROM lab_leases WHERE id = ?1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| format!("read ready lease failed: {error}"))?
-                .ok_or_else(|| format!("lease {id} not found"))?,
-        )?;
-        Ok(current.state == LeaseState::Ready
-            && current.provision_id.as_deref() == Some(provision_id))
     }
 
     async fn claim_for_release(

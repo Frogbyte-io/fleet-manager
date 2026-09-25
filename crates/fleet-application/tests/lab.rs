@@ -208,6 +208,14 @@ impl ProvisionPort for FakeProvisions {
         Ok(())
     }
 
+    async fn complete_ready(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        _lease_expires_at: Option<i64>,
+    ) -> Result<(), String> {
+        self.update(record).await
+    }
+
     async fn list(&self) -> Result<Vec<fleet_application::lab::ProvisionRecord>, String> {
         Ok(self.records.lock().unwrap().clone())
     }
@@ -329,29 +337,6 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             return Ok(true);
         }
         Ok(stored.state == LeaseState::Provisioning
-            && stored.provision_id.as_deref() == Some(provision_id))
-    }
-
-    async fn mark_ready(
-        &self,
-        id: &str,
-        provision_id: &str,
-        ready_at: i64,
-        expires_at: i64,
-    ) -> Result<bool, String> {
-        let mut leases = self.leases.lock().unwrap();
-        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
-            return Ok(false);
-        };
-        if stored.state == LeaseState::Provisioning
-            && stored.provision_id.as_deref() == Some(provision_id)
-        {
-            stored.state = LeaseState::Ready;
-            stored.ready_at = Some(ready_at);
-            stored.expires_at = Some(expires_at);
-            return Ok(true);
-        }
-        Ok(stored.state == LeaseState::Ready
             && stored.provision_id.as_deref() == Some(provision_id))
     }
 

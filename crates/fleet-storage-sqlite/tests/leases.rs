@@ -158,7 +158,8 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
         )
         .await
         .expect("the lease must be created");
-    let provision = fleet_storage_sqlite::LabRepository::new(store.pool().clone())
+    let provisions = fleet_storage_sqlite::LabRepository::new(store.pool().clone());
+    let mut provision = provisions
         .create(
             &NewProvision {
                 template_version_id: lease.template_version_id.clone(),
@@ -175,26 +176,82 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
             .await
             .expect("the provision must attach")
     );
-    lease.provision_id = Some(provision.id.clone());
-    lease.state = LeaseState::Provisioning;
+    lease = leases.get(&lease.id).await.expect("the lease must reload");
     lease
         .mark_ready(NOW + 120)
         .expect("the lease must become ready");
     assert_eq!(lease.expires_at, Some(NOW + 3_600_120));
-    assert!(
-        leases
-            .mark_ready(
-                &lease.id,
-                &provision.id,
-                lease.ready_at.unwrap(),
-                lease.expires_at.unwrap(),
-            )
-            .await
-            .expect("the ready transition must persist")
-    );
+    provision.state = fleet_core::GuestState::Ready;
+    provision.node = Some("pve-1".to_owned());
+    provision.vmid = Some(123);
+    provision.ready_at = lease.ready_at;
+    provisions
+        .complete_ready(&provision, lease.expires_at)
+        .await
+        .expect("the provision and lease must complete atomically");
+    provisions
+        .complete_ready(&provision, lease.expires_at)
+        .await
+        .expect("a readiness replay must be idempotent");
     let stored = leases.get(&lease.id).await.expect("the lease must reload");
     assert_eq!(stored.state, LeaseState::Ready);
     assert_eq!(stored.provision_id.as_deref(), Some(provision.id.as_str()));
     assert_eq!(stored.ready_at, Some(NOW + 120));
     assert_eq!(stored.expires_at, Some(NOW + 3_600_120));
+    let stored_provision = provisions
+        .get(&provision.id)
+        .await
+        .expect("the provision must reload");
+    assert_eq!(stored_provision.state, fleet_core::GuestState::Ready);
+    assert_eq!(stored_provision.node.as_deref(), Some("pve-1"));
+    assert_eq!(stored_provision.vmid, Some(123));
+}
+
+#[tokio::test]
+async fn readiness_transaction_rolls_back_when_lease_expiry_exceeds_its_cap() {
+    let (_dir, store, leases) = setup().await;
+    let lease = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "operator",
+            NOW,
+        )
+        .await
+        .expect("the lease must be created");
+    let provisions = fleet_storage_sqlite::LabRepository::new(store.pool().clone());
+    let mut provision = provisions
+        .create(
+            &NewProvision {
+                template_version_id: lease.template_version_id.clone(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: None,
+            },
+            NOW,
+        )
+        .await
+        .expect("the provision must be created");
+    leases
+        .attach_provision(&lease.id, &provision.id)
+        .await
+        .unwrap();
+    provision.state = fleet_core::GuestState::Ready;
+    provision.ready_at = Some(NOW + 120);
+    let result = provisions
+        .complete_ready(&provision, Some(lease.max_lifetime_at + 1))
+        .await;
+    assert!(result.is_err());
+    assert_eq!(
+        leases.get(&lease.id).await.unwrap().state,
+        LeaseState::Provisioning
+    );
+    assert_eq!(
+        provisions.get(&provision.id).await.unwrap().state,
+        fleet_core::GuestState::Provisioning
+    );
 }
