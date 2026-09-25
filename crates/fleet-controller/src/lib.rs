@@ -362,7 +362,6 @@ fn build_router_for_caller(
         .route("/readyz", get(readyz))
         .fallback_service(shell)
         .layer(axum::middleware::from_fn(browser::browser_mutation_guard))
-        .layer(axum::middleware::from_fn(browser::security_headers))
         .with_state(probe);
     if let Some(artifacts_dir) = &settings.artifacts_dir {
         router = router.nest(
@@ -390,6 +389,9 @@ fn build_router_for_caller(
         // own correlation contract.
         router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
     }
+    // Keep headers outside the identity gate so its early 401 responses keep
+    // the controller's browser protections.
+    router = router.layer(middleware::from_fn(browser::security_headers));
     if let Some(db) = audit_db {
         // Observe the response so API correlation IDs can be copied into the
         // audit row without wrapping the node protocol in API correlation.
@@ -808,6 +810,20 @@ mod tailscale_identity_tests {
                     .headers()
                     .contains_key(fleet_api::CORRELATION_ID_HEADER)
             );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::CONTENT_SECURITY_POLICY)
+                    .unwrap(),
+                "default-src 'self'; img-src 'self' data:; style-src 'self'"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                    .unwrap(),
+                "nosniff"
+            );
         }
 
         let mut request = Request::builder()
@@ -818,7 +834,7 @@ mod tailscale_identity_tests {
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
-        let response = router.oneshot(request).await.unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -859,7 +875,7 @@ mod tailscale_identity_tests {
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45678))));
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             response
@@ -885,5 +901,34 @@ mod tailscale_identity_tests {
         assert!(metadata.contains("tailscale-user-login"));
         assert!(metadata.contains(r#""peerLoopback":false"#));
         assert!(!metadata.contains("spoofed@example.invalid"));
+
+        let mut malformed_correlation = Request::builder()
+            .uri("/api/v1/system")
+            .header("tailscale-user-login", "second-spoof@example.invalid")
+            .header("x-correlation-id", "not-a-valid-correlation-id")
+            .body(Body::empty())
+            .unwrap();
+        malformed_correlation
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([10, 20, 30, 40], 45679))));
+        let response = router.oneshot(malformed_correlation).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let rows = sqlx::query(
+            "SELECT correlation_id, metadata_json FROM audit_events \
+             WHERE action = 'auth.identity_header_ignored' ORDER BY occurred_at",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            let metadata = row.get::<String, _>("metadata_json");
+            metadata.contains("tailscale-user-login")
+                && !metadata.contains("second-spoof@example.invalid")
+                && row
+                    .get::<Option<String>, _>("correlation_id")
+                    .as_deref()
+                    .is_some_and(|id| id != "not-a-valid-correlation-id")
+        }));
     }
 }
