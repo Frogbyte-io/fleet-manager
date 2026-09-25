@@ -543,6 +543,17 @@ describe('Add dialog review fixes', () => {
     expect($('[data-testid="create-draft"]').attributes('disabled')).toBeUndefined()
   })
 
+  it('explains an out-of-range SSH port', async () => {
+    await mountAt('/fleet/add?source=ssh')
+    await $('[data-testid="ssh-host"]').setValue('pi-4.lan')
+    await $('[data-testid="ssh-user"]').setValue('pi')
+    await $('[data-testid="ssh-port"]').setValue('70000')
+    expect($('[data-testid="create-draft"]').attributes('disabled')).toBeDefined()
+    expect(exists('[data-testid="ssh-port-invalid"]')).toBe(true)
+    await $('[data-testid="ssh-port"]').setValue('2222')
+    expect(exists('[data-testid="ssh-port-invalid"]')).toBe(false)
+  })
+
   it('a rotated certificate leads back to TLS verification and re-pins', async () => {
     accounts = [{ id: 'acc1', name: 'homelab', host: 'pve.lan', port: 8006, tokenId: 't', fingerprint: 'AB', fingerprintState: 'confirmed', createdAt: NOW }]
     localStorage.setItem(RESUME_KEY, JSON.stringify({ kind: 'proxmox', id: 'acc1' }))

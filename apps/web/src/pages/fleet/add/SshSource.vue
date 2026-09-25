@@ -82,6 +82,9 @@ async function create() {
         <input
           v-model.number="port"
           type="number"
+          min="1"
+          max="65535"
+          data-testid="ssh-port"
           class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
         >
       </label>
@@ -139,6 +142,13 @@ async function create() {
       data-testid="ssh-option-like"
     >
       Host and user cannot start with "-".
+    </p>
+    <p
+      v-if="!validPort(port)"
+      class="text-xs text-fc-err"
+      data-testid="ssh-port-invalid"
+    >
+      Port must be between 1 and 65535.
     </p>
     <p
       v-if="error"
