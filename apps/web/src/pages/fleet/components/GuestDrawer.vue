@@ -85,7 +85,7 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
             >
               ≈
               <RouterLink
-                :to="`/fleet?focus=${candidate.machineId}`"
+                :to="`/fleet/machines/${candidate.machineId}?tab=guest`"
                 class="underline decoration-dotted hover:text-fc-ink"
               >
                 {{ candidate.machineName }}
@@ -102,7 +102,7 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
         </dl>
 
         <p class="border-t border-fc-line pt-3 text-xs text-fc-faint">
-          Lifecycle actions move to the machine page (FM-911).
+          Lifecycle and reviewed operations run from a candidate machine's Guest tab.
         </p>
       </div>
     </SheetContent>

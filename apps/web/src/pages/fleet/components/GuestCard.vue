@@ -56,7 +56,7 @@ defineProps<{ guest: GuestItem }>()
       >
         ≈
         <RouterLink
-          :to="`/fleet?focus=${candidate.machineId}`"
+          :to="`/fleet/machines/${candidate.machineId}?tab=guest`"
           class="underline decoration-dotted hover:text-fc-ink"
         >
           {{ candidate.machineName }}

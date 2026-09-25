@@ -1,12 +1,10 @@
 <script setup lang="ts">
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { RouterLink, useRoute } from 'vue-router'
 import { computed, ref, watch } from 'vue'
 
-import MachinesPanel from '@/components/MachinesPanel.vue'
 import type { PageMachineDtoItemsItem } from '@frogbyte-io/fleet-api-client'
 
 import GuestCard from './components/GuestCard.vue'
@@ -105,7 +103,6 @@ function hideTailnet(nodeId: string) {
   hiddenTailnet.value = hidden
 }
 
-const classicOpen = ref(false)
 
 const selectedMachineId = ref<string | null>(null)
 const selectedGuestKey = ref<string | null>(null)
@@ -697,21 +694,5 @@ function sourceBorder(state: string): string {
       :guest="selectedGuest"
     />
 
-    <Collapsible
-      v-model:open="classicOpen"
-      class="mt-10"
-    >
-      <CollapsibleTrigger
-        class="flex w-full items-center justify-between rounded-sm border border-fc-line bg-fc-panel px-4 py-2 text-left text-sm text-fc-muted hover:border-fc-line2"
-      >
-        Classic machine list
-        <span class="font-mono text-[10px] uppercase">{{ classicOpen ? 'HIDE' : 'SHOW' }}</span>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div class="mt-3">
-          <MachinesPanel />
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
   </div>
 </template>
