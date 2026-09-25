@@ -35,6 +35,9 @@ describe('audit filters', () => {
   it('keeps the outcome only when it is one of the honest set', () => {
     const good = buildParams(filtersWith({ outcome: 'denied' }))
     expect(good.params.outcome).toBe('denied')
+    // An outcome that is not one of the API's ids is dropped, not sent.
+    const bad = buildParams(filtersWith({ outcome: 'excellent' as never }))
+    expect(bad.params.outcome).toBeUndefined()
   })
 
   it('reports whether any filter is set', () => {

@@ -23,7 +23,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
           outcome: 'succeeded',
           correlationId: null,
           operationId: null,
-          metadata: [],
+          metadata: [{ key: 'secret_material', value: 'TOPSECRETMARKER' }],
         },
         {
           seq: 2,
@@ -89,6 +89,10 @@ describe('AuditPage', () => {
     expect(wrapper.text()).toContain('succeeded')
     expect(wrapper.text()).toContain('denied · denied by policy')
     expect(wrapper.text()).toContain('anonymous-lan-admin')
+    // Metadata is metadata-only by construction: even a secret-shaped
+    // value in the ledger's metadata never reaches the DOM.
+    expect(wrapper.text()).not.toContain('TOPSECRETMARKER')
+    expect(wrapper.text()).not.toContain('secret_material')
   })
 
   it('shows the empty state when nothing matches', async () => {
@@ -114,6 +118,10 @@ describe('AuditPage', () => {
     await wrapper.find('form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('the audit query failed (403)')
+    // The filter actually reached the API.
+    expect(listAuditEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: 'anon', limit: 200 }),
+    )
   })
 
   it('shows the truncation notice when the walk bound is reached', async () => {
@@ -143,5 +151,12 @@ describe('AuditPage', () => {
     }) as never)
     wrapper = await mountAt()
     expect(wrapper.find('[data-testid="audit-truncated"]').exists()).toBe(true)
+  })
+
+  it('offers no next page when the ledger is exhausted', async () => {
+    // The final page is not full and carries nextCursor: null — the end
+    // of the ledger, not an invitation to query past it.
+    wrapper = await mountAt()
+    expect(wrapper.find('[data-testid="audit-next"]').exists()).toBe(false)
   })
 })

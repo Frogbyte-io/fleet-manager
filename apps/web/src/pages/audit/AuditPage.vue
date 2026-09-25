@@ -51,7 +51,8 @@ const query = useQuery({
     let next: string | undefined = params.cursor as string | undefined
     let walked = 0
     // Walk whole pages so a filter's result set is complete up to the
-    // bound, matching the machine Audit tab's convention.
+    // bound, matching the machine Audit tab's convention. The final
+    // page's own nextCursor decides whether more pages exist.
     for (;;) {
       const response = await listAuditEvents({ ...params, cursor: next, limit: PAGE } as never)
       if (response.status !== 200) {
@@ -60,16 +61,17 @@ const query = useQuery({
       const page = response.data as { items: PageAuditEventDtoItemsItem[]; page: { nextCursor?: string | null } }
       items.push(...page.items)
       walked += 1
-      if (!page.page.nextCursor) return { events: items, truncated: false }
-      if (walked >= MAX_PAGES) return { events: items, truncated: true }
-      next = page.page.nextCursor
+      const finalCursor = page.page.nextCursor ?? null
+      if (!finalCursor) return { events: items, truncated: false, nextCursor: null }
+      if (walked >= MAX_PAGES) return { events: items, truncated: true, nextCursor: finalCursor }
+      next = finalCursor
     }
   },
 })
 
 const events = computed(() => query.data.value?.events ?? [])
 const truncated = computed(() => query.data.value?.truncated ?? false)
-const nextCursor = computed(() => events.value.at(-1)?.seq != null ? String(events.value.at(-1)!.seq) : undefined)
+const nextCursor = computed(() => query.data.value?.nextCursor ?? undefined)
 
 // Re-running a query resets the cursor: new filters start at page one.
 watch(applied, () => {
@@ -287,7 +289,7 @@ function absolute(ms: number): string {
       </tbody>
     </table>
     <button
-      v-if="nextCursor && !truncated"
+      v-if="nextCursor"
       type="button"
       class="mt-4 h-8 rounded-sm border border-border px-3 text-sm text-fc-muted hover:text-foreground"
       data-testid="audit-next"
