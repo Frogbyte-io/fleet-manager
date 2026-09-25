@@ -182,10 +182,14 @@ describe('ProjectsPage', () => {
     await wrapper.find('[data-testid="ready-endpoint"]').setValue('ep1')
     await wrapper.find('[data-testid="ready-root"]').setValue('/srv/alpha')
     await wrapper.find('[data-testid="ready-execute"]').trigger('click')
-    // The flow polls the operation every 500 ms; give it two ticks.
-    await new Promise((resolve) => setTimeout(resolve, 1_200))
-    await flushPromises()
-    expect(wrapper.find('[data-testid="ready-blocked"]').exists()).toBe(true)
+    // The flow polls the operation every 500 ms; wait for the blocked
+    // state rather than sleeping a magic duration.
+    await vi.waitFor(
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      () => expect(wrapper!.find('[data-testid="ready-blocked"]').exists()).toBe(true),
+      // Two 500 ms polls plus latency; the 1 s default is too tight.
+      { timeout: 5_000, interval: 100 },
+    )
     expect(wrapper.text()).toContain('the frogenv_setup ceremony requires manual approval')
   })
 

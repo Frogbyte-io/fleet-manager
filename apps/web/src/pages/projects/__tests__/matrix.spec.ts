@@ -30,15 +30,17 @@ describe('the checkout matrix', () => {
   it('places every machine in every project row, with honest empty cells', () => {
     const rows = buildMatrix(
       [
-        { id: 'p1', name: 'alpha', checkouts: [checkout('m1', 'main', false)] },
+        // The checkout list is deliberately ordered opposite to the
+        // machines so a position-based match could not pass.
+        { id: 'p1', name: 'alpha', checkouts: [checkout('m2', 'feat', true), checkout('m1', 'main', false)] },
         { id: 'p2', name: 'beta', checkouts: [] },
       ],
       [machine('m1', 'homelab'), machine('m2', 'bare-lab')],
     )
     expect(rows).toHaveLength(2)
-    expect(rows[0].cells.map((cell) => cell.machineName)).toEqual(['homelab', 'bare-lab'])
-    expect(rows[0].cells[0]).toMatchObject({ branch: 'main', dirty: false })
-    expect(rows[0].cells[1]).toMatchObject({ branch: null, dirty: null, observedAt: null })
+    expect(rows[0].cells.map((cell) => cell.machineId)).toEqual(['m1', 'm2'])
+    expect(rows[0].cells[0]).toMatchObject({ machineId: 'm1', branch: 'main', dirty: false })
+    expect(rows[0].cells[1]).toMatchObject({ machineId: 'm2', branch: 'feat', dirty: true })
     expect(rows[1].cells.every((cell) => cell.observedAt === null)).toBe(true)
   })
 
@@ -67,10 +69,13 @@ describe('the checkout matrix', () => {
   })
 
   it("extracts a blocked approval's detail from the operation error JSON", () => {
-    expect(
-      blockedDetail('{"reason":"blocked_manual_approval","detail":"the frogenv_setup ceremony requires manual approval"}'),
-    ).toBe('the frogenv_setup ceremony requires manual approval')
+    expect(blockedDetail('{"reason":"blocked_manual_approval","detail":"the frogenv_setup ceremony requires manual approval"}')).toBe(
+      'the frogenv_setup ceremony requires manual approval',
+    )
     expect(blockedDetail('{"detail":"just a detail"}')).toBe('just a detail')
+    // An empty or non-string field cannot suppress the banner silently.
+    expect(blockedDetail('{"detail":"","reason":"the reason"}')).toBe('the reason')
+    expect(blockedDetail('{"detail":42}')).toBeNull()
     expect(blockedDetail('not json')).toBeNull()
     expect(blockedDetail(null)).toBeNull()
   })

@@ -70,13 +70,17 @@ export function planLines(plan: ReadyPlanDto): string[] {
 
 /**
  * The blocked state a make-ready run can land in: an explicit state, not
- * an error. The detail comes from the operation's error JSON.
+ * an error. The detail comes from the operation's error JSON; only
+ * non-empty string fields count, so an empty or non-string value cannot
+ * suppress the banner or break the string contract.
  */
 export function blockedDetail(errorJson: string | null | undefined): string | null {
   if (!errorJson) return null
   try {
-    const parsed = JSON.parse(errorJson) as { detail?: string; reason?: string }
-    return parsed.detail ?? parsed.reason ?? null
+    const parsed = JSON.parse(errorJson) as { detail?: unknown; reason?: unknown }
+    const detail = typeof parsed.detail === 'string' && parsed.detail !== '' ? parsed.detail : null
+    const reason = typeof parsed.reason === 'string' && parsed.reason !== '' ? parsed.reason : null
+    return detail ?? reason
   } catch {
     return null
   }

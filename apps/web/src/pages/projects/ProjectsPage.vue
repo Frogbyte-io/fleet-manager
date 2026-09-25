@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 
 import {
   getOperation,
@@ -11,6 +11,8 @@ import {
   type PageProjectDtoItemsItem,
   type ReadyPlanDto,
 } from '@frogbyte-io/fleet-api-client'
+import { isTerminal } from '../machine/api'
+import ProjectsPanel from '@/components/ProjectsPanel.vue'
 
 import {
   blockedDetail,
@@ -27,36 +29,62 @@ const MAX_PAGES = 10
 const POLL_MS = 500
 const DEADLINE_MS = 30 * 60 * 1000
 
+/// Walks a cursor-paginated list endpoint until it is exhausted (bounded),
+/// so a list larger than one page is not silently truncated.
+async function listAllPages<Item>(
+  fetchPage: (
+    cursor?: string,
+  ) => Promise<{
+    status: number
+    data: { items: Item[]; page: { nextCursor?: string | null }; message?: string }
+  } | null>,
+): Promise<{ items: Item[]; complete: boolean } | null> {
+  const items: Item[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const response = await fetchPage(cursor)
+    if (response === null) return null
+    items.push(...response.data.items)
+    const next = response.data.page.nextCursor ?? null
+    if (!next) return { items, complete: true }
+    cursor = next
+  }
+  return { items, complete: false }
+}
+
 const projectsQuery = useQuery({
   queryKey: ['projects', 'matrix'],
   queryFn: async () => {
-    const response = await listProjects({ limit: PAGE })
-    if (response.status !== 200) {
-      throw new Error(
-        (response.data as { message?: string })?.message ??
-          `the controller answered ${response.status}`,
-      )
+    const result = await listAllPages<PageProjectDtoItemsItem>(async (cursor) => {
+      const response = await listProjects({ limit: PAGE, cursor })
+      if (response.status !== 200) return null
+      return response
+    })
+    if (result === null) {
+      throw new Error('the project list could not be read')
     }
-    return response.data.items as PageProjectDtoItemsItem[]
+    return result
   },
 })
 
 const machinesQuery = useQuery({
   queryKey: ['machines', 'matrix'],
   queryFn: async () => {
-    const response = await listMachines({ limit: PAGE })
-    if (response.status !== 200) {
-      throw new Error(
-        (response.data as { message?: string })?.message ??
-          `the controller answered ${response.status}`,
-      )
+    const result = await listAllPages<MachineDto>(async (cursor) => {
+      const response = await listMachines({ limit: PAGE, cursor })
+      if (response.status !== 200) return null
+      return response
+    })
+    if (result === null) {
+      throw new Error('the machine list could not be read')
     }
-    return response.data.items as MachineDto[]
+    return result
   },
 })
 
-const projects = computed(() => projectsQuery.data.value ?? [])
-const machines = computed(() => machinesQuery.data.value ?? [])
+const projects = computed(() => projectsQuery.data.value?.items ?? [])
+const machines = computed(() => machinesQuery.data.value?.items ?? [])
+const machinesTruncated = computed(() => !(machinesQuery.data.value?.complete ?? true))
 const matrix = computed(() => buildMatrix(projects.value, machines.value))
 
 // The make-ready flow for one project.
@@ -67,6 +95,11 @@ const progress = ref<string | null>(null)
 const blocked = ref<string | null>(null)
 const failed = ref<string | null>(null)
 const busy = ref(false)
+// Polling must not outlive the page: a navigation away stops the loop.
+let disposed = false
+onUnmounted(() => {
+  disposed = true
+})
 
 function openReady(projectId: string): void {
   readyFor.value = projectId
@@ -119,7 +152,9 @@ async function runReady(dryRun: boolean): Promise<void> {
       progress.value = `workflow ${operation?.id ?? ''} accepted`
       const deadline = Date.now() + DEADLINE_MS
       for (;;) {
+        if (disposed) return
         await new Promise((resolve) => setTimeout(resolve, POLL_MS))
+        if (disposed) return
         const detail = await getOperation(operation?.id ?? '')
         if (detail.status !== 200) {
           failed.value =
@@ -134,7 +169,13 @@ async function runReady(dryRun: boolean): Promise<void> {
           blocked.value = blockedDetail(state?.errorJson) ?? 'waiting for a human to approve'
           break
         }
-        if (state?.state && !['pending', 'running', 'cancelling'].includes(state.state)) {
+        // Only the four settled states end the wait; blocked is handled
+        // above, and a state this client has not heard of keeps polling.
+        if (state?.state && isTerminal(state.state)) {
+          if (state.state !== 'succeeded') {
+            failed.value =
+              blockedDetail(state?.errorJson) ?? `the workflow ended: ${state.state}`
+          }
           break
         }
         if (Date.now() > deadline) {
@@ -245,12 +286,28 @@ const lines = computed(() => (plan.value ? planLines(plan.value) : []))
         </tbody>
       </table>
       <p
-        v-else
+        v-if="projects.length === 0"
         class="text-sm text-fc-faint"
       >
         No projects registered yet.
       </p>
+      <p
+        v-else-if="machines.length === 0"
+        class="text-sm text-fc-faint"
+      >
+        No machines registered yet; add one on the Fleet page to see checkouts.
+      </p>
+      <p
+        v-else-if="machinesTruncated"
+        class="text-xs text-fc-warn"
+      >
+        The machine list stopped at the pagination bound; some machines may be missing from the matrix.
+      </p>
     </div>
+
+    <!-- Registration and removal stay on this page until a dedicated
+         project admin surface exists. -->
+    <ProjectsPanel class="mt-8" />
 
     <!-- Make ready: pick a project, inspect the dry-run plan, execute. -->
     <section class="mt-8 rounded-sm border border-border bg-card p-6">
@@ -353,7 +410,7 @@ const lines = computed(() => (plan.value ? planLines(plan.value) : []))
           <button
             type="button"
             class="rounded-sm border border-fc-info/40 bg-fc-info/10 px-3 py-1.5 text-sm text-fc-info hover:bg-fc-info/20 disabled:opacity-50"
-            :disabled="busy || readyForm.machineId === '' || readyForm.endpointId === '' || readyForm.root === ''"
+            :disabled="busy || readyForm.machineId === '' || readyForm.endpointId === '' || readyForm.root === '' || (readyForm.auth === 'identityFile' && readyForm.identity === '')"
             data-testid="ready-plan"
             @click="runReady(true)"
           >
@@ -362,7 +419,7 @@ const lines = computed(() => (plan.value ? planLines(plan.value) : []))
           <button
             type="button"
             class="rounded-sm border border-fc-ok/40 bg-fc-ok/10 px-3 py-1.5 text-sm text-fc-ok hover:bg-fc-ok/20 disabled:opacity-50"
-            :disabled="busy || readyForm.machineId === '' || readyForm.endpointId === '' || readyForm.root === ''"
+            :disabled="busy || readyForm.machineId === '' || readyForm.endpointId === '' || readyForm.root === '' || (readyForm.auth === 'identityFile' && readyForm.identity === '')"
             data-testid="ready-execute"
             @click="runReady(false)"
           >
