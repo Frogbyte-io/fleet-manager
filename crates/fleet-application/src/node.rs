@@ -377,6 +377,19 @@ pub struct RotationOutcome {
     pub credential_expires_at: i64,
 }
 
+/// The identity revocation request, including the audit intent committed
+/// with the revocation and the time used to consume pending tokens.
+#[derive(Clone, Debug)]
+pub struct RevokeClaim {
+    /// The machine whose node identity is revoked.
+    pub machine_id: String,
+    /// Revocation time (epoch milliseconds).
+    pub now: i64,
+    /// The audit intent written in the revocation transaction. The storage
+    /// adapter adds the number of invalidated enrollment tokens.
+    pub audit: AuditIntent,
+}
+
 /// Whether a node session is currently valid, and for which machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionValidity {
@@ -698,14 +711,16 @@ pub trait NodePort: fmt::Debug + Send + Sync {
     /// Fails when the challenge is unknown, used, expired, or for another
     /// key, the credential is no longer live, or the backend errors.
     async fn rotate_key(&self, claim: &RotateClaim) -> Result<RotationOutcome, NodePortError>;
-    /// Revokes the identity and every credential and session of a machine.
-    /// Renewal fails until an explicit re-enrollment replaces the revoked
-    /// identity.
+    /// Revokes the identity, every credential and session, and all pending
+    /// enrollment tokens of a machine. The audit intent and state change
+    /// commit together; the returned value is the number of invalidated
+    /// tokens. Renewal fails until an explicit re-enrollment replaces the
+    /// revoked identity.
     ///
     /// # Errors
     ///
     /// Fails when the machine has no identity or the backend errors.
-    async fn revoke_identity(&self, machine_id: &str) -> Result<(), NodePortError>;
+    async fn revoke_identity(&self, claim: &RevokeClaim) -> Result<u64, NodePortError>;
     /// The node view of a machine, or `None` when the machine is unknown.
     ///
     /// # Errors
@@ -1014,17 +1029,29 @@ impl Nodes {
             },
         )
         .map_err(NodeUseCaseError::Denied)?;
+        let mut metadata = AuditMetadata::default();
+        metadata
+            .insert("event", "node_identity_revoked")
+            .map_err(|error| NodeUseCaseError::Backend {
+                context: "audit",
+                detail: error.to_string(),
+            })?;
         self.port
-            .revoke_identity(machine_id)
+            .revoke_identity(&RevokeClaim {
+                machine_id: machine_id.to_owned(),
+                now: fleet_core::SystemClock::now_unix_millis(),
+                audit: AuditIntent {
+                    actor: principal.id.clone(),
+                    action: Permission::NodeRevoke.id().to_owned(),
+                    resource: Some(machine_id.to_owned()),
+                    decision: Decision::allow(),
+                    correlation_id: None,
+                    operation_id: None,
+                    metadata,
+                },
+            })
             .await
             .map_err(|error| map_port("revoke", error))?;
-        self.audit_event(
-            principal.id.clone(),
-            Permission::NodeRevoke.id().to_owned(),
-            machine_id,
-            "node_identity_revoked",
-        )
-        .await?;
         Ok(())
     }
 

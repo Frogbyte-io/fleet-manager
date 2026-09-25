@@ -17,7 +17,8 @@ use fleet_application::node::{
     EnrollmentTokenView, GatewayState, NewChallenge, NewEnrollmentToken, NodeChallenge,
     NodeCredential, NodeCredentialClaims, NodeCrypto, NodeIdentity, NodePort, NodePortError,
     NodeSessionClaims, NodeSessionIssued, NodeStatus, NodeUseCaseError, NodeView, Nodes,
-    RotateClaim, RotationOutcome, SessionClaim, SessionValidity, TokenFacts, proof_message,
+    RevokeClaim, RotateClaim, RotationOutcome, SessionClaim, SessionValidity, TokenFacts,
+    proof_message,
 };
 use fleet_application::operation::AuditPort;
 
@@ -265,6 +266,7 @@ impl NodePort for MemoryPort {
         tokens.insert(
             claim.token_hash.clone(),
             TokenRow {
+                status: "consumed".to_owned(),
                 consumed_at: Some(claim.now),
                 ..row.clone()
             },
@@ -529,7 +531,8 @@ impl NodePort for MemoryPort {
         }
     }
 
-    async fn revoke_identity(&self, machine_id: &str) -> Result<(), NodePortError> {
+    async fn revoke_identity(&self, claim: &RevokeClaim) -> Result<u64, NodePortError> {
+        let machine_id = &claim.machine_id;
         let mut identities = self.identities.lock().expect("uncontended");
         let identity = identities
             .get_mut(machine_id)
@@ -544,16 +547,32 @@ impl NodePort for MemoryPort {
         identity.status = NodeStatus::Revoked;
         drop(identities);
         for credential in self.credentials.lock().expect("uncontended").values_mut() {
-            if credential.machine_id == machine_id {
+            if credential.machine_id == *machine_id {
                 credential.status = NodeStatus::Revoked;
             }
         }
         for session in self.sessions.lock().expect("uncontended").values_mut() {
-            if session.machine_id == machine_id {
+            if session.machine_id == *machine_id {
                 session.status = NodeStatus::Revoked;
             }
         }
-        Ok(())
+        let mut tokens = self.tokens.lock().expect("uncontended");
+        let mut invalidated = 0;
+        for token in tokens.values_mut() {
+            if token.machine_id == *machine_id && token.status == "pending" {
+                "consumed".clone_into(&mut token.status);
+                token.consumed_at = Some(claim.now);
+                invalidated += 1;
+            }
+        }
+        drop(tokens);
+        let mut audit = claim.audit.clone();
+        audit
+            .metadata
+            .insert("invalidatedEnrollmentCount", &invalidated.to_string())
+            .expect("the count metadata is valid");
+        self.audits.lock().expect("uncontended").push(audit);
+        Ok(invalidated)
     }
 
     async fn node_view(
@@ -1238,6 +1257,52 @@ async fn revocation_prevents_renewal_and_re_enrollment_is_explicit() {
         "{events:?}"
     );
     assert!(events.contains(&"node_enrolled".to_owned()), "{events:?}");
+}
+
+#[tokio::test]
+async fn revocation_invalidates_pending_enrollment_tokens_and_audits_the_count() {
+    let service = service();
+    let first_token = create_token(&service, TEST_MACHINE).await;
+    enroll(&service, &first_token, GOOD_KEY).await;
+    let pending_token = create_token(&service, TEST_MACHINE).await;
+
+    service
+        .nodes
+        .revoke(&PermitAll, &principal(), TEST_MACHINE)
+        .await
+        .expect("the revocation must succeed");
+
+    let enrollment = service
+        .nodes
+        .enroll(&pending_token.token, OTHER_KEY, "linux", "x86_64", "0.1.0")
+        .await;
+    assert!(
+        matches!(enrollment, Err(NodeUseCaseError::Unauthorized { .. })),
+        "a token issued before revocation must no longer authorize enrollment: {enrollment:?}"
+    );
+
+    let revoke_audit = service
+        .port
+        .audits
+        .lock()
+        .expect("uncontended")
+        .iter()
+        .find(|intent| {
+            intent
+                .metadata
+                .entries()
+                .any(|(key, value)| key == "event" && value == "node_identity_revoked")
+        })
+        .cloned()
+        .expect("revocation must append its audit intent");
+    assert_eq!(
+        revoke_audit
+            .metadata
+            .entries()
+            .find(|(key, _)| *key == "invalidatedEnrollmentCount")
+            .map(|(_, value)| value),
+        Some("1")
+    );
 }
 
 #[tokio::test]

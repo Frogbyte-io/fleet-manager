@@ -10,7 +10,7 @@ use fleet_application::authz::Decision;
 use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
 use fleet_application::node::{
     ChallengePurpose, EnrollClaim, NewChallenge, NewEnrollmentToken, NodePort, NodePortError,
-    NodeStatus, RotateClaim, SessionClaim,
+    NodeStatus, RevokeClaim, RotateClaim, SessionClaim,
 };
 use fleet_core::EndpointKind;
 use fleet_storage_sqlite::{MachineRepository, NodeRepository, Store};
@@ -30,6 +30,17 @@ fn audit_event(event: &str) -> AuditIntent {
         correlation_id: None,
         operation_id: None,
         metadata,
+    }
+}
+
+fn revoke_claim(machine_id: &str, now: i64) -> RevokeClaim {
+    let mut audit = audit_event("node_identity_revoked");
+    "node.revoke".clone_into(&mut audit.action);
+    audit.resource = Some(machine_id.to_owned());
+    RevokeClaim {
+        machine_id: machine_id.to_owned(),
+        now,
+        audit,
     }
 }
 
@@ -476,7 +487,7 @@ async fn revocation_stops_renewal_and_sessions_and_allows_explicit_rebind() {
 
     setup
         .nodes
-        .revoke_identity(&machine_id)
+        .revoke_identity(&revoke_claim(&machine_id, now))
         .await
         .expect("the revocation must succeed");
 
@@ -523,6 +534,54 @@ async fn revocation_stops_renewal_and_sessions_and_allows_explicit_rebind() {
         .expect("the rebind must succeed");
     assert!(rebind.rebind);
     assert_eq!(rebind.node_key_version, 2);
+}
+
+#[tokio::test]
+async fn revocation_consumes_pending_tokens_and_records_the_count_atomically() {
+    let setup = setup().await;
+    let (machine_id, _) = enrolled_machine(&setup, "revoked-tokens", KEY_A).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    new_token(&setup, &machine_id, "hash-pending-1", 60_000, now).await;
+    new_token(&setup, &machine_id, "hash-pending-2", 60_000, now).await;
+
+    let invalidated = setup
+        .nodes
+        .revoke_identity(&revoke_claim(&machine_id, now + 1))
+        .await
+        .expect("the revoke transaction must succeed");
+    assert_eq!(invalidated, 2);
+
+    for hash in ["hash-pending-1", "hash-pending-2"] {
+        let facts = setup
+            .nodes
+            .token_facts(hash)
+            .await
+            .expect("the token read must succeed")
+            .expect("the token must still be recorded");
+        assert_eq!(facts.status, "consumed");
+    }
+    let audit_json: String = sqlx::query_scalar(
+        "SELECT metadata_json FROM audit_events WHERE action = 'node.revoke' \
+         AND resource = ?1 ORDER BY occurred_at DESC LIMIT 1",
+    )
+    .bind(&machine_id)
+    .fetch_one(setup.store.pool())
+    .await
+    .expect("the revoke audit intent must be stored");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&audit_json).expect("audit metadata must be valid JSON");
+    assert_eq!(metadata["event"], "node_identity_revoked");
+    assert_eq!(metadata["invalidatedEnrollmentCount"], "2");
+    assert_eq!(metadata.as_object().map(serde_json::Map::len), Some(2));
+
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM node_enrollment_tokens WHERE machine_id = ?1 AND token_hash LIKE 'hash-pending-%'",
+    )
+    .bind(&machine_id)
+    .fetch_all(setup.store.pool())
+    .await
+    .expect("the token statuses must be readable");
+    assert_eq!(statuses, vec!["consumed", "consumed"]);
 }
 
 #[tokio::test]
@@ -582,7 +641,7 @@ async fn session_validation_walks_the_whole_chain() {
     // Revoking the credential invalidates the session.
     setup
         .nodes
-        .revoke_identity(&machine_id)
+        .revoke_identity(&revoke_claim(&machine_id, now + 2))
         .await
         .expect("the revocation must succeed");
     let revoked = setup
