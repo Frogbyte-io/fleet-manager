@@ -54,7 +54,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Control',
     items: [
       { title: 'Operations', to: '/operations', icon: Activity, available: true },
-      { title: 'Audit log', to: '/audit', icon: FileText, available: false },
+      { title: 'Audit log', to: '/audit', icon: FileText, available: true },
       { title: 'Settings', to: '/settings', icon: Settings, available: true },
     ],
   },
