@@ -2244,6 +2244,14 @@ mod tests {
         );
         assert!(
             catalog_install_reference(
+                "https://github.com/example/skills",
+                None,
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .is_err()
+        );
+        assert!(
+            catalog_install_reference(
                 "https://gitlab.com/example/skills",
                 Some("skills/reviewer"),
                 Some("v2.1.0"),
