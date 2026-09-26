@@ -206,6 +206,79 @@
       }
     ]
   },
+  "$defs:SkillAssignmentScope": {
+    "description": "The machine selector for a Fleet-managed skill assignment.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Apply to every current and future machine.",
+        "properties": {
+          "type": {
+            "const": "all",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Apply to machines in a group.",
+        "properties": {
+          "type": {
+            "const": "group",
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Apply to machines carrying a tag.",
+        "properties": {
+          "type": {
+            "const": "tag",
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "Apply to one stable Fleet machine identity.",
+        "properties": {
+          "type": {
+            "const": "machine",
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "type": "object"
+      }
+    ]
+  },
   "$defs:SkillRequirementSpec": {
     "additionalProperties": false,
     "description": "One skill to deploy to named agents, with explicit removal semantics.",
@@ -500,11 +573,29 @@
         "properties": {
           "spec": {
             "additionalProperties": false,
-            "description": "One skill to deploy to named agents, with explicit removal semantics.",
+            "description": "A Fleet-managed skill assignment from a catalog version to agents.",
             "properties": {
+              "catalogId": {
+                "default": null,
+                "description": "The catalog identity for a Fleet-authored or referenced skill.",
+                "maxLength": 63,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "catalogVersionId": {
+                "default": null,
+                "description": "The Fleet catalog version this assignment pins, when Fleet owns the\nskill content. External Skills Manager entries may omit it.",
+                "maxLength": 128,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "denyAgents": {
                 "default": [],
-                "description": "Explicitly undeploy from these agents even if an earlier profile\nincluded the skill for them: deny wins over include.",
+                "description": "Agents explicitly excluded even if another matching assignment\nincludes the skill. Deny wins over include.",
                 "items": {
                   "type": "string"
                 },
@@ -512,7 +603,7 @@
                 "type": "array"
               },
               "deployTo": {
-                "description": "The agents the skill deploys to.",
+                "description": "The coding agents receiving the skill.",
                 "items": {
                   "type": "string"
                 },
@@ -520,8 +611,15 @@
                 "minItems": 1,
                 "type": "array"
               },
+              "scope": {
+                "$ref": "#/$defs:SkillAssignmentScope",
+                "default": {
+                  "type": "all"
+                },
+                "description": "The target selector. Omitting it preserves the global assignment\nbehavior of early `SkillPreset` resources."
+              },
               "skillId": {
-                "description": "The skill's identifier in the Skills Manager library.",
+                "description": "The stable skill identity used by the Skills Manager CLI.",
                 "maxLength": 63,
                 "minLength": 1,
                 "type": "string"
@@ -531,7 +629,7 @@
               "skillId",
               "deployTo"
             ],
-            "title": "SkillRequirementSpec",
+            "title": "SkillPresetSpec",
             "type": "object"
           }
         }

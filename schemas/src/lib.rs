@@ -183,7 +183,7 @@ pub fn generate_schema() -> Value {
                 serde_json::to_value(schema_for!(crate::kinds::ToolRequirementSpec))
             }
             ResourceKind::SkillPreset => {
-                serde_json::to_value(schema_for!(crate::kinds::SkillRequirementSpec))
+                serde_json::to_value(schema_for!(crate::kinds::SkillPresetSpec))
             }
             ResourceKind::Recipe => serde_json::to_value(schema_for!(crate::kinds::RecipeSpec)),
             ResourceKind::Action => serde_json::to_value(schema_for!(crate::kinds::ActionSpec)),
@@ -384,6 +384,66 @@ fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagno
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if kind == "SkillPreset"
+        && let Some(spec) = document.get("spec")
+    {
+        let catalog_id = spec.get("catalogId").and_then(Value::as_str);
+        let catalog_version_id = spec.get("catalogVersionId").and_then(Value::as_str);
+        match (catalog_id, catalog_version_id) {
+            (Some(catalog), Some(version))
+                if !catalog.trim().is_empty()
+                    && !version.trim().is_empty()
+                    && !catalog.contains('/')
+                    && !version.contains('/')
+                    && version
+                        .strip_prefix(catalog)
+                        .and_then(|suffix| suffix.strip_prefix('@'))
+                        .is_some_and(|digest| {
+                            digest.len() == 64
+                                && digest.chars().all(|character| character.is_ascii_hexdigit())
+                        }) => {}
+            (None, None) => {}
+            _ => diagnostics.push(Diagnostic {
+                code: "FM_SCHEMA_SEMANTIC_INVALID_SKILL_ASSIGNMENT",
+                location: format!("{base}/spec"),
+                message: "catalogId and catalogVersionId must both be omitted or a non-empty catalog ID and its generated <catalogId>@<sha256> version ID".to_owned(),
+            }),
+        }
+        for field in ["skillId", "deployTo", "denyAgents"] {
+            let values: Vec<(usize, &str)> = if field == "skillId" {
+                spec.get(field)
+                    .and_then(Value::as_str)
+                    .map(|value| vec![(0, value)])
+                    .unwrap_or_default()
+            } else {
+                spec.get(field)
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, item)| item.as_str().map(|value| (index, value)))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            for (index, value) in values {
+                if value.trim().is_empty() || value.contains('/') {
+                    let pointer = if field == "skillId" {
+                        format!("{base}/spec/{field}")
+                    } else {
+                        format!("{base}/spec/{field}/{index}")
+                    };
+                    diagnostics.push(Diagnostic {
+                        code: "FM_SCHEMA_SEMANTIC_INVALID_SKILL_ASSIGNMENT",
+                        location: pointer,
+                        message: "skill and agent IDs must be non-empty and contain no slash"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+    }
     // Machine endpoints: credential-bearing userinfo is refused.
     if kind == "Machine"
         && let Some(endpoints) = document

@@ -1806,6 +1806,8 @@ fn safe_cli_outcome(value: &serde_json::Value) -> serde_json::Value {
         "paths",
         "held_back_removals",
         "heldBackRemovals",
+        "versionDigest",
+        "verified",
     ] {
         if let Some(value) = value.get(key) {
             safe.insert(key.to_owned(), redact(value));

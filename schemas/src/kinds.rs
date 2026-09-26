@@ -54,6 +54,59 @@ pub struct SkillRequirementSpec {
     pub deny_agents: Vec<String>,
 }
 
+/// The machine selector for a Fleet-managed skill assignment.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "camelCase",
+    tag = "type",
+    content = "value"
+)]
+pub enum SkillAssignmentScope {
+    /// Apply to every current and future machine.
+    All,
+    /// Apply to machines in a group.
+    Group(String),
+    /// Apply to machines carrying a tag.
+    Tag(String),
+    /// Apply to one stable Fleet machine identity.
+    Machine(String),
+}
+
+/// A Fleet-managed skill assignment from a catalog version to agents.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SkillPresetSpec {
+    /// The stable skill identity used by the Skills Manager CLI.
+    #[schemars(length(min = 1, max = 63))]
+    pub skill_id: String,
+    /// The catalog identity for a Fleet-authored or referenced skill.
+    #[serde(default)]
+    #[schemars(length(max = 63))]
+    pub catalog_id: Option<String>,
+    /// The Fleet catalog version this assignment pins, when Fleet owns the
+    /// skill content. External Skills Manager entries may omit it.
+    #[serde(default)]
+    #[schemars(length(max = 128))]
+    pub catalog_version_id: Option<String>,
+    /// The target selector. Omitting it preserves the global assignment
+    /// behavior of early `SkillPreset` resources.
+    #[serde(default = "global_skill_scope")]
+    pub scope: SkillAssignmentScope,
+    /// The coding agents receiving the skill.
+    #[schemars(length(min = 1, max = 16))]
+    pub deploy_to: Vec<String>,
+    /// Agents explicitly excluded even if another matching assignment
+    /// includes the skill. Deny wins over include.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub deny_agents: Vec<String>,
+}
+
+fn global_skill_scope() -> SkillAssignmentScope {
+    SkillAssignmentScope::All
+}
+
 /// An endpoint a machine exposes, as desired identity. Observed
 /// connectivity lives in capability facts, never here.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
