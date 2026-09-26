@@ -48,6 +48,7 @@ impl fleet_application::authz::Authorizer for DenySkills {
             request.action,
             fleet_application::authz::Permission::SkillsRead
                 | fleet_application::authz::Permission::SkillsDeploy
+                | fleet_application::authz::Permission::SkillsModify
         ) {
             fleet_application::authz::Decision::deny(
                 fleet_application::authz::ReasonId::UnknownPrincipal,
@@ -537,6 +538,63 @@ async fn a_deploy_starts_the_deploy_kind() {
     let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     assert_eq!(value["data"]["kind"], "skills.deploy");
+}
+
+#[tokio::test]
+async fn an_explicit_library_install_starts_a_durable_install_operation() {
+    let state = state_for(Arc::new(PermitAll));
+    let body = serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "operation": "install",
+        "reference": "org/repo/skill",
+        "timeoutSeconds": 30,
+    })
+    .to_string();
+    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    assert_eq!(value["data"]["kind"], "skills.install");
+}
+
+#[tokio::test]
+async fn skill_removal_requires_explicit_confirmation() {
+    let state = state_for(Arc::new(PermitAll));
+    let body = serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "operation": "remove",
+        "reference": "db",
+        "timeoutSeconds": 30,
+    })
+    .to_string();
+    let (status, _) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn library_mutation_is_denied_without_skills_modify() {
+    let state = state_for(Arc::new(DenySkills));
+    let body = serde_json::json!({
+        "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
+        "operation": "install", "reference": "org/repo/skill", "timeoutSeconds": 30
+    })
+    .to_string();
+    let (status, _) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn credential_bearing_source_urls_are_rejected_before_operation_creation() {
+    let state = state_for(Arc::new(PermitAll));
+    let body = serde_json::json!({
+        "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
+        "operation": "install", "reference": "https://user:secret@example.invalid/org/skill", "timeoutSeconds": 30
+    }).to_string();
+    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert!(!value.to_string().contains("secret"));
 }
 
 #[tokio::test]

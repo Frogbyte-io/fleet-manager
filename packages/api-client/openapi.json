@@ -11223,6 +11223,24 @@
             "$ref": "#/components/schemas/SkillsAuthDto",
             "description": "How the endpoint authenticates."
           },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional source branch for set-source."
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Explicit destructive confirmation. Never inferred by Fleet."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional preset description."
+          },
           "direction": {
             "oneOf": [
               {
@@ -11242,9 +11260,77 @@
             "type": "string",
             "description": "The SSH endpoint id to act through."
           },
+          "force": {
+            "type": "boolean",
+            "description": "Re-point a source even when the current source differs."
+          },
+          "git": {
+            "type": "boolean",
+            "description": "Treat the installation reference as a Git source."
+          },
+          "gitSubpath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Upstream Git subpath option for adoption."
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional preset icon identifier."
+          },
+          "local": {
+            "type": "boolean",
+            "description": "Documented install source and sync options."
+          },
           "machineId": {
             "type": "string",
             "description": "The machine to act on (must match the path's machine)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional preset name, description, or icon used by preset creation/update."
+          },
+          "operation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Explicit library or preset action (for example `install` or\n`presets.delete`). Existing deploy/probe requests may omit it."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Subpath or local path used by adopt/set-source."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths to adopt in one operation."
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Skill or preset reference used by the selected operation."
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional references for CLI-supported bulk actions."
           },
           "skillId": {
             "type": [
@@ -11259,6 +11345,24 @@
               "null"
             ],
             "description": "An external skills root, when the operation targets one."
+          },
+          "sourceUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source URL for adopt/set-source. URLs with embedded credentials are refused."
+          },
+          "sync": {
+            "type": "boolean",
+            "description": "Add the installed skill to the current preset and sync agents."
+          },
+          "syncPreset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Add the installed skill to this preset and sync agents."
           },
           "timeoutSeconds": {
             "type": "integer",

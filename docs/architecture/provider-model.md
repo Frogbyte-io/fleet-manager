@@ -107,6 +107,7 @@ Custom command buttons use the same runner, authorization, operation, and audit 
 ## Provider selection decisions
 
 - Skills: `skills-manager-cli --json` is primary. The skills.sh CLI is a source/install fallback only where the richer provider is unavailable; Fleet does not emulate presets.
+- Skills library and preset mutations are durable, machine-scoped operations dispatched through the pinned v1.40.0 CLI contract. `skills.modify` protects library and preset changes; destructive remove/delete calls require explicit confirmation, and CLI conflicts remain structured operation output.
 - Project secrets: Frogenv CLI provider; Fleet does not read Frogenv policy/key files or decrypted values.
 - Docker: Docker Engine API on fully managed nodes; Docker-over-SSH for agentless nodes; never expose unauthenticated TCP Docker.
 - Git: system Git CLI in a controlled environment to retain credential-helper/SSH behavior; isolate controller desired-state worktrees.

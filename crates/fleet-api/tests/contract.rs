@@ -926,6 +926,47 @@ async fn an_unknown_kind_is_refused_with_the_invalid_request_code() {
 }
 
 #[tokio::test]
+async fn generic_skills_removal_requires_explicit_confirmation() {
+    let (parts, body) = post_json(
+        &format!("{API_BASE_PATH}/operations"),
+        serde_json::json!({
+            "kind": "skills.remove",
+            "payload": {"machineId":"m-1", "confirm": false}
+        }),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn generic_skills_creation_rejects_credentials_before_persisting_payloads() {
+    let (parts, body) = post_json(
+        &format!("{API_BASE_PATH}/operations"),
+        serde_json::json!({
+            "kind": "skills.install",
+            "payload": {"machineId":"m-1", "reference":"https://example.invalid/skill?access_token=do-not-store"}
+        }),
+    ).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body.to_string().contains("do-not-store"));
+}
+
+#[tokio::test]
+async fn generic_skills_creation_rejects_unsupported_dry_run_flags() {
+    let (parts, body) = post_json(
+        &format!("{API_BASE_PATH}/operations"),
+        serde_json::json!({
+            "kind": "skills.install",
+            "payload": {"machineId":"m-1", "reference":"org/repo/skill", "dryRun":true}
+        }),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
 async fn generic_operation_creation_cannot_start_lab_provision_sagas() {
     let (parts, body) = post_json(
         &format!("{API_BASE_PATH}/operations"),

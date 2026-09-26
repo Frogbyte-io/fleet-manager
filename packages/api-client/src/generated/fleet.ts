@@ -3696,13 +3696,66 @@ export interface StartSkillsOperationRequest {
   artifactUrl?: string | null;
   /** How the endpoint authenticates. */
   auth: SkillsAuthDto;
+  /**
+     * Optional source branch for set-source.
+     * @nullable
+     */
+  branch?: string | null;
+  /** Explicit destructive confirmation. Never inferred by Fleet. */
+  confirm?: boolean;
+  /**
+     * Optional preset description.
+     * @nullable
+     */
+  description?: string | null;
   direction?: null | SkillsDirectionDto;
   /** Preserve a dry run: never upgraded to a real mutation. */
   dryRun?: boolean;
   /** The SSH endpoint id to act through. */
   endpointId: string;
+  /** Re-point a source even when the current source differs. */
+  force?: boolean;
+  /** Treat the installation reference as a Git source. */
+  git?: boolean;
+  /**
+     * Upstream Git subpath option for adoption.
+     * @nullable
+     */
+  gitSubpath?: string | null;
+  /**
+     * Optional preset icon identifier.
+     * @nullable
+     */
+  icon?: string | null;
+  /** Documented install source and sync options. */
+  local?: boolean;
   /** The machine to act on (must match the path's machine). */
   machineId: string;
+  /**
+     * Optional preset name, description, or icon used by preset creation/update.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * Explicit library or preset action (for example `install` or
+     * `presets.delete`). Existing deploy/probe requests may omit it.
+     * @nullable
+     */
+  operation?: string | null;
+  /**
+     * Subpath or local path used by adopt/set-source.
+     * @nullable
+     */
+  path?: string | null;
+  /** Paths to adopt in one operation. */
+  paths?: string[];
+  /**
+     * Skill or preset reference used by the selected operation.
+     * @nullable
+     */
+  reference?: string | null;
+  /** Additional references for CLI-supported bulk actions. */
+  references?: string[];
   /**
      * The skill to deploy or undeploy; absent for a probe.
      * @nullable
@@ -3713,6 +3766,18 @@ export interface StartSkillsOperationRequest {
      * @nullable
      */
   skillsRoot?: string | null;
+  /**
+     * Source URL for adopt/set-source. URLs with embedded credentials are refused.
+     * @nullable
+     */
+  sourceUrl?: string | null;
+  /** Add the installed skill to the current preset and sync agents. */
+  sync?: boolean;
+  /**
+     * Add the installed skill to this preset and sync agents.
+     * @nullable
+     */
+  syncPreset?: string | null;
   /**
      * The deadline, in seconds. Bounded by the executor.
      * @minimum 0

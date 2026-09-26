@@ -151,6 +151,10 @@ case "$1" in
     case "$1" in
       list) echo '[{"id":"hello","name":"Hello","description":"private text","path":"/secret/skill/path","enabled":true,"preset_ids":["default"],"deployed_to":["claude_code"],"source_ref":"private"}]' ;;
       check) echo '[{"skill_id":"hello","update_status":"update_available","last_check_error":"/secret/error"}]' ;;
+      remove)
+        if [ "$2" = conflict ]; then echo '{"ok":false,"code":"TARGET_CONFLICT","message":"blocked","error":{"paths":["/tmp/conflict"],"held_back_removals":["managed"]}}'; exit 2; fi
+        echo '{"ok":true}'
+        ;;
       deploy)
         skill=$2; shift 2
         agents=""
@@ -297,6 +301,124 @@ async fn deploy_reaches_the_stub_with_an_argument_array() {
         "the arguments arrive as an array: {log}"
     );
     assert!(!log.contains("--dry-run"), "a real deploy is not a dry run");
+}
+
+#[tokio::test]
+async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
+    let _guard = CLI_LOCK.lock().await;
+    let sshd = start_sshd();
+    let fixture = compose(&sshd).await;
+    let home = std::env::var("HOME").unwrap();
+    let _path = install_stub_cli(&home, None);
+    std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
+
+    let base = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "timeoutSeconds": 30,
+    });
+    let (state, _, error) = fixture.run_kind("skills.install", base.clone()).await;
+    assert_eq!(state, "failed", "a reference is required: {error:?}");
+    let mut install = base.clone();
+    install["reference"] = serde_json::json!("org/repo/skill one");
+    install["git"] = serde_json::json!(true);
+    install["name"] = serde_json::json!("Friendly Skill");
+    install["syncPreset"] = serde_json::json!("default");
+    let (state, _, error) = fixture.run_kind("skills.install", install).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    assert!(
+        log.contains(
+            "skills install org/repo/skill one --git --name Friendly Skill --sync-preset default"
+        ),
+        "{log}"
+    );
+    assert!(
+        !log.contains("--yes"),
+        "install never receives destructive confirmation: {log}"
+    );
+
+    let mut remove = base;
+    remove["reference"] = serde_json::json!("skill-id");
+    remove["confirm"] = serde_json::json!(true);
+    remove["dryRun"] = serde_json::json!(true);
+    let (state, _, error) = fixture.run_kind("skills.remove", remove).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    assert!(
+        log.contains("skills remove skill-id --yes --dry-run"),
+        "{log}"
+    );
+
+    let bulk_remove = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "references": ["skill-a", "skill b"],
+        "confirm": true,
+        "dryRun": true,
+        "timeoutSeconds": 30,
+    });
+    let (state, _, error) = fixture.run_kind("skills.remove", bulk_remove).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    assert!(
+        log.contains("skills remove skill-a skill b --yes --dry-run"),
+        "{log}"
+    );
+
+    let adopt = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "path": "/tmp/one",
+        "paths": ["/tmp/two"],
+        "sourceUrl": "https://example.invalid/org/repo",
+        "gitSubpath": "skills/sub",
+        "dryRun": true,
+        "timeoutSeconds": 30,
+    });
+    let (state, _, error) = fixture.run_kind("skills.adopt", adopt).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    assert!(
+        log.contains("skills adopt /tmp/one /tmp/two --git-url https://example.invalid/org/repo --git-subpath skills/sub --dry-run"),
+        "{log}"
+    );
+
+    let conflict = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "reference": "conflict",
+        "confirm": true,
+        "timeoutSeconds": 30,
+    });
+    let (state, _, error) = fixture.run_kind("skills.remove", conflict).await;
+    assert_eq!(state, "failed");
+    let error: serde_json::Value = serde_json::from_str(&error.unwrap()).unwrap();
+    assert_eq!(error["reason"], "TARGET_CONFLICT");
+    assert_eq!(error["data"]["paths"][0], "/tmp/conflict");
+    assert_eq!(error["data"]["held_back_removals"][0], "managed");
+
+    let preset_update = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "reference": "preset",
+        "name": "Renamed",
+        "description": "Safe text",
+        "icon": "book",
+        "timeoutSeconds": 30,
+    });
+    let (state, _, error) = fixture.run_kind("presets.update", preset_update).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    assert!(
+        log.contains("presets update preset --name Renamed --description Safe text --icon book"),
+        "{log}"
+    );
 }
 
 #[tokio::test]
