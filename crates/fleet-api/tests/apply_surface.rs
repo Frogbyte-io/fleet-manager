@@ -455,6 +455,15 @@ async fn a_catalog_skill_rollout_requires_a_version_pin_at_the_boundary() {
     let state = state_for(Arc::new(PermitAll));
     body["actions"][0]["difference"]["identity"] =
         serde_json::Value::String("catalog-skill: / ".to_owned());
+    body["actions"][0]["difference"]["desired"] = serde_json::Value::String(
+        "catalog-1@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+    );
+    let (status, value) = call(state, "POST", "/machines/m-1/apply", Some(body.to_string())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+
+    let state = state_for(Arc::new(PermitAll));
+    body["actions"][0]["difference"]["identity"] =
+        serde_json::Value::String("catalog-skill:catalog-1/codex".to_owned());
     body["actions"][0]["difference"]["desired"] = serde_json::Value::String("  ".to_owned());
     let (status, value) = call(state, "POST", "/machines/m-1/apply", Some(body.to_string())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");

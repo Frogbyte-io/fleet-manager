@@ -202,6 +202,11 @@ pub fn compose_skill_assignments(
         for agent in &assignment.deny_agents {
             denied.insert((assignment.skill_id.clone(), agent.clone()));
         }
+    }
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| applies(&assignment.scope))
+    {
         if assignment.skill_id.contains('/') {
             return Err(SkillAssignmentCompositionError::InvalidIdentityComponent {
                 component: "skill id",
@@ -223,6 +228,9 @@ pub fn compose_skill_assignments(
                 return Err(SkillAssignmentCompositionError::InvalidIdentityComponent {
                     component: "catalog or version id",
                 });
+            }
+            if denied.contains(&(assignment.skill_id.clone(), agent.clone())) {
+                continue;
             }
             let identity = assignment.catalog_version.as_ref().map_or_else(
                 || format!("skill:{}/{agent}", assignment.skill_id),
@@ -684,6 +692,57 @@ mod tests {
                 second_version: "version-2".into(),
             }
         );
+    }
+
+    #[test]
+    fn an_explicit_deny_suppresses_conflicting_catalog_pins() {
+        let assignment = |version: &str, name: &str| SkillAssignment {
+            skill_id: "skill-1".into(),
+            deploy_to: vec!["codex".into()],
+            deny_agents: vec![],
+            scope: SkillAssignmentScope::All,
+            provenance: super::ProvenanceRecord {
+                resource_id: name.into(),
+                resource_name: name.into(),
+                path: "/spec".into(),
+            },
+            catalog_version: Some(("catalog-1".into(), version.into())),
+        };
+        let assignments = vec![
+            assignment(
+                "catalog-1@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "preset-a",
+            ),
+            assignment(
+                "catalog-1@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "preset-b",
+            ),
+            SkillAssignment {
+                skill_id: "skill-1".into(),
+                deploy_to: vec![],
+                deny_agents: vec!["codex".into()],
+                scope: SkillAssignmentScope::All,
+                provenance: super::ProvenanceRecord {
+                    resource_id: "deny".into(),
+                    resource_name: "deny".into(),
+                    path: "/spec".into(),
+                },
+                catalog_version: None,
+            },
+        ];
+
+        let composed = compose_skill_assignments(
+            &MachineSkillTarget {
+                machine_id: "m1".into(),
+                groups: vec![],
+                tags: vec![],
+            },
+            &assignments,
+        )
+        .unwrap();
+        assert!(composed.catalog_skills.is_empty());
+        assert!(composed.skills.is_empty());
+        assert!(composed.provenance.is_empty());
     }
 
     #[test]

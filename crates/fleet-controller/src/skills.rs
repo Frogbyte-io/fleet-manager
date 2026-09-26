@@ -338,6 +338,7 @@ impl SkillsExecutor {
                 || reference.ends_with(".git");
             let mut args = vec![
                 version.name.clone(),
+                version.content_digest.clone(),
                 install_reference,
                 if is_git {
                     "true".to_owned()
@@ -1900,7 +1901,7 @@ while [ "$#" -gt 0 ]; do fleet_agent_args+=("$1"); shift; done
 fleet_committed=1
 rm -rf "$fleet_backup"
 trap - EXIT HUP INT TERM
-printf '{\"versionDigest\":\"%s\",\"verified\":true}\\n' "$fleet_digest"
+printf '{\"versionDigest\":\"%s\",\"verified\":true}\n' "$fleet_digest"
 "#.to_owned()
 }
 
@@ -1970,24 +1971,36 @@ fn catalog_install_reference(
 
 fn referenced_rollout_script() -> String {
     r#"set -euo pipefail
-fleet_name=$1; fleet_reference=$2; fleet_git=$3; fleet_agents=$4; shift 4
+fleet_name=$1; fleet_digest=$2; fleet_reference=$3; fleet_git=$4; fleet_agents=$5; shift 5
+case "$fleet_digest" in (*[!0-9a-f]*|'') echo "invalid catalog digest" >&2; exit 2;; esac
+[ "${#fleet_digest}" -eq 64 ] || { echo "invalid catalog digest" >&2; exit 2; }
 fleet_cli=""
 for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
 [ -n "$fleet_cli" ] || { echo "skills-manager-cli is not installed" >&2; exit 3; }
-if ! "$fleet_cli" --json skills show "$fleet_name" >/dev/null 2>&1; then
+fleet_silent() {
+  local fleet_output fleet_status
+  if fleet_output=$("$fleet_cli" --json "$@"); then
+    return 0
+  else
+    fleet_status=$?
+    [ -z "$fleet_output" ] || printf '%s\n' "$fleet_output"
+    return "$fleet_status"
+  fi
+}
+if ! fleet_silent skills show "$fleet_name"; then
   fleet_install_args=(--name "$fleet_name")
   [ "$fleet_git" = "true" ] && fleet_install_args+=(--git)
-  "$fleet_cli" --json skills install "$fleet_reference" "${fleet_install_args[@]}"
+  fleet_silent skills install "$fleet_reference" "${fleet_install_args[@]}"
 else
   if [ "$fleet_git" = "true" ]; then
-    "$fleet_cli" --json skills set-source "$fleet_name" --git-url "$fleet_reference" --force
+    fleet_silent skills set-source "$fleet_name" --git-url "$fleet_reference" --force
   else
     command -v jq >/dev/null 2>&1 || { echo "jq is required to validate an existing non-Git skill source" >&2; exit 3; }
     fleet_existing=$("$fleet_cli" --json skills show "$fleet_name")
     if printf '%s' "$fleet_existing" | jq -e --arg reference "$fleet_reference" '.source_ref == $reference' >/dev/null 2>&1; then
-      "$fleet_cli" --json skills update "$fleet_name"
+      fleet_silent skills update "$fleet_name"
     else
       echo "the existing skill uses a different non-Git source; refusing to remove and reinstall it" >&2
       exit 4
@@ -1996,10 +2009,10 @@ else
 fi
 [ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
 fleet_agent_args=("$@")
-"$fleet_cli" --json skills deploy "$fleet_name" "${fleet_agent_args[@]}"
-"$fleet_cli" --json skills show "$fleet_name" >/dev/null
-"$fleet_cli" --json skills status >/dev/null
-printf '{\"source\":\"referenced\",\"verified\":true}\\n'
+fleet_silent skills deploy "$fleet_name" "${fleet_agent_args[@]}"
+fleet_silent skills show "$fleet_name"
+fleet_silent skills status
+printf '{\"versionDigest\":\"%s\",\"verified\":true}\n' "$fleet_digest"
 "#.to_owned()
 }
 
@@ -2189,6 +2202,7 @@ mod tests {
             .arg("fleet-rollout")
             .args([
                 "release-notes",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "https://github.com/example/skills/tree/v2.1.0/release-notes",
                 "true",
                 "1",
@@ -2208,6 +2222,10 @@ mod tests {
         assert!(calls.contains("skills set-source release-notes --git-url https://github.com/example/skills/tree/v2.1.0/release-notes --force"));
         assert!(calls.contains("skills deploy release-notes codex"));
         assert!(!calls.contains("skills update release-notes"));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            r#"{"versionDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verified":true}"#
+        );
     }
 
     #[test]
@@ -2253,7 +2271,14 @@ mod tests {
                 .arg("-c")
                 .arg(referenced_rollout_script())
                 .arg("fleet-rollout")
-                .args(["hello-world", reference, "false", "1", "codex"])
+                .args([
+                    "hello-world",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    reference,
+                    "false",
+                    "1",
+                    "codex",
+                ])
                 .env("HOME", &home)
                 .env("SHOW_JSON", show_json)
                 .env("JQ_MATCH", succeeds.to_string())

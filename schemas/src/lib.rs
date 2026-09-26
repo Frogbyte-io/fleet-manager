@@ -400,7 +400,9 @@ fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagno
                         .and_then(|suffix| suffix.strip_prefix('@'))
                         .is_some_and(|digest| {
                             digest.len() == 64
-                                && digest.chars().all(|character| character.is_ascii_hexdigit())
+                                && digest.chars().all(|character| {
+                                    character.is_ascii_digit() || ('a'..='f').contains(&character)
+                                })
                         }) => {}
             (None, None) => {}
             _ => diagnostics.push(Diagnostic {
