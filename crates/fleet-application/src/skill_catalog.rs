@@ -13,6 +13,9 @@ use crate::{
 };
 pub use fleet_core::{SkillCatalogContent, SkillCatalogFile, SkillCatalogSource};
 
+/// Largest catalog page returned by application use cases.
+pub const MAX_SKILL_CATALOG_PAGE_SIZE: u32 = 200;
+
 /// Mutable Fleet skill catalog draft.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +71,11 @@ pub trait SkillCatalogPort: fmt::Debug + Send + Sync {
     /// Reads one draft.
     async fn get(&self, id: &str) -> Result<SkillCatalogEntry, String>;
     /// Lists drafts.
-    async fn list(&self) -> Result<Vec<SkillCatalogEntry>, String>;
+    async fn list(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SkillCatalogEntry>, String>;
     /// Replaces draft content.
     async fn update(
         &self,
@@ -85,7 +92,12 @@ pub trait SkillCatalogPort: fmt::Debug + Send + Sync {
     /// Reads a published version.
     async fn get_version(&self, id: &str) -> Result<SkillCatalogVersion, String>;
     /// Lists versions for a catalog entry.
-    async fn list_versions(&self, id: &str) -> Result<Vec<SkillCatalogVersion>, String>;
+    async fn list_versions(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SkillCatalogVersion>, String>;
 }
 
 /// Catalog use-case error.
@@ -139,6 +151,8 @@ impl SkillCatalog {
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
+        cursor: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<SkillCatalogEntry>, SkillCatalogError> {
         authorize(
             authorizer,
@@ -149,7 +163,11 @@ impl SkillCatalog {
             },
         )
         .map_err(SkillCatalogError::Denied)?;
-        self.port.list().await.map_err(SkillCatalogError::Backend)
+        let limit = limit.clamp(1, MAX_SKILL_CATALOG_PAGE_SIZE);
+        self.port
+            .list(cursor, limit)
+            .await
+            .map_err(SkillCatalogError::Backend)
     }
 
     /// Reads a draft and checks entry-scoped access.
@@ -317,6 +335,16 @@ impl SkillCatalog {
         principal: &ActingPrincipal,
         id: &str,
     ) -> Result<SkillCatalogVersion, SkillCatalogError> {
+        let catalog_id = id.split_once('@').map_or(id, |(catalog_id, _)| catalog_id);
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::SkillsRead,
+                resource: Some(catalog_id),
+            },
+        )
+        .map_err(SkillCatalogError::Denied)?;
         let version = self.port.get_version(id).await.map_err(|e| {
             if e.contains("not found") {
                 SkillCatalogError::NotFound(format!("catalog version {id}"))
@@ -324,15 +352,6 @@ impl SkillCatalog {
                 SkillCatalogError::Backend(e)
             }
         })?;
-        authorize(
-            authorizer,
-            AccessRequest {
-                principal_id: &principal.id,
-                action: Permission::SkillsRead,
-                resource: Some(&version.catalog_id),
-            },
-        )
-        .map_err(SkillCatalogError::Denied)?;
         Ok(version)
     }
 
@@ -346,6 +365,8 @@ impl SkillCatalog {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         id: &str,
+        cursor: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<SkillCatalogVersion>, SkillCatalogError> {
         authorize(
             authorizer,
@@ -356,8 +377,9 @@ impl SkillCatalog {
             },
         )
         .map_err(SkillCatalogError::Denied)?;
+        let limit = limit.clamp(1, MAX_SKILL_CATALOG_PAGE_SIZE);
         self.port
-            .list_versions(id)
+            .list_versions(id, cursor, limit)
             .await
             .map_err(SkillCatalogError::Backend)
     }

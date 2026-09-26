@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use fleet_application::skill_catalog::{
@@ -228,6 +228,16 @@ pub struct CatalogRolloutPlanDto {
     pub steps: Vec<String>,
 }
 
+/// Cursor and bound for catalog list endpoints.
+#[derive(Clone, Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPageParams {
+    /// Opaque identifier returned as the previous page's cursor.
+    pub cursor: Option<String>,
+    /// Requested page size, clamped to the API maximum.
+    pub limit: Option<u32>,
+}
+
 fn service(
     state: &ApiState,
     cid: CorrelationId,
@@ -289,23 +299,30 @@ fn now() -> i64 {
 /// # Errors
 ///
 /// Returns an API error when authentication, authorization, or the catalog backend fails.
-#[utoipa::path(get,path="/skills/catalog",tag="skills",operation_id="listSkillCatalog",responses((status=200,body=Page<CatalogDto>)))]
+#[utoipa::path(get,path="/skills/catalog",tag="skills",operation_id="listSkillCatalog",params(CatalogPageParams),responses((status=200,body=Page<CatalogDto>)))]
 pub async fn list_catalog(
     State(st): State<Arc<ApiState>>,
     p: Option<Extension<crate::ActingPrincipal>>,
     Extension(cid): Extension<CorrelationId>,
+    Query(params): Query<CatalogPageParams>,
 ) -> Result<Json<Page<CatalogDto>>, ApiErrorResponse> {
     let p = principal(p, cid)?;
-    let v = service(&st, cid)?
-        .list(st.authorizer.as_ref(), &p)
+    let limit = params
+        .limit
+        .unwrap_or(crate::envelope::DEFAULT_PAGE_LIMIT)
+        .clamp(1, crate::envelope::MAX_PAGE_LIMIT);
+    let mut v = service(&st, cid)?
+        .list(st.authorizer.as_ref(), &p, params.cursor.as_deref(), limit)
         .await
         .map_err(|e| mapped(&e, cid))?;
+    let has_more = v.len() > usize::try_from(limit).unwrap_or(0);
+    v.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let next_cursor = has_more
+        .then(|| v.last().map(|entry| entry.id.clone()))
+        .flatten();
     Ok(Json(Page {
         items: v.into_iter().map(Into::into).collect(),
-        page: PageInfo {
-            next_cursor: None,
-            limit: 200,
-        },
+        page: PageInfo { next_cursor, limit },
     }))
 }
 
@@ -395,24 +412,37 @@ pub async fn publish_catalog(
 /// # Errors
 ///
 /// Returns an API error when authentication, authorization, or storage fails.
-#[utoipa::path(get,path="/skills/catalog/{id}/versions",tag="skills",operation_id="listSkillCatalogVersions",params(("id"=String,Path)),responses((status=200,body=Page<CatalogVersionDto>)))]
+#[utoipa::path(get,path="/skills/catalog/{id}/versions",tag="skills",operation_id="listSkillCatalogVersions",params(("id"=String,Path),CatalogPageParams),responses((status=200,body=Page<CatalogVersionDto>)))]
 pub async fn list_catalog_versions(
     State(st): State<Arc<ApiState>>,
     p: Option<Extension<crate::ActingPrincipal>>,
     Extension(cid): Extension<CorrelationId>,
     Path(id): Path<String>,
+    Query(params): Query<CatalogPageParams>,
 ) -> Result<Json<Page<CatalogVersionDto>>, ApiErrorResponse> {
     let p = principal(p, cid)?;
-    let v = service(&st, cid)?
-        .versions(st.authorizer.as_ref(), &p, &id)
+    let limit = params
+        .limit
+        .unwrap_or(crate::envelope::DEFAULT_PAGE_LIMIT)
+        .clamp(1, crate::envelope::MAX_PAGE_LIMIT);
+    let mut v = service(&st, cid)?
+        .versions(
+            st.authorizer.as_ref(),
+            &p,
+            &id,
+            params.cursor.as_deref(),
+            limit,
+        )
         .await
         .map_err(|e| mapped(&e, cid))?;
+    let has_more = v.len() > usize::try_from(limit).unwrap_or(0);
+    v.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let next_cursor = has_more
+        .then(|| v.last().map(|version| version.id.clone()))
+        .flatten();
     Ok(Json(Page {
         items: v.into_iter().map(Into::into).collect(),
-        page: PageInfo {
-            next_cursor: None,
-            limit: 200,
-        },
+        page: PageInfo { next_cursor, limit },
     }))
 }
 
@@ -446,7 +476,7 @@ fn rollout_plan(
         },
     }
 }
-async fn authorize_rollout(
+pub(crate) async fn authorize_rollout(
     st: &ApiState,
     p: &crate::ActingPrincipal,
     cid: CorrelationId,
@@ -473,10 +503,6 @@ async fn authorize_rollout(
             cid,
         ));
     }
-    let version = service(st, cid)?
-        .get_version(st.authorizer.as_ref(), p, &request.version_id)
-        .await
-        .map_err(|e| mapped(&e, cid))?;
     fleet_application::authz::authorize(
         st.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
@@ -486,6 +512,36 @@ async fn authorize_rollout(
         },
     )
     .map_err(|d| mapped(&SkillCatalogError::Denied(d), cid))?;
+    let machines = crate::machines::machines_or_error(st, cid)?;
+    let machine = machines
+        .get(st.authorizer.as_ref(), p, &request.machine_id, now())
+        .await
+        .map_err(|error| crate::machines::map_machine_error(&error, cid))?;
+    let endpoint = machine
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.id == request.endpoint_id)
+        .ok_or_else(|| {
+            crate::machines::map_machine_error(
+                &fleet_application::machine::MachineUseCaseError::NotFound {
+                    what: format!(
+                        "endpoint {} on machine {}",
+                        request.endpoint_id, request.machine_id
+                    ),
+                },
+                cid,
+            )
+        })?;
+    if endpoint.kind != fleet_core::EndpointKind::Ssh {
+        return Err(crate::machines::invalid_request(
+            "catalog rollout requires an SSH endpoint",
+            cid,
+        ));
+    }
+    let version = service(st, cid)?
+        .get_version(st.authorizer.as_ref(), p, &request.version_id)
+        .await
+        .map_err(|e| mapped(&e, cid))?;
     Ok(version)
 }
 
@@ -534,7 +590,8 @@ pub async fn start_catalog_rollout(
                 use sha2::Digest as _;
                 let digest = sha2::Sha256::digest(payload.as_bytes());
                 format!(
-                    "catalog-rollout-{}",
+                    "{}:catalog-rollout-{}",
+                    p.id,
                     digest.iter().fold(String::with_capacity(64), |mut out, b| {
                         use std::fmt::Write as _;
                         let _ = write!(out, "{b:02x}");
@@ -542,7 +599,7 @@ pub async fn start_catalog_rollout(
                     })
                 )
             },
-            str::to_owned,
+            |key| format!("{}:{key}", p.id),
         );
     let new_operation = fleet_application::operation::NewOperation {
         kind: "skills.catalog-rollout".to_owned(),

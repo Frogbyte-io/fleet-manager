@@ -81,8 +81,17 @@ impl SkillCatalogPort for SkillCatalogRepository {
     async fn get(&self, id: &str) -> Result<SkillCatalogEntry, String> {
         sqlx::query("SELECT id, content_json, published_from, created_at, updated_at FROM skill_catalog_entries WHERE id = ?1").bind(id).fetch_optional(&self.pool).await.map_err(|e| format!("get failed: {e}"))?.as_ref().ok_or_else(|| format!("catalog entry {id} not found")).and_then(Self::entry)
     }
-    async fn list(&self) -> Result<Vec<SkillCatalogEntry>, String> {
-        let rows = sqlx::query("SELECT id, content_json, published_from, created_at, updated_at FROM skill_catalog_entries ORDER BY updated_at DESC, id DESC").fetch_all(&self.pool).await.map_err(|e| format!("list failed: {e}"))?;
+    async fn list(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SkillCatalogEntry>, String> {
+        let rows = sqlx::query("SELECT id, content_json, published_from, created_at, updated_at FROM skill_catalog_entries WHERE (?1 IS NULL OR id > ?1) ORDER BY id ASC LIMIT ?2")
+            .bind(cursor)
+            .bind(i64::from(limit.saturating_add(1)))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| format!("list failed: {e}"))?;
         rows.iter().map(Self::entry).collect()
     }
     async fn update(
@@ -108,7 +117,7 @@ impl SkillCatalogPort for SkillCatalogRepository {
             .map_err(|e| format!("encode version failed: {e}"))?;
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|e| format!("begin publish failed: {e}"))?;
         sqlx::query("INSERT OR IGNORE INTO skill_catalog_versions (id, catalog_id, name, description, content_digest, content_json, published_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
@@ -127,8 +136,19 @@ impl SkillCatalogPort for SkillCatalogRepository {
     async fn get_version(&self, id: &str) -> Result<SkillCatalogVersion, String> {
         sqlx::query("SELECT id, catalog_id, name, description, content_digest, content_json, published_at FROM skill_catalog_versions WHERE id = ?1").bind(id).fetch_optional(&self.pool).await.map_err(|e| format!("get version failed: {e}"))?.as_ref().ok_or_else(|| format!("catalog version {id} not found")).and_then(Self::version)
     }
-    async fn list_versions(&self, id: &str) -> Result<Vec<SkillCatalogVersion>, String> {
-        let rows = sqlx::query("SELECT id, catalog_id, name, description, content_digest, content_json, published_at FROM skill_catalog_versions WHERE catalog_id = ?1 ORDER BY published_at DESC, id DESC").bind(id).fetch_all(&self.pool).await.map_err(|e| format!("list versions failed: {e}"))?;
+    async fn list_versions(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SkillCatalogVersion>, String> {
+        let rows = sqlx::query("SELECT id, catalog_id, name, description, content_digest, content_json, published_at FROM skill_catalog_versions WHERE catalog_id = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id ASC LIMIT ?3")
+            .bind(id)
+            .bind(cursor)
+            .bind(i64::from(limit.saturating_add(1)))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| format!("list versions failed: {e}"))?;
         rows.iter().map(Self::version).collect()
     }
 }

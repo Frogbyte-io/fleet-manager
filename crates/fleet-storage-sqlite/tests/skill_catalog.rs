@@ -25,6 +25,21 @@ async fn drafts_are_mutable_and_published_versions_are_immutable_and_deduplicate
     let repository = SkillCatalogRepository::new(store.pool().clone());
     let original = content("---\nname: hello-world\ndescription: Do useful work\n---\n# Hello\n");
     let draft = repository.create(&original, 10).await.unwrap();
+    let second_content = SkillCatalogContent {
+        name: "second-skill".to_owned(),
+        description: "Do other useful work".to_owned(),
+        files: vec![SkillCatalogFile {
+            path: "SKILL.md".to_owned(),
+            content: "---\nname: second-skill\ndescription: Do other useful work\n---\n# Second\n"
+                .to_owned(),
+        }],
+        source: SkillCatalogSource::Authored,
+    };
+    repository.create(&second_content, 11).await.unwrap();
+    let first_page = repository.list(None, 1).await.unwrap();
+    assert_eq!(first_page.len(), 2, "one requested row plus one look-ahead");
+    let cursor = first_page[0].id.clone();
+    assert_eq!(repository.list(Some(&cursor), 1).await.unwrap().len(), 1);
     let digest = original.validate_and_digest().unwrap();
     let version = SkillCatalogVersion {
         id: format!("{}@{digest}", draft.id),
@@ -56,5 +71,12 @@ async fn drafts_are_mutable_and_published_versions_are_immutable_and_deduplicate
             .published_at,
         20
     );
-    assert_eq!(repository.list_versions(&draft.id).await.unwrap().len(), 1);
+    assert_eq!(
+        repository
+            .list_versions(&draft.id, None, 50)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

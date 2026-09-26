@@ -414,6 +414,20 @@ pub async fn create_operation(
     Json(request): Json<CreateOperationRequest>,
 ) -> Result<(StatusCode, Json<Resource<OperationDto>>), ApiErrorResponse> {
     let principal = principal_or_error(principal, correlation_id)?;
+    if request.kind == "skills.catalog-rollout" {
+        let payload = request.payload_json.as_deref().ok_or_else(|| {
+            crate::machines::invalid_request("catalog rollout payload is required", correlation_id)
+        })?;
+        let rollout: crate::skill_catalog::CatalogRolloutRequest = serde_json::from_str(payload)
+            .map_err(|_| {
+                crate::machines::invalid_request(
+                    "catalog rollout payload is malformed",
+                    correlation_id,
+                )
+            })?;
+        crate::skill_catalog::authorize_rollout(&state, &principal, correlation_id, &rollout)
+            .await?;
+    }
     let operation = state
         .operations
         .create(

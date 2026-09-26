@@ -98,28 +98,12 @@ impl SkillCatalogContent {
                 reference,
                 subpath,
                 revision,
-            } => {
-                if reference.trim().is_empty()
-                    || reference.len() > 2048
-                    || !reference.trim().is_ascii()
-                {
-                    return Err(
-                        "referenced source must be a non-empty ASCII reference or URL".to_owned(),
-                    );
-                }
-                reject_secret_shaped_content(reference)?;
-                if let Some(path) = subpath {
-                    validate_relative_path(path)?;
-                }
-                if revision.as_ref().is_some_and(|rev| {
-                    rev.is_empty() || rev.len() > 256 || rev.chars().any(char::is_control)
-                }) {
-                    return Err("revision must be 1..=256 printable characters".to_owned());
-                }
-                if !self.files.is_empty() {
-                    return Err("referenced entries cannot include authored files".to_owned());
-                }
-            }
+            } => validate_referenced_source(
+                reference,
+                subpath.as_deref(),
+                revision.as_deref(),
+                &self.files,
+            )?,
         }
         let mut canonical_content = self.clone();
         canonical_content.files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -168,6 +152,77 @@ fn validate_relative_path(path: &str) -> Result<(), String> {
         return Err(format!(
             "skill path must be normalized and remain within the skill directory: {path:?}"
         ));
+    }
+    Ok(())
+}
+
+fn validate_referenced_source(
+    reference: &str,
+    subpath: Option<&str>,
+    revision: Option<&str>,
+    files: &[SkillCatalogFile],
+) -> Result<(), String> {
+    if reference.trim().is_empty()
+        || reference.len() > 2048
+        || !reference.trim().is_ascii()
+        || reference.trim_start().starts_with('-')
+        || reference.chars().any(char::is_control)
+    {
+        return Err("referenced source must be a non-empty ASCII reference or URL".to_owned());
+    }
+    reject_secret_shaped_content(reference)?;
+    if let Some(path) = subpath {
+        validate_relative_path(path)?;
+    }
+    if revision
+        .is_some_and(|rev| rev.is_empty() || rev.len() > 256 || rev.chars().any(char::is_control))
+    {
+        return Err("revision must be 1..=256 printable characters".to_owned());
+    }
+    if subpath.is_some() != revision.is_some() {
+        return Err(
+            "Git subpath and revision pins must be supplied together; Fleet does not guess a repository default branch".to_owned(),
+        );
+    }
+    if let (Some(path), Some(revision)) = (subpath, revision) {
+        validate_github_pin(reference, path, revision)?;
+    }
+    if files.is_empty() {
+        Ok(())
+    } else {
+        Err("referenced entries cannot include authored files".to_owned())
+    }
+}
+
+fn validate_github_pin(reference: &str, path: &str, revision: &str) -> Result<(), String> {
+    let Some(repository) = reference.strip_prefix("https://github.com/") else {
+        return Err(
+            "separate subpath and revision pins currently require an HTTPS GitHub repository URL"
+                .to_owned(),
+        );
+    };
+    let repository = repository
+        .strip_suffix(".git")
+        .unwrap_or(repository)
+        .trim_end_matches('/');
+    let safe_component = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    };
+    if repository.split('/').count() != 2
+        || !repository.split('/').all(safe_component)
+        || !revision
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        || !path.split('/').all(safe_component)
+    {
+        return Err(
+            "GitHub subpath or revision contains unsupported URL path characters".to_owned(),
+        );
     }
     Ok(())
 }
@@ -231,6 +286,35 @@ fn reject_secret_shaped_content(content: &str) -> Result<(), String> {
     let private_key = lower.contains("-----begin ") && lower.contains(" private key-----");
     if patterns.iter().any(|needle| lower.contains(needle)) || aws_key || private_key {
         return Err("authored content appears to contain a credential or private key".to_owned());
+    }
+    let query_credentials = content.split_whitespace().any(|token| {
+        token
+            .split(['?', '#'])
+            .skip(1)
+            .flat_map(|query| query.split('&'))
+            .filter_map(|part| part.split_once('='))
+            .any(|(key, value)| {
+                !value.is_empty()
+                    && [
+                        "token",
+                        "access_token",
+                        "refresh_token",
+                        "password",
+                        "passwd",
+                        "secret",
+                        "client_secret",
+                        "api_key",
+                        "apikey",
+                        "auth",
+                        "signature",
+                        "sig",
+                        "credential",
+                    ]
+                    .contains(&key.to_ascii_lowercase().as_str())
+            })
+    });
+    if query_credentials {
+        return Err("catalog source contains a credential-bearing query parameter".to_owned());
     }
     if content.split_whitespace().any(|token| {
         token
@@ -347,6 +431,36 @@ mod tests {
                 .validate_and_digest()
                 .unwrap_err()
                 .contains("userinfo")
+        );
+    }
+
+    #[test]
+    fn referenced_sources_reject_options_controls_and_query_credentials() {
+        let referenced = |reference: &str| SkillCatalogContent {
+            name: "hello-world".into(),
+            description: "Do useful work".into(),
+            files: Vec::new(),
+            source: SkillCatalogSource::Referenced {
+                reference: reference.to_owned(),
+                subpath: None,
+                revision: None,
+            },
+        };
+        assert!(referenced("--help").validate_and_digest().is_err());
+        assert!(
+            referenced("https://example.org/repo?token=secret")
+                .validate_and_digest()
+                .is_err()
+        );
+        assert!(
+            referenced("https://example.org/repo?branch=stable")
+                .validate_and_digest()
+                .is_ok()
+        );
+        assert!(
+            referenced("https://example.org/repo\n--help")
+                .validate_and_digest()
+                .is_err()
         );
     }
 }

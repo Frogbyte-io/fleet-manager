@@ -1304,3 +1304,241 @@ mod skills_permission_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod catalog_rollout_authorization_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    use super::{
+        AuditPort, NewOperation, Operation, OperationPort, Operations, PortFailure, QueueDepths,
+    };
+    use crate::audit::{AuditIntent, AuditOutcome};
+    use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
+
+    #[derive(Debug, Default)]
+    struct RecordingPort(Mutex<Vec<Operation>>);
+
+    #[async_trait]
+    impl OperationPort for RecordingPort {
+        async fn create(
+            &self,
+            kind: &str,
+            key: Option<&str>,
+            deadline: Option<i64>,
+            correlation: Option<&str>,
+            payload: Option<&str>,
+        ) -> Result<Operation, PortFailure> {
+            let operation = Operation {
+                id: "operation-1".to_owned(),
+                kind: kind.to_owned(),
+                state: "pending".to_owned(),
+                idempotency_key: key.map(str::to_owned),
+                progress_current: None,
+                progress_total: None,
+                progress_message: None,
+                deadline_at: deadline,
+                cancel_requested: false,
+                payload_json: payload.map(str::to_owned),
+                result_json: None,
+                error_json: None,
+                correlation_id: correlation.map(str::to_owned),
+                created_at: 0,
+                updated_at: 0,
+                claimed_at: None,
+                worker_id: None,
+            };
+            self.0.lock().unwrap().push(operation.clone());
+            Ok(operation)
+        }
+        async fn get(&self, _: &str) -> Result<Operation, PortFailure> {
+            Err(missing())
+        }
+        async fn list(&self, _: u32) -> Result<Vec<Operation>, PortFailure> {
+            Ok(Vec::new())
+        }
+        async fn request_cancel(&self, _: &str) -> Result<Operation, PortFailure> {
+            Err(missing())
+        }
+        async fn transition(&self, _: &str, _: &str) -> Result<Operation, PortFailure> {
+            Err(missing())
+        }
+        async fn complete(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Operation, PortFailure> {
+            Err(missing())
+        }
+        async fn record_progress(
+            &self,
+            _: &str,
+            _: Option<i64>,
+            _: Option<i64>,
+            _: Option<&str>,
+        ) -> Result<(), PortFailure> {
+            Ok(())
+        }
+        async fn claim_pending(&self, _: &str, _: i64) -> Result<Option<Operation>, PortFailure> {
+            Ok(None)
+        }
+        async fn claim_pending_by_id(
+            &self,
+            _: &str,
+            _: &str,
+            _: i64,
+        ) -> Result<Option<Operation>, PortFailure> {
+            Ok(None)
+        }
+        async fn expired_claims(&self, _: i64, _: i64) -> Result<Vec<Operation>, PortFailure> {
+            Ok(Vec::new())
+        }
+        async fn renew_lease(&self, _: &str, _: &str, _: i64, _: i64) -> Result<bool, PortFailure> {
+            Ok(false)
+        }
+        async fn fail_expired_claim(
+            &self,
+            _: &str,
+            _: i64,
+            _: i64,
+            _: &str,
+        ) -> Result<bool, PortFailure> {
+            Ok(false)
+        }
+        async fn sweep_deadlines(&self, _: i64) -> Result<Vec<String>, PortFailure> {
+            Ok(Vec::new())
+        }
+        async fn queue_depths(&self) -> Result<QueueDepths, PortFailure> {
+            Ok(QueueDepths::default())
+        }
+    }
+
+    fn missing() -> PortFailure {
+        PortFailure::NotFound {
+            what: "test operation".to_owned(),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingAudit;
+
+    #[async_trait]
+    impl AuditPort for RecordingAudit {
+        async fn record_intent(&self, _: &AuditIntent) -> Result<(), String> {
+            Ok(())
+        }
+        async fn record_outcome(&self, _: &str, _: AuditOutcome) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct Policy {
+        deny: Option<Permission>,
+        seen: Mutex<Vec<Permission>>,
+    }
+
+    impl Authorizer for Policy {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            self.seen.lock().unwrap().push(request.action);
+            if self.deny == Some(request.action) {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+
+    fn request(payload: &serde_json::Value) -> NewOperation {
+        NewOperation {
+            kind: "skills.catalog-rollout".to_owned(),
+            payload_json: Some(payload.to_string()),
+            ..NewOperation::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_rollout_rejects_missing_catalog_id_before_creation() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+        let authorizer = Policy {
+            deny: None,
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = operations
+            .create(
+                &authorizer,
+                "operator",
+                &request(&serde_json::json!({"machineId":"m1"})),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::OperationUseCaseError::Invalid { .. })
+        ));
+        assert!(port.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_rollout_requires_catalog_read_after_machine_deploy_permission() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+        let authorizer = Policy {
+            deny: Some(Permission::SkillsRead),
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = operations
+            .create(
+                &authorizer,
+                "operator",
+                &request(&serde_json::json!({"machineId":"m1","catalogId":"c1"})),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::OperationUseCaseError::Denied(_))
+        ));
+        assert!(
+            authorizer
+                .seen
+                .lock()
+                .unwrap()
+                .contains(&Permission::SkillsDeploy)
+        );
+        assert!(
+            authorizer
+                .seen
+                .lock()
+                .unwrap()
+                .contains(&Permission::SkillsRead)
+        );
+        assert!(port.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_rollout_creation_passes_both_scoped_authorization_checks() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+        let authorizer = Policy {
+            deny: None,
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = operations
+            .create(
+                &authorizer,
+                "operator",
+                &request(&serde_json::json!({"machineId":"m1","catalogId":"c1"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.kind, "skills.catalog-rollout");
+        let seen = authorizer.seen.lock().unwrap();
+        assert!(seen.contains(&Permission::OperationCreate));
+        assert!(seen.contains(&Permission::SkillsDeploy));
+        assert!(seen.contains(&Permission::SkillsRead));
+        assert_eq!(port.0.lock().unwrap().len(), 1);
+    }
+}

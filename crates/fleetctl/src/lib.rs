@@ -2635,12 +2635,27 @@ fn render_stream_event(
 mod event_output_tests {
     use super::{
         Command, Output, event_stream_http_error, event_stream_request, merge_skills_matrix_pages,
-        parse, parse_skills_command, read_sse_events, render_skills, render_stream_event,
-        request_for, retryable_event_stream_status,
+        parse, parse_skills_command, read_sse_events, render_catalog, render_skills,
+        render_stream_event, request_for, retryable_event_stream_status,
     };
     use std::io::{BufRead as _, Write as _};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn catalog_text_output_shows_catalog_metadata() {
+        let output = render_catalog(&serde_json::json!({
+            "items": [{
+                "id": "catalog-1",
+                "content": {"name": "release-notes", "description": "Prepare release notes", "source": {"kind": "authored"}},
+                "publishedFrom": "catalog-1@digest"
+            }]
+        }));
+        assert!(output.contains("release-notes"));
+        assert!(output.contains("catalog-1@digest"));
+        assert!(output.contains("Prepare release notes"));
+        assert!(!output.contains("KIND\tSTATE"));
+    }
 
     #[test]
     fn skills_install_rejects_batch_reference_flag() {
@@ -3184,6 +3199,7 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             }
             Command::AuditList { .. } => render_audit(Some(payload)),
             Command::SkillsList { .. } | Command::SkillsMatrix => render_skills(payload),
+            Command::SkillsCatalog { .. } => render_catalog(payload),
             Command::MachinesOnboardList { .. }
             | Command::MachinesOnboardGet { .. }
             | Command::MachinesOnboardCreate { .. }
@@ -3261,6 +3277,35 @@ fn render_skills(payload: &Value) -> String {
                 skill["id"].as_str().unwrap_or("?")
             );
         }
+    }
+    output
+}
+
+fn render_catalog(payload: &Value) -> String {
+    use std::fmt::Write as _;
+    let data = payload.get("data").unwrap_or(payload);
+    let rows = data
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| data.get("content").map(|_| vec![data.clone()]))
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return "No skill catalog entries.\n".to_owned();
+    }
+    let mut output = String::from("NAME\tID\tSOURCE\tPUBLISHED\tDESCRIPTION\n");
+    for row in rows {
+        let content = row.get("content").unwrap_or(&row);
+        let name = content["name"].as_str().unwrap_or("unknown");
+        let id = row["id"].as_str().unwrap_or("unknown");
+        let source = match content["source"]["kind"].as_str() {
+            Some("authored") => "authored",
+            Some("referenced") => "referenced",
+            _ => "unknown",
+        };
+        let published = row["publishedFrom"].as_str().unwrap_or("never");
+        let description = content["description"].as_str().unwrap_or_default();
+        let _ = writeln!(output, "{name}\t{id}\t{source}\t{published}\t{description}");
     }
     output
 }

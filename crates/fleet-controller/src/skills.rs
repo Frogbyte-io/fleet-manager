@@ -21,7 +21,7 @@
 //! digest before placing the binary and refuses a mismatch loudly.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use fleet_application::machine::MachinePort;
@@ -211,6 +211,50 @@ impl std::fmt::Debug for SkillsExecutor {
 }
 
 impl SkillsExecutor {
+    async fn catalog_target(
+        &self,
+        payload: &CatalogRolloutPayload,
+    ) -> Result<(SshConnectionSpec, Duration), (&'static str, String)> {
+        let budget = deadline(payload.timeout_seconds);
+        let started = Instant::now();
+        let spec = self
+            .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
+            .await
+            .map_err(|detail| ("connection_failed", detail))?;
+        let gate_budget = budget.saturating_sub(started.elapsed());
+        if gate_budget.is_zero() {
+            return Err((
+                "deadline_killed",
+                "the catalog rollout reached its deadline while resolving the machine".to_owned(),
+            ));
+        }
+        match self.version_gate(&spec, gate_budget).await {
+            GateOutcome::Pass => {}
+            GateOutcome::Absent => {
+                return Err((
+                    "cli_absent",
+                    "skills-manager-cli is not installed".to_owned(),
+                ));
+            }
+            GateOutcome::Unsupported { detail } => return Err(("unsupported_version", detail)),
+            GateOutcome::Connection { detail } => return Err(("connection_failed", detail)),
+            GateOutcome::Deadline => {
+                return Err((
+                    "deadline_killed",
+                    "the Skills Manager version gate exceeded its deadline".to_owned(),
+                ));
+            }
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err((
+                "deadline_killed",
+                "the catalog rollout reached its deadline during the version gate".to_owned(),
+            ));
+        }
+        Ok((spec, remaining))
+    }
+
     async fn catalog_rollout(
         &self,
         operations: &Operations,
@@ -283,49 +327,12 @@ impl SkillsExecutor {
                         .await;
                     }
                 };
-            let spec = self
-                .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
-                .await?;
-            let operation_deadline = deadline(payload.timeout_seconds);
-            match self.version_gate(&spec, operation_deadline).await {
-                GateOutcome::Pass => {}
-                GateOutcome::Absent => {
-                    return complete_failure(
-                        operations,
-                        &operation.id,
-                        "cli_absent",
-                        "skills-manager-cli is not installed",
-                    )
-                    .await;
+            let (spec, remaining) = match self.catalog_target(&payload).await {
+                Ok(target) => target,
+                Err((code, detail)) => {
+                    return complete_failure(operations, &operation.id, code, &detail).await;
                 }
-                GateOutcome::Unsupported { detail } => {
-                    return complete_failure(
-                        operations,
-                        &operation.id,
-                        "unsupported_version",
-                        &detail,
-                    )
-                    .await;
-                }
-                GateOutcome::Connection { detail } => {
-                    return complete_failure(
-                        operations,
-                        &operation.id,
-                        "connection_failed",
-                        &detail,
-                    )
-                    .await;
-                }
-                GateOutcome::Deadline => {
-                    return complete_failure(
-                        operations,
-                        &operation.id,
-                        "deadline_killed",
-                        "the Skills Manager version gate exceeded its deadline",
-                    )
-                    .await;
-                }
-            }
+            };
             let is_git = reference.starts_with("https://")
                 || reference.starts_with("ssh://")
                 || reference.ends_with(".git");
@@ -346,12 +353,7 @@ impl SkillsExecutor {
                 arguments: args,
             };
             let (result, detail) = self
-                .run(
-                    &spec,
-                    &referenced_rollout_script(),
-                    &metadata,
-                    operation_deadline,
-                )
+                .run(&spec, &referenced_rollout_script(), &metadata, remaining)
                 .await;
             return finish_cli(
                 operations,
@@ -362,39 +364,12 @@ impl SkillsExecutor {
             )
             .await;
         }
-        let spec = self
-            .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
-            .await?;
-        let operation_deadline = deadline(payload.timeout_seconds);
-        match self.version_gate(&spec, operation_deadline).await {
-            GateOutcome::Pass => {}
-            GateOutcome::Absent => {
-                return complete_failure(
-                    operations,
-                    &operation.id,
-                    "cli_absent",
-                    "skills-manager-cli is not installed",
-                )
-                .await;
+        let (spec, remaining) = match self.catalog_target(&payload).await {
+            Ok(target) => target,
+            Err((code, detail)) => {
+                return complete_failure(operations, &operation.id, code, &detail).await;
             }
-            GateOutcome::Unsupported { detail } => {
-                return complete_failure(operations, &operation.id, "unsupported_version", &detail)
-                    .await;
-            }
-            GateOutcome::Connection { detail } => {
-                return complete_failure(operations, &operation.id, "connection_failed", &detail)
-                    .await;
-            }
-            GateOutcome::Deadline => {
-                return complete_failure(
-                    operations,
-                    &operation.id,
-                    "deadline_killed",
-                    "the Skills Manager version gate exceeded its deadline",
-                )
-                .await;
-            }
-        }
+        };
         operations
             .record_progress(
                 &operation.id,
@@ -424,12 +399,7 @@ impl SkillsExecutor {
             arguments,
         };
         let (result, detail) = self
-            .run(
-                &spec,
-                &catalog_rollout_script(),
-                &metadata,
-                operation_deadline,
-            )
+            .run(&spec, &catalog_rollout_script(), &metadata, remaining)
             .await;
         finish_cli(operations, &operation.id, result, detail, "catalog rollout").await
     }
@@ -1948,6 +1918,9 @@ fn catalog_install_reference(
                 .to_owned(),
         );
     };
+    if subpath.is_some() && revision.is_none() {
+        return Err("a Git subpath requires an explicit revision; the Skills Manager URL contract cannot resolve the repository default branch".to_owned());
+    }
     if revision.is_some() && subpath.is_none() {
         return Err("a Git revision pin requires a subpath for the documented Skills Manager install URL form".to_owned());
     }
@@ -1962,7 +1935,7 @@ fn catalog_install_reference(
     {
         return Err("pinned Git references must use a GitHub repository root URL".to_owned());
     }
-    let revision = revision.unwrap_or("main");
+    let revision = revision.expect("a Git subpath or revision requires an explicit revision");
     if !revision
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
@@ -2006,7 +1979,17 @@ if ! "$fleet_cli" --json skills show "$fleet_name" >/dev/null 2>&1; then
   [ "$fleet_git" = "true" ] && fleet_install_args+=(--git)
   "$fleet_cli" --json skills install "$fleet_reference" "${fleet_install_args[@]}"
 else
-  "$fleet_cli" --json skills update "$fleet_name"
+  if [ "$fleet_git" = "true" ]; then
+    "$fleet_cli" --json skills set-source "$fleet_name" --git-url "$fleet_reference" --force
+  else
+    fleet_existing=$("$fleet_cli" --json skills show "$fleet_name")
+    if printf '%s' "$fleet_existing" | grep -Fq "\"source_ref\":\"$fleet_reference\""; then
+      "$fleet_cli" --json skills update "$fleet_name"
+    else
+      echo "the existing skill uses a different non-Git source; refusing to remove and reinstall it" >&2
+      exit 4
+    fi
+  fi
 fi
 [ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
 fleet_agent_args=("$@")
@@ -2079,7 +2062,7 @@ impl OperationExecutor for SkillsDispatch {
 mod tests {
     use super::{
         catalog_install_reference, catalog_rollout_script, library_script, normalize_probe,
-        parse_version_text, sha256_hex, url_has_userinfo,
+        parse_version_text, referenced_rollout_script, sha256_hex, url_has_userinfo,
     };
 
     fn b64(value: &str) -> String {
@@ -2152,14 +2135,13 @@ mod tests {
             .unwrap(),
             "https://github.com/example/skills/tree/v2.1.0/skills/reviewer"
         );
-        assert_eq!(
+        assert!(
             catalog_install_reference(
                 "https://github.com/example/skills",
                 Some("skills/reviewer"),
                 None,
             )
-            .unwrap(),
-            "https://github.com/example/skills/tree/main/skills/reviewer"
+            .is_err()
         );
         assert!(
             catalog_install_reference(
@@ -2177,6 +2159,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn referenced_rollout_rebinds_an_existing_git_skill_to_the_pinned_version() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(home.join("installed"), "old source").unwrap();
+        let log = home.join("calls.log");
+        let cli = bin.join("skills-manager-cli");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') test -f \"$HOME/installed\" ;;\n  'skills set-source') touch \"$HOME/rebound\" ;;\n  'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(referenced_rollout_script())
+            .arg("fleet-rollout")
+            .args([
+                "release-notes",
+                "https://github.com/example/skills/tree/v2.1.0/release-notes",
+                "true",
+                "1",
+                "codex",
+            ])
+            .env("HOME", home)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(home.join("rebound").exists());
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("skills set-source release-notes --git-url https://github.com/example/skills/tree/v2.1.0/release-notes --force"));
+        assert!(calls.contains("skills deploy release-notes codex"));
+        assert!(!calls.contains("skills update release-notes"));
     }
 
     #[test]

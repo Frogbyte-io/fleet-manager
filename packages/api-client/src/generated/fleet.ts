@@ -4264,6 +4264,34 @@ limit?: number;
 cursor?: string;
 };
 
+export type ListSkillCatalogParams = {
+/**
+ * Opaque identifier returned as the previous page's cursor.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListSkillCatalogVersionsParams = {
+/**
+ * Opaque identifier returned as the previous page's cursor.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
 export type GetSkillsMatrixParams = {
 cursor?: string;
 /**
@@ -8739,12 +8767,19 @@ export type listSkillCatalogResponseSuccess = (listSkillCatalogResponse200) & {
 
 export type listSkillCatalogResponse = (listSkillCatalogResponseSuccess)
 
-export const getListSkillCatalogUrl = () => {
+export const getListSkillCatalogUrl = (params?: ListSkillCatalogParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/skills/catalog`
+  return stringifiedParams.length > 0 ? `/api/v1/skills/catalog?${stringifiedParams}` : `/api/v1/skills/catalog`
 }
 
 /**
@@ -8753,9 +8788,9 @@ export const getListSkillCatalogUrl = () => {
  * Returns an API error when authentication, authorization, or the catalog backend fails.
  * @summary Lists catalog drafts.
  */
-export const listSkillCatalog = async ( options?: RequestInit): Promise<listSkillCatalogResponse> => {
+export const listSkillCatalog = async (params?: ListSkillCatalogParams, options?: RequestInit): Promise<listSkillCatalogResponse> => {
 
-  const res = await fetch(getListSkillCatalogUrl(),
+  const res = await fetch(getListSkillCatalogUrl(params),
   {
     ...options,
     method: 'GET'
@@ -9088,12 +9123,20 @@ export type listSkillCatalogVersionsResponseSuccess = (listSkillCatalogVersionsR
 
 export type listSkillCatalogVersionsResponse = (listSkillCatalogVersionsResponseSuccess)
 
-export const getListSkillCatalogVersionsUrl = (id: string,) => {
+export const getListSkillCatalogVersionsUrl = (id: string,
+    params?: ListSkillCatalogVersionsParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/skills/catalog/${id}/versions`
+  return stringifiedParams.length > 0 ? `/api/v1/skills/catalog/${id}/versions?${stringifiedParams}` : `/api/v1/skills/catalog/${id}/versions`
 }
 
 /**
@@ -9102,9 +9145,10 @@ export const getListSkillCatalogVersionsUrl = (id: string,) => {
  * Returns an API error when authentication, authorization, or storage fails.
  * @summary Lists immutable versions for a catalog entry.
  */
-export const listSkillCatalogVersions = async (id: string, options?: RequestInit): Promise<listSkillCatalogVersionsResponse> => {
+export const listSkillCatalogVersions = async (id: string,
+    params?: ListSkillCatalogVersionsParams, options?: RequestInit): Promise<listSkillCatalogVersionsResponse> => {
 
-  const res = await fetch(getListSkillCatalogVersionsUrl(id),
+  const res = await fetch(getListSkillCatalogVersionsUrl(id,params),
   {
     ...options,
     method: 'GET'

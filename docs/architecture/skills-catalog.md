@@ -15,4 +15,6 @@ controller stages authored content under a Fleet-owned directory, verifies it,
 and invokes only the documented Skills Manager CLI contract. Fleet never edits
 the Skills Manager database, its library directory, or agent-specific skill
 directories directly. Referenced skills keep their upstream source and pinned
-revision where available.
+revision where available. Separate GitHub subpath and revision pins must both
+be present; Fleet maps them to the documented `/tree/<revision>/<subpath>`
+install form and never guesses a repository's default branch.
