@@ -463,4 +463,23 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn pinned_referenced_sources_require_a_non_empty_subpath() {
+        let mut root_level = SkillCatalogContent {
+            name: "hello-world".into(),
+            description: "Do useful work".into(),
+            files: Vec::new(),
+            source: SkillCatalogSource::Referenced {
+                reference: "https://github.com/example/skills".into(),
+                subpath: None,
+                revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            },
+        };
+        assert!(root_level.validate_and_digest().is_err());
+        if let SkillCatalogSource::Referenced { subpath, .. } = &mut root_level.source {
+            *subpath = Some(String::new());
+        }
+        assert!(root_level.validate_and_digest().is_err());
+    }
 }

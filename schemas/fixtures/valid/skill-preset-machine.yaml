@@ -1,0 +1,12 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: SkillPreset
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58a010
+  name: workstation-skill
+spec:
+  skillId: workstation
+  scope:
+    type: machine
+    value: machine-1
+  deployTo:
+    - codex

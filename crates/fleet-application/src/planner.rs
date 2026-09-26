@@ -62,7 +62,7 @@ fn rank(kind: &str) -> u8 {
         "mise.install" => 1,
         // Skills deploy after tools exist; Frogenv setup is independent
         // of tools/skills.
-        "skills.deploy" | "frogenv.setup" => 2,
+        "skills.deploy" | "skills.catalog-rollout" | "frogenv.setup" => 2,
         // Exec uses the checkout and the tools.
         "mise.exec" => 3,
         // Everything else runs last.
@@ -91,6 +91,12 @@ fn resolving_kind(difference: &FieldDifference) -> Option<&'static str> {
         return match difference.state {
             DifferenceState::Missing => Some("skills.deploy"),
             DifferenceState::Extra => Some("skills.undeploy"),
+            _ => None,
+        };
+    }
+    if identity.starts_with("catalog-skill:") {
+        return match difference.state {
+            DifferenceState::Missing | DifferenceState::Changed => Some("skills.catalog-rollout"),
             _ => None,
         };
     }
@@ -177,6 +183,7 @@ fn reason_for(kind: &str) -> &'static str {
         "projects.clone" => "the checkout is the root every project-scoped step sits in",
         "mise.install" => "tools install before anything uses them",
         "skills.deploy" => "skills deploy after the tools they need exist",
+        "skills.catalog-rollout" => "install or update the pinned catalog version, then deploy it",
         "skills.undeploy" => "a stale deployment is removed through the guarded undeploy path",
         "frogenv.setup" => "the environment configures independently of tools",
         _ => "runs after its dependencies",
@@ -258,6 +265,33 @@ mod tests {
                 .iter()
                 .all(|difference| !difference.actionable()),
             "the unactionable list carries only honest states"
+        );
+    }
+
+    #[test]
+    fn catalog_skill_version_drift_plans_a_pinned_catalog_rollout() {
+        let set = set_with(vec![
+            FieldDifference::missing("catalog-skill:catalog-1/codex", "version-2"),
+            FieldDifference::changed(
+                "catalog-skill:catalog-2/claude_code",
+                "version-3",
+                "version-2",
+            ),
+        ]);
+        let plan = plan(&set);
+        assert_eq!(plan.actions.len(), 2);
+        assert!(
+            plan.actions
+                .iter()
+                .all(|action| action.kind == "skills.catalog-rollout")
+        );
+        assert_eq!(
+            plan.actions[0].difference.identity,
+            "catalog-skill:catalog-1/codex"
+        );
+        assert_eq!(
+            plan.actions[1].difference.identity,
+            "catalog-skill:catalog-2/claude_code"
         );
     }
 

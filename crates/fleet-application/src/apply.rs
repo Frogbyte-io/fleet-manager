@@ -190,6 +190,7 @@ mod tests {
         assert!(super::requires_approval("mise.install"));
         assert!(super::requires_approval("skills.deploy"));
         assert!(super::requires_approval("skills.undeploy"));
+        assert!(super::requires_approval("skills.catalog-rollout"));
         // The clone's catalog permission (projects.git.write) is risky, so
         // the gate covers it too — derived from the catalog, not hardcoded.
         assert!(super::requires_approval("projects.clone"));

@@ -46,6 +46,16 @@ Profiles compose desired outcomes. Composition must be deterministic and explain
 - Capability requirements select compatible machines/providers; capabilities themselves remain observed facts.
 - Secret fields contain secret-reference IDs only.
 
+Fleet-managed `SkillPreset` resources are assignments, not copies of
+Skills Manager state. Their `scope` selects all machines, a group, a tag,
+or one stable machine ID; omitted scope means all machines. Assignment
+composition matches the machine's Fleet groups/tags, deduplicates each
+skill/agent pair, and retains source provenance. Fleet desired state is
+the only authority for managed membership. An offline or stale observation
+is `unknown` and remains queued; a missing or unsupported Skills Manager
+CLI is `unsupported` and cannot produce apply steps. Manual changes appear
+as drift and are never imported into desired state.
+
 Legacy roles/packs provide fixtures for these semantics but do not force the old wrapper/filename schema into v1.
 
 ## Import and activation

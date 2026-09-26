@@ -87,6 +87,30 @@ impl ApplyExecutor {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::catalog_rollout_result_matches;
+
+    #[test]
+    fn catalog_rollout_verification_requires_the_pinned_content_digest() {
+        let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let result = format!(r#"{{"outcome":{{"versionDigest":"{digest}","verified":true}}}}"#);
+        let version = format!("catalog-1@{digest}");
+        assert!(catalog_rollout_result_matches(&version, Some(&result)));
+        assert!(!catalog_rollout_result_matches(
+            &version,
+            Some(r#"{"outcome":{"versionDigest":"different","verified":true}}"#)
+        ));
+        assert!(!catalog_rollout_result_matches(
+            &version,
+            Some(
+                r#"{"outcome":{"versionDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verified":false}}"#
+            )
+        ));
+        assert!(!catalog_rollout_result_matches(&version, None));
+    }
+}
+
 #[async_trait::async_trait]
 impl OperationExecutor for ApplyExecutor {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
@@ -129,10 +153,11 @@ impl ApplyExecutor {
         // refuses anything the dedicated endpoint would have rejected —
         // unknown kinds, non-actionable states, kind/state/identity
         // mismatches, and non-increasing orders.
-        const SUPPORTED_KINDS: [&str; 4] = [
+        const SUPPORTED_KINDS: [&str; 5] = [
             "mise.install",
             "skills.deploy",
             "skills.undeploy",
+            "skills.catalog-rollout",
             "projects.clone",
         ];
         let mut previous_order: Option<u32> = None;
@@ -182,9 +207,20 @@ impl ApplyExecutor {
             let expected_prefix = match action.kind.as_str() {
                 "mise.install" => "tool:",
                 "skills.deploy" | "skills.undeploy" => "skill:",
+                "skills.catalog-rollout" => "catalog-skill:",
                 _ => "checkout:",
             };
-            if !action.difference.identity.starts_with(expected_prefix) {
+            let state_matches_kind = matches!(
+                (action.kind.as_str(), action.difference.state),
+                (
+                    "mise.install" | "skills.deploy" | "skills.catalog-rollout" | "projects.clone",
+                    fleet_core::DifferenceState::Missing
+                ) | (
+                    "mise.install" | "skills.catalog-rollout" | "projects.clone",
+                    fleet_core::DifferenceState::Changed
+                ) | ("skills.undeploy", fleet_core::DifferenceState::Extra)
+            );
+            if !state_matches_kind || !action.difference.identity.starts_with(expected_prefix) {
                 return complete_failed(
                     operations,
                     &operation.id,
@@ -210,6 +246,44 @@ impl ApplyExecutor {
                     &[],
                 )
                 .await;
+            }
+            if action.kind == "skills.catalog-rollout" {
+                let identity = action
+                    .difference
+                    .identity
+                    .strip_prefix("catalog-skill:")
+                    .unwrap_or_default();
+                let valid_identity = identity.split_once('/').is_some_and(|(catalog, agent)| {
+                    !catalog.trim().is_empty()
+                        && !agent.trim().is_empty()
+                        && !agent.contains('/')
+                        && action
+                            .difference
+                            .desired
+                            .as_deref()
+                            .is_some_and(|version| valid_catalog_version_pin(catalog, version))
+                });
+                if !valid_identity {
+                    return complete_failed(
+                        operations,
+                        &operation.id,
+                        &fleet_application::planner::PlannedAction {
+                            order: 0,
+                            kind: "apply.workflow".to_owned(),
+                            difference: fleet_core::FieldDifference::unknown(
+                                "apply.workflow",
+                                None,
+                                "a catalog rollout requires catalog, agent, and pinned version ids",
+                            ),
+                            reason: String::new(),
+                        },
+                        "a catalog rollout requires catalog, agent, and pinned version ids",
+                        &[],
+                        &[],
+                        &[],
+                    )
+                    .await;
+                }
             }
             if previous_order.is_some_and(|previous| action.order <= previous) {
                 return complete_failed(
@@ -404,6 +478,32 @@ impl ApplyExecutor {
             };
             match state.as_str() {
                 "succeeded" => {
+                    if action.kind == "skills.catalog-rollout" {
+                        let finished = self
+                            .operations
+                            .get(
+                                &fleet_auth::LanAllowAllAuthorizer,
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                &inner_operation.id,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if !catalog_rollout_result_matches(
+                            action.difference.desired.as_deref().unwrap_or_default(),
+                            finished.result_json.as_deref(),
+                        ) {
+                            return complete_failed(
+                                operations,
+                                &operation.id,
+                                action,
+                                "the catalog rollout did not verify the pinned content digest",
+                                &completed,
+                                &compensations,
+                                &planned[index + 1..],
+                            )
+                            .await;
+                        }
+                    }
                     completed.push(action.difference.identity.clone());
                     compensations.push(Compensation::for_step(&action.kind, &action.difference));
                 }
@@ -597,6 +697,22 @@ impl ApplyExecutor {
                     "timeoutSeconds": 300,
                 })
             }
+            "skills.catalog-rollout" => {
+                let identity = difference
+                    .identity
+                    .strip_prefix("catalog-skill:")
+                    .unwrap_or_default();
+                let (catalog_id, agent) = identity.split_once('/').unwrap_or(("", ""));
+                serde_json::json!({
+                    "machineId": payload.machine_id,
+                    "endpointId": payload.endpoint_id,
+                    "auth": payload.auth,
+                    "catalogId": catalog_id,
+                    "versionId": difference.desired.clone().unwrap_or_default(),
+                    "agents": [agent],
+                    "timeoutSeconds": 600,
+                })
+            }
             "skills.undeploy" => {
                 let identity = difference
                     .identity
@@ -646,6 +762,41 @@ impl ApplyExecutor {
             .await
             .map_err(|error| error.to_string())
     }
+}
+
+fn catalog_rollout_result_matches(expected_version: &str, result_json: Option<&str>) -> bool {
+    let Some((expected_catalog, expected_digest)) = expected_version.rsplit_once('@') else {
+        return false;
+    };
+    if !valid_catalog_version_pin(expected_catalog, expected_version) {
+        return false;
+    }
+    let Some(result_json) = result_json else {
+        return false;
+    };
+    let Ok(result) = serde_json::from_str::<serde_json::Value>(result_json) else {
+        return false;
+    };
+    result
+        .pointer("/outcome/versionDigest")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected_digest)
+        && result
+            .pointer("/outcome/verified")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+fn valid_catalog_version_pin(catalog_id: &str, version_id: &str) -> bool {
+    version_id
+        .strip_prefix(catalog_id)
+        .and_then(|suffix| suffix.strip_prefix('@'))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        })
 }
 
 /// Completes the workflow as `blocked_manual_approval`.

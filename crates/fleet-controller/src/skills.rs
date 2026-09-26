@@ -313,9 +313,20 @@ impl SkillsExecutor {
             revision,
         } = &version.content.source
         {
+            let Some(revision) = revision
+                .as_deref()
+                .filter(|revision| is_immutable_git_revision(revision))
+            else {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "catalog_source_unverifiable",
+                    "referenced skill rollouts require a full lowercase Git commit SHA so the installed source revision can be verified",
+                )
+                .await;
+            };
             let install_reference =
-                match catalog_install_reference(reference, subpath.as_deref(), revision.as_deref())
-                {
+                match catalog_install_reference(reference, subpath.as_deref(), Some(revision)) {
                     Ok(reference) => reference,
                     Err(detail) => {
                         return complete_failure(
@@ -355,12 +366,14 @@ impl SkillsExecutor {
             let (result, detail) = self
                 .run(&spec, &referenced_rollout_script(), &metadata, remaining)
                 .await;
-            return finish_cli(
+            return finish_referenced_rollout(
                 operations,
                 &operation.id,
                 result,
                 detail,
-                "referenced catalog rollout",
+                &version.content_digest,
+                revision,
+                subpath.as_deref().unwrap_or_default(),
             )
             .await;
         }
@@ -1773,6 +1786,71 @@ async fn finish_cli(
     }
 }
 
+async fn finish_referenced_rollout(
+    operations: &Operations,
+    operation_id: &str,
+    result: Option<fleet_provider_ssh::ExecutionResult>,
+    detail: Option<String>,
+    expected_digest: &str,
+    expected_revision: &str,
+    expected_subpath: &str,
+) -> Result<(), String> {
+    if !result
+        .as_ref()
+        .is_some_and(|result| !result.killed_by_deadline && result.exit_code == Some(0))
+    {
+        return finish_cli(
+            operations,
+            operation_id,
+            result,
+            detail,
+            "referenced catalog rollout",
+        )
+        .await;
+    }
+    let result = result.expect("a successful referenced rollout has an execution result");
+    if !reported_revision_matches(&result.stdout, expected_revision, expected_subpath) {
+        return complete_failure(
+            operations,
+            operation_id,
+            "catalog_source_revision_mismatch",
+            "Skills Manager did not report the pinned Git commit and subpath as installed",
+        )
+        .await;
+    }
+    let result_json = serde_json::json!({
+        "outcome": {
+            "versionDigest": expected_digest,
+            "sourceRevision": expected_revision,
+            "verified": true,
+        }
+    })
+    .to_string();
+    operations
+        .complete(operation_id, "succeeded", Some(&result_json), None)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn reported_revision_matches(
+    stdout: &str,
+    expected_revision: &str,
+    expected_subpath: &str,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+        return false;
+    };
+    value
+        .get("source_revision")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected_revision)
+        && value
+            .get("source_subpath")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected_subpath)
+}
+
 /// Retain only the documented conflict/report fields needed by callers.
 /// The recursive redactor also prevents credential-shaped URLs returned by
 /// a CLI error from entering durable operation output.
@@ -1806,6 +1884,8 @@ fn safe_cli_outcome(value: &serde_json::Value) -> serde_json::Value {
         "paths",
         "held_back_removals",
         "heldBackRemovals",
+        "versionDigest",
+        "verified",
     ] {
         if let Some(value) = value.get(key) {
             safe.insert(key.to_owned(), redact(value));
@@ -1898,7 +1978,7 @@ while [ "$#" -gt 0 ]; do fleet_agent_args+=("$1"); shift; done
 fleet_committed=1
 rm -rf "$fleet_backup"
 trap - EXIT HUP INT TERM
-printf '{\"versionDigest\":\"%s\",\"verified\":true}\\n' "$fleet_digest"
+printf '{\"versionDigest\":\"%s\",\"verified\":true}\n' "$fleet_digest"
 "#.to_owned()
 }
 
@@ -1966,6 +2046,13 @@ fn catalog_install_reference(
     Ok(install_reference)
 }
 
+fn is_immutable_git_revision(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64)
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn referenced_rollout_script() -> String {
     r#"set -euo pipefail
 fleet_name=$1; fleet_reference=$2; fleet_git=$3; fleet_agents=$4; shift 4
@@ -1974,18 +2061,28 @@ for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skill
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
 done
 [ -n "$fleet_cli" ] || { echo "skills-manager-cli is not installed" >&2; exit 3; }
-if ! "$fleet_cli" --json skills show "$fleet_name" >/dev/null 2>&1; then
+fleet_silent() {
+  local fleet_output fleet_status
+  if fleet_output=$("$fleet_cli" --json "$@"); then
+    return 0
+  else
+    fleet_status=$?
+    [ -z "$fleet_output" ] || printf '%s\n' "$fleet_output"
+    return "$fleet_status"
+  fi
+}
+if ! fleet_silent skills show "$fleet_name"; then
   fleet_install_args=(--name "$fleet_name")
   [ "$fleet_git" = "true" ] && fleet_install_args+=(--git)
-  "$fleet_cli" --json skills install "$fleet_reference" "${fleet_install_args[@]}"
+  fleet_silent skills install "$fleet_reference" "${fleet_install_args[@]}"
 else
   if [ "$fleet_git" = "true" ]; then
-    "$fleet_cli" --json skills set-source "$fleet_name" --git-url "$fleet_reference" --force
+    fleet_silent skills set-source "$fleet_name" --git-url "$fleet_reference" --force
   else
     command -v jq >/dev/null 2>&1 || { echo "jq is required to validate an existing non-Git skill source" >&2; exit 3; }
     fleet_existing=$("$fleet_cli" --json skills show "$fleet_name")
     if printf '%s' "$fleet_existing" | jq -e --arg reference "$fleet_reference" '.source_ref == $reference' >/dev/null 2>&1; then
-      "$fleet_cli" --json skills update "$fleet_name"
+      fleet_silent skills update "$fleet_name"
     else
       echo "the existing skill uses a different non-Git source; refusing to remove and reinstall it" >&2
       exit 4
@@ -1994,10 +2091,10 @@ else
 fi
 [ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
 fleet_agent_args=("$@")
-"$fleet_cli" --json skills deploy "$fleet_name" "${fleet_agent_args[@]}"
-"$fleet_cli" --json skills show "$fleet_name" >/dev/null
-"$fleet_cli" --json skills status >/dev/null
-printf '{\"source\":\"referenced\",\"verified\":true}\\n'
+fleet_silent skills deploy "$fleet_name" "${fleet_agent_args[@]}"
+fleet_show=$("$fleet_cli" --json skills show "$fleet_name")
+fleet_silent skills status
+printf '%s\n' "$fleet_show"
 "#.to_owned()
 }
 
@@ -2062,8 +2159,9 @@ impl OperationExecutor for SkillsDispatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_install_reference, catalog_rollout_script, library_script, normalize_probe,
-        parse_version_text, referenced_rollout_script, sha256_hex, url_has_userinfo,
+        catalog_install_reference, catalog_rollout_script, is_immutable_git_revision,
+        library_script, normalize_probe, parse_version_text, referenced_rollout_script,
+        reported_revision_matches, sha256_hex, url_has_userinfo,
     };
 
     fn b64(value: &str) -> String {
@@ -2146,6 +2244,14 @@ mod tests {
         );
         assert!(
             catalog_install_reference(
+                "https://github.com/example/skills",
+                None,
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .is_err()
+        );
+        assert!(
+            catalog_install_reference(
                 "https://gitlab.com/example/skills",
                 Some("skills/reviewer"),
                 Some("v2.1.0"),
@@ -2163,6 +2269,47 @@ mod tests {
     }
 
     #[test]
+    fn only_full_lowercase_git_object_ids_are_immutable_revisions() {
+        assert!(is_immutable_git_revision(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(is_immutable_git_revision(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!is_immutable_git_revision("v2.1.0"));
+        assert!(!is_immutable_git_revision(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+    }
+
+    #[test]
+    fn referenced_rollout_verification_requires_the_reported_commit_and_subpath() {
+        let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let reported =
+            format!(r#"{{"source_revision":"{revision}","source_subpath":"release-notes"}}"#);
+        assert!(reported_revision_matches(
+            &reported,
+            revision,
+            "release-notes"
+        ));
+        assert!(!reported_revision_matches(
+            &reported,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "release-notes"
+        ));
+        assert!(!reported_revision_matches(
+            &reported,
+            revision,
+            "other-skill"
+        ));
+        assert!(!reported_revision_matches(
+            "not JSON",
+            revision,
+            "release-notes"
+        ));
+    }
+
+    #[test]
     fn referenced_rollout_rebinds_an_existing_git_skill_to_the_pinned_version() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path();
@@ -2174,7 +2321,7 @@ mod tests {
         std::fs::write(
             &cli,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') test -f \"$HOME/installed\" ;;\n  'skills set-source') touch \"$HOME/rebound\" ;;\n  'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') test -f \"$HOME/installed\" && printf '{{\"source_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_subpath\":\"release-notes\"}}\\n' ;;\n  'skills set-source') touch \"$HOME/rebound\" ;;\n  'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
                 log.display()
             ),
         )
@@ -2206,63 +2353,62 @@ mod tests {
         assert!(calls.contains("skills set-source release-notes --git-url https://github.com/example/skills/tree/v2.1.0/release-notes --force"));
         assert!(calls.contains("skills deploy release-notes codex"));
         assert!(!calls.contains("skills update release-notes"));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            r#"{"source_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_subpath":"release-notes"}"#
+        );
     }
 
     #[test]
-    fn referenced_non_git_rollout_updates_only_when_json_source_ref_matches() {
+    fn referenced_rollout_returns_the_skills_show_record_as_its_json_result() {
         let root = tempfile::tempdir().unwrap();
-        let reference = "file:///srv/fleet/catalog/hello-world";
+        let reference = "https://github.com/example/skills/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release-notes";
         for (name, show_json, succeeds) in [
             (
                 "matching",
-                r#"{ "name": "hello-world", "source_ref": "file:///srv/fleet/catalog/hello-world" }"#,
+                r#"{ "source_ref": "https://github.com/example/skills/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release-notes", "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_subpath": "release-notes" }"#,
                 true,
             ),
             (
                 "mismatched",
-                r#"{ "name": "hello-world", "source_ref": "file:///srv/other/hello-world" }"#,
-                false,
+                r#"{ "source_ref": "https://github.com/example/skills/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release-notes", "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source_subpath": "release-notes" }"#,
+                true,
             ),
-            ("malformed", "not json", false),
+            ("malformed", "not json", true),
         ] {
             let home = root.path().join(name);
             let bin = home.join(".local/bin");
             std::fs::create_dir_all(&bin).unwrap();
             let log = home.join("calls.log");
             let cli = bin.join("skills-manager-cli");
-            let jq = bin.join("jq");
-            std::fs::write(
-                &jq,
-                "#!/bin/sh\n[ \"$1\" = '-e' ] && [ \"$2\" = '--arg' ] && [ \"$3\" = 'reference' ] && [ \"$4\" = \"$EXPECTED_REFERENCE\" ] && [ \"$5\" = '.source_ref == $reference' ] || exit 42\ncat >/dev/null\n[ \"$JQ_MATCH\" = true ]\n",
-            )
-            .unwrap();
             std::fs::write(
                 &cli,
                 format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') printf '%s\\n' \"$SHOW_JSON\" ;;\n  'skills update'|'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') printf '%s\\n' \"$SHOW_JSON\" ;;\n  'skills set-source'|'skills update'|'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
                     log.display()
                 ),
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&jq, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
             let output = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(referenced_rollout_script())
                 .arg("fleet-rollout")
-                .args(["hello-world", reference, "false", "1", "codex"])
+                .args(["hello-world", reference, "true", "1", "codex"])
                 .env("HOME", &home)
                 .env("SHOW_JSON", show_json)
-                .env("JQ_MATCH", succeeds.to_string())
-                .env("EXPECTED_REFERENCE", reference)
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .output()
                 .unwrap();
             assert_eq!(output.status.success(), succeeds, "case: {name}");
             let calls = std::fs::read_to_string(log).unwrap();
-            assert_eq!(calls.contains("skills update hello-world"), succeeds);
-            assert_eq!(calls.contains("skills deploy hello-world codex"), succeeds);
+            assert!(calls.contains("skills deploy hello-world codex"));
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                show_json,
+                "case: {name}"
+            );
         }
     }
 

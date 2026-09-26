@@ -35,6 +35,74 @@ fn minimal_fixture_validates_on_the_rust_library_path() {
 }
 
 #[test]
+fn skill_preset_pins_and_identity_components_are_semantically_validated() {
+    let diagnostics = validate_sources(&[SourceDocument {
+        path: "inline/invalid-skill-assignment.yaml".into(),
+        yaml: r#"apiVersion: fleet.frogbyte.io/v1alpha1
+kind: SkillPreset
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58a012
+  name: bad-assignment
+spec:
+  skillId: "bad/skill"
+  catalogId: " "
+  catalogVersionId: version-1
+  scope:
+    type: all
+  deployTo:
+    - "bad/agent"
+  denyAgents: []
+"#
+        .to_owned(),
+    }]);
+    let mut locations = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "FM_SCHEMA_SEMANTIC_INVALID_SKILL_ASSIGNMENT")
+        .map(|diagnostic| diagnostic.location.as_str())
+        .collect::<Vec<_>>();
+    locations.sort_unstable();
+    assert_eq!(
+        locations,
+        [
+            "inline/invalid-skill-assignment.yaml#document=1/spec",
+            "inline/invalid-skill-assignment.yaml#document=1/spec/deployTo/0",
+            "inline/invalid-skill-assignment.yaml#document=1/spec/skillId",
+        ],
+        "each invalid catalog, agent, and skill field reports its own location"
+    );
+}
+
+#[test]
+fn catalog_version_digest_must_use_lowercase_hex() {
+    let diagnostics = validate_sources(&[SourceDocument {
+        path: "inline/uppercase-catalog-digest.yaml".into(),
+        yaml: r#"apiVersion: fleet.frogbyte.io/v1alpha1
+kind: SkillPreset
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58a012
+  name: uppercase-catalog-digest
+spec:
+  skillId: "good-skill"
+  catalogId: catalog-1
+  catalogVersionId: "catalog-1@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  scope:
+    type: all
+  deployTo:
+    - codex
+"#
+        .to_owned(),
+    }]);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "FM_SCHEMA_SEMANTIC_INVALID_SKILL_ASSIGNMENT")
+            .map(|diagnostic| diagnostic.location.as_str())
+            .collect::<Vec<_>>(),
+        ["inline/uppercase-catalog-digest.yaml#document=1/spec"]
+    );
+}
+
+#[test]
 fn every_valid_fixture_validates() {
     // The fixtures are one candidate revision: they validate in a single
     // call, so identities must be unique across all files and documents.
