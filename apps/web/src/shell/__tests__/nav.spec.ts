@@ -28,8 +28,8 @@ describe('nav', () => {
     ])
   })
 
-  it('exposes exactly the five available items', () => {
+  it('exposes exactly the built pages as available', () => {
     const available = NAV_GROUPS.flatMap(g => g.items.filter(i => i.available).map(i => i.to))
-    expect(available).toEqual(['/', '/fleet', '/projects', '/operations', '/settings'])
+    expect(available).toEqual(['/', '/fleet', '/projects', '/lab', '/operations', '/settings'])
   })
 })
