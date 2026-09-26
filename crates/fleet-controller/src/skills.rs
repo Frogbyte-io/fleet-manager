@@ -313,9 +313,20 @@ impl SkillsExecutor {
             revision,
         } = &version.content.source
         {
+            let Some(revision) = revision
+                .as_deref()
+                .filter(|revision| is_immutable_git_revision(revision))
+            else {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "catalog_source_unverifiable",
+                    "referenced skill rollouts require a full lowercase Git commit SHA so the installed source revision can be verified",
+                )
+                .await;
+            };
             let install_reference =
-                match catalog_install_reference(reference, subpath.as_deref(), revision.as_deref())
-                {
+                match catalog_install_reference(reference, subpath.as_deref(), Some(revision)) {
                     Ok(reference) => reference,
                     Err(detail) => {
                         return complete_failure(
@@ -339,6 +350,8 @@ impl SkillsExecutor {
             let mut args = vec![
                 version.name.clone(),
                 version.content_digest.clone(),
+                revision.to_owned(),
+                subpath.as_deref().unwrap_or_default().to_owned(),
                 install_reference,
                 if is_git {
                     "true".to_owned()
@@ -1969,11 +1982,21 @@ fn catalog_install_reference(
     Ok(install_reference)
 }
 
+fn is_immutable_git_revision(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64)
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn referenced_rollout_script() -> String {
     r#"set -euo pipefail
-fleet_name=$1; fleet_digest=$2; fleet_reference=$3; fleet_git=$4; fleet_agents=$5; shift 5
+fleet_name=$1; fleet_digest=$2; fleet_revision=$3; fleet_subpath=$4; fleet_reference=$5; fleet_git=$6; fleet_agents=$7; shift 7
 case "$fleet_digest" in (*[!0-9a-f]*|'') echo "invalid catalog digest" >&2; exit 2;; esac
 [ "${#fleet_digest}" -eq 64 ] || { echo "invalid catalog digest" >&2; exit 2; }
+case "$fleet_revision" in (*[!0-9a-f]*|'') echo "invalid source revision" >&2; exit 2;; esac
+case "${#fleet_revision}" in (40|64) :;; (*) echo "invalid source revision" >&2; exit 2;; esac
+command -v jq >/dev/null 2>&1 || { echo "jq is required to verify the installed Git revision" >&2; exit 3; }
 fleet_cli=""
 for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
   [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
@@ -2010,9 +2033,10 @@ fi
 [ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
 fleet_agent_args=("$@")
 fleet_silent skills deploy "$fleet_name" "${fleet_agent_args[@]}"
-fleet_silent skills show "$fleet_name"
+fleet_show=$("$fleet_cli" --json skills show "$fleet_name")
+printf '%s' "$fleet_show" | jq -e --arg revision "$fleet_revision" --arg subpath "$fleet_subpath" '.source_revision == $revision and .source_subpath == $subpath' >/dev/null || { echo "installed skill source does not match the pinned Git revision and subpath" >&2; exit 4; }
 fleet_silent skills status
-printf '{\"versionDigest\":\"%s\",\"verified\":true}\n' "$fleet_digest"
+printf '{\"versionDigest\":\"%s\",\"sourceRevision\":\"%s\",\"verified\":true}\n' "$fleet_digest" "$fleet_revision"
 "#.to_owned()
 }
 
@@ -2077,8 +2101,9 @@ impl OperationExecutor for SkillsDispatch {
 #[cfg(test)]
 mod tests {
     use super::{
-        catalog_install_reference, catalog_rollout_script, library_script, normalize_probe,
-        parse_version_text, referenced_rollout_script, sha256_hex, url_has_userinfo,
+        catalog_install_reference, catalog_rollout_script, is_immutable_git_revision,
+        library_script, normalize_probe, parse_version_text, referenced_rollout_script, sha256_hex,
+        url_has_userinfo,
     };
 
     fn b64(value: &str) -> String {
@@ -2178,6 +2203,20 @@ mod tests {
     }
 
     #[test]
+    fn only_full_lowercase_git_object_ids_are_immutable_revisions() {
+        assert!(is_immutable_git_revision(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(is_immutable_git_revision(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!is_immutable_git_revision("v2.1.0"));
+        assert!(!is_immutable_git_revision(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+    }
+
+    #[test]
     fn referenced_rollout_rebinds_an_existing_git_skill_to_the_pinned_version() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path();
@@ -2189,7 +2228,7 @@ mod tests {
         std::fs::write(
             &cli,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') test -f \"$HOME/installed\" ;;\n  'skills set-source') touch \"$HOME/rebound\" ;;\n  'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') test -f \"$HOME/installed\" && printf '{{\"source_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"source_subpath\":\"release-notes\"}}\\n' ;;\n  'skills set-source') touch \"$HOME/rebound\" ;;\n  'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
                 log.display()
             ),
         )
@@ -2203,6 +2242,8 @@ mod tests {
             .args([
                 "release-notes",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "release-notes",
                 "https://github.com/example/skills/tree/v2.1.0/release-notes",
                 "true",
                 "1",
@@ -2224,23 +2265,23 @@ mod tests {
         assert!(!calls.contains("skills update release-notes"));
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),
-            r#"{"versionDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verified":true}"#
+            r#"{"versionDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceRevision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verified":true}"#
         );
     }
 
     #[test]
-    fn referenced_non_git_rollout_updates_only_when_json_source_ref_matches() {
+    fn referenced_rollout_requires_the_installed_revision_and_subpath_to_match() {
         let root = tempfile::tempdir().unwrap();
-        let reference = "file:///srv/fleet/catalog/hello-world";
+        let reference = "https://github.com/example/skills/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release-notes";
         for (name, show_json, succeeds) in [
             (
                 "matching",
-                r#"{ "name": "hello-world", "source_ref": "file:///srv/fleet/catalog/hello-world" }"#,
+                r#"{ "source_ref": "https://github.com/example/skills/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release-notes", "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_subpath": "release-notes" }"#,
                 true,
             ),
             (
                 "mismatched",
-                r#"{ "name": "hello-world", "source_ref": "file:///srv/other/hello-world" }"#,
+                r#"{ "source_ref": "https://github.com/example/skills/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/release-notes", "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source_subpath": "release-notes" }"#,
                 false,
             ),
             ("malformed", "not json", false),
@@ -2250,12 +2291,6 @@ mod tests {
             std::fs::create_dir_all(&bin).unwrap();
             let log = home.join("calls.log");
             let cli = bin.join("skills-manager-cli");
-            let jq = bin.join("jq");
-            std::fs::write(
-                &jq,
-                "#!/bin/sh\n[ \"$1\" = '-e' ] && [ \"$2\" = '--arg' ] && [ \"$3\" = 'reference' ] && [ \"$4\" = \"$EXPECTED_REFERENCE\" ] && [ \"$5\" = '.source_ref == $reference' ] || exit 42\ncat >/dev/null\n[ \"$JQ_MATCH\" = true ]\n",
-            )
-            .unwrap();
             std::fs::write(
                 &cli,
                 format!(
@@ -2265,7 +2300,6 @@ mod tests {
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&jq, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
             let output = std::process::Command::new("bash")
                 .arg("-c")
@@ -2274,6 +2308,8 @@ mod tests {
                 .args([
                     "hello-world",
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "release-notes",
                     reference,
                     "false",
                     "1",
@@ -2281,15 +2317,27 @@ mod tests {
                 ])
                 .env("HOME", &home)
                 .env("SHOW_JSON", show_json)
-                .env("JQ_MATCH", succeeds.to_string())
-                .env("EXPECTED_REFERENCE", reference)
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .output()
                 .unwrap();
             assert_eq!(output.status.success(), succeeds, "case: {name}");
             let calls = std::fs::read_to_string(log).unwrap();
-            assert_eq!(calls.contains("skills update hello-world"), succeeds);
-            assert_eq!(calls.contains("skills deploy hello-world codex"), succeeds);
+            let attempted_update = name != "malformed";
+            assert_eq!(
+                calls.contains("skills update hello-world"),
+                attempted_update
+            );
+            assert_eq!(
+                calls.contains("skills deploy hello-world codex"),
+                attempted_update
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .contains(r#""verified":true"#),
+                succeeds,
+                "case: {name}"
+            );
         }
     }
 
