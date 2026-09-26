@@ -13,6 +13,7 @@ import {
 } from '@frogbyte-io/fleet-api-client'
 
 import { ACCOUNTS_KEY, allProxmoxAccounts } from '../fleet/add/queries'
+import { fetchAllPages, type PagedResponse } from '../fleet/useFleetInventory'
 
 import { isLive } from './lab'
 
@@ -46,24 +47,23 @@ export function useLab() {
     queryFn: async () => pageItems<LabTemplateDto>(await listLabTemplates(), 'listLabTemplates'),
   })
 
+  // Reactive, so provisions start polling as soon as a live lease appears
+  // (a function interval is only re-evaluated after the query's own fetches).
+  const anyLive = computed(() => (leases.data.value ?? []).some(lease => isLive(lease.state)))
   const provisions = useQuery({
     queryKey: PROVISIONS_KEY,
     queryFn: async () => pageItems<ProvisionRecordDto>(await listLabProvisions(), 'listLabProvisions'),
-    refetchInterval: () => ((leases.data.value ?? []).some(lease => isLive(lease.state)) ? LIVE_REFRESH_MS : false),
+    refetchInterval: computed(() => (anyLive.value ? LIVE_REFRESH_MS : false)),
   })
 
   // Same key and shape as the Fleet page and Add dialog, so they share a cache.
   const accounts = useQuery({ queryKey: ACCOUNTS_KEY, queryFn: allProxmoxAccounts })
 
-  // Same key and shape as the machine page's Projects tab.
+  // Same key and shape ({ items, truncated }) as the machine page's Projects tab.
   const projects = useQuery({
     queryKey: ['projects', 'all'],
-    queryFn: async () => {
-      const response = await listProjects({ limit: 200 })
-      if (response.status !== 200)
-        throw new Error(`listProjects failed (${response.status})`)
-      return { items: response.data.items as ProjectDto[], truncated: Boolean(response.data.page?.nextCursor) }
-    },
+    queryFn: async () => fetchAllPages(cursor =>
+      listProjects({ limit: 200, cursor }) as unknown as Promise<PagedResponse<ProjectDto>>),
   })
 
   /** Only confirmed accounts can provision: the trust gate refuses the rest. */

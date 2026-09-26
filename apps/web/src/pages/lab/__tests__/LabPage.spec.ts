@@ -231,6 +231,44 @@ describe('LabPage', () => {
     expect(document.body.textContent).toContain('Lease created, but provisioning did not start: conflict: no capacity')
   })
 
+  it('retries provisioning for the lease it created instead of creating another', async () => {
+    createLabLease.mockResolvedValue(ok({ data: lease({ id: 'new-lease', state: 'requested', purpose: 'x' }) }, 201))
+    startLabLeaseProvision
+      .mockResolvedValueOnce({ status: 409, data: { code: 'conflict', message: 'no capacity' } })
+      .mockResolvedValueOnce(ok({ data: { id: 'op-2', kind: 'lab.provision', state: 'pending' } }, 201))
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="new-environment"]').trigger('click')
+    await flushPromises()
+    const purpose = document.body.querySelector('input[placeholder="what this environment is for"]') as HTMLInputElement
+    purpose.value = 'x'
+    purpose.dispatchEvent(new Event('input'))
+    await flushPromises()
+    button('Request & provision').click()
+    await flushPromises()
+    expect(document.body.querySelector('[data-testid="pending-lease"]')).not.toBeNull()
+
+    button('Retry provisioning').click()
+    await flushPromises()
+    expect(createLabLease).toHaveBeenCalledTimes(1)
+    expect(startLabLeaseProvision).toHaveBeenCalledTimes(2)
+    expect(startLabLeaseProvision).toHaveBeenLastCalledWith('new-lease', { accountId: 'acc-1' })
+  })
+
+  it('shows no command until a purpose is entered', async () => {
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="new-environment"]').trigger('click')
+    await flushPromises()
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('Enter a purpose to see the equivalent command.')
+    expect(text).not.toContain('lab lease v1')
+  })
+
+  it('reports unavailable Proxmox accounts instead of implying none are configured', async () => {
+    listProxmoxAccounts.mockRejectedValue(new Error('listProxmoxAccounts failed (503)'))
+    const wrapper = await mountPage()
+    expect(wrapper.text()).toContain('Proxmox accounts:')
+  })
+
   it('requires an explicit acknowledgement before keeping a VM', async () => {
     releaseLabLease.mockResolvedValue(ok({ data: lease({ state: 'releasing' }) }))
     const wrapper = await mountPage()

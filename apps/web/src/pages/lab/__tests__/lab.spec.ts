@@ -125,6 +125,10 @@ describe('TTL', () => {
     expect(formatSpan(7200)).toBe('2H')
     expect(formatSpan(1800)).toBe('30M')
     expect(formatSpan(93_600)).toBe('1D 2H')
+    // Configured seconds are never dropped.
+    expect(formatSpan(45)).toBe('45S')
+    expect(formatSpan(61)).toBe('1M 1S')
+    expect(formatSpan(0)).toBe('0S')
   })
 })
 
