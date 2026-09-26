@@ -266,7 +266,7 @@ describe('LabPage', () => {
   it('reports unavailable Proxmox accounts instead of implying none are configured', async () => {
     listProxmoxAccounts.mockRejectedValue(new Error('listProxmoxAccounts failed (503)'))
     const wrapper = await mountPage()
-    expect(wrapper.text()).toContain('Proxmox accounts:')
+    expect(wrapper.text()).toContain('Could not load Proxmox accounts: listProxmoxAccounts failed (503)')
   })
 
   it('requires an explicit acknowledgement before keeping a VM', async () => {
