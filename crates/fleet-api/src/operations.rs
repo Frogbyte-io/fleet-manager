@@ -58,6 +58,8 @@ pub struct ApiState {
     pub projects: Option<Arc<fleet_application::project::Projects>>,
     /// The sensitive Skills Manager read model, when the controller has a store.
     pub skills: Option<Arc<fleet_application::skills::Skills>>,
+    /// The authorized Fleet-authored skill catalog, when a store is wired.
+    pub skill_catalog: Option<Arc<fleet_application::skill_catalog::SkillCatalog>>,
     /// The Proxmox use cases, when the controller was composed with a
     /// database, a secret store, and the provider wired; `None` only in
     /// document/test states.
@@ -84,6 +86,7 @@ impl std::fmt::Debug for ApiState {
             .field("tailnet", &self.tailnet)
             .field("projects", &self.projects)
             .field("skills", &self.skills)
+            .field("skill_catalog", &self.skill_catalog)
             .field("proxmox", &self.proxmox)
             .field("images", &self.images)
             .field("lab", &self.lab)
@@ -265,6 +268,7 @@ impl ApiState {
             tailnet: None,
             projects: None,
             skills: None,
+            skill_catalog: None,
             proxmox: None,
             images: None,
             lab: None,
@@ -410,6 +414,20 @@ pub async fn create_operation(
     Json(request): Json<CreateOperationRequest>,
 ) -> Result<(StatusCode, Json<Resource<OperationDto>>), ApiErrorResponse> {
     let principal = principal_or_error(principal, correlation_id)?;
+    if request.kind == "skills.catalog-rollout" {
+        let payload = request.payload_json.as_deref().ok_or_else(|| {
+            crate::machines::invalid_request("catalog rollout payload is required", correlation_id)
+        })?;
+        let rollout: crate::skill_catalog::CatalogRolloutRequest = serde_json::from_str(payload)
+            .map_err(|_| {
+                crate::machines::invalid_request(
+                    "catalog rollout payload is malformed",
+                    correlation_id,
+                )
+            })?;
+        crate::skill_catalog::authorize_rollout(&state, &principal, correlation_id, &rollout)
+            .await?;
+    }
     let operation = state
         .operations
         .create(

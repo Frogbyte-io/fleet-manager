@@ -16,6 +16,7 @@ mod operation;
 mod project;
 mod redact;
 mod sensitive;
+mod skill_catalog;
 mod source;
 mod time;
 mod value;
@@ -47,6 +48,10 @@ pub use redact::{
     flatten_control_characters, redact_schemeless_credentials, redact_url_credentials,
 };
 pub use sensitive::{SecretReference, SensitiveString};
+pub use skill_catalog::{
+    MAX_SKILL_CATALOG_BYTES, MAX_SKILL_CATALOG_FILES, SkillCatalogContent, SkillCatalogFile,
+    SkillCatalogSource,
+};
 pub use source::CandidateDigest;
 pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};
 pub use value::{ParseSlugError, Revision, Slug};

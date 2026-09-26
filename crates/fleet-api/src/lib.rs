@@ -29,6 +29,7 @@ pub mod operations;
 pub mod projects;
 pub mod proxmox;
 pub mod ready;
+pub mod skill_catalog;
 pub mod skills;
 pub mod system;
 pub mod tailnet;
@@ -93,6 +94,14 @@ pub const API_BASE_PATH: &str = "/api/v1";
         skills::SkillsAuthDto,
         skills::StartSkillsOperationRequest,
         skills::SkillsSnapshotDto,
+        skill_catalog::CatalogContentDto,
+        skill_catalog::CatalogDto,
+        skill_catalog::CatalogFileDto,
+        skill_catalog::CatalogSourceDto,
+        skill_catalog::CatalogVersionDto,
+        skill_catalog::CatalogRolloutPlanDto,
+        skill_catalog::CatalogRolloutRequest,
+        skill_catalog::SaveCatalogRequest,
         frogenv::FrogenvActionDto,
         frogenv::FrogenvAuthDto,
         frogenv::StartFrogenvOperationRequest,
@@ -218,6 +227,7 @@ pub struct ApiDoc;
 ///
 /// Both come from one registration, so a handler cannot be served without being
 /// documented or documented without being served.
+#[allow(clippy::too_many_lines)]
 pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenApi) {
     let (router, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .nest(
@@ -245,6 +255,16 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(skills::start_skills_operation))
                 .routes(routes!(skills::get_machine_skills))
                 .routes(routes!(skills::get_skills_matrix))
+                .routes(routes!(
+                    skill_catalog::list_catalog,
+                    skill_catalog::create_catalog
+                ))
+                .routes(routes!(skill_catalog::get_catalog))
+                .routes(routes!(skill_catalog::update_catalog))
+                .routes(routes!(skill_catalog::publish_catalog))
+                .routes(routes!(skill_catalog::list_catalog_versions))
+                .routes(routes!(skill_catalog::preview_catalog_rollout))
+                .routes(routes!(skill_catalog::start_catalog_rollout))
                 .routes(routes!(frogenv::start_frogenv_operation))
                 .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(ready::start_ready_workflow))

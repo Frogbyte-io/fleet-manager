@@ -409,6 +409,143 @@ export interface BuildImageRequest {
 }
 
 /**
+ * One text file included in an authored skill.
+ */
+export interface CatalogFileDto {
+  /** UTF-8 text file contents. */
+  content: string;
+  /** Relative file path. */
+  path: string;
+}
+
+/**
+ * Catalog draft response.
+ */
+export type CatalogSourceDto = {
+  kind: 'authored';
+} | {
+  kind: 'referenced';
+  /** Reference or Git URL. */
+  reference: string;
+  /**
+     * Optional immutable revision.
+     * @nullable
+     */
+  revision?: string | null;
+  /**
+     * Optional Git subpath.
+     * @nullable
+     */
+  subpath?: string | null;
+};
+
+/**
+ * Submitted or returned catalog content.
+ */
+export interface CatalogContentDto {
+  /** Agent Skills description. */
+  description: string;
+  /** Authored files, empty for referenced entries. */
+  files: CatalogFileDto[];
+  /** Agent Skills name. */
+  name: string;
+  /** Source contract. */
+  source: CatalogSourceDto;
+}
+
+/**
+ * Catalog draft response.
+ */
+export interface CatalogDto {
+  /** Draft content. */
+  content: CatalogContentDto;
+  /** Creation time. */
+  createdAt: number;
+  /** Draft identity. */
+  id: string;
+  /**
+     * Prior published version.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /** Last update time. */
+  updatedAt: number;
+}
+
+/**
+ * Preview of the steps for a catalog rollout.
+ */
+export interface CatalogRolloutPlanDto {
+  /** Explicit agents. */
+  agents: string[];
+  /** Frozen content digest. */
+  contentDigest: string;
+  /** Target machine. */
+  machineId: string;
+  /**
+     * Fleet-owned destination.
+     * @nullable
+     */
+  stagingPath?: string | null;
+  /** Ordered steps. */
+  steps: string[];
+  /** Pinned version. */
+  versionId: string;
+}
+
+/**
+ * How a skills operation's endpoint authenticates.
+ */
+export type SkillsAuthDto = {
+  type: 'agent';
+} | {
+  /** The identity file's path. */
+  path: string;
+  type: 'identityFile';
+};
+
+/**
+ * Machine-scoped request to preview or execute one pinned catalog version.
+ */
+export interface CatalogRolloutRequest {
+  /** Explicit Skills Manager agent ids. */
+  agents: string[];
+  /** SSH authentication mode. */
+  auth: SkillsAuthDto;
+  /** SSH endpoint id. */
+  endpointId: string;
+  /** Target machine id. */
+  machineId: string;
+  /**
+     * Operation deadline in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /** Immutable catalog version id. */
+  versionId: string;
+}
+
+/**
+ * Immutable published version response.
+ */
+export interface CatalogVersionDto {
+  /** Parent entry. */
+  catalogId: string;
+  /** Frozen content. */
+  content: CatalogContentDto;
+  /** SHA-256 content digest. */
+  contentDigest: string;
+  /** Skill description. */
+  description: string;
+  /** Version identity. */
+  id: string;
+  /** Skill name. */
+  name: string;
+  /** Publication time. */
+  publishedAt: number;
+}
+
+/**
  * How a checkout action's endpoint authenticates.
  */
 export type CheckoutAuthDto = {
@@ -1461,6 +1598,71 @@ export interface PageAuditEventDto {
 }
 
 /**
+ * Catalog draft response.
+ */
+export type PageCatalogDtoItemsItem = {
+  /** Draft content. */
+  content: CatalogContentDto;
+  /** Creation time. */
+  createdAt: number;
+  /** Draft identity. */
+  id: string;
+  /**
+     * Prior published version.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /** Last update time. */
+  updatedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageCatalogDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageCatalogDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * Immutable published version response.
+ */
+export type PageCatalogVersionDtoItemsItem = {
+  /** Parent entry. */
+  catalogId: string;
+  /** Frozen content. */
+  content: CatalogContentDto;
+  /** SHA-256 content digest. */
+  contentDigest: string;
+  /** Skill description. */
+  description: string;
+  /** Version identity. */
+  id: string;
+  /** Skill name. */
+  name: string;
+  /** Publication time. */
+  publishedAt: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageCatalogVersionDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageCatalogVersionDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * One tailnet device with its Fleet-machine candidates (evidence only).
  */
 export type PageCorrelatedDeviceDtoItemsItem = {
@@ -2480,6 +2682,99 @@ export interface ResourceAddedMachineDto {
 }
 
 /**
+ * Catalog draft response.
+ */
+export type ResourceCatalogDtoData = {
+  /** Draft content. */
+  content: CatalogContentDto;
+  /** Creation time. */
+  createdAt: number;
+  /** Draft identity. */
+  id: string;
+  /**
+     * Prior published version.
+     * @nullable
+     */
+  publishedFrom?: string | null;
+  /** Last update time. */
+  updatedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCatalogDto {
+  /** Catalog draft response. */
+  data: ResourceCatalogDtoData;
+}
+
+/**
+ * Preview of the steps for a catalog rollout.
+ */
+export type ResourceCatalogRolloutPlanDtoData = {
+  /** Explicit agents. */
+  agents: string[];
+  /** Frozen content digest. */
+  contentDigest: string;
+  /** Target machine. */
+  machineId: string;
+  /**
+     * Fleet-owned destination.
+     * @nullable
+     */
+  stagingPath?: string | null;
+  /** Ordered steps. */
+  steps: string[];
+  /** Pinned version. */
+  versionId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCatalogRolloutPlanDto {
+  /** Preview of the steps for a catalog rollout. */
+  data: ResourceCatalogRolloutPlanDtoData;
+}
+
+/**
+ * Immutable published version response.
+ */
+export type ResourceCatalogVersionDtoData = {
+  /** Parent entry. */
+  catalogId: string;
+  /** Frozen content. */
+  content: CatalogContentDto;
+  /** SHA-256 content digest. */
+  contentDigest: string;
+  /** Skill description. */
+  description: string;
+  /** Version identity. */
+  id: string;
+  /** Skill name. */
+  name: string;
+  /** Publication time. */
+  publishedAt: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCatalogVersionDto {
+  /** Immutable published version response. */
+  data: ResourceCatalogVersionDtoData;
+}
+
+/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -3381,6 +3676,14 @@ export interface ReviewProxmoxOperationRequest {
 }
 
 /**
+ * Draft input.
+ */
+export interface SaveCatalogRequest {
+  /** Content to save. */
+  content: CatalogContentDto;
+}
+
+/**
  * The create/update request.
  */
 export interface SaveLabTemplateRequest {
@@ -3448,17 +3751,6 @@ export interface SaveRecipeRequest {
   /** The PVE storage pool the build writes to. */
   storagePool: string;
 }
-
-/**
- * How a skills operation's endpoint authenticates.
- */
-export type SkillsAuthDto = {
-  type: 'agent';
-} | {
-  /** The identity file's path. */
-  path: string;
-  type: 'identityFile';
-};
 
 /**
  * The direction a skills operation takes.
@@ -3970,6 +4262,34 @@ limit?: number;
  * The opaque cursor: the last guest's cluster id of the previous page.
  */
 cursor?: string;
+};
+
+export type ListSkillCatalogParams = {
+/**
+ * Opaque identifier returned as the previous page's cursor.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
+export type ListSkillCatalogVersionsParams = {
+/**
+ * Opaque identifier returned as the previous page's cursor.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
 };
 
 export type GetSkillsMatrixParams = {
@@ -8431,6 +8751,417 @@ export const observeProxmoxFingerprint = async (accountId: string, options?: Req
 
   const data: observeProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as observeProxmoxFingerprintResponse
+}
+
+
+
+export type listSkillCatalogResponse200 = {
+  data: PageCatalogDto
+  status: 200
+}
+
+export type listSkillCatalogResponseSuccess = (listSkillCatalogResponse200) & {
+  headers: Headers;
+};
+;
+
+export type listSkillCatalogResponse = (listSkillCatalogResponseSuccess)
+
+export const getListSkillCatalogUrl = (params?: ListSkillCatalogParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/skills/catalog?${stringifiedParams}` : `/api/v1/skills/catalog`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or the catalog backend fails.
+ * @summary Lists catalog drafts.
+ */
+export const listSkillCatalog = async (params?: ListSkillCatalogParams, options?: RequestInit): Promise<listSkillCatalogResponse> => {
+
+  const res = await fetch(getListSkillCatalogUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listSkillCatalogResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listSkillCatalogResponse
+}
+
+
+
+export type createSkillCatalogResponse201 = {
+  data: ResourceCatalogDto
+  status: 201
+}
+
+export type createSkillCatalogResponseSuccess = (createSkillCatalogResponse201) & {
+  headers: Headers;
+};
+;
+
+export type createSkillCatalogResponse = (createSkillCatalogResponseSuccess)
+
+export const getCreateSkillCatalogUrl = () => {
+
+
+
+
+  return `/api/v1/skills/catalog`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, validation, authorization, auditing, or storage fails.
+ * @summary Creates a catalog draft.
+ */
+export const createSkillCatalog = async (saveCatalogRequest: SaveCatalogRequest, options?: RequestInit): Promise<createSkillCatalogResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateSkillCatalogUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(saveCatalogRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createSkillCatalogResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createSkillCatalogResponse
+}
+
+
+
+export type previewSkillCatalogRolloutResponse200 = {
+  data: ResourceCatalogRolloutPlanDto
+  status: 200
+}
+
+export type previewSkillCatalogRolloutResponseSuccess = (previewSkillCatalogRolloutResponse200) & {
+  headers: Headers;
+};
+;
+
+export type previewSkillCatalogRolloutResponse = (previewSkillCatalogRolloutResponseSuccess)
+
+export const getPreviewSkillCatalogRolloutUrl = () => {
+
+
+
+
+  return `/api/v1/skills/catalog/rollout-plan`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, request validation, authorization,
+ * machine lookup, or storage fails.
+ * @summary Previews a rollout without creating an operation or changing a machine.
+ */
+export const previewSkillCatalogRollout = async (catalogRolloutRequest: CatalogRolloutRequest, options?: RequestInit): Promise<previewSkillCatalogRolloutResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPreviewSkillCatalogRolloutUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(catalogRolloutRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: previewSkillCatalogRolloutResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as previewSkillCatalogRolloutResponse
+}
+
+
+
+export type startSkillCatalogRolloutResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type startSkillCatalogRolloutResponseSuccess = (startSkillCatalogRolloutResponse202) & {
+  headers: Headers;
+};
+;
+
+export type startSkillCatalogRolloutResponse = (startSkillCatalogRolloutResponseSuccess)
+
+export const getStartSkillCatalogRolloutUrl = () => {
+
+
+
+
+  return `/api/v1/skills/catalog/rollouts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, request validation, authorization,
+ * auditing, machine lookup, or operation creation fails.
+ * @summary Starts a durable, machine-scoped rollout of one immutable version.
+ */
+export const startSkillCatalogRollout = async (catalogRolloutRequest: CatalogRolloutRequest, options?: RequestInit): Promise<startSkillCatalogRolloutResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStartSkillCatalogRolloutUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(catalogRolloutRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: startSkillCatalogRolloutResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as startSkillCatalogRolloutResponse
+}
+
+
+
+export type getSkillCatalogResponse200 = {
+  data: ResourceCatalogDto
+  status: 200
+}
+
+export type getSkillCatalogResponseSuccess = (getSkillCatalogResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getSkillCatalogResponse = (getSkillCatalogResponseSuccess)
+
+export const getGetSkillCatalogUrl = (id: string,) => {
+
+
+
+
+  return `/api/v1/skills/catalog/${id}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Reads a catalog draft.
+ */
+export const getSkillCatalog = async (id: string, options?: RequestInit): Promise<getSkillCatalogResponse> => {
+
+  const res = await fetch(getGetSkillCatalogUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getSkillCatalogResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getSkillCatalogResponse
+}
+
+
+
+export type updateSkillCatalogResponse200 = {
+  data: ResourceCatalogDto
+  status: 200
+}
+
+export type updateSkillCatalogResponseSuccess = (updateSkillCatalogResponse200) & {
+  headers: Headers;
+};
+;
+
+export type updateSkillCatalogResponse = (updateSkillCatalogResponseSuccess)
+
+export const getUpdateSkillCatalogUrl = (id: string,) => {
+
+
+
+
+  return `/api/v1/skills/catalog/${id}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, validation, authorization, auditing, or storage fails.
+ * @summary Updates a catalog draft.
+ */
+export const updateSkillCatalog = async (id: string,
+    saveCatalogRequest: SaveCatalogRequest, options?: RequestInit): Promise<updateSkillCatalogResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getUpdateSkillCatalogUrl(id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(saveCatalogRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: updateSkillCatalogResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as updateSkillCatalogResponse
+}
+
+
+
+export type publishSkillCatalogResponse201 = {
+  data: ResourceCatalogVersionDto
+  status: 201
+}
+
+export type publishSkillCatalogResponseSuccess = (publishSkillCatalogResponse201) & {
+  headers: Headers;
+};
+;
+
+export type publishSkillCatalogResponse = (publishSkillCatalogResponseSuccess)
+
+export const getPublishSkillCatalogUrl = (id: string,) => {
+
+
+
+
+  return `/api/v1/skills/catalog/${id}/publish`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, auditing, or storage fails.
+ * @summary Publishes a content-addressed immutable catalog version.
+ */
+export const publishSkillCatalog = async (id: string, options?: RequestInit): Promise<publishSkillCatalogResponse> => {
+
+  const res = await fetch(getPublishSkillCatalogUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: publishSkillCatalogResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as publishSkillCatalogResponse
+}
+
+
+
+export type listSkillCatalogVersionsResponse200 = {
+  data: PageCatalogVersionDto
+  status: 200
+}
+
+export type listSkillCatalogVersionsResponseSuccess = (listSkillCatalogVersionsResponse200) & {
+  headers: Headers;
+};
+;
+
+export type listSkillCatalogVersionsResponse = (listSkillCatalogVersionsResponseSuccess)
+
+export const getListSkillCatalogVersionsUrl = (id: string,
+    params?: ListSkillCatalogVersionsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/skills/catalog/${id}/versions?${stringifiedParams}` : `/api/v1/skills/catalog/${id}/versions`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Lists immutable versions for a catalog entry.
+ */
+export const listSkillCatalogVersions = async (id: string,
+    params?: ListSkillCatalogVersionsParams, options?: RequestInit): Promise<listSkillCatalogVersionsResponse> => {
+
+  const res = await fetch(getListSkillCatalogVersionsUrl(id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listSkillCatalogVersionsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listSkillCatalogVersionsResponse
 }
 
 

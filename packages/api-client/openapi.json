@@ -4399,6 +4399,326 @@
         }
       }
     },
+    "/api/v1/skills/catalog": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Lists catalog drafts.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or the catalog backend fails.",
+        "operationId": "listSkillCatalog",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque identifier returned as the previous page's cursor.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CatalogDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Creates a catalog draft.",
+        "description": "# Errors\n\nReturns an API error when authentication, validation, authorization, auditing, or storage fails.",
+        "operationId": "createSkillCatalog",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveCatalogRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CatalogDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/skills/catalog/rollout-plan": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Previews a rollout without creating an operation or changing a machine.",
+        "description": "# Errors\n\nReturns an API error when authentication, request validation, authorization,\nmachine lookup, or storage fails.",
+        "operationId": "previewSkillCatalogRollout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogRolloutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CatalogRolloutPlanDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/skills/catalog/rollouts": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Starts a durable, machine-scoped rollout of one immutable version.",
+        "description": "# Errors\n\nReturns an API error when authentication, request validation, authorization,\nauditing, machine lookup, or operation creation fails.",
+        "operationId": "startSkillCatalogRollout",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Caller-chosen idempotency key; a stable key is derived from the request when omitted.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogRolloutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/skills/catalog/{id}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Reads a catalog draft.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "getSkillCatalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CatalogDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Updates a catalog draft.",
+        "description": "# Errors\n\nReturns an API error when authentication, validation, authorization, auditing, or storage fails.",
+        "operationId": "updateSkillCatalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveCatalogRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CatalogDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/skills/catalog/{id}/publish": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Publishes a content-addressed immutable catalog version.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, auditing, or storage fails.",
+        "operationId": "publishSkillCatalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CatalogVersionDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/skills/catalog/{id}/versions": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Lists immutable versions for a catalog entry.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "listSkillCatalogVersions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque identifier returned as the previous page's cursor.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CatalogVersionDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/matrix": {
       "get": {
         "tags": [
@@ -5184,6 +5504,279 @@
               "null"
             ],
             "description": "The observed value, when the capability has one."
+          }
+        }
+      },
+      "CatalogContentDto": {
+        "type": "object",
+        "description": "Submitted or returned catalog content.",
+        "required": [
+          "name",
+          "description",
+          "files",
+          "source"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Agent Skills description."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogFileDto"
+            },
+            "description": "Authored files, empty for referenced entries."
+          },
+          "name": {
+            "type": "string",
+            "description": "Agent Skills name."
+          },
+          "source": {
+            "$ref": "#/components/schemas/CatalogSourceDto",
+            "description": "Source contract."
+          }
+        }
+      },
+      "CatalogDto": {
+        "type": "object",
+        "description": "Catalog draft response.",
+        "required": [
+          "id",
+          "content",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/CatalogContentDto",
+            "description": "Draft content."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time."
+          },
+          "id": {
+            "type": "string",
+            "description": "Draft identity."
+          },
+          "publishedFrom": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Prior published version."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last update time."
+          }
+        }
+      },
+      "CatalogFileDto": {
+        "type": "object",
+        "description": "One text file included in an authored skill.",
+        "required": [
+          "path",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "UTF-8 text file contents."
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative file path."
+          }
+        }
+      },
+      "CatalogRolloutPlanDto": {
+        "type": "object",
+        "description": "Preview of the steps for a catalog rollout.",
+        "required": [
+          "versionId",
+          "contentDigest",
+          "machineId",
+          "agents",
+          "steps"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit agents."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "Frozen content digest."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "Target machine."
+          },
+          "stagingPath": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Fleet-owned destination."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered steps."
+          },
+          "versionId": {
+            "type": "string",
+            "description": "Pinned version."
+          }
+        }
+      },
+      "CatalogRolloutRequest": {
+        "type": "object",
+        "description": "Machine-scoped request to preview or execute one pinned catalog version.",
+        "required": [
+          "versionId",
+          "machineId",
+          "endpointId",
+          "auth",
+          "agents",
+          "timeoutSeconds"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit Skills Manager agent ids."
+          },
+          "auth": {
+            "$ref": "#/components/schemas/SkillsAuthDto",
+            "description": "SSH authentication mode."
+          },
+          "endpointId": {
+            "type": "string",
+            "description": "SSH endpoint id."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "Target machine id."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Operation deadline in seconds.",
+            "minimum": 0
+          },
+          "versionId": {
+            "type": "string",
+            "description": "Immutable catalog version id."
+          }
+        }
+      },
+      "CatalogSourceDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Fleet-owned authored content.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "authored"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "External source reference.",
+            "required": [
+              "reference",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "referenced"
+                ]
+              },
+              "reference": {
+                "type": "string",
+                "description": "Reference or Git URL."
+              },
+              "revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional immutable revision."
+              },
+              "subpath": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional Git subpath."
+              }
+            }
+          }
+        ],
+        "description": "Catalog draft response."
+      },
+      "CatalogVersionDto": {
+        "type": "object",
+        "description": "Immutable published version response.",
+        "required": [
+          "id",
+          "catalogId",
+          "name",
+          "description",
+          "contentDigest",
+          "content",
+          "publishedAt"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "description": "Parent entry."
+          },
+          "content": {
+            "$ref": "#/components/schemas/CatalogContentDto",
+            "description": "Frozen content."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "SHA-256 content digest."
+          },
+          "description": {
+            "type": "string",
+            "description": "Skill description."
+          },
+          "id": {
+            "type": "string",
+            "description": "Version identity."
+          },
+          "name": {
+            "type": "string",
+            "description": "Skill name."
+          },
+          "publishedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Publication time."
           }
         }
       },
@@ -7310,6 +7903,123 @@
           }
         }
       },
+      "Page_CatalogDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Catalog draft response.",
+              "required": [
+                "id",
+                "content",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "content": {
+                  "$ref": "#/components/schemas/CatalogContentDto",
+                  "description": "Draft content."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Creation time."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Draft identity."
+                },
+                "publishedFrom": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Prior published version."
+                },
+                "updatedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Last update time."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_CatalogVersionDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Immutable published version response.",
+              "required": [
+                "id",
+                "catalogId",
+                "name",
+                "description",
+                "contentDigest",
+                "content",
+                "publishedAt"
+              ],
+              "properties": {
+                "catalogId": {
+                  "type": "string",
+                  "description": "Parent entry."
+                },
+                "content": {
+                  "$ref": "#/components/schemas/CatalogContentDto",
+                  "description": "Frozen content."
+                },
+                "contentDigest": {
+                  "type": "string",
+                  "description": "SHA-256 content digest."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Skill description."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Version identity."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Skill name."
+                },
+                "publishedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Publication time."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
       "Page_CorrelatedDeviceDto": {
         "type": "object",
         "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
@@ -9153,6 +9863,160 @@
           }
         }
       },
+      "Resource_CatalogDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Catalog draft response.",
+            "required": [
+              "id",
+              "content",
+              "createdAt",
+              "updatedAt"
+            ],
+            "properties": {
+              "content": {
+                "$ref": "#/components/schemas/CatalogContentDto",
+                "description": "Draft content."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time."
+              },
+              "id": {
+                "type": "string",
+                "description": "Draft identity."
+              },
+              "publishedFrom": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Prior published version."
+              },
+              "updatedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Last update time."
+              }
+            }
+          }
+        }
+      },
+      "Resource_CatalogRolloutPlanDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Preview of the steps for a catalog rollout.",
+            "required": [
+              "versionId",
+              "contentDigest",
+              "machineId",
+              "agents",
+              "steps"
+            ],
+            "properties": {
+              "agents": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Explicit agents."
+              },
+              "contentDigest": {
+                "type": "string",
+                "description": "Frozen content digest."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "Target machine."
+              },
+              "stagingPath": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Fleet-owned destination."
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Ordered steps."
+              },
+              "versionId": {
+                "type": "string",
+                "description": "Pinned version."
+              }
+            }
+          }
+        }
+      },
+      "Resource_CatalogVersionDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Immutable published version response.",
+            "required": [
+              "id",
+              "catalogId",
+              "name",
+              "description",
+              "contentDigest",
+              "content",
+              "publishedAt"
+            ],
+            "properties": {
+              "catalogId": {
+                "type": "string",
+                "description": "Parent entry."
+              },
+              "content": {
+                "$ref": "#/components/schemas/CatalogContentDto",
+                "description": "Frozen content."
+              },
+              "contentDigest": {
+                "type": "string",
+                "description": "SHA-256 content digest."
+              },
+              "description": {
+                "type": "string",
+                "description": "Skill description."
+              },
+              "id": {
+                "type": "string",
+                "description": "Version identity."
+              },
+              "name": {
+                "type": "string",
+                "description": "Skill name."
+              },
+              "publishedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Publication time."
+              }
+            }
+          }
+        }
+      },
       "Resource_EnrollmentTokenCreatedDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -10636,6 +11500,19 @@
           },
           "params": {
             "description": "The action-specific parameters (snapshot name/description, clone\ntarget id/name, and so on)."
+          }
+        }
+      },
+      "SaveCatalogRequest": {
+        "type": "object",
+        "description": "Draft input.",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/CatalogContentDto",
+            "description": "Content to save."
           }
         }
       },

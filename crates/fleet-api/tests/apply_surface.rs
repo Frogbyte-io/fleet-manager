@@ -360,6 +360,7 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         tailnet: None,
         projects: None,
         skills: None,
+        skill_catalog: None,
         proxmox: None,
         images: None,
         lab: None,

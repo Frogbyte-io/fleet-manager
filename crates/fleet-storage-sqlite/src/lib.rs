@@ -21,6 +21,7 @@ pub mod onboarding;
 pub mod operations;
 pub mod projects;
 pub mod proxmox;
+pub mod skill_catalog;
 pub mod skills;
 pub mod source;
 
@@ -33,6 +34,7 @@ pub use onboarding::OnboardingRepository;
 pub use operations::OperationRepository;
 pub use projects::ProjectRepository;
 pub use proxmox::ProxmoxAccountRepository;
+pub use skill_catalog::SkillCatalogRepository;
 pub use skills::SkillsRepository;
 pub use source::SourceRepository;
 
