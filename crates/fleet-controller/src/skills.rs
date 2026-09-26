@@ -2230,6 +2230,12 @@ mod tests {
             std::fs::create_dir_all(&bin).unwrap();
             let log = home.join("calls.log");
             let cli = bin.join("skills-manager-cli");
+            let jq = bin.join("jq");
+            std::fs::write(
+                &jq,
+                "#!/bin/sh\n[ \"$1\" = '-e' ] && [ \"$2\" = '--arg' ] && [ \"$3\" = 'reference' ] && [ \"$4\" = \"$EXPECTED_REFERENCE\" ] && [ \"$5\" = '.source_ref == $reference' ] || exit 42\ncat >/dev/null\n[ \"$JQ_MATCH\" = true ]\n",
+            )
+            .unwrap();
             std::fs::write(
                 &cli,
                 format!(
@@ -2239,6 +2245,7 @@ mod tests {
             )
             .unwrap();
             use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&jq, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
             let output = std::process::Command::new("bash")
                 .arg("-c")
@@ -2247,6 +2254,8 @@ mod tests {
                 .args(["hello-world", reference, "false", "1", "codex"])
                 .env("HOME", &home)
                 .env("SHOW_JSON", show_json)
+                .env("JQ_MATCH", succeeds.to_string())
+                .env("EXPECTED_REFERENCE", reference)
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                 .output()
                 .unwrap();
