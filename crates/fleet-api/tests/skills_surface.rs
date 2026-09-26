@@ -426,6 +426,7 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         skills: Some(Arc::new(fleet_application::skills::Skills::new(Arc::new(
             FakeSkills,
         )))),
+        skill_catalog: None,
         proxmox: None,
         images: None,
         lab: None,

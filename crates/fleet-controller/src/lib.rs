@@ -216,6 +216,14 @@ fn api_state(
             skills: Some(std::sync::Arc::new(fleet_application::skills::Skills::new(
                 std::sync::Arc::new(fleet_storage_sqlite::SkillsRepository::new(pool.clone())),
             ))),
+            skill_catalog: Some(std::sync::Arc::new(
+                fleet_application::skill_catalog::SkillCatalog::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::SkillCatalogRepository::new(
+                        pool.clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+                ),
+            )),
             proxmox,
             images,
             lab,
@@ -237,6 +245,7 @@ fn api_state(
         tailnet: None,
         projects: None,
         skills: None,
+        skill_catalog: None,
         proxmox: None,
         images: None,
         lab: None,

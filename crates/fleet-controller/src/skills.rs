@@ -23,6 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
@@ -178,12 +179,26 @@ struct LibraryPayload {
     timeout_seconds: u64,
 }
 
+/// Payload for one immutable catalog version rollout.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogRolloutPayload {
+    machine_id: String,
+    endpoint_id: String,
+    auth: Auth,
+    catalog_id: String,
+    version_id: String,
+    agents: Vec<String>,
+    timeout_seconds: u64,
+}
+
 /// The kind-dispatching skills executor.
 pub struct SkillsExecutor {
     machines: Arc<dyn MachinePort>,
     provider: fleet_provider_ssh::SshProvider,
     limiter: Arc<ExecutionLimiter>,
     snapshots: Option<Arc<dyn fleet_application::skills::SkillsPort>>,
+    catalog: Option<Arc<dyn fleet_application::skill_catalog::SkillCatalogPort>>,
     /// Retained for the provider's isolated directory lifetime.
     #[allow(dead_code)]
     work_dir: std::path::PathBuf,
@@ -196,6 +211,229 @@ impl std::fmt::Debug for SkillsExecutor {
 }
 
 impl SkillsExecutor {
+    async fn catalog_rollout(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
+        let payload: CatalogRolloutPayload = payload(operation)?;
+        if payload.agents.is_empty() || payload.agents.len() > 32 {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "a catalog rollout requires 1..=32 explicit agents",
+            )
+            .await;
+        }
+        for agent in &payload.agents {
+            validate_id(agent, "an agent id")?;
+        }
+        let Some(catalog) = &self.catalog else {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "catalog_unavailable",
+                "the Fleet skill catalog storage is not wired",
+            )
+            .await;
+        };
+        let version = match catalog.get_version(&payload.version_id).await {
+            Ok(version) => version,
+            Err(_) => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "catalog_version_missing",
+                    "the pinned catalog version is unavailable",
+                )
+                .await;
+            }
+        };
+        let digest = version.content.validate_and_digest()?;
+        if digest != version.content_digest
+            || version.content.name != version.name
+            || version.catalog_id != payload.catalog_id
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "catalog_digest_mismatch",
+                "the pinned catalog version failed its content integrity check",
+            )
+            .await;
+        }
+        if let fleet_core::SkillCatalogSource::Referenced {
+            reference,
+            subpath,
+            revision,
+        } = &version.content.source
+        {
+            let install_reference =
+                match catalog_install_reference(reference, subpath.as_deref(), revision.as_deref())
+                {
+                    Ok(reference) => reference,
+                    Err(detail) => {
+                        return complete_failure(
+                            operations,
+                            &operation.id,
+                            "unsupported_source_pin",
+                            &detail,
+                        )
+                        .await;
+                    }
+                };
+            let spec = self
+                .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
+                .await?;
+            let operation_deadline = deadline(payload.timeout_seconds);
+            match self.version_gate(&spec, operation_deadline).await {
+                GateOutcome::Pass => {}
+                GateOutcome::Absent => {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "cli_absent",
+                        "skills-manager-cli is not installed",
+                    )
+                    .await;
+                }
+                GateOutcome::Unsupported { detail } => {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "unsupported_version",
+                        &detail,
+                    )
+                    .await;
+                }
+                GateOutcome::Connection { detail } => {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "connection_failed",
+                        &detail,
+                    )
+                    .await;
+                }
+                GateOutcome::Deadline => {
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        "deadline_killed",
+                        "the Skills Manager version gate exceeded its deadline",
+                    )
+                    .await;
+                }
+            }
+            let is_git = reference.starts_with("https://")
+                || reference.starts_with("ssh://")
+                || reference.ends_with(".git");
+            let mut args = vec![
+                version.name.clone(),
+                install_reference,
+                if is_git {
+                    "true".to_owned()
+                } else {
+                    "false".to_owned()
+                },
+                payload.agents.len().to_string(),
+            ];
+            args.extend(payload.agents.iter().cloned());
+            let metadata = ScriptMetadata {
+                working_directory: String::new(),
+                environment: Vec::new(),
+                arguments: args,
+            };
+            let (result, detail) = self
+                .run(
+                    &spec,
+                    &referenced_rollout_script(),
+                    &metadata,
+                    operation_deadline,
+                )
+                .await;
+            return finish_cli(
+                operations,
+                &operation.id,
+                result,
+                detail,
+                "referenced catalog rollout",
+            )
+            .await;
+        }
+        let spec = self
+            .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
+            .await?;
+        let operation_deadline = deadline(payload.timeout_seconds);
+        match self.version_gate(&spec, operation_deadline).await {
+            GateOutcome::Pass => {}
+            GateOutcome::Absent => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "cli_absent",
+                    "skills-manager-cli is not installed",
+                )
+                .await;
+            }
+            GateOutcome::Unsupported { detail } => {
+                return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+                    .await;
+            }
+            GateOutcome::Connection { detail } => {
+                return complete_failure(operations, &operation.id, "connection_failed", &detail)
+                    .await;
+            }
+            GateOutcome::Deadline => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "deadline_killed",
+                    "the Skills Manager version gate exceeded its deadline",
+                )
+                .await;
+            }
+        }
+        operations
+            .record_progress(
+                &operation.id,
+                Some(0),
+                Some(3),
+                Some("staging the pinned Fleet skill version"),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut arguments = vec![
+            version.name.clone(),
+            version.content_digest.clone(),
+            version.content.files.len().to_string(),
+        ];
+        for file in &version.content.files {
+            let digest = sha256_hex(file.content.as_bytes());
+            arguments.push(file.path.clone());
+            arguments
+                .push(base64::engine::general_purpose::STANDARD.encode(file.content.as_bytes()));
+            arguments.push(digest);
+        }
+        arguments.push(payload.agents.len().to_string());
+        arguments.extend(payload.agents.iter().cloned());
+        let metadata = ScriptMetadata {
+            working_directory: String::new(),
+            environment: Vec::new(),
+            arguments,
+        };
+        let (result, detail) = self
+            .run(
+                &spec,
+                &catalog_rollout_script(),
+                &metadata,
+                operation_deadline,
+            )
+            .await;
+        finish_cli(operations, &operation.id, result, detail, "catalog rollout").await
+    }
+
     /// Composes the executor from its parts.
     ///
     /// # Panics
@@ -215,6 +453,7 @@ impl SkillsExecutor {
             provider,
             limiter,
             snapshots: None,
+            catalog: None,
             work_dir,
         }
     }
@@ -226,6 +465,16 @@ impl SkillsExecutor {
         snapshots: Arc<dyn fleet_application::skills::SkillsPort>,
     ) -> Self {
         self.snapshots = Some(snapshots);
+        self
+    }
+
+    /// Attach immutable catalog storage for authored skill rollouts.
+    #[must_use]
+    pub fn with_catalog_port(
+        mut self,
+        catalog: Arc<dyn fleet_application::skill_catalog::SkillCatalogPort>,
+    ) -> Self {
+        self.catalog = Some(catalog);
         self
     }
 
@@ -286,6 +535,7 @@ impl OperationExecutor for SkillsExecutor {
             "skills.probe" => self.probe(operations, operation).await,
             "skills.deploy" => self.deploy(operations, operation).await,
             "skills.undeploy" => self.undeploy(operations, operation).await,
+            "skills.catalog-rollout" => self.catalog_rollout(operations, operation).await,
             "skills.install"
             | "skills.update"
             | "skills.check"
@@ -1610,6 +1860,163 @@ fn safe_cli_outcome(value: &serde_json::Value) -> serde_json::Value {
 
 /// Redacts credential-shaped userinfo and control noise from CLI output
 /// before it becomes a public result.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(bytes);
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+fn catalog_rollout_script() -> String {
+    r#"set -euo pipefail
+fleet_name=$1; fleet_digest=$2; fleet_count=$3; shift 3
+case "$fleet_name" in (*[!a-z0-9-]*|''|-*|*-) echo "invalid skill name" >&2; exit 2;; esac
+fleet_parent="$HOME/.local/share/fleet/skills"
+for fleet_dir in "$HOME/.local" "$HOME/.local/share" "$HOME/.local/share/fleet" "$fleet_parent"; do
+  [ ! -L "$fleet_dir" ] || { echo "Fleet staging path must not be a symlink" >&2; exit 2; }
+done
+install -d -m 700 "$HOME/.local/share/fleet" "$fleet_parent"
+for fleet_dir in "$HOME/.local" "$HOME/.local/share" "$HOME/.local/share/fleet" "$fleet_parent"; do
+  [ ! -L "$fleet_dir" ] && [ -O "$fleet_dir" ] || { echo "Fleet staging path must be a user-owned directory and must not be a symlink" >&2; exit 2; }
+done
+fleet_target="$fleet_parent/$fleet_name"
+[ ! -L "$fleet_target" ] && { [ ! -e "$fleet_target" ] || [ -O "$fleet_target" ]; } || { echo "Fleet staging target must be user-owned and must not be a symlink" >&2; exit 2; }
+fleet_tmp="$fleet_parent/.${fleet_name}.staging.$$"
+fleet_backup="$fleet_parent/.${fleet_name}.backup.$$"
+[ ! -e "$fleet_tmp" ] && [ ! -L "$fleet_tmp" ] && [ ! -e "$fleet_backup" ] && [ ! -L "$fleet_backup" ] || { echo "Fleet staging temporary path already exists" >&2; exit 2; }
+mkdir -m 700 "$fleet_tmp"
+fleet_committed=0
+fleet_restore() { if [ "$fleet_committed" -eq 0 ] && [ -d "$fleet_backup" ]; then rm -rf "$fleet_target"; mv "$fleet_backup" "$fleet_target"; fi; rm -rf "$fleet_tmp"; }
+trap fleet_restore EXIT HUP INT TERM
+i=0
+while [ "$i" -lt "$fleet_count" ]; do
+  fleet_rel=$1; fleet_b64=$2; fleet_expected=$3; shift 3
+  case "$fleet_rel" in (''|/*|../*|*/../*|*/..|*\\*) echo "invalid staged path" >&2; exit 2;; esac
+  fleet_file="$fleet_tmp/$fleet_rel"
+  install -d -m 700 "$(dirname "$fleet_file")"
+  printf '%s' "$fleet_b64" | base64 -d > "$fleet_file"
+  chmod 600 "$fleet_file"
+  fleet_actual=$(sha256sum "$fleet_file" | cut -d ' ' -f 1)
+  [ "$fleet_actual" = "$fleet_expected" ] || { echo "staged file digest mismatch" >&2; exit 2; }
+  i=$((i + 1))
+done
+fleet_agents=$1; shift
+[ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
+fleet_cli=""
+for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
+  [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
+done
+[ -n "$fleet_cli" ] || { echo "skills-manager-cli is not installed" >&2; exit 3; }
+if [ -e "$fleet_target" ]; then mv "$fleet_target" "$fleet_backup"; fi
+mv "$fleet_tmp" "$fleet_target"
+if "$fleet_cli" --json skills show "$fleet_name" >/dev/null 2>&1; then
+  fleet_update_output=$("$fleet_cli" --json skills update "$fleet_name")
+  case "$fleet_update_output" in (*held_back_removals*) echo "$fleet_update_output"; echo "update held back removals; inspect the Skills Manager result" >&2; exit 4;; esac
+else
+  "$fleet_cli" --json skills install "$fleet_target" --local
+fi
+fleet_agent_args=()
+while [ "$#" -gt 0 ]; do fleet_agent_args+=("$1"); shift; done
+"$fleet_cli" --json skills deploy "$fleet_name" "${fleet_agent_args[@]}"
+"$fleet_cli" --json skills show "$fleet_name" >/dev/null
+"$fleet_cli" --json skills status >/dev/null
+fleet_committed=1
+rm -rf "$fleet_backup"
+trap - EXIT HUP INT TERM
+printf '{\"versionDigest\":\"%s\",\"verified\":true}\\n' "$fleet_digest"
+"#.to_owned()
+}
+
+/// Converts catalog GitHub source pins to the install URL form documented by
+/// Skills Manager. Other providers need their URL layout to be explicit.
+fn catalog_install_reference(
+    reference: &str,
+    subpath: Option<&str>,
+    revision: Option<&str>,
+) -> Result<String, String> {
+    if subpath.is_none() && revision.is_none() {
+        return Ok(reference.to_owned());
+    }
+    let Some(base) = reference.strip_prefix("https://github.com/") else {
+        return Err(
+            "Skills Manager v1.40 supports pinned subpaths through GitHub /tree/<revision>/<subpath> URLs"
+                .to_owned(),
+        );
+    };
+    if revision.is_some() && subpath.is_none() {
+        return Err("a Git revision pin requires a subpath for the documented Skills Manager install URL form".to_owned());
+    }
+    let repository = base
+        .strip_suffix(".git")
+        .unwrap_or(base)
+        .trim_end_matches('/');
+    if repository.split('/').count() != 2
+        || repository
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("pinned Git references must use a GitHub repository root URL".to_owned());
+    }
+    let revision = revision.unwrap_or("main");
+    if !revision
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return Err(
+            "Git revision contains characters unsupported by the Skills Manager URL contract"
+                .to_owned(),
+        );
+    }
+    let mut install_reference = format!("https://github.com/{repository}/tree/{revision}");
+    if let Some(subpath) = subpath {
+        if !subpath.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        }) {
+            return Err(
+                "Git subpath contains characters unsupported by the Skills Manager URL contract"
+                    .to_owned(),
+            );
+        }
+        install_reference.push('/');
+        install_reference.push_str(subpath);
+    }
+    Ok(install_reference)
+}
+
+fn referenced_rollout_script() -> String {
+    r#"set -euo pipefail
+fleet_name=$1; fleet_reference=$2; fleet_git=$3; fleet_agents=$4; shift 4
+fleet_cli=""
+for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
+  [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
+done
+[ -n "$fleet_cli" ] || { echo "skills-manager-cli is not installed" >&2; exit 3; }
+if ! "$fleet_cli" --json skills show "$fleet_name" >/dev/null 2>&1; then
+  fleet_install_args=(--name "$fleet_name")
+  [ "$fleet_git" = "true" ] && fleet_install_args+=(--git)
+  "$fleet_cli" --json skills install "$fleet_reference" "${fleet_install_args[@]}"
+else
+  "$fleet_cli" --json skills update "$fleet_name"
+fi
+[ "$#" -eq "$fleet_agents" ] || { echo "invalid explicit agent list" >&2; exit 2; }
+fleet_agent_args=("$@")
+"$fleet_cli" --json skills deploy "$fleet_name" "${fleet_agent_args[@]}"
+"$fleet_cli" --json skills show "$fleet_name" >/dev/null
+"$fleet_cli" --json skills status >/dev/null
+printf '{\"source\":\"referenced\",\"verified\":true}\\n'
+"#.to_owned()
+}
+
 fn redact_output(text: &str) -> String {
     let trimmed = text.trim();
     let bounded = if trimmed.len() > 3_000 {
@@ -1650,6 +2057,7 @@ impl OperationExecutor for SkillsDispatch {
             | "skills.deploy"
             | "skills.undeploy"
             | "skills.install"
+            | "skills.catalog-rollout"
             | "skills.update"
             | "skills.check"
             | "skills.remove"
@@ -1669,11 +2077,106 @@ impl OperationExecutor for SkillsDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{library_script, normalize_probe, parse_version_text, url_has_userinfo};
+    use super::{
+        catalog_install_reference, catalog_rollout_script, library_script, normalize_probe,
+        parse_version_text, sha256_hex, url_has_userinfo,
+    };
 
     fn b64(value: &str) -> String {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(value)
+    }
+
+    #[test]
+    fn catalog_rollout_stages_verified_files_and_reruns_as_update() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("calls.log");
+        let cli = bin.join("skills-manager-cli");
+        std::fs::write(&cli, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') test -f \"$HOME/installed\" ;;\n  'skills install') touch \"$HOME/installed\" ;;\n  'skills update'|'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n", log.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let contents = "---\nname: hello-world\ndescription: Do useful work\n---\n# Hello\n";
+        let args = [
+            "hello-world".to_owned(),
+            "abc123".to_owned(),
+            "1".to_owned(),
+            "SKILL.md".to_owned(),
+            b64(contents),
+            sha256_hex(contents.as_bytes()),
+            "1".to_owned(),
+            "claude_code".to_owned(),
+        ];
+        for _ in 0..2 {
+            let output = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(catalog_rollout_script())
+                .arg("fleet-rollout")
+                .args(&args)
+                .env("HOME", home)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(home.join(".local/share/fleet/skills/hello-world/SKILL.md"))
+                .unwrap(),
+            contents
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.contains("skills install"));
+        assert!(calls.contains("skills update hello-world"));
+        assert_eq!(
+            calls
+                .matches("skills deploy hello-world claude_code")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn catalog_git_references_use_the_documented_subpath_url_form() {
+        assert_eq!(
+            catalog_install_reference(
+                "https://github.com/example/skills.git",
+                Some("skills/reviewer"),
+                Some("v2.1.0"),
+            )
+            .unwrap(),
+            "https://github.com/example/skills/tree/v2.1.0/skills/reviewer"
+        );
+        assert_eq!(
+            catalog_install_reference(
+                "https://github.com/example/skills",
+                Some("skills/reviewer"),
+                None,
+            )
+            .unwrap(),
+            "https://github.com/example/skills/tree/main/skills/reviewer"
+        );
+        assert!(
+            catalog_install_reference(
+                "https://gitlab.com/example/skills",
+                Some("skills/reviewer"),
+                Some("v2.1.0"),
+            )
+            .is_err()
+        );
+        assert!(
+            catalog_install_reference(
+                "https://github.com/example/skills",
+                Some("../outside"),
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -227,6 +227,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         )
                         .with_snapshot_port(std::sync::Arc::new(
                             fleet_storage_sqlite::SkillsRepository::new(store.pool().clone()),
+                        ))
+                        .with_catalog_port(std::sync::Arc::new(
+                            fleet_storage_sqlite::SkillCatalogRepository::new(store.pool().clone()),
                         )),
                     ),
                 ))

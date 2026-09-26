@@ -55,9 +55,11 @@ pub fn requires_approval(kind: &str) -> bool {
 fn fleet_application_kind_permission(kind: &str) -> Option<crate::authz::Permission> {
     match kind {
         "mise.install" => Some(crate::authz::Permission::MiseOperate),
-        "skills.deploy" | "skills.undeploy" | "presets.deploy" | "presets.undeploy" => {
-            Some(crate::authz::Permission::SkillsDeploy)
-        }
+        "skills.deploy"
+        | "skills.undeploy"
+        | "skills.catalog-rollout"
+        | "presets.deploy"
+        | "presets.undeploy" => Some(crate::authz::Permission::SkillsDeploy),
         "skills.install"
         | "skills.update"
         | "skills.check"

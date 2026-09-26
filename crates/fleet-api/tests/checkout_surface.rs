@@ -277,6 +277,7 @@ fn state_for(
         tailnet: None,
         projects,
         skills: None,
+        skill_catalog: None,
         proxmox: None,
         images: None,
         lab: None,

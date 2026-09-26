@@ -45,7 +45,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 56] = [
+pub const CREATABLE_KINDS: [&str; 57] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -69,6 +69,7 @@ pub const CREATABLE_KINDS: [&str; 56] = [
     "skills.remove",
     "skills.adopt",
     "skills.set-source",
+    "skills.catalog-rollout",
     "presets.create",
     "presets.update",
     "presets.delete",
@@ -158,9 +159,11 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
                 Some(Permission::SkillsRead)
             }
         }
-        "skills.deploy" | "skills.undeploy" | "presets.deploy" | "presets.undeploy" => {
-            Some(Permission::SkillsDeploy)
-        }
+        "skills.deploy"
+        | "skills.undeploy"
+        | "skills.catalog-rollout"
+        | "presets.deploy"
+        | "presets.undeploy" => Some(Permission::SkillsDeploy),
         "skills.install"
         | "skills.update"
         | "skills.check"
@@ -794,6 +797,26 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
+            if new.kind == "skills.catalog-rollout" {
+                let catalog_id = new
+                    .payload_json
+                    .as_deref()
+                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                    .and_then(|payload| payload["catalogId"].as_str().map(str::to_owned))
+                    .ok_or(OperationUseCaseError::Invalid {
+                        detail: "the skills.catalog-rollout payload must carry a catalogId"
+                            .to_owned(),
+                    })?;
+                authorize(
+                    authorizer,
+                    AccessRequest {
+                        principal_id,
+                        action: Permission::SkillsRead,
+                        resource: Some(&catalog_id),
+                    },
+                )
+                .map_err(OperationUseCaseError::Denied)?;
+            }
         } else if new.kind == "lab.provision" {
             if !allow_lab_provision {
                 return Err(OperationUseCaseError::Invalid {
@@ -1245,7 +1268,11 @@ mod skills_permission_tests {
                 "{kind}"
             );
         }
-        for kind in ["presets.deploy", "presets.undeploy"] {
+        for kind in [
+            "skills.catalog-rollout",
+            "presets.deploy",
+            "presets.undeploy",
+        ] {
             assert!(CREATABLE_KINDS.contains(&kind), "{kind}");
             assert_eq!(
                 machine_scoped_kind_permission(kind, None),
