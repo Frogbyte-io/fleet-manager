@@ -725,6 +725,37 @@ impl Operations {
             }
         }
 
+        if (new.kind.starts_with("skills.") || new.kind.starts_with("presets."))
+            && let Some(payload) = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            && let Some(force) = payload.get("force")
+        {
+            let Some(force) = force.as_bool() else {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "force must be a boolean".to_owned(),
+                });
+            };
+            if force && new.kind != "skills.set-source" {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "force is supported only for skills.set-source".to_owned(),
+                });
+            }
+        }
+        if new.kind == "presets.create"
+            && new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_some_and(|payload| payload.get("name").is_some())
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "presets.create uses reference as its name; name is only valid for update"
+                    .to_owned(),
+            });
+        }
+
         if let Some(payload_json) = &new.payload_json
             && payload_json.len() > MAX_PAYLOAD_JSON
         {
@@ -1126,7 +1157,7 @@ fn skills_payload_has_credentials(payload: &str) -> bool {
         candidates.extend(references.iter().filter_map(serde_json::Value::as_str));
     }
     candidates.into_iter().any(|value| {
-        let credential_query = value.split_once('?').is_some_and(|(_, query)| {
+        let has_credential_parameter = |query: &str| {
             query.split('&').any(|pair| {
                 let key = pair
                     .split('=')
@@ -1150,38 +1181,18 @@ fn skills_payload_has_credentials(payload: &str) -> bool {
                 ]
                 .contains(&key.as_str())
             })
-        });
-        credential_query
-            || value.chars().any(char::is_control)
-            || value.split_once("://").is_some_and(|(_, rest)| {
-                let authority = rest.split('/').next().unwrap_or_default();
-                authority.contains('@')
-                    || rest.split_once('?').is_some_and(|(_, query)| {
-                        query.split('&').any(|pair| {
-                            let key = pair
-                                .split('=')
-                                .next()
-                                .unwrap_or_default()
-                                .to_ascii_lowercase();
-                            [
-                                "token",
-                                "access_token",
-                                "refresh_token",
-                                "password",
-                                "passwd",
-                                "secret",
-                                "client_secret",
-                                "api_key",
-                                "apikey",
-                                "auth",
-                                "signature",
-                                "sig",
-                                "credential",
-                            ]
-                            .contains(&key.as_str())
-                        })
-                    })
+        };
+        let credential_query = value
+            .split(['?', '#'])
+            .skip(1)
+            .any(has_credential_parameter);
+        let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            authority.split_once('@').is_some_and(|(userinfo, _)| {
+                !(scheme.eq_ignore_ascii_case("ssh") && userinfo == "git")
             })
+        });
+        credential_query || value.chars().any(char::is_control) || credential_userinfo
     })
 }
 
@@ -1252,6 +1263,12 @@ mod skills_permission_tests {
         ));
         assert!(!skills_payload_has_credentials(
             r#"{"reference":"org/repo/skill?branch=stable"}"#
+        ));
+        assert!(skills_payload_has_credentials(
+            r#"{"sourceUrl":"https://example.invalid/repo#access_token=secret"}"#
+        ));
+        assert!(!skills_payload_has_credentials(
+            r#"{"sourceUrl":"ssh://git@github.com/org/repo.git"}"#
         ));
     }
 }

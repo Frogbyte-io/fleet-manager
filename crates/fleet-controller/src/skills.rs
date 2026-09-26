@@ -333,6 +333,24 @@ impl SkillsExecutor {
             )
             .await;
         }
+        if payload.force && action != "skills.set-source" {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "force is supported only for skills.set-source",
+            )
+            .await;
+        }
+        if action == "presets.create" && payload.name.is_some() {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "presets.create uses reference as its name; name is only valid for update",
+            )
+            .await;
+        }
         if matches!(action, "skills.remove" | "presets.delete") && !payload.confirm {
             return complete_failure(
                 operations,
@@ -1387,7 +1405,7 @@ fn deadline(seconds: u64) -> Duration {
 }
 
 fn url_has_userinfo(value: &str) -> bool {
-    let credential_query = value.split_once('?').is_some_and(|(_, query)| {
+    let has_credential_parameter = |query: &str| {
         query.split('&').any(|pair| {
             let key = pair
                 .split('=')
@@ -1411,14 +1429,18 @@ fn url_has_userinfo(value: &str) -> bool {
             ]
             .contains(&key.as_str())
         })
+    };
+    let credential_query = value
+        .split(['?', '#'])
+        .skip(1)
+        .any(has_credential_parameter);
+    let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority
+            .split_once('@')
+            .is_some_and(|(userinfo, _)| !(scheme.eq_ignore_ascii_case("ssh") && userinfo == "git"))
     });
-    credential_query
-        || value.chars().any(char::is_control)
-        || value.split_once("://").is_some_and(|(_, rest)| {
-            rest.split('/')
-                .next()
-                .is_some_and(|authority| authority.contains('@'))
-        })
+    credential_query || value.chars().any(char::is_control) || credential_userinfo
 }
 
 /// Decodes and validates an operation's payload.
@@ -1489,7 +1511,9 @@ async fn finish_cli(
                 let data = safe_cli_outcome(&parsed);
                 if data.get("code").is_some()
                     || data.get("targetConflict").is_some()
+                    || data.get("target_conflict").is_some()
                     || data.get("heldBackRemovals").is_some()
+                    || data.get("held_back_removals").is_some()
                 {
                     let error_json = serde_json::json!({
                         "reason": data.get("code").cloned().unwrap_or_else(|| serde_json::json!("cli_failed")),

@@ -153,7 +153,7 @@ case "$1" in
       list) echo '[{"id":"hello","name":"Hello","description":"private text","path":"/secret/skill/path","enabled":true,"preset_ids":["default"],"deployed_to":["claude_code"],"source_ref":"private"}]' ;;
       check) echo '[{"skill_id":"hello","update_status":"update_available","last_check_error":"/secret/error"}]' ;;
       remove)
-        if [ "$2" = conflict ]; then echo '{"ok":false,"code":"TARGET_CONFLICT","message":"blocked","error":{"paths":["/tmp/conflict"],"held_back_removals":["managed"]}}'; exit 2; fi
+        if [ "$2" = conflict ]; then echo '{"ok":false,"code":"TARGET_CONFLICT","message":"blocked","error":{"target_conflict":true,"paths":["/tmp/conflict"],"held_back_removals":["managed"]}}'; exit 2; fi
         echo '{"ok":true}'
         ;;
       deploy)
@@ -412,7 +412,7 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
         "timeoutSeconds": 30,
     });
     let (state, _, error) = fixture.run_kind("skills.remove", conflict).await;
-    assert_eq!(state, "failed");
+    assert_eq!(state, "failed", "{error:?}");
     let error: serde_json::Value = serde_json::from_str(&error.unwrap()).unwrap();
     assert_eq!(error["reason"], "TARGET_CONFLICT");
     assert_eq!(error["data"]["paths"][0], "/tmp/conflict");

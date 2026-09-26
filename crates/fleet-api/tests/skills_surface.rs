@@ -631,9 +631,36 @@ async fn credential_bearing_source_urls_are_rejected_before_operation_creation()
         "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
         "operation": "install", "reference": "https://user:secret@example.invalid/org/skill", "timeoutSeconds": 30
     }).to_string();
-    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    let (status, value) = call(
+        state.clone(),
+        "POST",
+        "/machines/m-1/skills/operations",
+        Some(body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
     assert!(!value.to_string().contains("secret"));
+
+    let body = serde_json::json!({
+        "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
+        "operation": "adopt", "path": "./skill", "sourceUrl": "https://example.invalid/repo#access_token=secret", "timeoutSeconds": 30
+    }).to_string();
+    let (status, value) = call(
+        state.clone(),
+        "POST",
+        "/machines/m-1/skills/operations",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert!(!value.to_string().contains("secret"));
+
+    let body = serde_json::json!({
+        "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
+        "operation": "adopt", "path": "./skill", "sourceUrl": "ssh://git@github.com/org/repo.git", "timeoutSeconds": 30
+    }).to_string();
+    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
 }
 
 #[tokio::test]
@@ -679,6 +706,23 @@ async fn the_authorization_names_the_machine_as_its_resource() {
         .await;
         assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     }
+    let body = serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "operation": "install",
+        "reference": "org/repo/skill",
+        "timeoutSeconds": 30,
+    });
+    let (status, value) = call(
+        state,
+        "POST",
+        "/machines/m-1/skills/operations",
+        Some(body.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    assert_eq!(value["data"]["kind"], "skills.install");
     let resources = authorizer.resources.lock().unwrap();
     let skills: Vec<_> = resources
         .iter()
@@ -696,6 +740,9 @@ async fn the_authorization_names_the_machine_as_its_resource() {
             "{action} is machine-scoped"
         );
     }
+    assert!(resources.iter().any(|(action, resource)| {
+        action == "skills.modify" && resource.as_deref() == Some("m-1")
+    }));
 }
 
 #[tokio::test]

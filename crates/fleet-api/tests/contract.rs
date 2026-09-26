@@ -992,6 +992,38 @@ async fn generic_skills_creation_rejects_unsupported_dry_run_flags() {
 }
 
 #[tokio::test]
+async fn generic_skills_reject_ignored_force_and_preset_create_name_fields() {
+    let (router, port, _) = test_router();
+    for (kind, payload) in [
+        (
+            "skills.install",
+            serde_json::json!({"machineId":"m-1", "reference":"org/repo/skill", "force":true}),
+        ),
+        (
+            "presets.create",
+            serde_json::json!({"machineId":"m-1", "reference":"preset", "name":"different-name"}),
+        ),
+    ] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_BASE_PATH}/operations"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "kind": kind,
+                    "payloadJson": payload.to_string(),
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let (parts, body) = into_parts_json(router.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "invalid_request");
+    }
+    assert!(port.operations.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn generic_operation_creation_cannot_start_lab_provision_sagas() {
     let (parts, body) = post_json(
         &format!("{API_BASE_PATH}/operations"),
