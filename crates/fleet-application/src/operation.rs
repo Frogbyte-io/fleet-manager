@@ -33,7 +33,9 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// record, never a machine (FM-210); the checkout and skills kinds carry a
 /// machine-scoped `{"machineId", "endpointId", "auth", …}` payload, with
 /// `skills.deploy`/`skills.undeploy` adding `skillId`, `agents`, and
-/// `dryRun` (FM-301, FM-302); the frogenv kinds carry the same
+/// `dryRun` (FM-301, FM-302); library and preset kinds add typed references,
+/// explicit confirmation, and supported dry-run data (FM-921); the frogenv
+/// kinds carry the same
 /// machine-scoped shape, with `frogenv.env-run` adding `root` (the
 /// checkout directory) and `command` with its argument array (FM-303);
 /// the mise kinds carry the same shape, with `mise.install` adding a
@@ -43,7 +45,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 43] = [
+pub const CREATABLE_KINDS: [&str; 56] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -61,6 +63,19 @@ pub const CREATABLE_KINDS: [&str; 43] = [
     "skills.probe",
     "skills.deploy",
     "skills.undeploy",
+    "skills.install",
+    "skills.update",
+    "skills.check",
+    "skills.remove",
+    "skills.adopt",
+    "skills.set-source",
+    "presets.create",
+    "presets.update",
+    "presets.delete",
+    "presets.add-skill",
+    "presets.remove-skill",
+    "presets.deploy",
+    "presets.undeploy",
     "frogenv.status",
     "frogenv.setup",
     "frogenv.login",
@@ -143,7 +158,20 @@ fn machine_scoped_kind_permission_inner(kind: &str, payload: Option<&str>) -> Op
                 Some(Permission::SkillsRead)
             }
         }
-        "skills.deploy" | "skills.undeploy" => Some(Permission::SkillsDeploy),
+        "skills.deploy" | "skills.undeploy" | "presets.deploy" | "presets.undeploy" => {
+            Some(Permission::SkillsDeploy)
+        }
+        "skills.install"
+        | "skills.update"
+        | "skills.check"
+        | "skills.remove"
+        | "skills.adopt"
+        | "skills.set-source"
+        | "presets.create"
+        | "presets.update"
+        | "presets.delete"
+        | "presets.add-skill"
+        | "presets.remove-skill" => Some(Permission::SkillsModify),
         "frogenv.status" => Some(Permission::FrogenvRead),
         "frogenv.setup" | "frogenv.login" | "frogenv.request" | "frogenv.sync"
         | "frogenv.env-run" => Some(Permission::FrogenvOperate),
@@ -643,6 +671,91 @@ impl Operations {
             });
         }
 
+        if matches!(new.kind.as_str(), "skills.remove" | "presets.delete")
+            && new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_none_or(|payload| payload["confirm"].as_bool() != Some(true))
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "this operation requires explicit confirmation".to_owned(),
+            });
+        }
+
+        if (new.kind.starts_with("skills.") || new.kind.starts_with("presets."))
+            && new
+                .payload_json
+                .as_deref()
+                .is_some_and(skills_payload_has_credentials)
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "credential-bearing URLs are not accepted".to_owned(),
+            });
+        }
+
+        if (new.kind.starts_with("skills.") || new.kind.starts_with("presets."))
+            && let Some(payload) = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            && let Some(dry_run) = payload.get("dryRun")
+        {
+            let Some(dry_run) = dry_run.as_bool() else {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "dryRun must be a boolean".to_owned(),
+                });
+            };
+            if dry_run
+                && !matches!(
+                    new.kind.as_str(),
+                    "skills.deploy"
+                        | "skills.undeploy"
+                        | "skills.remove"
+                        | "skills.adopt"
+                        | "skills.set-source"
+                        | "presets.delete"
+                        | "presets.deploy"
+                        | "presets.undeploy"
+                )
+            {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "the pinned CLI does not support dry-run for this operation".to_owned(),
+                });
+            }
+        }
+
+        if (new.kind.starts_with("skills.") || new.kind.starts_with("presets."))
+            && let Some(payload) = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            && let Some(force) = payload.get("force")
+        {
+            let Some(force) = force.as_bool() else {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "force must be a boolean".to_owned(),
+                });
+            };
+            if force && new.kind != "skills.set-source" {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "force is supported only for skills.set-source".to_owned(),
+                });
+            }
+        }
+        if new.kind == "presets.create"
+            && new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .is_some_and(|payload| payload.get("name").is_some())
+        {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "presets.create uses reference as its name; name is only valid for update"
+                    .to_owned(),
+            });
+        }
+
         if let Some(payload_json) = &new.payload_json
             && payload_json.len() > MAX_PAYLOAD_JSON
         {
@@ -1027,6 +1140,64 @@ impl Operations {
     }
 }
 
+fn skills_payload_has_credentials(payload: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    let mut candidates = Vec::new();
+    for key in ["reference", "sourceUrl", "artifactUrl"] {
+        if let Some(value) = value.get(key).and_then(serde_json::Value::as_str) {
+            candidates.push(value);
+        }
+    }
+    if let Some(references) = value
+        .get("references")
+        .and_then(serde_json::Value::as_array)
+    {
+        candidates.extend(references.iter().filter_map(serde_json::Value::as_str));
+    }
+    candidates.into_iter().any(|value| {
+        let has_credential_parameter = |query: &str| {
+            query.split('&').any(|pair| {
+                let key = pair
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                [
+                    "token",
+                    "access_token",
+                    "refresh_token",
+                    "password",
+                    "passwd",
+                    "secret",
+                    "client_secret",
+                    "api_key",
+                    "apikey",
+                    "auth",
+                    "signature",
+                    "sig",
+                    "credential",
+                ]
+                .contains(&key.as_str())
+            })
+        };
+        let credential_query = value
+            .split(['?', '#'])
+            .skip(1)
+            .any(has_credential_parameter);
+        let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            authority.split_once('@').is_some_and(|(userinfo, _)| {
+                !(scheme.eq_ignore_ascii_case("ssh")
+                    && userinfo == "git"
+                    && authority.matches('@').count() == 1)
+            })
+        });
+        credential_query || value.chars().any(char::is_control) || credential_userinfo
+    })
+}
+
 fn map_port_failure(context: &'static str) -> impl Fn(PortFailure) -> OperationUseCaseError {
     move |failure| match failure {
         PortFailure::Conflict { detail } => OperationUseCaseError::Invalid { detail },
@@ -1044,5 +1215,65 @@ impl OperationUseCaseError {
             Self::Denied(decision) => Some(decision.reason),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod skills_permission_tests {
+    use super::{CREATABLE_KINDS, machine_scoped_kind_permission, skills_payload_has_credentials};
+    use crate::authz::Permission;
+
+    #[test]
+    fn every_library_and_preset_kind_is_creatable_with_its_dedicated_permission() {
+        for kind in [
+            "skills.install",
+            "skills.update",
+            "skills.check",
+            "skills.remove",
+            "skills.adopt",
+            "skills.set-source",
+            "presets.create",
+            "presets.update",
+            "presets.delete",
+            "presets.add-skill",
+            "presets.remove-skill",
+        ] {
+            assert!(CREATABLE_KINDS.contains(&kind), "{kind}");
+            assert_eq!(
+                machine_scoped_kind_permission(kind, None),
+                Some(Permission::SkillsModify),
+                "{kind}"
+            );
+        }
+        for kind in ["presets.deploy", "presets.undeploy"] {
+            assert!(CREATABLE_KINDS.contains(&kind), "{kind}");
+            assert_eq!(
+                machine_scoped_kind_permission(kind, None),
+                Some(Permission::SkillsDeploy),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn skills_source_credential_queries_are_rejected_without_a_url_scheme() {
+        assert!(skills_payload_has_credentials(
+            r#"{"reference":"skill?access_token=secret"}"#
+        ));
+        assert!(skills_payload_has_credentials(
+            r#"{"sourceUrl":"org/repo?token=secret"}"#
+        ));
+        assert!(!skills_payload_has_credentials(
+            r#"{"reference":"org/repo/skill?branch=stable"}"#
+        ));
+        assert!(skills_payload_has_credentials(
+            r#"{"sourceUrl":"https://example.invalid/repo#access_token=secret"}"#
+        ));
+        assert!(!skills_payload_has_credentials(
+            r#"{"sourceUrl":"ssh://git@github.com/org/repo.git"}"#
+        ));
+        assert!(skills_payload_has_credentials(
+            r#"{"sourceUrl":"ssh://git@user:secret@github.com/org/repo.git"}"#
+        ));
     }
 }

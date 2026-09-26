@@ -43,6 +43,7 @@ pub enum SkillsAuthDto {
 /// The body of the start-skills-operation request.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StartSkillsOperationRequest {
     /// The machine to act on (must match the path's machine).
     pub machine_id: String,
@@ -67,6 +68,48 @@ pub struct StartSkillsOperationRequest {
     /// The operation's direction: `deploy` (the default when a skill is
     /// named) or `undeploy`. A closed enum: anything else is malformed.
     pub direction: Option<SkillsDirectionDto>,
+    /// Explicit library or preset action (for example `install` or
+    /// `presets.delete`). Existing deploy/probe requests may omit it.
+    pub operation: Option<String>,
+    /// Skill or preset reference used by the selected operation.
+    pub reference: Option<String>,
+    /// Additional references for CLI-supported bulk actions.
+    #[serde(default)]
+    pub references: Vec<String>,
+    /// Source URL for adopt/set-source. URLs with embedded credentials are refused.
+    pub source_url: Option<String>,
+    /// Subpath or local path used by adopt/set-source.
+    pub path: Option<String>,
+    /// Paths to adopt in one operation.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Upstream Git subpath option for adoption.
+    pub git_subpath: Option<String>,
+    /// Optional source branch for set-source.
+    pub branch: Option<String>,
+    /// Optional preset name, description, or icon used by preset creation/update.
+    pub name: Option<String>,
+    /// Optional preset description.
+    pub description: Option<String>,
+    /// Optional preset icon identifier.
+    pub icon: Option<String>,
+    /// Documented install source and sync options.
+    #[serde(default)]
+    pub local: bool,
+    /// Treat the installation reference as a Git source.
+    #[serde(default)]
+    pub git: bool,
+    /// Add the installed skill to the current preset and sync agents.
+    #[serde(default)]
+    pub sync: bool,
+    /// Add the installed skill to this preset and sync agents.
+    pub sync_preset: Option<String>,
+    /// Re-point a source even when the current source differs.
+    #[serde(default)]
+    pub force: bool,
+    /// Explicit destructive confirmation. Never inferred by Fleet.
+    #[serde(default)]
+    pub confirm: bool,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
 }
@@ -296,6 +339,40 @@ pub async fn start_skills_operation(
             correlation_id,
         ));
     }
+    if request.operation.is_some()
+        && (request.skill_id.is_some()
+            || request.direction.is_some()
+            || request.artifact_url.is_some()
+            || request.artifact_sha256.is_some())
+    {
+        return Err(crate::machines::invalid_request(
+            "library operations cannot be combined with probe/deploy fields",
+            correlation_id,
+        ));
+    }
+    if request.operation.is_none()
+        && (request.reference.is_some()
+            || !request.references.is_empty()
+            || request.source_url.is_some()
+            || request.path.is_some()
+            || !request.paths.is_empty()
+            || request.git_subpath.is_some()
+            || request.branch.is_some()
+            || request.name.is_some()
+            || request.description.is_some()
+            || request.icon.is_some()
+            || request.local
+            || request.git
+            || request.sync
+            || request.sync_preset.is_some()
+            || request.force
+            || request.confirm)
+    {
+        return Err(crate::machines::invalid_request(
+            "library operation fields require an explicit operation",
+            correlation_id,
+        ));
+    }
     // The machine must exist before the authorization names it.
     let _machine = machines
         .get(
@@ -311,8 +388,16 @@ pub async fn start_skills_operation(
     // A pin downloads and installs a binary: that is a mutation, never a
     // read, so a pinned probe requires the deploy permission.
     let permission = match (&request.skill_id, &request.artifact_url) {
-        (None, None) => fleet_application::authz::Permission::SkillsRead,
-        _ => fleet_application::authz::Permission::SkillsDeploy,
+        (None, None) if request.operation.is_none() => {
+            fleet_application::authz::Permission::SkillsRead
+        }
+        _ => match request.operation.as_deref() {
+            Some("deploy" | "undeploy" | "presets.deploy" | "presets.undeploy") => {
+                fleet_application::authz::Permission::SkillsDeploy
+            }
+            Some(_) => fleet_application::authz::Permission::SkillsModify,
+            None => fleet_application::authz::Permission::SkillsDeploy,
+        },
     };
     if let Err(decision) = fleet_application::authz::authorize(
         state.authorizer.as_ref(),
@@ -324,15 +409,73 @@ pub async fn start_skills_operation(
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));
     }
-    let kind = match (&request.skill_id, &request.direction) {
-        (None, _) => "skills.probe",
-        (Some(_), Some(SkillsDirectionDto::Undeploy)) => "skills.undeploy",
-        (Some(_), _) => "skills.deploy",
+    let kind = if let Some(action) = request.operation.as_deref() {
+        let valid = matches!(
+            action,
+            "install"
+                | "update"
+                | "check"
+                | "remove"
+                | "adopt"
+                | "set-source"
+                | "presets.create"
+                | "presets.update"
+                | "presets.delete"
+                | "presets.add-skill"
+                | "presets.remove-skill"
+                | "presets.deploy"
+                | "presets.undeploy"
+        );
+        if !valid {
+            return Err(crate::machines::invalid_request(
+                "unknown skills operation",
+                correlation_id,
+            ));
+        }
+        if matches!(action, "remove" | "presets.delete") && !request.confirm {
+            return Err(crate::machines::invalid_request(
+                "this operation requires explicit confirmation",
+                correlation_id,
+            ));
+        }
+        if action == "presets.create" && request.name.is_some() {
+            return Err(crate::machines::invalid_request(
+                "presets.create uses reference as its name; name is only valid for update",
+                correlation_id,
+            ));
+        }
+        match action {
+            "presets.create"
+            | "presets.update"
+            | "presets.delete"
+            | "presets.add-skill"
+            | "presets.remove-skill"
+            | "presets.deploy"
+            | "presets.undeploy" => action.to_owned(),
+            _ => format!("skills.{action}"),
+        }
+    } else {
+        match (&request.skill_id, &request.direction) {
+            (None, _) => "skills.probe",
+            (Some(_), Some(SkillsDirectionDto::Undeploy)) => "skills.undeploy",
+            (Some(_), _) => "skills.deploy",
+        }
+        .to_owned()
     };
     // A partial pin is refused here, before the executor would drop it.
     if request.artifact_url.is_some() != request.artifact_sha256.is_some() {
         return Err(crate::machines::invalid_request(
             "the pinned release requires both an artifact URL and a sha256",
+            correlation_id,
+        ));
+    }
+    if request
+        .artifact_url
+        .as_deref()
+        .is_some_and(has_url_userinfo)
+    {
+        return Err(crate::machines::invalid_request(
+            "credential-bearing artifact URLs are not accepted",
             correlation_id,
         ));
     }
@@ -345,6 +488,8 @@ pub async fn start_skills_operation(
     });
     if let Some(skill_id) = &request.skill_id {
         payload["skillId"] = serde_json::json!(skill_id);
+    }
+    if request.skill_id.is_some() || request.operation.is_some() {
         payload["agents"] = serde_json::json!(request.agents);
         payload["dryRun"] = serde_json::json!(request.dry_run);
     }
@@ -356,6 +501,69 @@ pub async fn start_skills_operation(
     }
     if let Some(sha256) = &request.artifact_sha256 {
         payload["artifactSha256"] = serde_json::json!(sha256);
+    }
+    if let Some(action) = &request.operation {
+        payload["action"] = serde_json::json!(action);
+    }
+    if let Some(reference) = &request.reference {
+        if has_url_userinfo(reference) {
+            return Err(crate::machines::invalid_request(
+                "credential-bearing source URLs are not accepted",
+                correlation_id,
+            ));
+        }
+        payload["reference"] = serde_json::json!(reference);
+    }
+    if !request.references.is_empty() {
+        if request
+            .references
+            .iter()
+            .any(|reference| has_url_userinfo(reference))
+        {
+            return Err(crate::machines::invalid_request(
+                "credential-bearing source URLs are not accepted",
+                correlation_id,
+            ));
+        }
+        payload["references"] = serde_json::json!(request.references);
+    }
+    if let Some(url) = &request.source_url {
+        if has_url_userinfo(url) {
+            return Err(crate::machines::invalid_request(
+                "credential-bearing or malformed source URLs are not accepted",
+                correlation_id,
+            ));
+        }
+        payload["sourceUrl"] = serde_json::json!(url);
+    }
+    if let Some(path) = &request.path {
+        payload["path"] = serde_json::json!(path);
+    }
+    if !request.paths.is_empty() {
+        payload["paths"] = serde_json::json!(request.paths);
+    }
+    if let Some(path) = &request.git_subpath {
+        payload["gitSubpath"] = serde_json::json!(path);
+    }
+    if let Some(branch) = &request.branch {
+        payload["branch"] = serde_json::json!(branch);
+    }
+    for (field, value) in [
+        ("name", request.name.as_ref()),
+        ("description", request.description.as_ref()),
+        ("icon", request.icon.as_ref()),
+        ("syncPreset", request.sync_preset.as_ref()),
+    ] {
+        if let Some(value) = value {
+            payload[field] = serde_json::json!(value);
+        }
+    }
+    payload["local"] = serde_json::json!(request.local);
+    payload["git"] = serde_json::json!(request.git);
+    payload["sync"] = serde_json::json!(request.sync);
+    payload["force"] = serde_json::json!(request.force);
+    if request.operation.is_some() {
+        payload["confirm"] = serde_json::json!(request.confirm);
     }
     // A caller-scoped idempotency key makes a retried POST return the
     // original operation instead of a second one.
@@ -369,7 +577,7 @@ pub async fn start_skills_operation(
             state.authorizer.as_ref(),
             &principal.id,
             &fleet_application::operation::NewOperation {
-                kind: kind.to_owned(),
+                kind: kind.clone(),
                 idempotency_key,
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
@@ -385,4 +593,45 @@ pub async fn start_skills_operation(
             operation,
         ))),
     ))
+}
+
+fn has_url_userinfo(value: &str) -> bool {
+    let has_credential_parameter = |query: &str| {
+        query.split('&').any(|pair| {
+            let key = pair
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            [
+                "token",
+                "access_token",
+                "refresh_token",
+                "password",
+                "passwd",
+                "secret",
+                "client_secret",
+                "api_key",
+                "apikey",
+                "auth",
+                "signature",
+                "sig",
+                "credential",
+            ]
+            .contains(&key.as_str())
+        })
+    };
+    let credential_query = value
+        .split(['?', '#'])
+        .skip(1)
+        .any(has_credential_parameter);
+    let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority.split_once('@').is_some_and(|(userinfo, _)| {
+            !(scheme.eq_ignore_ascii_case("ssh")
+                && userinfo == "git"
+                && authority.matches('@').count() == 1)
+        })
+    });
+    credential_query || value.chars().any(char::is_control) || credential_userinfo
 }

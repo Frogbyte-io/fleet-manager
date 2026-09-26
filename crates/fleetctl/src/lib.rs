@@ -70,6 +70,7 @@ pub enum Output {
 }
 
 /// The commands `fleetctl` knows.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// The node and Fleet read status. Prefers the node's local socket
@@ -429,6 +430,34 @@ pub enum Command {
         /// Wait for the operation to finish.
         wait: bool,
         /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// Execute a Skills Manager library or preset operation.
+    SkillsLibraryOperation {
+        machine: String,
+        endpoint: String,
+        auth: OnboardAuthArg,
+        action: String,
+        reference: Option<String>,
+        references: Vec<String>,
+        source_url: Option<String>,
+        path: Option<String>,
+        paths: Vec<String>,
+        git_subpath: Option<String>,
+        branch: Option<String>,
+        name: Option<String>,
+        description: Option<String>,
+        icon: Option<String>,
+        local: bool,
+        git: bool,
+        sync: bool,
+        sync_preset: Option<String>,
+        force: bool,
+        agents: Vec<String>,
+        skills_root: Option<String>,
+        dry_run: bool,
+        confirm: bool,
+        wait: bool,
         timeout: Option<u64>,
     },
     /// Run a Frogenv action on a machine: status, a ceremony, sync, or
@@ -1964,7 +1993,7 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
     )
 }
 
@@ -2547,12 +2576,34 @@ fn render_stream_event(
 mod event_output_tests {
     use super::{
         Command, Output, event_stream_http_error, event_stream_request, merge_skills_matrix_pages,
-        parse, read_sse_events, render_skills, render_stream_event, request_for,
-        retryable_event_stream_status,
+        parse, parse_skills_command, read_sse_events, render_skills, render_stream_event,
+        request_for, retryable_event_stream_status,
     };
     use std::io::{BufRead as _, Write as _};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn skills_install_rejects_batch_reference_flag() {
+        let error = parse_skills_command(
+            "install",
+            "machine-1",
+            &[
+                "--reference-batch",
+                "org/repo/skill",
+                "--endpoint",
+                "endpoint-1",
+                "--auth",
+                "agent",
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("--reference-batch applies to remove only")
+        );
+    }
 
     fn fake_controller(status: u16, body: &'static str) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2620,6 +2671,154 @@ mod event_output_tests {
             request_for(&matrix.command).unwrap().1,
             "/api/v1/skills/matrix"
         );
+    }
+
+    #[test]
+    fn skill_removal_cli_requires_yes_and_sends_explicit_confirmation() {
+        let args = [
+            "skills",
+            "remove",
+            "box",
+            "--endpoint",
+            "ssh",
+            "--auth",
+            "agent",
+            "--reference",
+            "db",
+        ];
+        assert!(
+            parse(&args.map(str::to_owned))
+                .unwrap_err()
+                .message
+                .contains("explicit --yes")
+        );
+        let invocation = parse(
+            &[
+                "skills",
+                "remove",
+                "box",
+                "--endpoint",
+                "ssh",
+                "--auth",
+                "agent",
+                "--reference",
+                "db",
+                "--yes",
+                "--dry-run",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let body = request_for(&invocation.command).unwrap().3.unwrap();
+        assert_eq!(body["operation"], "remove");
+        assert_eq!(body["confirm"], true);
+        assert_eq!(body["dryRun"], true);
+    }
+
+    #[test]
+    fn skill_library_cli_builds_typed_operation_requests() {
+        let install = parse(
+            &[
+                "skills",
+                "install",
+                "box",
+                "--endpoint",
+                "ssh",
+                "--auth",
+                "agent",
+                "--reference",
+                "org/repo/skill",
+                "--git",
+                "--name",
+                "Friendly",
+                "--sync-preset",
+                "default",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let body = request_for(&install.command).unwrap().3.unwrap();
+        assert_eq!(body["operation"], "install");
+        assert_eq!(body["git"], true);
+        assert_eq!(body["name"], "Friendly");
+        assert_eq!(body["syncPreset"], "default");
+
+        let adopt = parse(
+            &[
+                "skills",
+                "adopt",
+                "box",
+                "--endpoint",
+                "ssh",
+                "--auth",
+                "agent",
+                "--path",
+                "/tmp/one",
+                "--path-batch",
+                "/tmp/two",
+                "--source-url",
+                "https://example.invalid/repo",
+                "--git-subpath",
+                "skills/sub",
+                "--dry-run",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let body = request_for(&adopt.command).unwrap().3.unwrap();
+        assert_eq!(body["operation"], "adopt");
+        assert_eq!(body["path"], "/tmp/one");
+        assert_eq!(body["paths"][0], "/tmp/two");
+        assert_eq!(body["gitSubpath"], "skills/sub");
+        assert_eq!(body["dryRun"], true);
+
+        let invocation = parse(
+            &[
+                "skills",
+                "set-source",
+                "box",
+                "--endpoint",
+                "ssh",
+                "--auth",
+                "agent",
+                "--reference",
+                "db",
+                "--source-url",
+                "https://example.invalid/org/repo",
+                "--path",
+                "skills/db",
+                "--branch",
+                "main",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let body = request_for(&invocation.command).unwrap().3.unwrap();
+        assert_eq!(body["operation"], "set-source");
+        assert_eq!(body["reference"], "db");
+        assert_eq!(body["sourceUrl"], "https://example.invalid/org/repo");
+        assert_eq!(body["path"], "skills/db");
+        assert_eq!(body["branch"], "main");
+
+        let invocation = parse(
+            &[
+                "skills",
+                "preset-delete",
+                "box",
+                "--endpoint",
+                "ssh",
+                "--auth",
+                "agent",
+                "--reference",
+                "preset",
+                "--yes",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        let body = request_for(&invocation.command).unwrap().3.unwrap();
+        assert_eq!(body["operation"], "presets.delete");
+        assert_eq!(body["confirm"], true);
     }
 
     #[test]
@@ -2855,6 +3054,7 @@ fn follow_checkout_wait(
         | Command::SkillsProbe { wait, timeout, .. }
         | Command::SkillsDeploy { wait, timeout, .. }
         | Command::SkillsUndeploy { wait, timeout, .. }
+        | Command::SkillsLibraryOperation { wait, timeout, .. }
         | Command::FrogenvOperation { wait, timeout, .. }
         | Command::MiseOperation { wait, timeout, .. }
         | Command::ProjectsReady { wait, timeout, .. }
@@ -3340,6 +3540,90 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 None,
             )),
         ),
+        Command::SkillsLibraryOperation {
+            machine,
+            endpoint,
+            auth,
+            action,
+            reference,
+            references,
+            source_url,
+            path,
+            paths,
+            git_subpath,
+            branch,
+            name,
+            description,
+            icon,
+            local,
+            git,
+            sync,
+            sync_preset,
+            force,
+            agents,
+            skills_root,
+            dry_run,
+            confirm,
+            ..
+        } => {
+            let mut body = skills_request_body(
+                machine,
+                endpoint,
+                auth,
+                None,
+                agents,
+                skills_root.as_ref(),
+                *dry_run,
+                None,
+                None,
+                None,
+            );
+            body["operation"] = serde_json::json!(action.strip_prefix("skills.").unwrap_or(action));
+            body["confirm"] = serde_json::json!(confirm);
+            if let Some(reference) = reference {
+                body["reference"] = serde_json::json!(reference);
+            }
+            if !references.is_empty() {
+                body["references"] = serde_json::json!(references);
+            }
+            if let Some(source_url) = source_url {
+                body["sourceUrl"] = serde_json::json!(source_url);
+            }
+            if let Some(path) = path {
+                body["path"] = serde_json::json!(path);
+            }
+            if !paths.is_empty() {
+                body["paths"] = serde_json::json!(paths);
+            }
+            if let Some(path) = git_subpath {
+                body["gitSubpath"] = serde_json::json!(path);
+            }
+            if let Some(branch) = branch {
+                body["branch"] = serde_json::json!(branch);
+            }
+            if let Some(name) = name {
+                body["name"] = serde_json::json!(name);
+            }
+            if let Some(description) = description {
+                body["description"] = serde_json::json!(description);
+            }
+            if let Some(icon) = icon {
+                body["icon"] = serde_json::json!(icon);
+            }
+            if let Some(sync_preset) = sync_preset {
+                body["syncPreset"] = serde_json::json!(sync_preset);
+            }
+            body["local"] = serde_json::json!(local);
+            body["git"] = serde_json::json!(git);
+            body["sync"] = serde_json::json!(sync);
+            body["force"] = serde_json::json!(force);
+            (
+                reqwest::Method::POST,
+                format!("/api/v1/machines/{machine}/skills/operations"),
+                Vec::new(),
+                Some(body),
+            )
+        }
         Command::FrogenvOperation {
             machine,
             endpoint,
@@ -5190,8 +5474,24 @@ fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<C
     let mut artifact_url: Option<String> = None;
     let mut artifact_sha256: Option<String> = None;
     let mut skill: Option<String> = None;
+    let mut reference: Option<String> = None;
+    let mut references: Vec<String> = Vec::new();
+    let mut source_url: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut paths: Vec<String> = Vec::new();
+    let mut git_subpath: Option<String> = None;
+    let mut branch: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut icon: Option<String> = None;
+    let mut local = false;
+    let mut git = false;
+    let mut sync = false;
+    let mut sync_preset: Option<String> = None;
+    let mut force = false;
     let mut agents: Vec<String> = Vec::new();
     let mut dry_run = false;
+    let mut confirm = false;
     let mut wait = false;
     let mut timeout: Option<u64> = None;
     let mut flags = rest.iter().copied();
@@ -5209,8 +5509,24 @@ fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<C
             "--artifact-url" => artifact_url = Some(value("artifact-url")?.to_owned()),
             "--artifact-sha256" => artifact_sha256 = Some(value("artifact-sha256")?.to_owned()),
             "--skill" => skill = Some(value("skill")?.to_owned()),
+            "--reference" => reference = Some(value("reference")?.to_owned()),
+            "--reference-batch" => references.push(value("reference-batch")?.to_owned()),
+            "--source-url" => source_url = Some(value("source-url")?.to_owned()),
+            "--path" => path = Some(value("path")?.to_owned()),
+            "--path-batch" => paths.push(value("path-batch")?.to_owned()),
+            "--git-subpath" => git_subpath = Some(value("git-subpath")?.to_owned()),
+            "--branch" => branch = Some(value("branch")?.to_owned()),
+            "--name" => name = Some(value("name")?.to_owned()),
+            "--description" => description = Some(value("description")?.to_owned()),
+            "--icon" => icon = Some(value("icon")?.to_owned()),
+            "--local" => local = true,
+            "--git" => git = true,
+            "--sync" => sync = true,
+            "--sync-preset" => sync_preset = Some(value("sync-preset")?.to_owned()),
+            "--force" => force = true,
             "--agent" => agents.push(value("agent")?.to_owned()),
             "--dry-run" => dry_run = true,
+            "--yes" => confirm = true,
             "--wait" => wait = true,
             "--timeout" => {
                 let parsed = value("timeout")?;
@@ -5247,6 +5563,118 @@ fn parse_skills_command(verb: &str, machine_id: &str, rest: &[&str]) -> Result<C
     let endpoint = endpoint.ok_or_else(|| CliError {
         message: "--endpoint <endpoint-id> is required".to_owned(),
     })?;
+    let library_action = match verb {
+        "install" | "update" | "check" | "remove" | "adopt" | "set-source" => {
+            Some(format!("skills.{verb}"))
+        }
+        "preset-create" => Some("presets.create".to_owned()),
+        "preset-update" => Some("presets.update".to_owned()),
+        "preset-delete" => Some("presets.delete".to_owned()),
+        "preset-add-skill" => Some("presets.add-skill".to_owned()),
+        "preset-remove-skill" => Some("presets.remove-skill".to_owned()),
+        "preset-deploy" => Some("presets.deploy".to_owned()),
+        "preset-undeploy" => Some("presets.undeploy".to_owned()),
+        _ => None,
+    };
+    if library_action.is_none() && confirm {
+        return Err(CliError {
+            message: "--yes applies only to remove and preset-delete".to_owned(),
+        });
+    }
+    if let Some(action) = library_action {
+        if matches!(action.as_str(), "skills.remove" | "presets.delete") && !confirm {
+            return Err(CliError {
+                message: "this action requires explicit --yes confirmation".to_owned(),
+            });
+        }
+        if confirm && !matches!(action.as_str(), "skills.remove" | "presets.delete") {
+            return Err(CliError {
+                message: "--yes applies only to remove and preset-delete".to_owned(),
+            });
+        }
+        if dry_run
+            && !matches!(
+                action.as_str(),
+                "skills.remove"
+                    | "skills.adopt"
+                    | "skills.set-source"
+                    | "presets.deploy"
+                    | "presets.undeploy"
+                    | "presets.delete"
+            )
+        {
+            return Err(CliError {
+                message: "the pinned CLI does not support --dry-run for this action".to_owned(),
+            });
+        }
+        let reference = reference.or(skill);
+        if !references.is_empty() && action != "skills.remove" {
+            return Err(CliError {
+                message: "--reference-batch applies to remove only".to_owned(),
+            });
+        }
+        if local && git || sync && sync_preset.is_some() {
+            return Err(CliError {
+                message: "install source and sync flags are mutually exclusive".to_owned(),
+            });
+        }
+        if force && action != "skills.set-source" {
+            return Err(CliError {
+                message: "--force applies only to set-source".to_owned(),
+            });
+        }
+        let missing = match action.as_str() {
+            "skills.install" | "presets.create" | "presets.update" | "presets.delete"
+            | "presets.deploy" | "presets.undeploy" => reference.is_none(),
+            "skills.remove" => reference.is_none() && references.is_empty(),
+            "skills.adopt" => path.is_none() && paths.is_empty(),
+            "skills.set-source" => reference.is_none() || source_url.is_none(),
+            "presets.add-skill" | "presets.remove-skill" => reference.is_none() || path.is_none(),
+            _ => false,
+        };
+        if missing {
+            return Err(CliError {
+                message: "the selected action requires a reference or path".to_owned(),
+            });
+        }
+        if action == "presets.update" && name.is_none() && description.is_none() && icon.is_none() {
+            return Err(CliError {
+                message: "preset update needs --name, --description, or --icon".to_owned(),
+            });
+        }
+        if artifact_url.is_some() || artifact_sha256.is_some() {
+            return Err(CliError {
+                message: "artifact pin flags apply to probe only".to_owned(),
+            });
+        }
+        return Ok(Command::SkillsLibraryOperation {
+            machine: machine_id.to_owned(),
+            endpoint,
+            auth: auth_arg,
+            action,
+            reference,
+            references,
+            source_url,
+            path,
+            paths,
+            git_subpath,
+            branch,
+            name,
+            description,
+            icon,
+            local,
+            git,
+            sync,
+            sync_preset,
+            force,
+            agents,
+            skills_root,
+            dry_run,
+            confirm,
+            wait,
+            timeout,
+        });
+    }
     if verb == "probe" {
         // Probe-only flags on a mutation, or mutation-only flags on a
         // probe, are typos the caller must see, not silently dropped.

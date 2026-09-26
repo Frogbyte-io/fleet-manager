@@ -102,6 +102,8 @@ pub enum Permission {
     /// Deploy or undeploy skills through the Skills Manager CLI. A
     /// mutation: it changes agent state on a managed machine.
     SkillsDeploy,
+    /// Change the managed skill library or presets through Skills Manager.
+    SkillsModify,
     /// Probe and read the Frogenv CLI's status on a machine. A read, but
     /// a secrets-infrastructure-revealing one.
     FrogenvRead,
@@ -204,6 +206,7 @@ impl Permission {
         Permission::ProjectsFileWrite,
         Permission::SkillsRead,
         Permission::SkillsDeploy,
+        Permission::SkillsModify,
         Permission::FrogenvRead,
         Permission::FrogenvOperate,
         Permission::ToolsRead,
@@ -259,6 +262,7 @@ impl Permission {
             Permission::ProjectsFileWrite => "projects.file.write",
             Permission::SkillsRead => "skills.read",
             Permission::SkillsDeploy => "skills.deploy",
+            Permission::SkillsModify => "skills.modify",
             Permission::FrogenvRead => "frogenv.read",
             Permission::FrogenvOperate => "frogenv.operate",
             Permission::ToolsRead => "tools.read",
@@ -319,6 +323,7 @@ impl Permission {
             | Permission::ProjectsFileWrite
             | Permission::SkillsRead
             | Permission::SkillsDeploy
+            | Permission::SkillsModify
             | Permission::FrogenvRead
             | Permission::FrogenvOperate
             | Permission::ToolsRead
@@ -386,6 +391,7 @@ impl Permission {
             | Permission::ProjectsFileWrite
             | Permission::SkillsRead
             | Permission::SkillsDeploy
+            | Permission::SkillsModify
             | Permission::FrogenvRead
             | Permission::FrogenvOperate
             | Permission::ToolsRead

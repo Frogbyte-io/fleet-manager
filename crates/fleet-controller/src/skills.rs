@@ -129,6 +129,55 @@ struct UndeployPayload {
     timeout_seconds: u64,
 }
 
+/// Payload for versioned Skills Manager library and preset mutations.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
+struct LibraryPayload {
+    machine_id: String,
+    endpoint_id: String,
+    auth: Auth,
+    #[serde(default)]
+    reference: Option<String>,
+    #[serde(default)]
+    references: Vec<String>,
+    #[serde(default)]
+    source_url: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    git_subpath: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    local: bool,
+    #[serde(default)]
+    git: bool,
+    #[serde(default)]
+    sync: bool,
+    #[serde(default)]
+    sync_preset: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    agents: Vec<String>,
+    #[serde(default)]
+    skills_root: Option<String>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    confirm: bool,
+    timeout_seconds: u64,
+}
+
 /// The kind-dispatching skills executor.
 pub struct SkillsExecutor {
     machines: Arc<dyn MachinePort>,
@@ -237,12 +286,316 @@ impl OperationExecutor for SkillsExecutor {
             "skills.probe" => self.probe(operations, operation).await,
             "skills.deploy" => self.deploy(operations, operation).await,
             "skills.undeploy" => self.undeploy(operations, operation).await,
+            "skills.install"
+            | "skills.update"
+            | "skills.check"
+            | "skills.remove"
+            | "skills.adopt"
+            | "skills.set-source"
+            | "presets.create"
+            | "presets.update"
+            | "presets.delete"
+            | "presets.add-skill"
+            | "presets.remove-skill"
+            | "presets.deploy"
+            | "presets.undeploy" => self.library_operation(operations, operation).await,
             _ => Err("not a skills kind".to_owned()),
         }
     }
 }
 
 impl SkillsExecutor {
+    async fn library_operation(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+    ) -> Result<(), String> {
+        let payload: LibraryPayload = payload(operation)?;
+        let action = operation.kind.as_str();
+        let missing_required = match action {
+            "skills.install" => payload.reference.is_none(),
+            "skills.remove" => payload.reference.is_none() && payload.references.is_empty(),
+            "skills.adopt" => payload.path.is_none() && payload.paths.is_empty(),
+            "skills.set-source" => payload.reference.is_none() || payload.source_url.is_none(),
+            "presets.create" | "presets.update" | "presets.delete" | "presets.deploy"
+            | "presets.undeploy" => payload.reference.is_none(),
+            "presets.add-skill" | "presets.remove-skill" => {
+                payload.reference.is_none() || payload.path.is_none()
+            }
+            _ => false,
+        };
+        if missing_required {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "the selected operation is missing a required reference or path",
+            )
+            .await;
+        }
+        if payload.force && action != "skills.set-source" {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "force is supported only for skills.set-source",
+            )
+            .await;
+        }
+        if action == "presets.create" && payload.name.is_some() {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "presets.create uses reference as its name; name is only valid for update",
+            )
+            .await;
+        }
+        if matches!(action, "skills.remove" | "presets.delete") && !payload.confirm {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "confirmation_required",
+                "explicit confirmation is required for removal",
+            )
+            .await;
+        }
+        if payload.dry_run
+            && !matches!(
+                action,
+                "skills.remove"
+                    | "skills.adopt"
+                    | "skills.set-source"
+                    | "presets.deploy"
+                    | "presets.undeploy"
+                    | "presets.delete"
+            )
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "unsupported_dry_run",
+                "the pinned CLI does not support dry-run for this operation",
+            )
+            .await;
+        }
+        if let Some(url) = payload.source_url.as_deref()
+            && url_has_userinfo(url)
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_source",
+                "credential-bearing or malformed source URLs are not accepted",
+            )
+            .await;
+        }
+        if let Some(reference) = payload.reference.as_deref() {
+            if url_has_userinfo(reference) {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "invalid_source",
+                    "credential-bearing source URLs are not accepted",
+                )
+                .await;
+            }
+            validate_id(reference, "the skill or preset reference")?;
+        }
+        if payload.local && payload.git {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "install source flags --local and --git are mutually exclusive",
+            )
+            .await;
+        }
+        if payload.sync && payload.sync_preset.is_some() {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "install sync options are mutually exclusive",
+            )
+            .await;
+        }
+        for (label, value) in [
+            ("name", payload.name.as_deref()),
+            ("description", payload.description.as_deref()),
+            ("icon", payload.icon.as_deref()),
+            ("sync preset", payload.sync_preset.as_deref()),
+            ("Git subpath", payload.git_subpath.as_deref()),
+            ("branch", payload.branch.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.chars().any(char::is_control)) {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "invalid_request",
+                    &format!("{label} must not contain control characters"),
+                )
+                .await;
+            }
+        }
+        if let Some(path) = payload.path.as_deref()
+            && (path.is_empty() || path.starts_with('-') || path.chars().any(char::is_control))
+        {
+            return complete_failure(operations, &operation.id, "invalid_request", "paths must be non-empty, must not start with a dash, and must not contain control characters").await;
+        }
+        if action == "presets.update"
+            && payload.name.is_none()
+            && payload.description.is_none()
+            && payload.icon.is_none()
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "preset update needs at least one changed field",
+            )
+            .await;
+        }
+        for reference in &payload.references {
+            if url_has_userinfo(reference) {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "invalid_source",
+                    "credential-bearing source URLs are not accepted",
+                )
+                .await;
+            }
+            validate_id(reference, "a skill reference")?;
+        }
+        if payload.paths.iter().any(|path| {
+            path.is_empty() || path.starts_with('-') || path.chars().any(char::is_control)
+        }) {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "invalid_request",
+                "adoption paths must be non-empty and contain no control characters",
+            )
+            .await;
+        }
+        for agent in &payload.agents {
+            validate_id(agent, "an agent id")?;
+        }
+        if let Some(root) = payload.skills_root.as_deref() {
+            validate_root(root)?;
+        }
+        let spec = self
+            .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
+            .await?;
+        let operation_deadline = deadline(payload.timeout_seconds);
+        match self.version_gate(&spec, operation_deadline).await {
+            GateOutcome::Pass => {}
+            GateOutcome::Absent => {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "cli_absent",
+                    "skills-manager-cli is not installed",
+                )
+                .await;
+            }
+            GateOutcome::Unsupported { detail } => {
+                return complete_failure(operations, &operation.id, "unsupported_version", &detail)
+                    .await;
+            }
+            GateOutcome::Connection { detail } => {
+                return complete_failure(operations, &operation.id, "connection_failed", &detail)
+                    .await;
+            }
+            GateOutcome::Deadline => return complete_failure(
+                operations,
+                &operation.id,
+                "deadline_killed",
+                "the version gate was killed at its deadline; the machine's skill state is unknown",
+            )
+            .await,
+        }
+        let mut arguments = Vec::new();
+        match action {
+            "skills.adopt" => {
+                if let Some(path) = payload.path {
+                    arguments.push(path);
+                }
+                arguments.extend(payload.paths);
+            }
+            "skills.set-source" => {
+                if let Some(reference) = payload.reference {
+                    arguments.push(reference);
+                }
+                if let Some(url) = payload.source_url.as_ref() {
+                    arguments.push(url.clone());
+                }
+                if let Some(path) = payload.path {
+                    arguments.push(path);
+                }
+                if let Some(branch) = payload.branch {
+                    arguments.push(branch);
+                }
+            }
+            "presets.add-skill" | "presets.remove-skill" => {
+                if let Some(reference) = payload.reference {
+                    arguments.push(reference);
+                }
+                if let Some(path) = payload.path {
+                    arguments.push(path);
+                }
+            }
+            "presets.deploy" | "presets.undeploy" => {
+                if let Some(reference) = payload.reference {
+                    arguments.push(reference);
+                }
+                arguments.extend(payload.agents);
+            }
+            "skills.remove" => {
+                if let Some(reference) = payload.reference {
+                    arguments.push(reference);
+                }
+                arguments.extend(payload.references);
+            }
+            _ => {
+                if let Some(reference) = payload.reference {
+                    arguments.push(reference);
+                }
+            }
+        }
+        let script = library_script(action, payload.dry_run, payload.confirm, payload.force);
+        let mut environment = root_environment(payload.skills_root.as_deref());
+        for (key, value) in [
+            ("FLEET_INSTALL_LOCAL", payload.local.then(|| "1".to_owned())),
+            ("FLEET_INSTALL_GIT", payload.git.then(|| "1".to_owned())),
+            ("FLEET_INSTALL_SYNC", payload.sync.then(|| "1".to_owned())),
+            ("FLEET_INSTALL_NAME", payload.name.clone()),
+            ("FLEET_INSTALL_SYNC_PRESET", payload.sync_preset.clone()),
+            ("FLEET_PRESET_NAME", payload.name),
+            ("FLEET_PRESET_DESCRIPTION", payload.description),
+            ("FLEET_PRESET_ICON", payload.icon),
+            ("FLEET_ADOPT_GIT_URL", payload.source_url.clone()),
+            ("FLEET_ADOPT_GIT_SUBPATH", payload.git_subpath),
+        ] {
+            if let Some(value) = value {
+                environment.push((key.to_owned(), value));
+            }
+        }
+        if payload.force {
+            environment.push(("FLEET_SOURCE_FORCE".to_owned(), "1".to_owned()));
+        }
+        let metadata = ScriptMetadata {
+            working_directory: String::new(),
+            environment,
+            arguments,
+        };
+        let (result, detail) = self
+            .run(&spec, &script, &metadata, operation_deadline)
+            .await;
+        finish_cli(operations, &operation.id, result, detail, action).await
+    }
+
     async fn probe(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
         let payload: ProbePayload = payload(operation)?;
         let spec = self
@@ -272,8 +625,10 @@ impl SkillsExecutor {
             }
             // The URL rides the metadata's NUL-framed environment; control
             // characters cannot break the framing but would smuggle fields.
-            if url.chars().any(char::is_control) {
-                return Err("the artifact URL must not contain control characters".to_owned());
+            if url_has_userinfo(url) {
+                return Err(
+                    "credential-bearing or malformed artifact URLs are not accepted".to_owned(),
+                );
             }
             if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err("the artifact sha256 must be 64 hex characters".to_owned());
@@ -896,6 +1251,72 @@ esac
     )
 }
 
+fn library_script(kind: &str, dry_run: bool, confirm: bool, force: bool) -> String {
+    let is_preset = kind.starts_with("presets.");
+    let verb = kind.split_once('.').map_or("", |(_, verb)| verb);
+    let dry = if dry_run { "--dry-run" } else { "" };
+    let yes = if confirm { "--yes" } else { "" };
+    let force = if force { "--force" } else { "" };
+    let script = r#"for fleet_candidate in "$HOME/.local/bin/skills-manager-cli" "$(command -v skills-manager-cli 2>/dev/null)"; do
+  [ -n "$fleet_candidate" ] && [ -x "$fleet_candidate" ] && fleet_cli="$fleet_candidate" && break
+done
+[ -n "${FLEET_CLI:-}" ] || FLEET_CLI="$fleet_cli"
+[ -n "${FLEET_CLI:-}" ] || { echo "skills-manager-cli is not installed" >&2; exit 3; }
+fleet_ref=${1:-}; [ "$#" -eq 0 ] || shift
+fleet_global=(--json)
+if [ -n "${FLEET_SKILLS_ROOT:-}" ]; then fleet_global+=(--skills-root "$FLEET_SKILLS_ROOT"); fi
+fleet_dry=(__DRY__)
+fleet_yes=(__YES__)
+fleet_force=(__FORCE__)
+__BODY__
+"#;
+    let body = match (is_preset, verb) {
+        (false, "install") => {
+            r#"fleet_install_args=(); [ -z "${FLEET_INSTALL_LOCAL:-}" ] || fleet_install_args+=(--local); [ -z "${FLEET_INSTALL_GIT:-}" ] || fleet_install_args+=(--git); [ -z "${FLEET_INSTALL_NAME:-}" ] || fleet_install_args+=(--name "$FLEET_INSTALL_NAME"); [ -z "${FLEET_INSTALL_SYNC:-}" ] || fleet_install_args+=(--sync); [ -z "${FLEET_INSTALL_SYNC_PRESET:-}" ] || fleet_install_args+=(--sync-preset "$FLEET_INSTALL_SYNC_PRESET"); "$FLEET_CLI" "${fleet_global[@]}" skills install "$fleet_ref" "${fleet_install_args[@]}""#
+        }
+        (false, "update") => {
+            r#"if [ -n "$fleet_ref" ]; then "$FLEET_CLI" "${fleet_global[@]}" skills update "$fleet_ref" "${fleet_dry[@]}"; else "$FLEET_CLI" "${fleet_global[@]}" skills update --all "${fleet_dry[@]}"; fi"#
+        }
+        (false, "check") => {
+            r#"if [ -n "$fleet_ref" ]; then "$FLEET_CLI" "${fleet_global[@]}" skills check "$fleet_ref"; else "$FLEET_CLI" "${fleet_global[@]}" skills check --all; fi"#
+        }
+        (false, "remove") => {
+            r#""$FLEET_CLI" "${fleet_global[@]}" skills remove "$fleet_ref" "$@" "${fleet_yes[@]}" "${fleet_dry[@]}""#
+        }
+        (false, "adopt") => {
+            r#"fleet_adopt_args=("$fleet_ref" "$@"); [ -z "${FLEET_ADOPT_GIT_URL:-}" ] || fleet_adopt_args+=(--git-url "$FLEET_ADOPT_GIT_URL"); [ -z "${FLEET_ADOPT_GIT_SUBPATH:-}" ] || fleet_adopt_args+=(--git-subpath "$FLEET_ADOPT_GIT_SUBPATH"); "$FLEET_CLI" "${fleet_global[@]}" skills adopt "${fleet_adopt_args[@]}" "${fleet_dry[@]}""#
+        }
+        (false, "set-source") => {
+            r#"fleet_url=$1; shift; fleet_subpath=${1:-}; [ "$#" -eq 0 ] || shift; fleet_branch=${1:-}; fleet_source_args=(--git-url "$fleet_url"); [ -z "$fleet_subpath" ] || fleet_source_args+=(--subpath "$fleet_subpath"); [ -z "$fleet_branch" ] || fleet_source_args+=(--branch "$fleet_branch"); "$FLEET_CLI" "${fleet_global[@]}" skills set-source "$fleet_ref" "${fleet_source_args[@]}" "${fleet_force[@]}" "${fleet_dry[@]}""#
+        }
+        (true, "create") => {
+            r#"fleet_preset_args=(); [ -z "${FLEET_PRESET_DESCRIPTION:-}" ] || fleet_preset_args+=(--description "$FLEET_PRESET_DESCRIPTION"); [ -z "${FLEET_PRESET_ICON:-}" ] || fleet_preset_args+=(--icon "$FLEET_PRESET_ICON"); "$FLEET_CLI" "${fleet_global[@]}" presets create "$fleet_ref" "${fleet_preset_args[@]}""#
+        }
+        (true, "update") => {
+            r#"fleet_preset_args=(); [ -z "${FLEET_PRESET_NAME:-}" ] || fleet_preset_args+=(--name "$FLEET_PRESET_NAME"); [ -z "${FLEET_PRESET_DESCRIPTION:-}" ] || fleet_preset_args+=(--description "$FLEET_PRESET_DESCRIPTION"); [ -z "${FLEET_PRESET_ICON:-}" ] || fleet_preset_args+=(--icon "$FLEET_PRESET_ICON"); "$FLEET_CLI" "${fleet_global[@]}" presets update "$fleet_ref" "${fleet_preset_args[@]}""#
+        }
+        (true, "delete") => {
+            r#""$FLEET_CLI" "${fleet_global[@]}" presets delete "$fleet_ref" "${fleet_yes[@]}" "${fleet_dry[@]}""#
+        }
+        (true, "add-skill") => {
+            r#"fleet_skill=$1; "$FLEET_CLI" "${fleet_global[@]}" presets add-skill "$fleet_ref" "$fleet_skill""#
+        }
+        (true, "remove-skill") => {
+            r#"fleet_skill=$1; "$FLEET_CLI" "${fleet_global[@]}" presets remove-skill "$fleet_ref" "$fleet_skill""#
+        }
+        (true, "deploy" | "undeploy") => {
+            r#"fleet_agents=(); for fleet_agent in "$@"; do fleet_agents+=(--agent "$fleet_agent"); done; "$FLEET_CLI" "${fleet_global[@]}" presets __VERB__ "$fleet_ref" "${fleet_agents[@]}" "${fleet_dry[@]}""#
+        }
+        _ => r#"echo "unsupported skills operation" >&2; exit 2"#,
+    };
+    script
+        .replace("__DRY__", dry)
+        .replace("__YES__", yes)
+        .replace("__FORCE__", force)
+        .replace("__VERB__", verb)
+        .replace("__BODY__", body)
+}
+
 /// The skills-root environment: empty means the default library.
 fn root_environment(root: Option<&str>) -> Vec<(String, String)> {
     match root {
@@ -983,6 +1404,47 @@ fn deadline(seconds: u64) -> Duration {
     Duration::from_secs(seconds.min(MAX_SKILLS_TIMEOUT))
 }
 
+fn url_has_userinfo(value: &str) -> bool {
+    let has_credential_parameter = |query: &str| {
+        query.split('&').any(|pair| {
+            let key = pair
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            [
+                "token",
+                "access_token",
+                "refresh_token",
+                "password",
+                "passwd",
+                "secret",
+                "client_secret",
+                "api_key",
+                "apikey",
+                "auth",
+                "signature",
+                "sig",
+                "credential",
+            ]
+            .contains(&key.as_str())
+        })
+    };
+    let credential_query = value
+        .split(['?', '#'])
+        .skip(1)
+        .any(has_credential_parameter);
+    let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority.split_once('@').is_some_and(|(userinfo, _)| {
+            !(scheme.eq_ignore_ascii_case("ssh")
+                && userinfo == "git"
+                && authority.matches('@').count() == 1)
+        })
+    });
+    credential_query || value.chars().any(char::is_control) || credential_userinfo
+}
+
 /// Decodes and validates an operation's payload.
 fn payload<T: serde::de::DeserializeOwned>(operation: &Operation) -> Result<T, String> {
     serde_json::from_str(
@@ -1034,7 +1496,8 @@ async fn finish_cli(
                 .stdout
                 .lines()
                 .find_map(|line| serde_json::from_str(line).ok());
-            let result_json = serde_json::json!({ "outcome": parsed }).to_string();
+            let result_json =
+                serde_json::json!({ "outcome": parsed.as_ref().map(safe_cli_outcome) }).to_string();
             operations
                 .complete(operation_id, "succeeded", Some(&result_json), None)
                 .await
@@ -1042,19 +1505,107 @@ async fn finish_cli(
                 .map_err(|error| error.to_string())
         }
         (Some(result), _) => {
-            complete_failure(
-                operations,
-                operation_id,
-                "cli_failed",
-                &redact_output(&result.stderr),
-            )
-            .await
+            if let Some(parsed) = result
+                .stdout
+                .lines()
+                .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            {
+                let data = safe_cli_outcome(&parsed);
+                if data.get("code").is_some()
+                    || data.get("targetConflict").is_some()
+                    || data.get("target_conflict").is_some()
+                    || data.get("heldBackRemovals").is_some()
+                    || data.get("held_back_removals").is_some()
+                {
+                    let error_json = serde_json::json!({
+                        "reason": data.get("code").cloned().unwrap_or_else(|| serde_json::json!("cli_failed")),
+                        "detail": redact_output(parsed.get("message").and_then(serde_json::Value::as_str).unwrap_or("the CLI rejected the operation")),
+                        "data": data,
+                    }).to_string();
+                    operations
+                        .complete(operation_id, "failed", None, Some(&error_json))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                } else {
+                    complete_failure(
+                        operations,
+                        operation_id,
+                        "cli_failed",
+                        &redact_output(&result.stderr),
+                    )
+                    .await
+                }
+            } else {
+                complete_failure(
+                    operations,
+                    operation_id,
+                    "cli_failed",
+                    &redact_output(&result.stderr),
+                )
+                .await
+            }
         }
         (None, Some(detail)) => {
             complete_failure(operations, operation_id, "connection_failed", &detail).await
         }
         (None, None) => Err(format!("the {what} produced neither a result nor a detail")),
     }
+}
+
+/// Retain only the documented conflict/report fields needed by callers.
+/// The recursive redactor also prevents credential-shaped URLs returned by
+/// a CLI error from entering durable operation output.
+fn safe_cli_outcome(value: &serde_json::Value) -> serde_json::Value {
+    fn redact(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => serde_json::Value::String(redact_output(text)),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(redact).collect())
+            }
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, value)| (key.clone(), redact(value)))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+    let mut safe = serde_json::Map::new();
+    for key in [
+        "code",
+        "message",
+        "skillId",
+        "deployedTo",
+        "skills",
+        "updated",
+        "checked",
+        "status",
+        "target_conflict",
+        "targetConflict",
+        "paths",
+        "held_back_removals",
+        "heldBackRemovals",
+    ] {
+        if let Some(value) = value.get(key) {
+            safe.insert(key.to_owned(), redact(value));
+        }
+    }
+    if let Some(error) = value.get("error").and_then(serde_json::Value::as_object) {
+        for key in [
+            "code",
+            "target_conflict",
+            "targetConflict",
+            "paths",
+            "held_back_removals",
+            "heldBackRemovals",
+        ] {
+            if let Some(value) = error.get(key) {
+                safe.insert(key.to_owned(), redact(value));
+            }
+        }
+    }
+    serde_json::Value::Object(safe)
 }
 
 /// Redacts credential-shaped userinfo and control noise from CLI output
@@ -1095,9 +1646,22 @@ impl SkillsDispatch {
 impl OperationExecutor for SkillsDispatch {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
         match operation.kind.as_str() {
-            "skills.probe" | "skills.deploy" | "skills.undeploy" => {
-                self.skills.execute(operations, operation).await
-            }
+            "skills.probe"
+            | "skills.deploy"
+            | "skills.undeploy"
+            | "skills.install"
+            | "skills.update"
+            | "skills.check"
+            | "skills.remove"
+            | "skills.adopt"
+            | "skills.set-source"
+            | "presets.create"
+            | "presets.update"
+            | "presets.delete"
+            | "presets.add-skill"
+            | "presets.remove-skill"
+            | "presets.deploy"
+            | "presets.undeploy" => self.skills.execute(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
         }
     }
@@ -1105,11 +1669,19 @@ impl OperationExecutor for SkillsDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_probe, parse_version_text};
+    use super::{library_script, normalize_probe, parse_version_text, url_has_userinfo};
 
     fn b64(value: &str) -> String {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(value)
+    }
+
+    #[test]
+    fn ssh_git_url_exception_rejects_additional_userinfo() {
+        assert!(!url_has_userinfo("ssh://git@github.com/org/repo.git"));
+        assert!(url_has_userinfo(
+            "ssh://git@user:secret@github.com/org/repo.git"
+        ));
     }
 
     #[test]
@@ -1130,6 +1702,23 @@ mod tests {
             Some("1.34.2".to_owned())
         );
         assert_eq!(parse_version_text(r#"{"foo":"bar"}"#), None);
+    }
+
+    #[test]
+    fn library_scripts_keep_confirmation_explicit_and_quote_positional_values() {
+        let unconfirmed = library_script("skills.remove", false, false, false);
+        let confirmed = library_script("skills.remove", true, true, false);
+        assert!(unconfirmed.contains("fleet_yes=()"));
+        assert!(!unconfirmed.contains("--yes"));
+        assert!(confirmed.contains("fleet_yes=(--yes)"));
+        assert!(confirmed.contains("fleet_dry=(--dry-run)"));
+        assert!(confirmed.contains("skills remove \"$fleet_ref\""));
+        let add_skill = library_script("presets.add-skill", false, false, false);
+        assert!(add_skill.contains("presets add-skill \"$fleet_ref\" \"$fleet_skill\""));
+        let install = library_script("skills.install", false, false, false);
+        assert!(install.contains("skills install \"$fleet_ref\" \"${fleet_install_args[@]}\""));
+        let set_source = library_script("skills.set-source", true, false, true);
+        assert!(set_source.contains("\"${fleet_force[@]}\" \"${fleet_dry[@]}\""));
     }
 
     #[test]
