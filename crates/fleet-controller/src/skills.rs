@@ -1436,9 +1436,11 @@ fn url_has_userinfo(value: &str) -> bool {
         .any(has_credential_parameter);
     let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
         let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        authority
-            .split_once('@')
-            .is_some_and(|(userinfo, _)| !(scheme.eq_ignore_ascii_case("ssh") && userinfo == "git"))
+        authority.split_once('@').is_some_and(|(userinfo, _)| {
+            !(scheme.eq_ignore_ascii_case("ssh")
+                && userinfo == "git"
+                && authority.matches('@').count() == 1)
+        })
     });
     credential_query || value.chars().any(char::is_control) || credential_userinfo
 }
@@ -1667,11 +1669,19 @@ impl OperationExecutor for SkillsDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{library_script, normalize_probe, parse_version_text};
+    use super::{library_script, normalize_probe, parse_version_text, url_has_userinfo};
 
     fn b64(value: &str) -> String {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(value)
+    }
+
+    #[test]
+    fn ssh_git_url_exception_rejects_additional_userinfo() {
+        assert!(!url_has_userinfo("ssh://git@github.com/org/repo.git"));
+        assert!(url_has_userinfo(
+            "ssh://git@user:secret@github.com/org/repo.git"
+        ));
     }
 
     #[test]

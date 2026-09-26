@@ -627,9 +627,11 @@ fn has_url_userinfo(value: &str) -> bool {
         .any(has_credential_parameter);
     let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
         let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        authority
-            .split_once('@')
-            .is_some_and(|(userinfo, _)| !(scheme.eq_ignore_ascii_case("ssh") && userinfo == "git"))
+        authority.split_once('@').is_some_and(|(userinfo, _)| {
+            !(scheme.eq_ignore_ascii_case("ssh")
+                && userinfo == "git"
+                && authority.matches('@').count() == 1)
+        })
     });
     credential_query || value.chars().any(char::is_control) || credential_userinfo
 }

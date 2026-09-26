@@ -643,6 +643,20 @@ async fn credential_bearing_source_urls_are_rejected_before_operation_creation()
 
     let body = serde_json::json!({
         "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
+        "operation": "adopt", "path": "./skill", "sourceUrl": "ssh://git@user:secret@github.com/org/repo.git", "timeoutSeconds": 30
+    }).to_string();
+    let (status, value) = call(
+        state.clone(),
+        "POST",
+        "/machines/m-1/skills/operations",
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert!(!value.to_string().contains("secret"));
+
+    let body = serde_json::json!({
+        "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
         "operation": "adopt", "path": "./skill", "sourceUrl": "https://example.invalid/repo#access_token=secret", "timeoutSeconds": 30
     }).to_string();
     let (status, value) = call(

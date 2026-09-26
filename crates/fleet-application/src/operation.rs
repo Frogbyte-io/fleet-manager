@@ -1189,7 +1189,9 @@ fn skills_payload_has_credentials(payload: &str) -> bool {
         let credential_userinfo = value.split_once("://").is_some_and(|(scheme, rest)| {
             let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
             authority.split_once('@').is_some_and(|(userinfo, _)| {
-                !(scheme.eq_ignore_ascii_case("ssh") && userinfo == "git")
+                !(scheme.eq_ignore_ascii_case("ssh")
+                    && userinfo == "git"
+                    && authority.matches('@').count() == 1)
             })
         });
         credential_query || value.chars().any(char::is_control) || credential_userinfo
@@ -1269,6 +1271,9 @@ mod skills_permission_tests {
         ));
         assert!(!skills_payload_has_credentials(
             r#"{"sourceUrl":"ssh://git@github.com/org/repo.git"}"#
+        ));
+        assert!(skills_payload_has_credentials(
+            r#"{"sourceUrl":"ssh://git@user:secret@github.com/org/repo.git"}"#
         ));
     }
 }
