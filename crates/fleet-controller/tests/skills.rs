@@ -208,6 +208,7 @@ async fn the_probe_answers_presence_version_and_agents() {
     let home = std::env::var("HOME").unwrap();
     let _path = install_stub_cli(&home, None);
     std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
+    std::fs::remove_file("/tmp/fleet-stub-argv.log").ok();
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -312,6 +313,7 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     let home = std::env::var("HOME").unwrap();
     let _path = install_stub_cli(&home, None);
     std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
+    std::fs::remove_file("/tmp/fleet-stub-argv.log").ok();
 
     let base = serde_json::json!({
         "machineId": fixture.machine_id,
