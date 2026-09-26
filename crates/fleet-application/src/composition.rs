@@ -99,6 +99,122 @@ pub struct ProvenanceRecord {
     pub path: String,
 }
 
+/// The target selected by one Fleet-managed skill assignment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type", content = "value")]
+pub enum SkillAssignmentScope {
+    /// Assign to every current and future machine.
+    All,
+    /// Assign to machines in this group.
+    Group(String),
+    /// Assign to machines carrying this tag.
+    Tag(String),
+    /// Assign to this stable machine identity.
+    Machine(String),
+}
+
+/// Fleet identity and selectors used to match skill assignments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MachineSkillTarget {
+    /// The stable Fleet machine identity.
+    pub machine_id: String,
+    /// The machine's desired groups.
+    pub groups: Vec<String>,
+    /// The machine's desired tags.
+    pub tags: Vec<String>,
+}
+
+/// One Fleet-managed assignment from a catalog skill to agents and scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkillAssignment {
+    /// The stable catalog or Skills Manager skill identity.
+    pub skill_id: String,
+    /// Agents receiving the skill.
+    pub deploy_to: Vec<String>,
+    /// Catalog identity and immutable version when the assignment is
+    /// backed by a Fleet catalog entry.
+    pub catalog_version: Option<(String, String)>,
+    /// The assignment's machine scope.
+    pub scope: SkillAssignmentScope,
+    /// The desired resource that contributed this assignment.
+    pub provenance: ProvenanceRecord,
+}
+
+/// Deterministically composed skills for one machine with source provenance.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ComposedSkillAssignments {
+    /// Skill/agent pairs to deploy.
+    pub skills: Vec<(String, String)>,
+    /// Catalog version/agent triples requiring an install or update.
+    pub catalog_skills: Vec<(String, String, String)>,
+    /// Provenance by stable `skill:<id>/<agent>` identity.
+    pub provenance: BTreeMap<String, ProvenanceRecord>,
+}
+
+type ResolvedSkillAssignment = (String, String, ProvenanceRecord, Option<(String, String)>);
+
+/// Composes global, group, tag, and machine assignments for one machine.
+/// Duplicate skill/agent pairs collapse to one entry, choosing provenance
+/// deterministically by resource name, id, and path.
+#[must_use]
+pub fn compose_skill_assignments(
+    target: &MachineSkillTarget,
+    assignments: &[SkillAssignment],
+) -> ComposedSkillAssignments {
+    let applies = |scope: &SkillAssignmentScope| match scope {
+        SkillAssignmentScope::All => true,
+        SkillAssignmentScope::Group(group) => target.groups.contains(group),
+        SkillAssignmentScope::Tag(tag) => target.tags.contains(tag),
+        SkillAssignmentScope::Machine(machine_id) => machine_id == &target.machine_id,
+    };
+    let mut resolved: BTreeMap<String, ResolvedSkillAssignment> = BTreeMap::new();
+    for assignment in assignments
+        .iter()
+        .filter(|assignment| applies(&assignment.scope))
+    {
+        for agent in &assignment.deploy_to {
+            let identity = assignment.catalog_version.as_ref().map_or_else(
+                || format!("skill:{}/{agent}", assignment.skill_id),
+                |(catalog_id, _)| format!("catalog-skill:{catalog_id}/{agent}"),
+            );
+            let candidate = (
+                assignment.skill_id.clone(),
+                agent.clone(),
+                assignment.provenance.clone(),
+                assignment.catalog_version.clone(),
+            );
+            let replace = resolved
+                .get(&identity)
+                .is_none_or(|existing| provenance_key(&candidate.2) < provenance_key(&existing.2));
+            if replace {
+                resolved.insert(identity, candidate);
+            }
+        }
+    }
+    let mut result = ComposedSkillAssignments::default();
+    for (identity, (skill_id, agent, provenance, catalog_version)) in resolved {
+        if let Some((_, version_id)) = catalog_version {
+            let catalog_id = identity
+                .strip_prefix("catalog-skill:")
+                .and_then(|identity| identity.split_once('/'))
+                .map_or_else(String::new, |(catalog_id, _)| catalog_id.to_owned());
+            result.catalog_skills.push((catalog_id, version_id, agent));
+        } else {
+            result.skills.push((skill_id, agent));
+        }
+        result.provenance.insert(identity, provenance);
+    }
+    result
+}
+
+fn provenance_key(provenance: &ProvenanceRecord) -> (&str, &str, &str) {
+    (
+        &provenance.resource_name,
+        &provenance.resource_id,
+        &provenance.path,
+    )
+}
+
 /// A profile resource as composition sees it: identity plus the spec.
 #[derive(Clone, Debug)]
 pub struct ProfileResource {
@@ -289,7 +405,8 @@ fn compose_into(
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposedProfile, CompositionError, ProfileResource, RequirementValue, compose_profile,
+        ComposedProfile, CompositionError, MachineSkillTarget, ProfileResource, RequirementValue,
+        SkillAssignment, SkillAssignmentScope, compose_profile, compose_skill_assignments,
     };
     use std::collections::BTreeMap;
 
@@ -327,6 +444,136 @@ mod tests {
             namespace: namespace.to_owned(),
             name: name.to_owned(),
         }
+    }
+
+    #[test]
+    fn skill_assignments_compose_global_group_tag_and_machine_scopes_deterministically() {
+        let assignments = vec![
+            SkillAssignment {
+                skill_id: "fleet-basics".into(),
+                deploy_to: vec!["codex".into(), "claude_code".into()],
+                catalog_version: None,
+                scope: SkillAssignmentScope::All,
+                provenance: super::ProvenanceRecord {
+                    resource_id: "global-id".into(),
+                    resource_name: "global".into(),
+                    path: "/spec".into(),
+                },
+            },
+            SkillAssignment {
+                skill_id: "rust-style".into(),
+                deploy_to: vec!["codex".into()],
+                catalog_version: None,
+                scope: SkillAssignmentScope::Group("engineering".into()),
+                provenance: super::ProvenanceRecord {
+                    resource_id: "group-id".into(),
+                    resource_name: "engineering".into(),
+                    path: "/spec".into(),
+                },
+            },
+            SkillAssignment {
+                skill_id: "oncall".into(),
+                deploy_to: vec!["claude_code".into()],
+                catalog_version: None,
+                scope: SkillAssignmentScope::Tag("oncall".into()),
+                provenance: super::ProvenanceRecord {
+                    resource_id: "tag-id".into(),
+                    resource_name: "oncall".into(),
+                    path: "/spec".into(),
+                },
+            },
+            SkillAssignment {
+                skill_id: "local-only".into(),
+                deploy_to: vec!["codex".into()],
+                catalog_version: None,
+                scope: SkillAssignmentScope::Machine("machine-1".into()),
+                provenance: super::ProvenanceRecord {
+                    resource_id: "machine-id".into(),
+                    resource_name: "machine-1".into(),
+                    path: "/spec".into(),
+                },
+            },
+        ];
+        let target = MachineSkillTarget {
+            machine_id: "machine-1".into(),
+            groups: vec!["engineering".into()],
+            tags: vec!["oncall".into()],
+        };
+
+        let first = compose_skill_assignments(&target, &assignments);
+        let second = compose_skill_assignments(&target, &assignments);
+        assert_eq!(first, second);
+        assert_eq!(
+            first.skills,
+            vec![
+                ("fleet-basics".into(), "claude_code".into()),
+                ("fleet-basics".into(), "codex".into()),
+                ("local-only".into(), "codex".into()),
+                ("oncall".into(), "claude_code".into()),
+                ("rust-style".into(), "codex".into()),
+            ]
+        );
+        assert_eq!(first.provenance.len(), 5);
+    }
+
+    #[test]
+    fn skill_assignments_are_deduplicated_and_nonmatching_scopes_are_excluded() {
+        let assignment = |scope, name: &str| SkillAssignment {
+            skill_id: "same".into(),
+            deploy_to: vec!["codex".into(), "codex".into()],
+            catalog_version: None,
+            scope,
+            provenance: super::ProvenanceRecord {
+                resource_id: name.into(),
+                resource_name: name.into(),
+                path: "/spec".into(),
+            },
+        };
+        let target = MachineSkillTarget {
+            machine_id: "m1".into(),
+            groups: vec!["g1".into()],
+            tags: vec!["t1".into()],
+        };
+        let result = compose_skill_assignments(
+            &target,
+            &[
+                assignment(SkillAssignmentScope::All, "global"),
+                assignment(SkillAssignmentScope::Group("g2".into()), "other-group"),
+            ],
+        );
+        assert_eq!(result.skills, vec![("same".into(), "codex".into())]);
+        assert_eq!(
+            result.provenance["skill:same/codex"].resource_name,
+            "global"
+        );
+    }
+
+    #[test]
+    fn catalog_assignments_retain_catalog_and_version_pins_for_rollout_planning() {
+        let assignment = SkillAssignment {
+            skill_id: "fleet-help".into(),
+            deploy_to: vec!["codex".into()],
+            catalog_version: Some(("catalog-1".into(), "version-4".into())),
+            scope: SkillAssignmentScope::All,
+            provenance: super::ProvenanceRecord {
+                resource_id: "global-id".into(),
+                resource_name: "global-help".into(),
+                path: "/spec".into(),
+            },
+        };
+        let result = compose_skill_assignments(
+            &MachineSkillTarget {
+                machine_id: "m1".into(),
+                groups: vec![],
+                tags: vec![],
+            },
+            &[assignment],
+        );
+        assert!(result.skills.is_empty());
+        assert_eq!(
+            result.catalog_skills,
+            vec![("catalog-1".into(), "version-4".into(), "codex".into())]
+        );
     }
 
     fn registry(entries: Vec<ProfileResource>) -> BTreeMap<String, ProfileResource> {

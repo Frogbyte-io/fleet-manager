@@ -54,6 +54,9 @@ pub struct ObservedState {
     pub tools: Vec<ObservedTool>,
     /// The skill deployments observed on the machine.
     pub skills: Vec<ObservedSkill>,
+    /// Pinned Fleet catalog versions observed on the machine as
+    /// (catalog id, version id, agent) tuples.
+    pub catalog_skills: Vec<(String, String, String)>,
     /// The checkouts observed on the machine.
     pub checkouts: Vec<ObservedCheckout>,
     /// Whether mise answered at all: `None`/`Some(false)` means the
@@ -63,9 +66,27 @@ pub struct ObservedState {
     /// Whether the Skills Manager deployment status answered: `None`/
     /// `Some(false)` makes every desired skill an honest `unknown`.
     pub skills_answered: Option<bool>,
+    /// A richer Skills Manager state when the caller can distinguish
+    /// unavailable, stale, and offline from an unanswered probe.
+    pub skills_availability: Option<SkillsObservationAvailability>,
     /// Whether checkout discovery answered: `None`/`Some(false)` makes
     /// the desired checkout an honest `unknown`.
     pub checkouts_answered: Option<bool>,
+}
+
+/// Availability of a Skills Manager observation for drift handling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkillsObservationAvailability {
+    /// A supported CLI returned a fresh deployment inventory.
+    Available,
+    /// No Skills Manager CLI is installed.
+    Absent,
+    /// The installed CLI does not support Fleet's contract.
+    Unsupported,
+    /// The last inventory exceeded the freshness window.
+    Stale,
+    /// The machine could not be reached.
+    Offline,
 }
 
 /// The desired values one comparison needs, extracted from the composed
@@ -76,6 +97,9 @@ pub struct DesiredState {
     pub tools: Vec<(String, String)>,
     /// The desired skill deployments, as (skill id, agent) pairs.
     pub skills: Vec<(String, String)>,
+    /// Fleet catalog versions desired on the machine as
+    /// (catalog id, version id, agent) tuples.
+    pub catalog_skills: Vec<(String, String, String)>,
     /// The desired checkout's normalized remote and root, when the
     /// project declares one.
     pub checkout: Option<(String, String)>,
@@ -229,9 +253,11 @@ impl ObservedState {
         Self {
             tools,
             skills,
+            catalog_skills: Vec::new(),
             checkouts,
             mise_answered: Some(mise_ran),
             skills_answered: Some(skills_ran),
+            skills_availability: None,
             checkouts_answered: Some(checkouts_ran),
         }
     }
@@ -296,7 +322,27 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
 
     // Skills: desired (skill, agent) pairs vs observed pairs, in BOTH
     // directions — a deployment of a no-longer-desired skill is `extra`.
-    if observed.skills_answered.is_none_or(|answered| !answered) {
+    if matches!(
+        observed.skills_availability,
+        Some(SkillsObservationAvailability::Absent | SkillsObservationAvailability::Unsupported)
+    ) {
+        for (skill_id, agent) in &desired.skills {
+            set.push(FieldDifference::unsupported(
+                &format!(
+                    "skill:{}/{}",
+                    fleet_core::redact_schemeless_credentials(skill_id),
+                    fleet_core::redact_schemeless_credentials(agent)
+                ),
+                Some("deployed"),
+                "the machine has no supported Skills Manager CLI; managed skill changes are unavailable",
+            ));
+        }
+    } else if matches!(
+        observed.skills_availability,
+        Some(SkillsObservationAvailability::Offline | SkillsObservationAvailability::Stale)
+    ) || (observed.skills_availability.is_none()
+        && observed.skills_answered.is_none_or(|answered| !answered))
+    {
         for (skill_id, agent) in &desired.skills {
             set.push(FieldDifference::unknown(
                 &format!(
@@ -336,6 +382,59 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
                     ),
                     "deployed",
                 ));
+            }
+        }
+    }
+
+    // Fleet-authored catalog versions use their own identity so a rollout
+    // step carries the catalog ID and pinned version rather than appearing
+    // as an ordinary Skills Manager deploy.
+    for (catalog_id, desired_version, agent) in &desired.catalog_skills {
+        let identity = format!(
+            "catalog-skill:{}/{}",
+            fleet_core::redact_schemeless_credentials(catalog_id),
+            fleet_core::redact_schemeless_credentials(agent)
+        );
+        match observed.skills_availability {
+            Some(
+                SkillsObservationAvailability::Absent | SkillsObservationAvailability::Unsupported,
+            ) => {
+                set.push(FieldDifference::unsupported(
+                    &identity,
+                    Some(desired_version),
+                    "the machine has no supported Skills Manager CLI; managed skill changes are unavailable",
+                ));
+            }
+            Some(SkillsObservationAvailability::Offline | SkillsObservationAvailability::Stale) => {
+                set.push(FieldDifference::unknown(
+                    &identity,
+                    Some(desired_version),
+                    "the deployment status did not answer; the machine's catalog skill state is unknown",
+                ));
+            }
+            None if observed.skills_answered.is_none_or(|answered| !answered) => {
+                set.push(FieldDifference::unknown(
+                    &identity,
+                    Some(desired_version),
+                    "the deployment status did not answer; the machine's catalog skill state is unknown",
+                ));
+            }
+            _ => {
+                let observed_version = observed
+                    .catalog_skills
+                    .iter()
+                    .find(|(id, _, observed_agent)| id == catalog_id && observed_agent == agent)
+                    .map(|(_, version, _)| version.as_str());
+                match observed_version {
+                    None => set.push(FieldDifference::missing(&identity, desired_version)),
+                    Some(version) => {
+                        if let Some(difference) =
+                            compare_field(&identity, Some(desired_version), Some(version))
+                        {
+                            set.push(difference);
+                        }
+                    }
+                }
             }
         }
     }
@@ -424,8 +523,9 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckoutObservation, DesiredState, ObservedState, ObservedTool, ToolAvailability,
-        canonicalize_version, compare, normalize_checkouts, normalize_skills, normalize_tools,
+        CheckoutObservation, DesiredState, ObservedState, ObservedTool,
+        SkillsObservationAvailability, ToolAvailability, canonicalize_version, compare,
+        normalize_checkouts, normalize_skills, normalize_tools,
     };
     use fleet_core::{CapabilityFact, CapabilityStatus, DifferenceState, Timestamp};
 
@@ -549,6 +649,7 @@ mod tests {
                 ("python".to_owned(), "3.12.1".to_owned()),
             ],
             skills: vec![("db".to_owned(), "claude_code".to_owned())],
+            catalog_skills: vec![],
             checkout: Some((
                 "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 "/srv/repo".to_owned(),
@@ -561,9 +662,11 @@ mod tests {
                 availability: ToolAvailability::Present,
             }],
             skills: vec![],
+            catalog_skills: vec![],
             checkouts: vec![],
             mise_answered: Some(true),
             skills_answered: Some(true),
+            skills_availability: None,
             checkouts_answered: Some(true),
         };
         let set = compare(&desired, &observed);
@@ -669,6 +772,74 @@ mod tests {
     }
 
     #[test]
+    fn missing_or_unsupported_skills_cli_is_reported_as_unavailable() {
+        let desired = DesiredState {
+            skills: vec![("db".to_owned(), "codex".to_owned())],
+            ..DesiredState::default()
+        };
+        for availability in [
+            SkillsObservationAvailability::Absent,
+            SkillsObservationAvailability::Unsupported,
+        ] {
+            let observed = ObservedState {
+                skills_availability: Some(availability),
+                ..ObservedState::default()
+            };
+            let field = compare(&desired, &observed).fields.remove(0);
+            assert_eq!(field.identity, "skill:db/codex");
+            assert_eq!(field.state, DifferenceState::Unsupported);
+            assert!(!field.actionable());
+        }
+    }
+
+    #[test]
+    fn offline_and_stale_skill_observations_remain_queued_as_unknown() {
+        let desired = DesiredState {
+            skills: vec![("db".to_owned(), "codex".to_owned())],
+            ..DesiredState::default()
+        };
+        for availability in [
+            SkillsObservationAvailability::Offline,
+            SkillsObservationAvailability::Stale,
+        ] {
+            let observed = ObservedState {
+                skills_availability: Some(availability),
+                ..ObservedState::default()
+            };
+            let field = compare(&desired, &observed).fields.remove(0);
+            assert_eq!(field.state, DifferenceState::Unknown);
+            assert!(!field.actionable());
+        }
+    }
+
+    #[test]
+    fn catalog_version_drift_is_reported_as_missing_or_changed() {
+        let desired = DesiredState {
+            catalog_skills: vec![("catalog-1".into(), "version-2".into(), "codex".into())],
+            ..DesiredState::default()
+        };
+        let missing = ObservedState {
+            skills_answered: Some(true),
+            skills_availability: Some(SkillsObservationAvailability::Available),
+            ..ObservedState::default()
+        };
+        let missing_field = compare(&desired, &missing).fields.remove(0);
+        assert_eq!(missing_field.identity, "catalog-skill:catalog-1/codex");
+        assert_eq!(missing_field.state, DifferenceState::Missing);
+        assert_eq!(missing_field.desired.as_deref(), Some("version-2"));
+
+        let old_version = ObservedState {
+            catalog_skills: vec![("catalog-1".into(), "version-1".into(), "codex".into())],
+            skills_answered: Some(true),
+            skills_availability: Some(SkillsObservationAvailability::Available),
+            ..ObservedState::default()
+        };
+        let changed_field = compare(&desired, &old_version).fields.remove(0);
+        assert_eq!(changed_field.state, DifferenceState::Changed);
+        assert_eq!(changed_field.observed.as_deref(), Some("version-1"));
+    }
+
+    #[test]
     fn an_unanswered_discovery_makes_the_checkout_unknown() {
         let desired = DesiredState {
             checkout: Some((
@@ -758,6 +929,7 @@ mod tests {
         let desired = DesiredState {
             tools: vec![("node".to_owned(), "20.11.0".to_owned())],
             skills: vec![("db".to_owned(), "claude_code".to_owned())],
+            catalog_skills: vec![],
             checkout: Some((
                 "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 "/srv/repo".to_owned(),
@@ -773,6 +945,7 @@ mod tests {
                 skill_id: "db".to_owned(),
                 agent: "claude_code".to_owned(),
             }],
+            catalog_skills: vec![],
             checkouts: vec![super::ObservedCheckout {
                 root: "/srv/repo".to_owned(),
                 remote: Some("github.com/Frogbyte-io/fleet-manager".to_owned()),
@@ -780,6 +953,7 @@ mod tests {
             }],
             mise_answered: Some(true),
             skills_answered: Some(true),
+            skills_availability: Some(super::SkillsObservationAvailability::Available),
             checkouts_answered: Some(true),
         };
         let set = compare(&desired, &observed);

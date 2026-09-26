@@ -129,10 +129,11 @@ impl ApplyExecutor {
         // refuses anything the dedicated endpoint would have rejected —
         // unknown kinds, non-actionable states, kind/state/identity
         // mismatches, and non-increasing orders.
-        const SUPPORTED_KINDS: [&str; 4] = [
+        const SUPPORTED_KINDS: [&str; 5] = [
             "mise.install",
             "skills.deploy",
             "skills.undeploy",
+            "skills.catalog-rollout",
             "projects.clone",
         ];
         let mut previous_order: Option<u32> = None;
@@ -182,9 +183,20 @@ impl ApplyExecutor {
             let expected_prefix = match action.kind.as_str() {
                 "mise.install" => "tool:",
                 "skills.deploy" | "skills.undeploy" => "skill:",
+                "skills.catalog-rollout" => "catalog-skill:",
                 _ => "checkout:",
             };
-            if !action.difference.identity.starts_with(expected_prefix) {
+            let state_matches_kind = matches!(
+                (action.kind.as_str(), action.difference.state),
+                (
+                    "mise.install" | "skills.deploy" | "skills.catalog-rollout" | "projects.clone",
+                    fleet_core::DifferenceState::Missing
+                ) | (
+                    "mise.install" | "skills.catalog-rollout" | "projects.clone",
+                    fleet_core::DifferenceState::Changed
+                ) | ("skills.undeploy", fleet_core::DifferenceState::Extra)
+            );
+            if !state_matches_kind || !action.difference.identity.starts_with(expected_prefix) {
                 return complete_failed(
                     operations,
                     &operation.id,
@@ -210,6 +222,43 @@ impl ApplyExecutor {
                     &[],
                 )
                 .await;
+            }
+            if action.kind == "skills.catalog-rollout" {
+                let identity = action
+                    .difference
+                    .identity
+                    .strip_prefix("catalog-skill:")
+                    .unwrap_or_default();
+                let valid_identity = identity.split_once('/').is_some_and(|(catalog, agent)| {
+                    !catalog.is_empty() && !agent.is_empty() && !agent.contains('/')
+                });
+                if !valid_identity
+                    || action
+                        .difference
+                        .desired
+                        .as_deref()
+                        .is_none_or(str::is_empty)
+                {
+                    return complete_failed(
+                        operations,
+                        &operation.id,
+                        &fleet_application::planner::PlannedAction {
+                            order: 0,
+                            kind: "apply.workflow".to_owned(),
+                            difference: fleet_core::FieldDifference::unknown(
+                                "apply.workflow",
+                                None,
+                                "a catalog rollout requires catalog, agent, and pinned version ids",
+                            ),
+                            reason: String::new(),
+                        },
+                        "a catalog rollout requires catalog, agent, and pinned version ids",
+                        &[],
+                        &[],
+                        &[],
+                    )
+                    .await;
+                }
             }
             if previous_order.is_some_and(|previous| action.order <= previous) {
                 return complete_failed(
@@ -595,6 +644,22 @@ impl ApplyExecutor {
                     "skillId": skill_id,
                     "agents": [agent],
                     "timeoutSeconds": 300,
+                })
+            }
+            "skills.catalog-rollout" => {
+                let identity = difference
+                    .identity
+                    .strip_prefix("catalog-skill:")
+                    .unwrap_or_default();
+                let (catalog_id, agent) = identity.split_once('/').unwrap_or(("", ""));
+                serde_json::json!({
+                    "machineId": payload.machine_id,
+                    "endpointId": payload.endpoint_id,
+                    "auth": payload.auth,
+                    "catalogId": catalog_id,
+                    "versionId": difference.desired.clone().unwrap_or_default(),
+                    "agents": [agent],
+                    "timeoutSeconds": 600,
                 })
             }
             "skills.undeploy" => {

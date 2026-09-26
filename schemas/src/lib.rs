@@ -183,7 +183,7 @@ pub fn generate_schema() -> Value {
                 serde_json::to_value(schema_for!(crate::kinds::ToolRequirementSpec))
             }
             ResourceKind::SkillPreset => {
-                serde_json::to_value(schema_for!(crate::kinds::SkillRequirementSpec))
+                serde_json::to_value(schema_for!(crate::kinds::SkillPresetSpec))
             }
             ResourceKind::Recipe => serde_json::to_value(schema_for!(crate::kinds::RecipeSpec)),
             ResourceKind::Action => serde_json::to_value(schema_for!(crate::kinds::ActionSpec)),

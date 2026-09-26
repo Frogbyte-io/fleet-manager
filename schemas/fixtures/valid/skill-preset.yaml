@@ -5,5 +5,7 @@ metadata:
   name: db-skill
 spec:
   skillId: db
+  scope:
+    type: all
   deployTo:
     - claude_code

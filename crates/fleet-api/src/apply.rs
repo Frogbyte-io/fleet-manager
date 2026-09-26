@@ -30,10 +30,11 @@ pub enum ApplyAuthDto {
 }
 
 /// The action kinds the apply workflow can execute.
-const SUPPORTED_KINDS: [&str; 4] = [
+const SUPPORTED_KINDS: [&str; 5] = [
     "mise.install",
     "skills.deploy",
     "skills.undeploy",
+    "skills.catalog-rollout",
     "projects.clone",
 ];
 
@@ -229,10 +230,10 @@ pub async fn start_apply_workflow(
         let state_matches_kind = matches!(
             (action.kind.as_str(), state),
             (
-                "mise.install" | "skills.deploy" | "projects.clone",
+                "mise.install" | "skills.deploy" | "skills.catalog-rollout" | "projects.clone",
                 fleet_core::DifferenceState::Missing
             ) | (
-                "mise.install" | "projects.clone",
+                "mise.install" | "skills.catalog-rollout" | "projects.clone",
                 fleet_core::DifferenceState::Changed
             ) | ("skills.undeploy", fleet_core::DifferenceState::Extra)
         );
@@ -243,6 +244,7 @@ pub async fn start_apply_workflow(
         let expected_prefix = match action.kind.as_str() {
             "mise.install" => "tool:",
             "skills.deploy" | "skills.undeploy" => "skill:",
+            "skills.catalog-rollout" => "catalog-skill:",
             _ => "checkout:",
         };
         if !state_matches_kind || !action.difference.identity.starts_with(expected_prefix) {
@@ -253,6 +255,33 @@ pub async fn start_apply_workflow(
                 ),
                 correlation_id,
             ));
+        }
+        if action.kind == "skills.catalog-rollout" {
+            let identity = action
+                .difference
+                .identity
+                .strip_prefix("catalog-skill:")
+                .unwrap_or_default();
+            let Some((catalog_id, agent)) = identity.split_once('/') else {
+                return Err(crate::machines::invalid_request(
+                    "a catalog rollout identity must include catalog and agent ids",
+                    correlation_id,
+                ));
+            };
+            if catalog_id.is_empty()
+                || agent.is_empty()
+                || agent.contains('/')
+                || action
+                    .difference
+                    .desired
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+            {
+                return Err(crate::machines::invalid_request(
+                    "a catalog rollout requires catalog, agent, and pinned version ids",
+                    correlation_id,
+                ));
+            }
         }
         if previous_order.is_some_and(|previous| action.order <= previous) {
             return Err(crate::machines::invalid_request(

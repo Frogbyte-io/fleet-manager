@@ -10,6 +10,54 @@ use serde::{Deserialize, Serialize};
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::operation::PortFailure;
 
+/// One machine's desired Fleet-managed skills and their drift, suitable
+/// for the skill matrix and an overview attention projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkillMatrixRow {
+    /// The stable Fleet machine identity.
+    pub machine_id: String,
+    /// Desired skill/agent pairs after scope composition.
+    pub desired: Vec<(String, String)>,
+    /// Desired catalog version/agent triples.
+    pub catalog_skills: Vec<(String, String, String)>,
+    /// Drift against the supplied normalized observation.
+    pub differences: fleet_core::DifferenceSet,
+}
+
+/// Builds the skill matrix and attention data for one machine from Fleet
+/// assignments and a normalized observation. `None` means the machine is
+/// offline; stale observations remain unknown and unavailable CLIs remain
+/// unsupported, so neither case can become an apply step.
+#[must_use]
+pub fn skill_matrix_row(
+    target: &crate::composition::MachineSkillTarget,
+    assignments: &[crate::composition::SkillAssignment],
+    observed: Option<&crate::observed::ObservedState>,
+) -> SkillMatrixRow {
+    let composed = crate::composition::compose_skill_assignments(target, assignments);
+    let offline_observation;
+    let observed = if let Some(observed) = observed {
+        observed
+    } else {
+        offline_observation = crate::observed::ObservedState {
+            skills_availability: Some(crate::observed::SkillsObservationAvailability::Offline),
+            ..crate::observed::ObservedState::default()
+        };
+        &offline_observation
+    };
+    let desired = crate::observed::DesiredState {
+        skills: composed.skills.clone(),
+        catalog_skills: composed.catalog_skills.clone(),
+        ..crate::observed::DesiredState::default()
+    };
+    SkillMatrixRow {
+        machine_id: target.machine_id.clone(),
+        desired: composed.skills,
+        catalog_skills: composed.catalog_skills,
+        differences: crate::observed::compare(&desired, observed),
+    }
+}
+
 /// How long a Skills Manager observation remains fresh.
 pub const SKILLS_FRESHNESS_MS: i64 = 24 * 60 * 60 * 1000;
 /// Maximum number of machine observations in one skills matrix page.
@@ -211,6 +259,56 @@ impl Skills {
             .record(snapshot)
             .await
             .map_err(|_| SkillsError::Backend)
+    }
+}
+
+#[cfg(test)]
+mod assignment_projection_tests {
+    use super::skill_matrix_row;
+    use crate::composition::{
+        MachineSkillTarget, ProvenanceRecord, SkillAssignment, SkillAssignmentScope,
+    };
+    use crate::observed::{ObservedState, SkillsObservationAvailability};
+
+    fn assignment() -> SkillAssignment {
+        SkillAssignment {
+            skill_id: "global-help".into(),
+            deploy_to: vec!["codex".into()],
+            catalog_version: None,
+            scope: SkillAssignmentScope::All,
+            provenance: ProvenanceRecord {
+                resource_id: "assignment-1".into(),
+                resource_name: "global-help".into(),
+                path: "/spec".into(),
+            },
+        }
+    }
+
+    fn target() -> MachineSkillTarget {
+        MachineSkillTarget {
+            machine_id: "machine-1".into(),
+            groups: vec![],
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn matrix_projection_shows_drift_for_available_cli_and_keeps_offline_queued() {
+        let fresh = ObservedState {
+            skills_answered: Some(true),
+            skills_availability: Some(SkillsObservationAvailability::Available),
+            ..ObservedState::default()
+        };
+        let fresh_row = skill_matrix_row(&target(), &[assignment()], Some(&fresh));
+        assert_eq!(
+            fresh_row.differences.fields[0].state,
+            fleet_core::DifferenceState::Missing
+        );
+        let offline_row = skill_matrix_row(&target(), &[assignment()], None);
+        assert_eq!(
+            offline_row.differences.fields[0].state,
+            fleet_core::DifferenceState::Unknown
+        );
     }
 }
 
