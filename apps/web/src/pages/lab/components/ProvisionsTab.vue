@@ -11,7 +11,7 @@ import { shortId, templatesByVersion } from '../lab'
 // Provisioning records: the durable saga state for each guest the Lab cloned,
 // with the external IDs it recorded (node, VMID, clone task, guest IP). The
 // API does not link a record to a lease, so this list stands on its own.
-const props = defineProps<{ provisions: ProvisionRecordDto[], templates: LabTemplateDto[], now: number }>()
+const props = defineProps<{ provisions: ProvisionRecordDto[], templates: LabTemplateDto[], now: number, loading: boolean }>()
 
 const byVersion = computed(() => templatesByVersion(props.templates))
 const rows = computed(() => [...props.provisions].sort((a, b) => b.createdAt - a.createdAt))
@@ -32,7 +32,13 @@ const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em
 
 <template>
   <p
-    v-if="rows.length === 0"
+    v-if="loading"
+    class="rounded-sm border border-fc-line bg-card p-6 text-center text-sm text-fc-muted"
+  >
+    Loading provisioning records…
+  </p>
+  <p
+    v-else-if="rows.length === 0"
     class="rounded-sm border border-fc-line bg-card p-6 text-center text-sm text-fc-muted"
   >
     No provisioning records yet.

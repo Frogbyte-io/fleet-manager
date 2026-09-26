@@ -16,7 +16,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { leaseCommand, provisionLeaseCommand, templateSpec } from '../lab'
-import { LEASES_KEY } from '../useLab'
+import { LEASES_KEY, PROVISIONS_KEY } from '../useLab'
 
 // Request a disposable environment. A lease is created from a template's
 // published version; provisioning is a separate durable operation that needs
@@ -61,44 +61,82 @@ const willProvision = computed(() => provisionNow.value && props.accounts.length
 const valid = computed(() => versionId.value !== null && purpose.value.trim() !== '')
 
 const command = computed(() =>
-  versionId.value ? leaseCommand(versionId.value, purpose.value.trim() || 'PURPOSE', projectId.value || null) : null,
+  versionId.value && purpose.value.trim()
+    ? leaseCommand(versionId.value, purpose.value.trim(), projectId.value || null)
+    : null,
 )
 
 // Why there is no command: nothing to lease yet, or a project the CLI cannot express.
-const missingReason = computed(() =>
-  versionId.value === null
-    ? 'Choose a published template to see the equivalent command.'
-    : 'fleetctl lab lease has no project flag yet, so a project-scoped request has no exact CLI equivalent.',
-)
+const missingReason = computed(() => {
+  if (versionId.value === null)
+    return 'Choose a published template to see the equivalent command.'
+  if (!purpose.value.trim())
+    return 'Enter a purpose to see the equivalent command.'
+  return 'fleetctl lab lease has no project flag yet, so a project-scoped request has no exact CLI equivalent.'
+})
+
+// A lease created whose provisioning did not start: the drawer then retries
+// provisioning for that lease instead of creating a second one.
+const pendingLease = ref<LeaseDto | null>(null)
+
+watch(() => props.open, (open) => {
+  if (!open) {
+    pendingLease.value = null
+    error.value = ''
+  }
+})
+
+async function refresh() {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: LEASES_KEY }),
+    queryClient.invalidateQueries({ queryKey: PROVISIONS_KEY }),
+  ])
+}
+
+/** Starts provisioning; returns the operation id, or null with `error` set. */
+async function provision(lease: LeaseDto): Promise<string | null> {
+  try {
+    const operation = unwrap<OperationDto>(await startLabLeaseProvision(lease.id, { accountId: accountId.value }), [201])
+    return operation.id
+  }
+  catch (caught) {
+    // The lease exists either way; say so rather than hiding it.
+    error.value = `Lease created, but provisioning did not start: ${errorMessage(caught)}`
+    return null
+  }
+}
+
+function finish(lease: LeaseDto, operationId: string | null) {
+  emit('created', lease, operationId)
+  if (!error.value) {
+    purpose.value = ''
+    pendingLease.value = null
+    emit('update:open', false)
+  }
+}
 
 async function submit() {
-  if (!valid.value || !versionId.value)
-    return
   busy.value = true
   error.value = ''
   try {
+    if (pendingLease.value) {
+      const operationId = await provision(pendingLease.value)
+      await refresh()
+      finish(pendingLease.value, operationId)
+      return
+    }
+    if (!valid.value || !versionId.value)
+      return
     const lease = unwrap<LeaseDto>(await createLabLease({
       templateVersionId: versionId.value,
       purpose: purpose.value.trim(),
       projectId: projectId.value || null,
     }), [201])
-    let operationId: string | null = null
-    if (willProvision.value) {
-      try {
-        const operation = unwrap<OperationDto>(await startLabLeaseProvision(lease.id, { accountId: accountId.value }), [201])
-        operationId = operation.id
-      }
-      catch (caught) {
-        // The lease exists either way; say so rather than hiding it.
-        error.value = `Lease created, but provisioning did not start: ${errorMessage(caught)}`
-      }
-    }
-    await queryClient.invalidateQueries({ queryKey: LEASES_KEY })
-    emit('created', lease, operationId)
-    if (!error.value) {
-      purpose.value = ''
-      emit('update:open', false)
-    }
+    const operationId = willProvision.value ? await provision(lease) : null
+    if (error.value)
+      pendingLease.value = lease
+    await refresh()
+    finish(lease, operationId)
   }
   catch (caught) {
     error.value = errorMessage(caught)
@@ -131,7 +169,17 @@ async function submit() {
         class="grid gap-4 px-4 pb-6 text-sm"
         @submit.prevent="submit"
       >
-        <fieldset class="grid gap-1.5">
+        <p
+          v-if="pendingLease"
+          class="rounded-sm border border-fc-warn/40 bg-fc-warn/10 p-2 text-xs text-fc-warn"
+          data-testid="pending-lease"
+        >
+          Lease "{{ pendingLease.purpose }}" exists and is waiting to be provisioned. Retrying provisions it; it does not create another lease.
+        </p>
+        <fieldset
+          class="grid gap-1.5"
+          :disabled="pendingLease !== null"
+        >
           <legend class="fc-kicker mb-1.5">
             Template
           </legend>
@@ -172,6 +220,7 @@ async function submit() {
           <span class="fc-kicker">Purpose</span>
           <input
             v-model="purpose"
+            :disabled="pendingLease !== null"
             required
             maxlength="200"
             placeholder="what this environment is for"
@@ -183,6 +232,7 @@ async function submit() {
           <span class="fc-kicker">Project (optional)</span>
           <select
             v-model="projectId"
+            :disabled="pendingLease !== null"
             class="h-9 rounded-sm border border-input bg-background px-2"
           >
             <option value="">
@@ -256,9 +306,9 @@ async function submit() {
         <button
           type="submit"
           class="fc-grad-bg h-10 rounded-sm font-head text-sm font-bold disabled:opacity-50"
-          :disabled="busy || !valid"
+          :disabled="busy || (pendingLease ? !willProvision : !valid)"
         >
-          {{ willProvision ? 'Request & provision →' : 'Request environment →' }}
+          {{ pendingLease ? 'Retry provisioning →' : willProvision ? 'Request & provision →' : 'Request environment →' }}
         </button>
       </form>
     </SheetContent>

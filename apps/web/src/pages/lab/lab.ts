@@ -138,19 +138,23 @@ export function formatDuration(seconds: number): string {
     : `${pad(hours)}:${pad(minutes)}:${pad(secs)}`
 }
 
-/** `2H`, `30M`, `1D 4H` — for TTL settings, which are whole minutes in practice. */
+/** `2H`, `30M`, `1D 4H`, `1M 1S` — for configured TTLs and deadlines. */
 export function formatSpan(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds))
   const days = Math.floor(s / 86_400)
   const hours = Math.floor((s % 86_400) / 3600)
   const minutes = Math.floor((s % 3600) / 60)
+  const secs = s % 60
   const parts: string[] = []
   if (days)
     parts.push(`${days}D`)
   if (hours)
     parts.push(`${hours}H`)
-  if (minutes || parts.length === 0)
+  if (minutes)
     parts.push(`${minutes}M`)
+  // Never drop configured seconds: 45 → 45S, 61 → 1M 1S.
+  if (secs || parts.length === 0)
+    parts.push(`${secs}S`)
   return parts.join(' ')
 }
 

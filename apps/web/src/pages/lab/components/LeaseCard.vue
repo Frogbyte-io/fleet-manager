@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQueryClient } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
   extendLabLease,
@@ -49,6 +49,11 @@ const error = ref('')
 const operationId = ref<string | null>(null)
 
 const accountId = ref(props.accounts[0]?.id ?? '')
+// Accounts load independently of leases; keep a valid default as they arrive.
+watch(() => props.accounts, (list) => {
+  if (!list.some(account => account.id === accountId.value))
+    accountId.value = list[0]?.id ?? ''
+})
 const EXTEND_CHOICES = [
   { seconds: 1800, label: '+30M' },
   { seconds: 3600, label: '+1H' },

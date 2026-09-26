@@ -18,27 +18,36 @@ defineProps<{ templates: LabTemplateDto[], now: number }>()
 
 const queryClient = useQueryClient()
 const confirming = ref<string | null>(null)
-const busy = ref(false)
+// The template being published; other rows cannot open or close meanwhile.
+const publishing = ref<string | null>(null)
 const error = ref('')
 const published = ref<{ templateId: string, versionId: string } | null>(null)
 
 const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em] text-fc-faint'
 
 async function publish(template: LabTemplateDto) {
-  busy.value = true
+  publishing.value = template.id
   error.value = ''
   try {
     const version = unwrap<LabTemplateVersionDto>(await publishLabTemplate(template.id), [201])
     published.value = { templateId: template.id, versionId: version.id }
-    confirming.value = null
+    if (confirming.value === template.id)
+      confirming.value = null
     await queryClient.invalidateQueries({ queryKey: TEMPLATES_KEY })
   }
   catch (caught) {
     error.value = errorMessage(caught)
   }
   finally {
-    busy.value = false
+    publishing.value = null
   }
+}
+
+function toggle(templateId: string) {
+  if (publishing.value)
+    return
+  confirming.value = confirming.value === templateId ? null : templateId
+  error.value = ''
 }
 </script>
 
@@ -111,7 +120,8 @@ async function publish(template: LabTemplateDto) {
                 type="button"
                 class="h-7 rounded-sm border border-input px-2.5 text-xs hover:border-fc-muted"
                 :aria-expanded="confirming === template.id"
-                @click="confirming = confirming === template.id ? null : template.id; error = ''"
+                :disabled="publishing !== null"
+                @click="toggle(template.id)"
               >
                 Publish…
               </button>
@@ -135,14 +145,15 @@ async function publish(template: LabTemplateDto) {
                   <button
                     type="button"
                     class="fc-grad-bg h-8 rounded-sm px-3 font-semibold disabled:opacity-50"
-                    :disabled="busy"
+                    :disabled="publishing !== null"
                     @click="publish(template)"
                   >
                     Publish version →
                   </button>
                   <button
                     type="button"
-                    class="h-8 px-2 text-fc-muted hover:text-fc-ink"
+                    class="h-8 px-2 text-fc-muted hover:text-fc-ink disabled:opacity-50"
+                    :disabled="publishing !== null"
                     @click="confirming = null"
                   >
                     Cancel

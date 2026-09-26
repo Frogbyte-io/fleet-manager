@@ -19,7 +19,7 @@ import { LEASES_KEY, PROVISIONS_KEY, useLab } from './useLab'
 // Lab, environments first (docs/planning/web-console.md, decision 2): the
 // leases you have now, a request drawer one click away, and templates and
 // provisioning records on their own tabs.
-const { leases, templates, provisions, provisioningAccounts, projects } = useLab()
+const { leases, templates, provisions, accounts, provisioningAccounts, projects } = useLab()
 const queryClient = useQueryClient()
 // One clock for every TTL countdown on the page.
 const now = ref(Date.now())
@@ -108,9 +108,13 @@ const TABS: { id: Tab, label: string, count: () => number | null }[] = [
 ]
 
 const loadError = computed(() => {
+  // Accounts and projects feed the request drawer and provisioning; when they
+  // fail, their empty lists would otherwise look like "none configured".
   const failed = [
     leases.error.value && `leases: ${errorMessage(leases.error.value)}`,
     templates.error.value && `templates: ${errorMessage(templates.error.value)}`,
+    accounts.error.value && `Proxmox accounts: ${errorMessage(accounts.error.value)}`,
+    projects.error.value && `projects: ${errorMessage(projects.error.value)}`,
   ].filter(Boolean)
   return failed.length ? failed.join(' · ') : ''
 })
@@ -338,6 +342,7 @@ const loadError = computed(() => {
         :provisions="provisions.data.value ?? []"
         :templates="allTemplates"
         :now="now"
+        :loading="provisions.isLoading.value"
       />
     </div>
 

@@ -3,7 +3,7 @@ import { computed } from 'vue'
 
 import type { LeaseDto } from '@frogbyte-io/fleet-api-client'
 
-import { leaseSteps } from '../lab'
+import { leaseSteps, type StepStatus } from '../lab'
 
 // Lifecycle stepper (DESIGN.md §6): done segments muted, the current one
 // gradient, a failed one --fc-err. The list carries the state as text for
@@ -11,6 +11,13 @@ import { leaseSteps } from '../lab'
 const props = defineProps<{ lease: Pick<LeaseDto, 'state' | 'readyAt'> }>()
 
 const steps = computed(() => leaseSteps(props.lease))
+
+const STATUS_TEXT: Record<StepStatus, string> = {
+  done: '(done)',
+  current: '(current)',
+  failed: '(failed)',
+  todo: '(not reached)',
+}
 </script>
 
 <template>
@@ -23,6 +30,7 @@ const steps = computed(() => leaseSteps(props.lease))
       :key="step.label"
       class="min-w-0 flex-1"
       :data-status="step.status"
+      :aria-current="step.status === 'current' ? 'step' : undefined"
     >
       <span
         class="block h-[3px] rounded-sm"
@@ -42,6 +50,7 @@ const steps = computed(() => leaseSteps(props.lease))
           'text-fc-faint': step.status === 'done' || step.status === 'todo',
         }"
       >{{ step.label.replace('_', ' ') }}</span>
+      <span class="sr-only">{{ STATUS_TEXT[step.status] }}</span>
     </li>
   </ol>
 </template>
