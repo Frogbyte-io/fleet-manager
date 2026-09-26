@@ -87,7 +87,7 @@ pub struct SkillPresetSpec {
     /// The Fleet catalog version this assignment pins, when Fleet owns the
     /// skill content. External Skills Manager entries may omit it.
     #[serde(default)]
-    #[schemars(length(max = 80))]
+    #[schemars(length(max = 128))]
     pub catalog_version_id: Option<String>,
     /// The target selector. Omitting it preserves the global assignment
     /// behavior of early `SkillPreset` resources.
@@ -96,6 +96,11 @@ pub struct SkillPresetSpec {
     /// The coding agents receiving the skill.
     #[schemars(length(min = 1, max = 16))]
     pub deploy_to: Vec<String>,
+    /// Agents explicitly excluded even if another matching assignment
+    /// includes the skill. Deny wins over include.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub deny_agents: Vec<String>,
 }
 
 fn global_skill_scope() -> SkillAssignmentScope {

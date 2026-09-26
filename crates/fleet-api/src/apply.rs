@@ -268,14 +268,19 @@ pub async fn start_apply_workflow(
                     correlation_id,
                 ));
             };
-            if catalog_id.is_empty()
-                || agent.is_empty()
+            if catalog_id.trim().is_empty()
+                || agent.trim().is_empty()
                 || agent.contains('/')
-                || action
-                    .difference
-                    .desired
-                    .as_deref()
-                    .is_none_or(str::is_empty)
+                || action.difference.desired.as_deref().is_none_or(|version| {
+                    let Some((version_catalog, digest)) = version.rsplit_once('@') else {
+                        return true;
+                    };
+                    version_catalog != catalog_id
+                        || digest.len() != 64
+                        || !digest
+                            .chars()
+                            .all(|character| character.is_ascii_hexdigit())
+                })
             {
                 return Err(crate::machines::invalid_request(
                     "a catalog rollout requires catalog, agent, and pinned version ids",

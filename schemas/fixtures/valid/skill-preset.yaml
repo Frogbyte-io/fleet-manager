@@ -9,3 +9,4 @@ spec:
     type: all
   deployTo:
     - claude_code
+  denyAgents: []

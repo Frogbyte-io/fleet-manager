@@ -6,7 +6,7 @@ metadata:
 spec:
   skillId: fleet-help
   catalogId: catalog-1
-  catalogVersionId: version-4
+  catalogVersionId: catalog-1@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   scope:
     type: all
   deployTo:

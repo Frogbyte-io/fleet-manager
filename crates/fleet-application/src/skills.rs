@@ -28,13 +28,16 @@ pub struct SkillMatrixRow {
 /// assignments and a normalized observation. `None` means the machine is
 /// offline; stale observations remain unknown and unavailable CLIs remain
 /// unsupported, so neither case can become an apply step.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error for ambiguous identities or conflicting catalog pins.
 pub fn skill_matrix_row(
     target: &crate::composition::MachineSkillTarget,
     assignments: &[crate::composition::SkillAssignment],
     observed: Option<&crate::observed::ObservedState>,
-) -> SkillMatrixRow {
-    let composed = crate::composition::compose_skill_assignments(target, assignments);
+) -> Result<SkillMatrixRow, crate::composition::SkillAssignmentCompositionError> {
+    let composed = crate::composition::compose_skill_assignments(target, assignments)?;
     let offline_observation;
     let observed = if let Some(observed) = observed {
         observed
@@ -50,12 +53,12 @@ pub fn skill_matrix_row(
         catalog_skills: composed.catalog_skills.clone(),
         ..crate::observed::DesiredState::default()
     };
-    SkillMatrixRow {
+    Ok(SkillMatrixRow {
         machine_id: target.machine_id.clone(),
         desired: composed.skills,
         catalog_skills: composed.catalog_skills,
         differences: crate::observed::compare(&desired, observed),
-    }
+    })
 }
 
 /// How long a Skills Manager observation remains fresh.
@@ -274,6 +277,7 @@ mod assignment_projection_tests {
         SkillAssignment {
             skill_id: "global-help".into(),
             deploy_to: vec!["codex".into()],
+            deny_agents: vec![],
             catalog_version: None,
             scope: SkillAssignmentScope::All,
             provenance: ProvenanceRecord {
@@ -299,12 +303,12 @@ mod assignment_projection_tests {
             skills_availability: Some(SkillsObservationAvailability::Available),
             ..ObservedState::default()
         };
-        let fresh_row = skill_matrix_row(&target(), &[assignment()], Some(&fresh));
+        let fresh_row = skill_matrix_row(&target(), &[assignment()], Some(&fresh)).unwrap();
         assert_eq!(
             fresh_row.differences.fields[0].state,
             fleet_core::DifferenceState::Missing
         );
-        let offline_row = skill_matrix_row(&target(), &[assignment()], None);
+        let offline_row = skill_matrix_row(&target(), &[assignment()], None).unwrap();
         assert_eq!(
             offline_row.differences.fields[0].state,
             fleet_core::DifferenceState::Unknown

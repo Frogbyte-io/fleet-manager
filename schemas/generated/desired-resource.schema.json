@@ -587,11 +587,20 @@
               "catalogVersionId": {
                 "default": null,
                 "description": "The Fleet catalog version this assignment pins, when Fleet owns the\nskill content. External Skills Manager entries may omit it.",
-                "maxLength": 80,
+                "maxLength": 128,
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "denyAgents": {
+                "default": [],
+                "description": "Agents explicitly excluded even if another matching assignment\nincludes the skill. Deny wins over include.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
               },
               "deployTo": {
                 "description": "The coding agents receiving the skill.",

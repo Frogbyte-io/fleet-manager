@@ -35,6 +35,37 @@ fn minimal_fixture_validates_on_the_rust_library_path() {
 }
 
 #[test]
+fn skill_preset_pins_and_identity_components_are_semantically_validated() {
+    let diagnostics = validate_sources(&[SourceDocument {
+        path: "inline/invalid-skill-assignment.yaml".into(),
+        yaml: r#"apiVersion: fleet.frogbyte.io/v1alpha1
+kind: SkillPreset
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58a012
+  name: bad-assignment
+spec:
+  skillId: "bad/skill"
+  catalogId: " "
+  catalogVersionId: version-1
+  scope:
+    type: all
+  deployTo:
+    - "bad/agent"
+  denyAgents: []
+"#
+        .to_owned(),
+    }]);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "FM_SCHEMA_SEMANTIC_INVALID_SKILL_ASSIGNMENT")
+            .count(),
+        3,
+        "mismatched catalog pins and slash-delimited skill/agent IDs are rejected"
+    );
+}
+
+#[test]
 fn every_valid_fixture_validates() {
     // The fixtures are one candidate revision: they validate in a single
     // call, so identities must be unique across all files and documents.

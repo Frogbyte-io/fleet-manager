@@ -57,6 +57,9 @@ pub struct ObservedState {
     /// Pinned Fleet catalog versions observed on the machine as
     /// (catalog id, version id, agent) tuples.
     pub catalog_skills: Vec<(String, String, String)>,
+    /// Whether the dedicated managed-catalog version observation answered.
+    /// This is separate from the ordinary skill deployment inventory.
+    pub catalog_skills_answered: Option<bool>,
     /// The checkouts observed on the machine.
     pub checkouts: Vec<ObservedCheckout>,
     /// Whether mise answered at all: `None`/`Some(false)` means the
@@ -254,10 +257,42 @@ impl ObservedState {
             tools,
             skills,
             catalog_skills: Vec::new(),
+            catalog_skills_answered: None,
             checkouts,
             mise_answered: Some(mise_ran),
             skills_answered: Some(skills_ran),
             skills_availability: None,
+            checkouts_answered: Some(checkouts_ran),
+        }
+    }
+
+    /// Builds observations with an explicit catalog-version observation.
+    /// A regular Skills Manager deployment response does not imply that
+    /// managed catalog versions were observed.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_observations_with_catalog_versions(
+        tools: Vec<ObservedTool>,
+        skills: Vec<ObservedSkill>,
+        catalog_skills: Vec<(String, String, String)>,
+        checkouts: Vec<ObservedCheckout>,
+        mise_ran: bool,
+        skills_availability: SkillsObservationAvailability,
+        catalog_skills_ran: bool,
+        checkouts_ran: bool,
+    ) -> Self {
+        Self {
+            tools,
+            skills,
+            catalog_skills,
+            catalog_skills_answered: Some(catalog_skills_ran),
+            checkouts,
+            mise_answered: Some(mise_ran),
+            skills_answered: Some(matches!(
+                skills_availability,
+                SkillsObservationAvailability::Available
+            )),
+            skills_availability: Some(skills_availability),
             checkouts_answered: Some(checkouts_ran),
         }
     }
@@ -412,7 +447,7 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
                     "the deployment status did not answer; the machine's catalog skill state is unknown",
                 ));
             }
-            None if observed.skills_answered.is_none_or(|answered| !answered) => {
+            _ if observed.catalog_skills_answered != Some(true) => {
                 set.push(FieldDifference::unknown(
                     &identity,
                     Some(desired_version),
@@ -435,6 +470,32 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
                         }
                     }
                 }
+            }
+        }
+    }
+    if observed.catalog_skills_answered == Some(true)
+        && matches!(
+            observed.skills_availability,
+            Some(SkillsObservationAvailability::Available)
+        )
+    {
+        for (catalog_id, version_id, agent) in &observed.catalog_skills {
+            let desired_pin =
+                desired
+                    .catalog_skills
+                    .iter()
+                    .any(|(desired_catalog, _, desired_agent)| {
+                        desired_catalog == catalog_id && desired_agent == agent
+                    });
+            if !desired_pin {
+                set.push(FieldDifference::extra(
+                    &format!(
+                        "catalog-skill:{}/{}",
+                        fleet_core::redact_schemeless_credentials(catalog_id),
+                        fleet_core::redact_schemeless_credentials(agent)
+                    ),
+                    version_id,
+                ));
             }
         }
     }
@@ -667,6 +728,7 @@ mod tests {
             mise_answered: Some(true),
             skills_answered: Some(true),
             skills_availability: None,
+            catalog_skills_answered: None,
             checkouts_answered: Some(true),
         };
         let set = compare(&desired, &observed);
@@ -820,6 +882,7 @@ mod tests {
         };
         let missing = ObservedState {
             skills_answered: Some(true),
+            catalog_skills_answered: Some(true),
             skills_availability: Some(SkillsObservationAvailability::Available),
             ..ObservedState::default()
         };
@@ -830,6 +893,7 @@ mod tests {
 
         let old_version = ObservedState {
             catalog_skills: vec![("catalog-1".into(), "version-1".into(), "codex".into())],
+            catalog_skills_answered: Some(true),
             skills_answered: Some(true),
             skills_availability: Some(SkillsObservationAvailability::Available),
             ..ObservedState::default()
@@ -837,6 +901,24 @@ mod tests {
         let changed_field = compare(&desired, &old_version).fields.remove(0);
         assert_eq!(changed_field.state, DifferenceState::Changed);
         assert_eq!(changed_field.observed.as_deref(), Some("version-1"));
+
+        let removed_assignment = DesiredState::default();
+        let leftover = ObservedState {
+            catalog_skills: vec![("catalog-1".into(), "version-1".into(), "codex".into())],
+            catalog_skills_answered: Some(true),
+            skills_availability: Some(SkillsObservationAvailability::Available),
+            ..ObservedState::default()
+        };
+        let extra = compare(&removed_assignment, &leftover).fields.remove(0);
+        assert_eq!(extra.state, DifferenceState::Extra);
+
+        let no_catalog_observation = ObservedState {
+            skills_answered: Some(true),
+            skills_availability: Some(SkillsObservationAvailability::Available),
+            ..ObservedState::default()
+        };
+        let unknown = compare(&desired, &no_catalog_observation).fields.remove(0);
+        assert_eq!(unknown.state, DifferenceState::Unknown);
     }
 
     #[test]
@@ -954,6 +1036,7 @@ mod tests {
             mise_answered: Some(true),
             skills_answered: Some(true),
             skills_availability: Some(super::SkillsObservationAvailability::Available),
+            catalog_skills_answered: None,
             checkouts_answered: Some(true),
         };
         let set = compare(&desired, &observed);

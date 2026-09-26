@@ -433,13 +433,13 @@ async fn a_valid_plan_is_accepted() {
 }
 
 #[tokio::test]
-async fn a_catalog_skill_rollout_requires_a_version_pin_and_plan_bound_approval() {
+async fn a_catalog_skill_rollout_requires_a_version_pin_at_the_boundary() {
     let state = state_for(Arc::new(PermitAll));
     let mut body = body_for("m-1");
     body["actions"] = serde_json::json!([
         {"order": 1, "kind": "skills.catalog-rollout",
          "difference": {"identity": "catalog-skill:catalog-1/codex", "state": "missing",
-                        "desired": "version-2", "observed": null, "reason": null}},
+                        "desired": "catalog-1@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "observed": null, "reason": null}},
     ]);
     body["approvals"] = serde_json::json!([
         {"planId": "plan-1", "actionOrder": 1, "kind": "skills.catalog-rollout"},
@@ -449,6 +449,13 @@ async fn a_catalog_skill_rollout_requires_a_version_pin_and_plan_bound_approval(
 
     let state = state_for(Arc::new(PermitAll));
     body["actions"][0]["difference"]["desired"] = serde_json::Value::Null;
+    let (status, value) = call(state, "POST", "/machines/m-1/apply", Some(body.to_string())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+
+    let state = state_for(Arc::new(PermitAll));
+    body["actions"][0]["difference"]["identity"] =
+        serde_json::Value::String("catalog-skill: / ".to_owned());
+    body["actions"][0]["difference"]["desired"] = serde_json::Value::String("  ".to_owned());
     let (status, value) = call(state, "POST", "/machines/m-1/apply", Some(body.to_string())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
 }
