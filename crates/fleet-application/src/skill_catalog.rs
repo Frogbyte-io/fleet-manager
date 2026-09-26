@@ -52,6 +52,12 @@ pub struct SkillCatalogVersion {
     pub published_at: i64,
 }
 
+/// Builds the opaque continuation cursor for a catalog version page.
+#[must_use]
+pub fn skill_catalog_version_cursor(version: &SkillCatalogVersion) -> String {
+    format!("{}|{}", version.published_at, version.id)
+}
+
 /// New catalog entry request.
 #[derive(Clone, Debug)]
 pub struct NewSkillCatalogEntry {

@@ -15,7 +15,7 @@ use fleet_application::machine::{
     RegisterMachine,
 };
 use fleet_application::node::{GatewayState, NodeStatus};
-use fleet_application::operation::PortFailure;
+use fleet_application::operation::{CatalogRolloutTargetPort, PortFailure};
 use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
 
 /// The machine repository over a pool.
@@ -420,6 +420,22 @@ impl MachinePort for MachineRepository {
             .ok_or_else(|| PortFailure::NotFound {
                 what: format!("endpoint {endpoint_id:?}"),
             })
+    }
+}
+
+#[async_trait]
+impl CatalogRolloutTargetPort for MachineRepository {
+    async fn endpoint_kind(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<Option<EndpointKind>, PortFailure> {
+        let machine = <Self as MachinePort>::get(self, machine_id).await?;
+        Ok(machine
+            .endpoints
+            .into_iter()
+            .find(|endpoint| endpoint.id == endpoint_id)
+            .map(|endpoint| endpoint.kind))
     }
 }
 

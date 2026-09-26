@@ -438,7 +438,10 @@ pub async fn list_catalog_versions(
     let has_more = v.len() > usize::try_from(limit).unwrap_or(0);
     v.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     let next_cursor = has_more
-        .then(|| v.last().map(|version| version.id.clone()))
+        .then(|| {
+            v.last()
+                .map(fleet_application::skill_catalog::skill_catalog_version_cursor)
+        })
         .flatten();
     Ok(Json(Page {
         items: v.into_iter().map(Into::into).collect(),

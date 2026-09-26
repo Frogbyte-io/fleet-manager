@@ -1982,8 +1982,9 @@ else
   if [ "$fleet_git" = "true" ]; then
     "$fleet_cli" --json skills set-source "$fleet_name" --git-url "$fleet_reference" --force
   else
+    command -v jq >/dev/null 2>&1 || { echo "jq is required to validate an existing non-Git skill source" >&2; exit 3; }
     fleet_existing=$("$fleet_cli" --json skills show "$fleet_name")
-    if printf '%s' "$fleet_existing" | grep -Fq "\"source_ref\":\"$fleet_reference\""; then
+    if printf '%s' "$fleet_existing" | jq -e --arg reference "$fleet_reference" '.source_ref == $reference' >/dev/null 2>&1; then
       "$fleet_cli" --json skills update "$fleet_name"
     else
       echo "the existing skill uses a different non-Git source; refusing to remove and reinstall it" >&2
@@ -2205,6 +2206,55 @@ mod tests {
         assert!(calls.contains("skills set-source release-notes --git-url https://github.com/example/skills/tree/v2.1.0/release-notes --force"));
         assert!(calls.contains("skills deploy release-notes codex"));
         assert!(!calls.contains("skills update release-notes"));
+    }
+
+    #[test]
+    fn referenced_non_git_rollout_updates_only_when_json_source_ref_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let reference = "file:///srv/fleet/catalog/hello-world";
+        for (name, show_json, succeeds) in [
+            (
+                "matching",
+                r#"{ "name": "hello-world", "source_ref": "file:///srv/fleet/catalog/hello-world" }"#,
+                true,
+            ),
+            (
+                "mismatched",
+                r#"{ "name": "hello-world", "source_ref": "file:///srv/other/hello-world" }"#,
+                false,
+            ),
+            ("malformed", "not json", false),
+        ] {
+            let home = root.path().join(name);
+            let bin = home.join(".local/bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let log = home.join("calls.log");
+            let cli = bin.join("skills-manager-cli");
+            std::fs::write(
+                &cli,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2 $3\" in\n  'skills show') printf '%s\\n' \"$SHOW_JSON\" ;;\n  'skills update'|'skills deploy'|'skills status') printf '{{}}\\n' ;;\n  *) exit 8 ;;\nesac\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(referenced_rollout_script())
+                .arg("fleet-rollout")
+                .args(["hello-world", reference, "false", "1", "codex"])
+                .env("HOME", &home)
+                .env("SHOW_JSON", show_json)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), succeeds, "case: {name}");
+            let calls = std::fs::read_to_string(log).unwrap();
+            assert_eq!(calls.contains("skills update hello-world"), succeeds);
+            assert_eq!(calls.contains("skills deploy hello-world codex"), succeeds);
+        }
     }
 
     #[test]

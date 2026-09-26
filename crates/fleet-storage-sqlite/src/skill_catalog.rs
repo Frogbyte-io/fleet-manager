@@ -142,15 +142,30 @@ impl SkillCatalogPort for SkillCatalogRepository {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<Vec<SkillCatalogVersion>, String> {
-        let rows = sqlx::query("SELECT id, catalog_id, name, description, content_digest, content_json, published_at FROM skill_catalog_versions WHERE catalog_id = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id ASC LIMIT ?3")
+        let cursor = cursor.map(parse_version_cursor).transpose()?;
+        let rows = sqlx::query("SELECT id, catalog_id, name, description, content_digest, content_json, published_at FROM skill_catalog_versions WHERE catalog_id = ?1 AND (?2 IS NULL OR published_at < ?2 OR (published_at = ?2 AND id > ?3)) ORDER BY published_at DESC, id ASC LIMIT ?4")
             .bind(id)
-            .bind(cursor)
+            .bind(cursor.as_ref().map(|(published_at, _)| *published_at))
+            .bind(cursor.as_ref().map(|(_, id)| id.as_str()))
             .bind(i64::from(limit.saturating_add(1)))
             .fetch_all(&self.pool)
             .await
             .map_err(|e| format!("list versions failed: {e}"))?;
         rows.iter().map(Self::version).collect()
     }
+}
+
+fn parse_version_cursor(cursor: &str) -> Result<(i64, String), String> {
+    let Some((published_at, id)) = cursor.split_once('|') else {
+        return Err("invalid skill catalog version cursor".to_owned());
+    };
+    let published_at = published_at
+        .parse::<i64>()
+        .map_err(|_| "invalid skill catalog version cursor".to_owned())?;
+    if id.is_empty() {
+        return Err("invalid skill catalog version cursor".to_owned());
+    }
+    Ok((published_at, id.to_owned()))
 }
 
 fn is_unique(error: &sqlx::Error) -> bool {

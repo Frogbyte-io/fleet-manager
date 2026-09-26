@@ -18,3 +18,8 @@ directories directly. Referenced skills keep their upstream source and pinned
 revision where available. Separate GitHub subpath and revision pins must both
 be present; Fleet maps them to the documented `/tree/<revision>/<subpath>`
 install form and never guesses a repository's default branch.
+
+When an existing non-Git skill is rolled out, Fleet updates it only if the
+Skills Manager JSON `source_ref` exactly matches the catalog reference. This
+check parses the JSON with `jq`; if `jq` is unavailable or the source differs,
+the rollout fails closed without removing and reinstalling the skill.

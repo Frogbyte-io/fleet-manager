@@ -1,6 +1,6 @@
 use fleet_application::skill_catalog::{
     SkillCatalogContent, SkillCatalogFile, SkillCatalogPort, SkillCatalogSource,
-    SkillCatalogVersion,
+    SkillCatalogVersion, skill_catalog_version_cursor,
 };
 use fleet_storage_sqlite::{SkillCatalogRepository, Store};
 
@@ -79,4 +79,57 @@ async fn drafts_are_mutable_and_published_versions_are_immutable_and_deduplicate
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn version_pages_follow_publication_time_and_use_a_stable_composite_cursor() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("controller.sqlite"))
+        .await
+        .unwrap();
+    let repository = SkillCatalogRepository::new(store.pool().clone());
+    let draft = repository
+        .create(
+            &content("---\nname: hello-world\ndescription: Do useful work\n---\n# First\n"),
+            1,
+        )
+        .await
+        .unwrap();
+    let mut contents = ["First", "Second", "Third"]
+        .into_iter()
+        .map(|heading| {
+            content(&format!(
+                "---\nname: hello-world\ndescription: Do useful work\n---\n# {heading}\n"
+            ))
+        })
+        .collect::<Vec<_>>();
+    contents.sort_by_key(|entry| entry.validate_and_digest().unwrap());
+    let mut versions = Vec::new();
+    for (index, entry) in contents.into_iter().enumerate() {
+        let digest = entry.validate_and_digest().unwrap();
+        let version = SkillCatalogVersion {
+            id: format!("{}@{digest}", draft.id),
+            catalog_id: draft.id.clone(),
+            name: entry.name.clone(),
+            description: entry.description.clone(),
+            content_digest: digest,
+            content: entry,
+            published_at: [100, 200, 200][index],
+        };
+        versions.push(repository.publish(&draft.id, &version).await.unwrap());
+    }
+
+    let first_page = repository.list_versions(&draft.id, None, 1).await.unwrap();
+    assert_eq!(first_page.len(), 2, "one requested row plus one look-ahead");
+    assert_eq!(first_page[0].published_at, 200);
+    assert_eq!(first_page[1].published_at, 200);
+    assert!(first_page[0].id < first_page[1].id);
+    let cursor = skill_catalog_version_cursor(&first_page[0]);
+    let second_page = repository
+        .list_versions(&draft.id, Some(&cursor), 1)
+        .await
+        .unwrap();
+    assert_eq!(second_page[0].id, first_page[1].id);
+    assert_eq!(second_page[1].published_at, 100);
+    assert_eq!(versions.len(), 3);
 }

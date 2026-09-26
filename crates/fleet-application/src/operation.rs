@@ -539,7 +539,65 @@ pub struct NewOperation {
 pub struct Operations {
     pub(crate) port: Arc<dyn OperationPort>,
     audit: Arc<dyn AuditPort>,
+    catalog_rollout_targets: Option<Arc<dyn CatalogRolloutTargetPort>>,
     pub(crate) events: Option<Arc<crate::events::EventHub>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogRolloutPayload {
+    version_id: String,
+    catalog_id: String,
+    machine_id: String,
+    endpoint_id: String,
+    agents: Vec<String>,
+    timeout_seconds: u64,
+}
+
+fn catalog_rollout_payload(
+    new: &NewOperation,
+) -> Result<Option<CatalogRolloutPayload>, OperationUseCaseError> {
+    if new.kind != "skills.catalog-rollout" {
+        return Ok(None);
+    }
+    let payload = new
+        .payload_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<CatalogRolloutPayload>(json).ok())
+        .ok_or(OperationUseCaseError::Invalid {
+            detail: "the skills.catalog-rollout payload is malformed".to_owned(),
+        })?;
+    let unique_agents: std::collections::HashSet<_> = payload.agents.iter().collect();
+    if payload.version_id.trim().is_empty()
+        || payload.catalog_id.trim().is_empty()
+        || payload.machine_id.trim().is_empty()
+        || payload.endpoint_id.trim().is_empty()
+        || payload.agents.is_empty()
+        || payload.agents.len() > 32
+        || unique_agents.len() != payload.agents.len()
+        || payload.agents.iter().any(|agent| agent.trim().is_empty())
+        || !(1..=3600).contains(&payload.timeout_seconds)
+    {
+        return Err(OperationUseCaseError::Invalid {
+            detail: "catalog rollout requires a version, catalog, machine, SSH endpoint, 1..=32 unique agents, and a timeout in 1..=3600 seconds".to_owned(),
+        });
+    }
+    Ok(Some(payload))
+}
+
+/// Reads endpoint kinds needed to validate catalog rollout targets.
+#[async_trait]
+pub trait CatalogRolloutTargetPort: fmt::Debug + Send + Sync {
+    /// Returns the endpoint kind for a machine endpoint, or `None` when absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a backend failure when the machine store cannot be read.
+    async fn endpoint_kind(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+    ) -> Result<Option<fleet_core::EndpointKind>, PortFailure>;
 }
 
 impl Operations {
@@ -549,6 +607,7 @@ impl Operations {
         Self {
             port,
             audit,
+            catalog_rollout_targets: None,
             events: None,
         }
     }
@@ -563,6 +622,38 @@ impl Operations {
         Self {
             port,
             audit,
+            catalog_rollout_targets: None,
+            events: Some(events),
+        }
+    }
+
+    /// Composes the service with target validation for catalog rollouts.
+    #[must_use]
+    pub fn new_with_catalog_rollout_targets(
+        port: Arc<dyn OperationPort>,
+        audit: Arc<dyn AuditPort>,
+        targets: Arc<dyn CatalogRolloutTargetPort>,
+    ) -> Self {
+        Self {
+            port,
+            audit,
+            catalog_rollout_targets: Some(targets),
+            events: None,
+        }
+    }
+
+    /// Composes the service with events and target validation for catalog rollouts.
+    #[must_use]
+    pub fn new_with_events_and_catalog_rollout_targets(
+        port: Arc<dyn OperationPort>,
+        audit: Arc<dyn AuditPort>,
+        events: Arc<crate::events::EventHub>,
+        targets: Arc<dyn CatalogRolloutTargetPort>,
+    ) -> Self {
+        Self {
+            port,
+            audit,
+            catalog_rollout_targets: Some(targets),
             events: Some(events),
         }
     }
@@ -766,6 +857,7 @@ impl Operations {
                 detail: format!("the payload exceeds {MAX_PAYLOAD_JSON} bytes"),
             });
         }
+        let rollout_payload = catalog_rollout_payload(new)?;
 
         // The checkout and skills kinds act on a machine through SSH, so
         // their creation carries the machine-scoped authorization the
@@ -798,24 +890,44 @@ impl Operations {
             )
             .map_err(OperationUseCaseError::Denied)?;
             if new.kind == "skills.catalog-rollout" {
-                let catalog_id = new
-                    .payload_json
-                    .as_deref()
-                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                    .and_then(|payload| payload["catalogId"].as_str().map(str::to_owned))
-                    .ok_or(OperationUseCaseError::Invalid {
-                        detail: "the skills.catalog-rollout payload must carry a catalogId"
-                            .to_owned(),
-                    })?;
+                let rollout = rollout_payload
+                    .as_ref()
+                    .expect("catalog rollout parsed above");
                 authorize(
                     authorizer,
                     AccessRequest {
                         principal_id,
                         action: Permission::SkillsRead,
-                        resource: Some(&catalog_id),
+                        resource: Some(&rollout.catalog_id),
                     },
                 )
                 .map_err(OperationUseCaseError::Denied)?;
+                let targets = self.catalog_rollout_targets.as_ref().ok_or(
+                    OperationUseCaseError::Invalid {
+                        detail: "catalog rollout target validation is unavailable".to_owned(),
+                    },
+                )?;
+                let endpoint_kind = targets
+                    .endpoint_kind(&rollout.machine_id, &rollout.endpoint_id)
+                    .await
+                    .map_err(|failure| match failure {
+                        PortFailure::NotFound { what } => OperationUseCaseError::NotFound { what },
+                        failure => OperationUseCaseError::Backend {
+                            context: "catalog rollout target lookup",
+                            detail: failure.to_string(),
+                        },
+                    })?
+                    .ok_or(OperationUseCaseError::NotFound {
+                        what: format!(
+                            "endpoint {} on machine {}",
+                            rollout.endpoint_id, rollout.machine_id
+                        ),
+                    })?;
+                if endpoint_kind != fleet_core::EndpointKind::Ssh {
+                    return Err(OperationUseCaseError::Invalid {
+                        detail: "catalog rollout requires an SSH endpoint".to_owned(),
+                    });
+                }
             }
         } else if new.kind == "lab.provision" {
             if !allow_lab_provision {
@@ -1312,10 +1424,12 @@ mod catalog_rollout_authorization_tests {
     use async_trait::async_trait;
 
     use super::{
-        AuditPort, NewOperation, Operation, OperationPort, Operations, PortFailure, QueueDepths,
+        AuditPort, CatalogRolloutTargetPort, NewOperation, Operation, OperationPort, Operations,
+        PortFailure, QueueDepths,
     };
     use crate::audit::{AuditIntent, AuditOutcome};
     use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
+    use fleet_core::EndpointKind;
 
     #[derive(Debug, Default)]
     struct RecordingPort(Mutex<Vec<Operation>>);
@@ -1452,6 +1566,20 @@ mod catalog_rollout_authorization_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingTargets(Option<EndpointKind>);
+
+    #[async_trait]
+    impl CatalogRolloutTargetPort for RecordingTargets {
+        async fn endpoint_kind(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<EndpointKind>, PortFailure> {
+            Ok(self.0)
+        }
+    }
+
     fn request(payload: &serde_json::Value) -> NewOperation {
         NewOperation {
             kind: "skills.catalog-rollout".to_owned(),
@@ -1485,7 +1613,11 @@ mod catalog_rollout_authorization_tests {
     #[tokio::test]
     async fn catalog_rollout_requires_catalog_read_after_machine_deploy_permission() {
         let port = Arc::new(RecordingPort::default());
-        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+        let operations = Operations::new_with_catalog_rollout_targets(
+            port.clone(),
+            Arc::new(RecordingAudit),
+            Arc::new(RecordingTargets(Some(EndpointKind::Ssh))),
+        );
         let authorizer = Policy {
             deny: Some(Permission::SkillsRead),
             seen: Mutex::new(Vec::new()),
@@ -1494,7 +1626,10 @@ mod catalog_rollout_authorization_tests {
             .create(
                 &authorizer,
                 "operator",
-                &request(&serde_json::json!({"machineId":"m1","catalogId":"c1"})),
+                &request(&serde_json::json!({
+                    "machineId":"m1", "endpointId":"ssh1", "versionId":"v1", "catalogId":"c1",
+                    "agents":["codex"], "timeoutSeconds":60
+                })),
             )
             .await;
         assert!(matches!(
@@ -1521,7 +1656,11 @@ mod catalog_rollout_authorization_tests {
     #[tokio::test]
     async fn catalog_rollout_creation_passes_both_scoped_authorization_checks() {
         let port = Arc::new(RecordingPort::default());
-        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+        let operations = Operations::new_with_catalog_rollout_targets(
+            port.clone(),
+            Arc::new(RecordingAudit),
+            Arc::new(RecordingTargets(Some(EndpointKind::Ssh))),
+        );
         let authorizer = Policy {
             deny: None,
             seen: Mutex::new(Vec::new()),
@@ -1530,7 +1669,10 @@ mod catalog_rollout_authorization_tests {
             .create(
                 &authorizer,
                 "operator",
-                &request(&serde_json::json!({"machineId":"m1","catalogId":"c1"})),
+                &request(&serde_json::json!({
+                    "machineId":"m1", "endpointId":"ssh1", "versionId":"v1", "catalogId":"c1",
+                    "agents":["codex"], "timeoutSeconds":60
+                })),
             )
             .await
             .unwrap();
@@ -1540,5 +1682,63 @@ mod catalog_rollout_authorization_tests {
         assert!(seen.contains(&Permission::SkillsDeploy));
         assert!(seen.contains(&Permission::SkillsRead));
         assert_eq!(port.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn catalog_rollout_rejects_duplicate_agents_and_out_of_range_timeouts() {
+        for payload in [
+            serde_json::json!({
+                "machineId":"m1", "endpointId":"ssh1", "versionId":"v1", "catalogId":"c1",
+                "agents":["codex", "codex"], "timeoutSeconds":60
+            }),
+            serde_json::json!({
+                "machineId":"m1", "endpointId":"ssh1", "versionId":"v1", "catalogId":"c1",
+                "agents":["codex"], "timeoutSeconds":3601
+            }),
+        ] {
+            let port = Arc::new(RecordingPort::default());
+            let operations = Operations::new(port.clone(), Arc::new(RecordingAudit));
+            let authorizer = Policy {
+                deny: None,
+                seen: Mutex::new(Vec::new()),
+            };
+            let result = operations
+                .create(&authorizer, "operator", &request(&payload))
+                .await;
+            assert!(matches!(
+                result,
+                Err(super::OperationUseCaseError::Invalid { .. })
+            ));
+            assert!(port.0.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_rollout_rejects_non_ssh_endpoint_before_creation() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new_with_catalog_rollout_targets(
+            port.clone(),
+            Arc::new(RecordingAudit),
+            Arc::new(RecordingTargets(Some(EndpointKind::Fleetd))),
+        );
+        let authorizer = Policy {
+            deny: None,
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = operations
+            .create(
+                &authorizer,
+                "operator",
+                &request(&serde_json::json!({
+                    "machineId":"m1", "endpointId":"node1", "versionId":"v1", "catalogId":"c1",
+                    "agents":["codex"], "timeoutSeconds":60
+                })),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::OperationUseCaseError::Invalid { .. })
+        ));
+        assert!(port.0.lock().unwrap().is_empty());
     }
 }

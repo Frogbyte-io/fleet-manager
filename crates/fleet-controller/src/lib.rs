@@ -189,11 +189,13 @@ fn api_state(
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
         std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
     if let Some(pool) = db {
-        let operations = fleet_application::operation::Operations::new_with_events(
-            std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
-            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
-            events.clone(),
-        );
+        let operations =
+            fleet_application::operation::Operations::new_with_events_and_catalog_rollout_targets(
+                std::sync::Arc::new(fleet_storage_sqlite::OperationRepository::new(pool.clone())),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+                events.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
+            );
         let machines = fleet_application::machine::Machines::new(
             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
