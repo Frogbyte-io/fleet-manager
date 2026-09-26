@@ -313,9 +313,8 @@ impl SkillsExecutor {
         let payload: LibraryPayload = payload(operation)?;
         let action = operation.kind.as_str();
         let missing_required = match action {
-            "skills.install" | "skills.remove" => {
-                payload.reference.is_none() && payload.references.is_empty()
-            }
+            "skills.install" => payload.reference.is_none(),
+            "skills.remove" => payload.reference.is_none() && payload.references.is_empty(),
             "skills.adopt" => payload.path.is_none() && payload.paths.is_empty(),
             "skills.set-source" => payload.reference.is_none() || payload.source_url.is_none(),
             "presets.create" | "presets.update" | "presets.delete" | "presets.deploy"

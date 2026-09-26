@@ -482,10 +482,8 @@ pub async fn start_skills_operation(
     });
     if let Some(skill_id) = &request.skill_id {
         payload["skillId"] = serde_json::json!(skill_id);
-        payload["agents"] = serde_json::json!(request.agents);
-        payload["dryRun"] = serde_json::json!(request.dry_run);
     }
-    if request.operation.is_some() {
+    if request.skill_id.is_some() || request.operation.is_some() {
         payload["agents"] = serde_json::json!(request.agents);
         payload["dryRun"] = serde_json::json!(request.dry_run);
     }

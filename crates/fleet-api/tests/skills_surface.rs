@@ -60,6 +60,23 @@ impl fleet_application::authz::Authorizer for DenySkills {
 }
 
 #[derive(Debug)]
+struct DenySkillsModify;
+impl fleet_application::authz::Authorizer for DenySkillsModify {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        if request.action == fleet_application::authz::Permission::SkillsModify {
+            fleet_application::authz::Decision::deny(
+                fleet_application::authz::ReasonId::UnknownPrincipal,
+            )
+        } else {
+            fleet_application::authz::Decision::allow()
+        }
+    }
+}
+
+#[derive(Debug)]
 struct DenySecondMachine;
 impl fleet_application::authz::Authorizer for DenySecondMachine {
     fn decide(
@@ -467,7 +484,13 @@ async fn a_probe_starts_a_durable_operation() {
         "timeoutSeconds": 30,
     })
     .to_string();
-    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    let (status, value) = call(
+        state.clone(),
+        "POST",
+        "/machines/m-1/skills/operations",
+        Some(body),
+    )
+    .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     assert_eq!(value["data"]["kind"], "skills.probe");
 }
@@ -569,13 +592,29 @@ async fn skill_removal_requires_explicit_confirmation() {
         "timeoutSeconds": 30,
     })
     .to_string();
-    let (status, _) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    let (status, value) = call(
+        state.clone(),
+        "POST",
+        "/machines/m-1/skills/operations",
+        Some(body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["code"], "invalid_request");
+
+    let body = serde_json::json!({
+        "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
+        "operation": "remove", "reference": "db", "confirm": true, "timeoutSeconds": 30
+    })
+    .to_string();
+    let (status, value) = call(state, "POST", "/machines/m-1/skills/operations", Some(body)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{value}");
+    assert_eq!(value["data"]["kind"], "skills.remove");
 }
 
 #[tokio::test]
 async fn library_mutation_is_denied_without_skills_modify() {
-    let state = state_for(Arc::new(DenySkills));
+    let state = state_for(Arc::new(DenySkillsModify));
     let body = serde_json::json!({
         "machineId": "m-1", "endpointId": "e-1", "auth": {"type":"agent"},
         "operation": "install", "reference": "org/repo/skill", "timeoutSeconds": 30

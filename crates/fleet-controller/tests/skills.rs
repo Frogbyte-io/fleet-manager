@@ -141,6 +141,7 @@ fn install_stub_cli(home: &str, sha_of_stub: Option<&str>) -> String {
     let path = format!("{bin_dir}/skills-manager-cli");
     let stub = r#"#!/usr/bin/env bash
 echo "$@" >> /tmp/fleet-stub-cli.log
+printf '%q\n' "$@" >> /tmp/fleet-stub-argv.log
 [ "$1" = "--json" ] && shift
 case "$1" in
   --version) echo '{"version":"1.40.0"}' ;;
@@ -320,6 +321,13 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     });
     let (state, _, error) = fixture.run_kind("skills.install", base.clone()).await;
     assert_eq!(state, "failed", "a reference is required: {error:?}");
+    let mut references_only = base.clone();
+    references_only["references"] = serde_json::json!(["org/repo/skill"]);
+    let (state, _, error) = fixture.run_kind("skills.install", references_only).await;
+    assert_eq!(
+        state, "failed",
+        "install requires one --reference: {error:?}"
+    );
     let mut install = base.clone();
     install["reference"] = serde_json::json!("org/repo/skill one");
     install["git"] = serde_json::json!(true);
@@ -366,6 +374,14 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     assert!(
         log.contains("skills remove skill-a skill b --yes --dry-run"),
         "{log}"
+    );
+    let argv = std::fs::read_to_string("/tmp/fleet-stub-argv.log").unwrap();
+    assert!(
+        argv.lines()
+            .collect::<Vec<_>>()
+            .windows(5)
+            .any(|args| { args == ["skills", "remove", "skill-a", "skill\\ b", "--yes"] }),
+        "{argv}"
     );
 
     let adopt = serde_json::json!({

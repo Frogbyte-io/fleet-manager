@@ -690,30 +690,39 @@ impl Operations {
                 .is_some_and(skills_payload_has_credentials)
         {
             return Err(OperationUseCaseError::Invalid {
-                detail: "credential-bearing skills source URLs are not accepted".to_owned(),
+                detail: "credential-bearing URLs are not accepted".to_owned(),
             });
         }
 
-        if new
-            .payload_json
-            .as_deref()
-            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-            .is_some_and(|payload| payload["dryRun"].as_bool() == Some(true))
-            && !matches!(
-                new.kind.as_str(),
-                "skills.deploy"
-                    | "skills.undeploy"
-                    | "skills.remove"
-                    | "skills.adopt"
-                    | "skills.set-source"
-                    | "presets.delete"
-                    | "presets.deploy"
-                    | "presets.undeploy"
-            )
+        if (new.kind.starts_with("skills.") || new.kind.starts_with("presets."))
+            && let Some(payload) = new
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            && let Some(dry_run) = payload.get("dryRun")
         {
-            return Err(OperationUseCaseError::Invalid {
-                detail: "the pinned CLI does not support dry-run for this operation".to_owned(),
-            });
+            let Some(dry_run) = dry_run.as_bool() else {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "dryRun must be a boolean".to_owned(),
+                });
+            };
+            if dry_run
+                && !matches!(
+                    new.kind.as_str(),
+                    "skills.deploy"
+                        | "skills.undeploy"
+                        | "skills.remove"
+                        | "skills.adopt"
+                        | "skills.set-source"
+                        | "presets.delete"
+                        | "presets.deploy"
+                        | "presets.undeploy"
+                )
+            {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "the pinned CLI does not support dry-run for this operation".to_owned(),
+                });
+            }
         }
 
         if let Some(payload_json) = &new.payload_json
@@ -1117,7 +1126,33 @@ fn skills_payload_has_credentials(payload: &str) -> bool {
         candidates.extend(references.iter().filter_map(serde_json::Value::as_str));
     }
     candidates.into_iter().any(|value| {
-        value.chars().any(char::is_control)
+        let credential_query = value.split_once('?').is_some_and(|(_, query)| {
+            query.split('&').any(|pair| {
+                let key = pair
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                [
+                    "token",
+                    "access_token",
+                    "refresh_token",
+                    "password",
+                    "passwd",
+                    "secret",
+                    "client_secret",
+                    "api_key",
+                    "apikey",
+                    "auth",
+                    "signature",
+                    "sig",
+                    "credential",
+                ]
+                .contains(&key.as_str())
+            })
+        });
+        credential_query
+            || value.chars().any(char::is_control)
             || value.split_once("://").is_some_and(|(_, rest)| {
                 let authority = rest.split('/').next().unwrap_or_default();
                 authority.contains('@')
@@ -1172,7 +1207,7 @@ impl OperationUseCaseError {
 
 #[cfg(test)]
 mod skills_permission_tests {
-    use super::{CREATABLE_KINDS, machine_scoped_kind_permission};
+    use super::{CREATABLE_KINDS, machine_scoped_kind_permission, skills_payload_has_credentials};
     use crate::authz::Permission;
 
     #[test]
@@ -1205,5 +1240,18 @@ mod skills_permission_tests {
                 "{kind}"
             );
         }
+    }
+
+    #[test]
+    fn skills_source_credential_queries_are_rejected_without_a_url_scheme() {
+        assert!(skills_payload_has_credentials(
+            r#"{"reference":"skill?access_token=secret"}"#
+        ));
+        assert!(skills_payload_has_credentials(
+            r#"{"sourceUrl":"org/repo?token=secret"}"#
+        ));
+        assert!(!skills_payload_has_credentials(
+            r#"{"reference":"org/repo/skill?branch=stable"}"#
+        ));
     }
 }

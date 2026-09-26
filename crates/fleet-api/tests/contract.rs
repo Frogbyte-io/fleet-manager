@@ -927,43 +927,68 @@ async fn an_unknown_kind_is_refused_with_the_invalid_request_code() {
 
 #[tokio::test]
 async fn generic_skills_removal_requires_explicit_confirmation() {
-    let (parts, body) = post_json(
-        &format!("{API_BASE_PATH}/operations"),
-        serde_json::json!({
-            "kind": "skills.remove",
-            "payload": {"machineId":"m-1", "confirm": false}
-        }),
-    )
-    .await;
+    let (router, port, _) = test_router();
+    let request = |confirm| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_BASE_PATH}/operations"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                "kind": "skills.remove",
+                "payloadJson": serde_json::json!({"machineId":"m-1", "confirm": confirm}).to_string()
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    };
+    let (parts, body) =
+        into_parts_json(router.clone().oneshot(request(false)).await.unwrap()).await;
     assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_request");
+    assert!(port.operations.lock().unwrap().is_empty());
+
+    let (parts, body) = into_parts_json(router.oneshot(request(true)).await.unwrap()).await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["data"]["kind"], "skills.remove");
 }
 
 #[tokio::test]
 async fn generic_skills_creation_rejects_credentials_before_persisting_payloads() {
-    let (parts, body) = post_json(
-        &format!("{API_BASE_PATH}/operations"),
-        serde_json::json!({
+    let (router, port, _) = test_router();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/operations"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "kind": "skills.install",
-            "payload": {"machineId":"m-1", "reference":"https://example.invalid/skill?access_token=do-not-store"}
-        }),
-    ).await;
+            "payloadJson": serde_json::json!({"machineId":"m-1", "reference":"https://example.invalid/skill?access_token=do-not-store"}).to_string()
+        })).unwrap()))
+        .unwrap();
+    let (parts, body) = into_parts_json(router.oneshot(request).await.unwrap()).await;
     assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!body.to_string().contains("do-not-store"));
+    assert!(port.operations.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn generic_skills_creation_rejects_unsupported_dry_run_flags() {
-    let (parts, body) = post_json(
-        &format!("{API_BASE_PATH}/operations"),
-        serde_json::json!({
+    let (router, port, _) = test_router();
+    for dry_run in [serde_json::json!(true), serde_json::json!("true")] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{API_BASE_PATH}/operations"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
             "kind": "skills.install",
-            "payload": {"machineId":"m-1", "reference":"org/repo/skill", "dryRun":true}
-        }),
-    )
-    .await;
-    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["code"], "invalid_request");
+                "payloadJson": serde_json::json!({"machineId":"m-1", "reference":"org/repo/skill", "dryRun":dry_run}).to_string()
+            })).unwrap()))
+            .unwrap();
+        let (parts, body) = into_parts_json(router.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "invalid_request");
+    }
+    assert!(port.operations.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
