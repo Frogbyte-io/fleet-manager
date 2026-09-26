@@ -403,6 +403,29 @@ impl SkillsExecutor {
             )
             .await;
         }
+        for (label, value) in [
+            ("name", payload.name.as_deref()),
+            ("description", payload.description.as_deref()),
+            ("icon", payload.icon.as_deref()),
+            ("sync preset", payload.sync_preset.as_deref()),
+            ("Git subpath", payload.git_subpath.as_deref()),
+            ("branch", payload.branch.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.chars().any(char::is_control)) {
+                return complete_failure(
+                    operations,
+                    &operation.id,
+                    "invalid_request",
+                    &format!("{label} must not contain control characters"),
+                )
+                .await;
+            }
+        }
+        if let Some(path) = payload.path.as_deref()
+            && (path.is_empty() || path.starts_with('-') || path.chars().any(char::is_control))
+        {
+            return complete_failure(operations, &operation.id, "invalid_request", "paths must be non-empty, must not start with a dash, and must not contain control characters").await;
+        }
         if action == "presets.update"
             && payload.name.is_none()
             && payload.description.is_none()
@@ -428,11 +451,9 @@ impl SkillsExecutor {
             }
             validate_id(reference, "a skill reference")?;
         }
-        if payload
-            .paths
-            .iter()
-            .any(|path| path.is_empty() || path.chars().any(char::is_control))
-        {
+        if payload.paths.iter().any(|path| {
+            path.is_empty() || path.starts_with('-') || path.chars().any(char::is_control)
+        }) {
             return complete_failure(
                 operations,
                 &operation.id,
