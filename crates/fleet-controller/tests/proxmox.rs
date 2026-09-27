@@ -102,7 +102,15 @@ impl PveTransport for FixedTransport {
                 pinned: Some(pinned.clone()),
             }),
             (Some(_), Behavior::Normal) => {
-                let body = if request.path.contains("/version") {
+                let body = if request.path == "/api2/json/nodes/pve/status" {
+                    include_str!(
+                        "../../providers/fleet-provider-proxmox/tests/fixtures/pve9/node-status.json"
+                    )
+                } else if request.path == "/api2/json/nodes/pve/storage" {
+                    include_str!(
+                        "../../providers/fleet-provider-proxmox/tests/fixtures/pve9/node-storage.json"
+                    )
+                } else if request.path.contains("/version") {
                     VERSION_BODY
                 } else if request.path.contains("/qemu/100/config") {
                     GUEST_100_CONFIG_BODY
@@ -342,6 +350,23 @@ async fn the_proxmox_surface_walks_create_observe_confirm_discover_delete() {
         .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert_eq!(body["data"]["pveVersion"], "9.2.2");
+    let capacities = body["data"]["nodeCapacities"].as_array().unwrap();
+    assert_eq!(capacities.len(), 1, "{body}");
+    assert_eq!(capacities[0]["node"], "pve");
+    assert_eq!(capacities[0]["cpuUsageRatio"], 0.125);
+    assert_eq!(capacities[0]["cpuCount"], 16);
+    assert_eq!(capacities[0]["memoryUsedBytes"], 16_835_707_904_u64);
+    assert_eq!(capacities[0]["memoryTotalBytes"], 67_342_831_616_u64);
+    assert_eq!(capacities[0]["observedAt"], body["data"]["observedAt"]);
+    assert_eq!(capacities[0]["storages"][0]["storage"], "local");
+    assert_eq!(
+        capacities[0]["storages"][0]["usedBytes"],
+        107_374_182_400_u64
+    );
+    assert_eq!(
+        capacities[0]["storages"][0]["totalBytes"],
+        536_870_912_000_u64
+    );
     let resources = body["data"]["resources"].as_array().unwrap();
     assert_eq!(resources.len(), 4, "{body}");
     assert!(

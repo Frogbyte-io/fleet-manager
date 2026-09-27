@@ -9383,6 +9383,7 @@
           "accountId",
           "pveVersion",
           "resources",
+          "nodeCapacities",
           "warnings",
           "reportedCount",
           "observedAt"
@@ -9391,6 +9392,13 @@
           "accountId": {
             "type": "string",
             "description": "The account that produced the snapshot."
+          },
+          "nodeCapacities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxNodeCapacityDto"
+            },
+            "description": "Current capacity observations for each discovered node."
           },
           "observedAt": {
             "type": "integer",
@@ -9437,6 +9445,68 @@
           "fingerprint": {
             "type": "string",
             "description": "The host certificate's SHA-256 fingerprint."
+          }
+        }
+      },
+      "ProxmoxNodeCapacityDto": {
+        "type": "object",
+        "description": "Current CPU, memory, and storage usage observed for one node.",
+        "required": [
+          "node",
+          "storages",
+          "observedAt"
+        ],
+        "properties": {
+          "cpuCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The node's logical CPU count, when available.",
+            "minimum": 0
+          },
+          "cpuUsageRatio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "CPU usage as a fraction between 0.0 and 1.0."
+          },
+          "memoryTotalBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total memory in bytes.",
+            "minimum": 0
+          },
+          "memoryUsedBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Used memory in bytes.",
+            "minimum": 0
+          },
+          "node": {
+            "type": "string",
+            "description": "The Proxmox node name."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the observation was taken."
+          },
+          "storages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxStorageCapacityDto"
+            },
+            "description": "Storage capacity reported by this node."
           }
         }
       },
@@ -9539,6 +9609,33 @@
             "type": "integer",
             "format": "int32",
             "description": "The guest's VMID.",
+            "minimum": 0
+          }
+        }
+      },
+      "ProxmoxStorageCapacityDto": {
+        "type": "object",
+        "description": "Used and total capacity for one storage pool.",
+        "required": [
+          "storage",
+          "usedBytes",
+          "totalBytes"
+        ],
+        "properties": {
+          "storage": {
+            "type": "string",
+            "description": "The Proxmox storage identifier."
+          },
+          "totalBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total capacity in bytes.",
+            "minimum": 0
+          },
+          "usedBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Used capacity in bytes.",
             "minimum": 0
           }
         }
@@ -11064,6 +11161,7 @@
               "accountId",
               "pveVersion",
               "resources",
+              "nodeCapacities",
               "warnings",
               "reportedCount",
               "observedAt"
@@ -11072,6 +11170,13 @@
               "accountId": {
                 "type": "string",
                 "description": "The account that produced the snapshot."
+              },
+              "nodeCapacities": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProxmoxNodeCapacityDto"
+                },
+                "description": "Current capacity observations for each discovered node."
               },
               "observedAt": {
                 "type": "integer",

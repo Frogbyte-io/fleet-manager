@@ -1,0 +1,1 @@
+{"data":[{"storage":"local","type":"dir","active":1,"enabled":1,"used":107374182400,"total":536870912000,"avail":429496729600},{"storage":"local-zfs","type":"zfspool","active":1,"enabled":1,"used":214748364800,"total":1073741824000,"avail":858993459200}]}

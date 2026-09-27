@@ -15,7 +15,8 @@ use axum::{
     http::StatusCode,
 };
 use fleet_application::proxmox::{
-    AssociatedGuest, NewProxmoxAccount, ProxmoxAccount, ProxmoxUseCaseError,
+    AssociatedGuest, NewProxmoxAccount, ProxmoxAccount, ProxmoxNodeCapacity,
+    ProxmoxStorageCapacity, ProxmoxUseCaseError,
 };
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use serde::{Deserialize, Serialize};
@@ -178,12 +179,70 @@ pub struct ProxmoxDiscoveryDto {
     pub pve_version: String,
     /// The normalized resources.
     pub resources: Vec<ProxmoxResourceDto>,
+    /// Current capacity observations for each discovered node.
+    pub node_capacities: Vec<ProxmoxNodeCapacityDto>,
     /// The per-resource normalization warnings.
     pub warnings: Vec<String>,
     /// The count the API reported.
     pub reported_count: usize,
     /// When the snapshot was taken.
     pub observed_at: i64,
+}
+
+/// Current CPU, memory, and storage usage observed for one node.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxNodeCapacityDto {
+    /// The Proxmox node name.
+    pub node: String,
+    /// CPU usage as a fraction between 0.0 and 1.0.
+    pub cpu_usage_ratio: Option<f64>,
+    /// The node's logical CPU count, when available.
+    pub cpu_count: Option<u64>,
+    /// Used memory in bytes.
+    pub memory_used_bytes: Option<u64>,
+    /// Total memory in bytes.
+    pub memory_total_bytes: Option<u64>,
+    /// Storage capacity reported by this node.
+    pub storages: Vec<ProxmoxStorageCapacityDto>,
+    /// When the observation was taken.
+    pub observed_at: i64,
+}
+
+/// Used and total capacity for one storage pool.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxStorageCapacityDto {
+    /// The Proxmox storage identifier.
+    pub storage: String,
+    /// Used capacity in bytes.
+    pub used_bytes: u64,
+    /// Total capacity in bytes.
+    pub total_bytes: u64,
+}
+
+impl From<ProxmoxStorageCapacity> for ProxmoxStorageCapacityDto {
+    fn from(storage: ProxmoxStorageCapacity) -> Self {
+        Self {
+            storage: storage.storage,
+            used_bytes: storage.used_bytes,
+            total_bytes: storage.total_bytes,
+        }
+    }
+}
+
+impl From<ProxmoxNodeCapacity> for ProxmoxNodeCapacityDto {
+    fn from(capacity: ProxmoxNodeCapacity) -> Self {
+        Self {
+            node: capacity.node,
+            cpu_usage_ratio: capacity.cpu_usage_ratio,
+            cpu_count: capacity.cpu_count,
+            memory_used_bytes: capacity.memory_used_bytes,
+            memory_total_bytes: capacity.memory_total_bytes,
+            storages: capacity.storages.into_iter().map(Into::into).collect(),
+            observed_at: capacity.observed_at,
+        }
+    }
 }
 
 /// One discovered guest with its Fleet-machine association candidates.
@@ -743,6 +802,11 @@ pub async fn discover_proxmox_cluster(
                 pve_version: resource.pve_version,
                 observed_at: resource.observed_at,
             })
+            .collect(),
+        node_capacities: discovery
+            .node_capacities
+            .into_iter()
+            .map(Into::into)
             .collect(),
         warnings: discovery.warnings,
         reported_count: discovery.reported_count,
