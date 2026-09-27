@@ -370,20 +370,37 @@ describe('FleetPage', () => {
     expect(wrapper.text()).toContain('listMachines failed (500)')
   })
 
-  it('fetches machines in one request and flags a truncated list', async () => {
-    // The machines endpoint has no cursor parameter: one request with the
-    // clamped limit is the whole list, and a reported next cursor means it was
-    // cut short, which is surfaced rather than hidden (#151).
-    listMachines.mockResolvedValueOnce(ok(page([machine()], 'more') as PageMachineDto))
+  it('paginates machines across nextCursor pages and flags only the safety cap', async () => {
+    // The machines endpoint pages by cursor now (#156): every machine
+    // loads across pages, and the warning appears only when the 20-page
+    // safety cap is hit.
+    listMachines
+      .mockResolvedValueOnce(ok(page([machine()], 'm-cursor') as PageMachineDto))
+      .mockResolvedValueOnce(ok(page([{ ...machine(), id: 'm2', name: 'second-host' }], null) as PageMachineDto))
     const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
     expect(wrapper.text()).toContain('build-host')
-    expect(listMachines).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('second-host')
+    expect(listMachines).toHaveBeenCalledTimes(2)
     expect(listMachines.mock.calls[0]![0]).toMatchObject({ limit: 200 })
-    expect(listMachines.mock.calls[0]![0]).not.toHaveProperty('cursor')
-    expect(wrapper.text()).toContain('Showing the first 200 machines — the machines API cannot page further yet (#151).')
+    expect(listMachines.mock.calls[1]![0]).toMatchObject({ limit: 200, cursor: 'm-cursor' })
+    expect(wrapper.text()).not.toContain('cannot page further yet')
+    expect(wrapper.text()).not.toContain('safety cap')
+  })
+
+  it('flags machines truncation only when the safety cap is hit', async () => {
+    // Every page reports another cursor; after 20 pages the walk stops
+    // and the warning is surfaced rather than hidden.
+    for (let i = 0; i < 20; i++)
+      listMachines.mockResolvedValueOnce(ok(page([machine()], `cursor-${i}`) as PageMachineDto))
+    const wrapper = await mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    expect(listMachines).toHaveBeenCalledTimes(20)
+    expect(wrapper.text()).toContain('Machines hit the 20-page safety cap')
   })
 
   it('paginates tailnet devices across nextCursor pages', async () => {
@@ -495,19 +512,22 @@ describe('FleetPage', () => {
   })
 
   it('clears a machines truncation warning after a complete refetch', async () => {
-    listMachines
-      .mockResolvedValueOnce(ok(page([machine()], 'more') as PageMachineDto))
-      .mockResolvedValue(ok(page([machine()]) as PageMachineDto))
+    // Twenty capped pages (each reporting another cursor) hit the
+    // 20-page safety cap; the default stub then answers a complete page.
+    for (let i = 0; i < 20; i++)
+      listMachines.mockResolvedValueOnce(ok(page([machine()], `cursor-${i}`) as PageMachineDto))
+    listMachines.mockResolvedValue(ok(page([machine()]) as PageMachineDto))
     const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Showing the first 200 machines — the machines API cannot page further yet (#151).')
+    expect(listMachines).toHaveBeenCalledTimes(20)
+    expect(wrapper.text()).toContain('Machines hit the 20-page safety cap')
 
     await wrapper.get('[data-testid="refresh"]').trigger('click')
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.text()).not.toContain('cannot page further yet')
+    expect(wrapper.text()).not.toContain('safety cap')
   })
 })
