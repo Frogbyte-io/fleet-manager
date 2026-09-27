@@ -90,8 +90,8 @@ describe('round-trip', () => {
     expect(edited.endsWith('\n')).toBe(true)
   })
 
-  it('is a no-op for unchanged fields apart from formatting', () => {
-    expect(JSON.parse(applyFields(TEMPLATE, fields(TEMPLATE)))).toEqual(JSON.parse(TEMPLATE))
+  it('returns the raw text byte for byte when nothing changed', () => {
+    expect(applyFields(TEMPLATE, fields(TEMPLATE))).toBe(TEMPLATE)
   })
 
   it('removes a cleared key', () => {
@@ -115,6 +115,18 @@ describe('round-trip', () => {
     const view = fields(edited)
     expect(view.builderType).toBe('proxmox-iso')
     expect(metadataFrom(view)).toEqual({ node: 'pve-01', storagePool: 'local-lvm', source: 'iso' })
+  })
+
+  it('keeps values the form cannot represent unless that field is edited', () => {
+    const odd = '{"builders":[{"type":"proxmox-iso","node":"p","cores":5000000000,"memory":"4096"}]}'
+    const view = fields(odd)
+    expect(view).toMatchObject({ cores: null, memory: null })
+    const edited = JSON.parse(applyFields(odd, { ...view, node: 'q' })).builders[0]
+    expect(edited).toEqual({ type: 'proxmox-iso', node: 'q', cores: 5000000000, memory: '4096' })
+    // Editing the field itself replaces the value.
+    expect(JSON.parse(applyFields(odd, { ...view, cores: 8 })).builders[0].cores).toBe(8)
+    // Nothing changed: the raw text is returned byte for byte.
+    expect(applyFields(odd, view)).toBe(odd)
   })
 
   it('leaves raw-only content untouched', () => {

@@ -211,6 +211,14 @@ describe('e2e: edit → publish → build → promote', () => {
     expect(wrapper.get('[data-testid="build"]').attributes('disabled')).toBeUndefined()
   })
 
+  it('clears the draft storage pool when the structured field is cleared', async () => {
+    const { wrapper } = await mountAt('/images?select=recipe:r1')
+    await wrapper.get('[data-testid="field-pool"]').setValue('')
+    await wrapper.get('[data-testid="field-pool"]').trigger('change')
+    expect(JSON.parse((wrapper.get('[data-testid="raw-editor"]').element as HTMLTextAreaElement).value).builders[0]).not.toHaveProperty('vm_storage_pool')
+    expect(wrapper.get('[data-testid="recipe-errors"]').text()).toContain('storage pool')
+  })
+
   it('offers raw-only editing for a non-JSON template', async () => {
     listImageRecipes.mockResolvedValue(ok(page([recipe({ content: 'source "proxmox-iso" "x" {}' })])))
     const { wrapper } = await mountAt('/images?select=recipe:r1')

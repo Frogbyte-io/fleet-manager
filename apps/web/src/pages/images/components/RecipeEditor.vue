@@ -74,6 +74,12 @@ function update<K extends keyof StructuredFields>(key: K, value: StructuredField
   if (!fields.value)
     return
   content.value = applyFields(content.value, { ...fields.value, [key]: value })
+  // A deliberate clear also clears the draft metadata it feeds; the sync
+  // watch below only absorbs non-empty builder values.
+  if (key === 'node' && String(value).trim() === '')
+    node.value = ''
+  if (key === 'storagePool' && String(value).trim() === '')
+    storagePool.value = ''
 }
 
 function numberOrNull(value: string): number | null {

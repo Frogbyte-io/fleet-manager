@@ -131,38 +131,57 @@ function setOrDelete(target: JsonObject, key: string, value: Json | undefined) {
 }
 
 /**
- * Applies structured fields to the raw content in place: only the keys the
- * structured view owns change; every other key, builder, provisioner, and
- * variable is kept. A cleared field removes its key. Returns the raw text
- * unchanged when the content has no structured view.
+ * Applies structured fields to the raw content in place. Only keys whose
+ * structured value changed are written, so anything the form cannot
+ * represent (an out-of-range number, a non-string value) and every other
+ * key, builder, provisioner, and variable stays exactly as it was. A
+ * cleared field removes its key. Returns the raw text unchanged when the
+ * content has no structured view or nothing changed.
  */
 export function applyFields(raw: string, fields: StructuredFields): string {
   const parsed = parse(raw)
-  if ('reason' in parsed)
+  const current = analyze(raw)
+  if ('reason' in parsed || !current.editable)
     return raw
+  const was = current.fields
   const b = parsed.builder
-  b.type = fields.builderType
-  setOrDelete(b, 'node', fields.node.trim())
+  let changed = false
+  const set = <K extends keyof StructuredFields>(key: K, apply: () => void) => {
+    const before = was[key]
+    const after = fields[key]
+    if ((typeof after === 'string' ? after.trim() : after) === (typeof before === 'string' ? before.trim() : before))
+      return
+    apply()
+    changed = true
+  }
+  set('builderType', () => (b.type = fields.builderType))
+  set('node', () => setOrDelete(b, 'node', fields.node.trim()))
   // The storage pool keeps whichever key the template already uses.
-  const poolKey = b.vm_storage_pool !== undefined || b.storage_pool === undefined ? 'vm_storage_pool' : 'storage_pool'
-  setOrDelete(b, poolKey, fields.storagePool.trim())
-  setOrDelete(b, 'iso_file', fields.isoFile.trim())
-  setOrDelete(b, 'iso_storage_pool', fields.isoStoragePool.trim())
+  set('storagePool', () => {
+    const poolKey = b.vm_storage_pool !== undefined || b.storage_pool === undefined ? 'vm_storage_pool' : 'storage_pool'
+    setOrDelete(b, poolKey, fields.storagePool.trim())
+  })
+  set('isoFile', () => setOrDelete(b, 'iso_file', fields.isoFile.trim()))
+  set('isoStoragePool', () => setOrDelete(b, 'iso_storage_pool', fields.isoStoragePool.trim()))
   // Packer's `clone_vm` is a VM name; `clone_vm_id` is the numeric VMID.
   // Keep the form the template uses.
-  const clone = fields.cloneVm.trim()
-  if (b.clone_vm_id !== undefined && b.clone_vm === undefined && /^\d+$/.test(clone))
-    b.clone_vm_id = Number(clone)
-  else {
-    delete b.clone_vm_id
-    setOrDelete(b, 'clone_vm', clone)
-  }
-  setOrDelete(b, 'cores', fields.cores)
-  setOrDelete(b, 'memory', fields.memory)
-  setOrDelete(b, 'disk_size', fields.diskSize.trim())
-  setOrDelete(b, 'bridge', fields.bridge.trim())
-  setOrDelete(b, 'ciuser', fields.cloudInitUser.trim())
-  setOrDelete(b, 'sshkeys', fields.sshKeys.trim())
+  set('cloneVm', () => {
+    const clone = fields.cloneVm.trim()
+    if (b.clone_vm_id !== undefined && b.clone_vm === undefined && /^\d+$/.test(clone))
+      b.clone_vm_id = Number(clone)
+    else {
+      delete b.clone_vm_id
+      setOrDelete(b, 'clone_vm', clone)
+    }
+  })
+  set('cores', () => setOrDelete(b, 'cores', fields.cores))
+  set('memory', () => setOrDelete(b, 'memory', fields.memory))
+  set('diskSize', () => setOrDelete(b, 'disk_size', fields.diskSize.trim()))
+  set('bridge', () => setOrDelete(b, 'bridge', fields.bridge.trim()))
+  set('cloudInitUser', () => setOrDelete(b, 'ciuser', fields.cloudInitUser.trim()))
+  set('sshKeys', () => setOrDelete(b, 'sshkeys', fields.sshKeys.trim()))
+  if (!changed)
+    return raw
   const out = JSON.stringify(parsed.doc, null, indentOf(raw))
   return raw.endsWith('\n') ? `${out}\n` : out
 }
