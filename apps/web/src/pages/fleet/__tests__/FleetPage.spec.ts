@@ -512,30 +512,11 @@ describe('FleetPage', () => {
   })
 
   it('clears a machines truncation warning after a complete refetch', async () => {
-    // Three capped pages (each reporting another cursor) hit the 20-page
-    // safety cap; the default stub then answers a complete page.
-    listMachines
-      .mockResolvedValueOnce(ok(page([machine()], 'c1') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c2') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c3') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c4') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c5') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c6') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c7') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c8') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c9') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c10') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c11') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c12') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c13') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c14') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c15') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c16') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c17') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c18') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c19') as PageMachineDto))
-      .mockResolvedValueOnce(ok(page([machine()], 'c20') as PageMachineDto))
-      .mockResolvedValue(ok(page([machine()]) as PageMachineDto))
+    // Twenty capped pages (each reporting another cursor) hit the
+    // 20-page safety cap; the default stub then answers a complete page.
+    for (let i = 0; i < 20; i++)
+      listMachines.mockResolvedValueOnce(ok(page([machine()], `cursor-${i}`) as PageMachineDto))
+    listMachines.mockResolvedValue(ok(page([machine()]) as PageMachineDto))
     const wrapper = await mountPage()
     await flushPromises()
     await flushPromises()
