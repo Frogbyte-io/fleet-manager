@@ -45,7 +45,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Work',
     items: [
       { title: 'Projects', to: '/projects', icon: Folder, available: true },
-      { title: 'Skills', to: '/skills', icon: Layers, available: false },
+      { title: 'Skills', to: '/skills', icon: Layers, available: true },
       { title: 'Lab', to: '/lab', icon: FlaskConical, available: true },
       { title: 'Images', to: '/images', icon: Image, available: false },
     ],

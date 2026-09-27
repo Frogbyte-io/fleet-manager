@@ -20,6 +20,7 @@ import InventoryTab from './tabs/InventoryTab.vue'
 import OperationsTab from './tabs/OperationsTab.vue'
 import OverviewTab from './tabs/OverviewTab.vue'
 import ProjectsTab from './tabs/ProjectsTab.vue'
+import SkillsTab from './tabs/SkillsTab.vue'
 import ToolsTab from './tabs/ToolsTab.vue'
 
 // MachineRoute keys this page by id, so the id is fixed per instance.
@@ -53,6 +54,7 @@ const TABS = [
   { value: 'connections', label: 'Connections' },
   { value: 'projects', label: 'Projects' },
   { value: 'tools', label: 'Tools' },
+  { value: 'skills', label: 'Skills' },
   { value: 'operations', label: 'Operations' },
   { value: 'audit', label: 'Audit' },
   { value: 'guest', label: 'Guest' },
@@ -220,6 +222,9 @@ async function copySsh() {
           </TabsContent>
           <TabsContent value="tools">
             <ToolsTab :machine="machine" />
+          </TabsContent>
+          <TabsContent value="skills">
+            <SkillsTab :machine="machine" />
           </TabsContent>
           <TabsContent value="operations">
             <OperationsTab />

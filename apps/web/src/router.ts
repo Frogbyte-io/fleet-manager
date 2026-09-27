@@ -72,7 +72,7 @@ export const routes: RouteRecordRaw[] = [
   },
   {
     path: '/skills',
-    component: () => import('./pages/NotYetAvailablePage.vue'),
+    component: () => import('./pages/skills/SkillsPage.vue'),
     meta: { title: 'Skills', group: 'Work' },
   },
   {
