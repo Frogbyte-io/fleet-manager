@@ -1115,6 +1115,8 @@ async fn confirmed_link_requires_current_evidence_and_is_audited() {
     let account = create_account(&proxmox).await;
     observe_and_confirm(&proxmox, &account.id).await;
     let matching = register_machine(&machine_port, "matched", "ops@192.168.68.240:22", None).await;
+    let also_matching =
+        register_machine(&machine_port, "also-matched", "ops@192.168.68.240:22", None).await;
     let unmatched = register_machine(&machine_port, "other", "ops@10.0.0.9:22", None).await;
     let links = Arc::new(FakeGuestLinks::default());
     let machines = Machines::new(machine_port, audit.clone()).with_guest_links(links.clone());
@@ -1158,7 +1160,7 @@ async fn confirmed_link_requires_current_evidence_and_is_audited() {
             &proxmox,
             &AllowAll,
             &principal(),
-            &unmatched,
+            &also_matching,
             &identity,
             NOW,
         )
@@ -1166,7 +1168,7 @@ async fn confirmed_link_requires_current_evidence_and_is_audited() {
         .unwrap_err();
     assert!(matches!(
         conflict,
-        fleet_application::machine::MachineUseCaseError::Conflict { .. }
+        fleet_application::machine::MachineUseCaseError::Conflict { ref detail } if detail == "already linked"
     ));
     let unlinked = machines
         .unlink_guest(&AllowAll, &principal(), &matching, NOW)
@@ -1187,6 +1189,25 @@ async fn confirmed_link_requires_current_evidence_and_is_audited() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn targeted_guest_candidate_preserves_missing_machine_error() {
+    let (proxmox, _audit, _machine_port) = service_with_guests(
+        FakeDiscovery::with(Ok(discovery_ok())),
+        FakeGuestDiscovery::with(Ok(guest_discovery(vec![qemu_guest()]))),
+        FakeProbe::with(FP),
+    );
+    let identity = GuestIdentity {
+        account_id: "account".to_owned(),
+        guest_kind: "qemu".to_owned(),
+        vmid: 101,
+    };
+    let error = proxmox
+        .current_guest_candidate(&AllowAll, &principal(), "missing", &identity, NOW)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ProxmoxUseCaseError::NotFound { .. }));
 }
 
 #[tokio::test]

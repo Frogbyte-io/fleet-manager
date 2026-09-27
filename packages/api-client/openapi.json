@@ -2340,6 +2340,7 @@
           "machines"
         ],
         "summary": "Confirms a current Proxmox guest candidate for a Fleet machine.",
+        "description": "# Errors\n\nReturns the public error envelope on denial, missing evidence, or a\nconflicting link.",
         "operationId": "linkMachineGuest",
         "parameters": [
           {
@@ -2369,6 +2370,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Resource_MachineDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The guest kind or VMID is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -2410,6 +2421,7 @@
           "machines"
         ],
         "summary": "Removes a machine's confirmed Proxmox guest association.",
+        "description": "# Errors\n\nReturns the public error envelope on denial, a missing link, or failure.",
         "operationId": "unlinkMachineGuest",
         "parameters": [
           {

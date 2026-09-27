@@ -283,6 +283,41 @@ fn parsing_accepts_confirmed_guest_link_commands() {
 }
 
 #[test]
+fn parsing_rejects_invalid_guest_link_arguments() {
+    for vmid in ["0", "-1", "abc"] {
+        let args = [
+            "machines",
+            "link-guest",
+            "m1",
+            "--account",
+            "a1",
+            "--kind",
+            "qemu",
+            "--vmid",
+            vmid,
+        ]
+        .map(ToString::to_string);
+        let error = fleetctl::parse(&args).unwrap_err();
+        assert!(
+            error.message.contains("--vmid must be a positive number"),
+            "{error}"
+        );
+    }
+    let args = [
+        "machines",
+        "link-guest",
+        "m1",
+        "--kind",
+        "qemu",
+        "--vmid",
+        "101",
+    ]
+    .map(ToString::to_string);
+    let error = fleetctl::parse(&args).unwrap_err();
+    assert!(error.message.contains("Usage"), "{error}");
+}
+
+#[test]
 fn text_output_renders_a_page_as_a_table() {
     let page = json!({
         "items": [

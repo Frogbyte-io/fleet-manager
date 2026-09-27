@@ -266,7 +266,7 @@ impl MachineView {
             groups: machine.groups,
             machine_status,
             runs_on: None,
-            kind: MachineKind::derive(None, &machine.capabilities),
+            kind: MachineKind::derive(None, &machine.capabilities, now),
             last_seen_at: machine.node.and_then(|node| node.last_seen_at),
             last_observation: machine.last_observation,
             capabilities,
@@ -318,7 +318,7 @@ pub enum MachineKind {
 impl MachineKind {
     /// Derives kind from a confirmed link first, then a fresh virtualization fact.
     #[must_use]
-    pub fn derive(link: Option<&GuestLink>, facts: &[CapabilityFact]) -> Self {
+    pub fn derive(link: Option<&GuestLink>, facts: &[CapabilityFact], now: i64) -> Self {
         if let Some(link) = link {
             return match link.guest_kind.as_str() {
                 "qemu" => Self::Vm,
@@ -329,7 +329,8 @@ impl MachineKind {
         let Some(fact) = facts.iter().find(|fact| {
             fact.namespace == "host"
                 && fact.name == "virtualization"
-                && fact.status == CapabilityStatus::Known
+                && fact.effective_status(Timestamp::from_unix_millis(now), CAPABILITY_FRESHNESS_MS)
+                    == CapabilityStatus::Known
         }) else {
             return Self::Unknown;
         };
@@ -743,7 +744,7 @@ impl Machines {
         };
         let mut view = MachineView::assemble(machine, now, sensitive);
         if let Some(link) = link {
-            view.kind = MachineKind::derive(Some(&link), &[]);
+            view.kind = MachineKind::derive(Some(&link), &[], now);
             view.runs_on = Some(link);
         }
         Ok(view)

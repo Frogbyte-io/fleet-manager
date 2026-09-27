@@ -6808,6 +6808,11 @@ export type linkMachineGuestResponse200 = {
   status: 200
 }
 
+export type linkMachineGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type linkMachineGuestResponse403 = {
   data: ApiError
   status: 403
@@ -6826,7 +6831,7 @@ export type linkMachineGuestResponse409 = {
 export type linkMachineGuestResponseSuccess = (linkMachineGuestResponse200) & {
   headers: Headers;
 };
-export type linkMachineGuestResponseError = (linkMachineGuestResponse403 | linkMachineGuestResponse404 | linkMachineGuestResponse409) & {
+export type linkMachineGuestResponseError = (linkMachineGuestResponse400 | linkMachineGuestResponse403 | linkMachineGuestResponse404 | linkMachineGuestResponse409) & {
   headers: Headers;
 };
 
@@ -6841,6 +6846,10 @@ export const getLinkMachineGuestUrl = (machineId: string,) => {
 }
 
 /**
+ * # Errors
+ *
+ * Returns the public error envelope on denial, missing evidence, or a
+ * conflicting link.
  * @summary Confirms a current Proxmox guest candidate for a Fleet machine.
  */
 export const linkMachineGuest = async (machineId: string,
@@ -6903,6 +6912,9 @@ export const getUnlinkMachineGuestUrl = (machineId: string,) => {
 }
 
 /**
+ * # Errors
+ *
+ * Returns the public error envelope on denial, a missing link, or failure.
  * @summary Removes a machine's confirmed Proxmox guest association.
  */
 export const unlinkMachineGuest = async (machineId: string, options?: RequestInit): Promise<unlinkMachineGuestResponse> => {

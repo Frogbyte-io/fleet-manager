@@ -480,6 +480,7 @@ pub async fn get_machine(
     request_body = LinkGuestRequest,
     responses(
         (status = 200, description = "The machine with its confirmed link.", body = Resource<MachineDto>),
+        (status = 400, description = "The guest kind or VMID is malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not link this guest.", body = crate::error::ApiError),
         (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
         (status = 409, description = "The guest is not a current candidate or is already linked.", body = crate::error::ApiError)

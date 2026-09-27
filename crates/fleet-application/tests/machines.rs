@@ -23,16 +23,28 @@ fn kind_comes_from_confirmed_link_or_known_virtualization() {
     let mut virt = fact("host", "virtualization", CapabilityStatus::Known, NOW);
     virt.value = Some("none".to_owned());
     assert_eq!(
-        MachineKind::derive(None, &[virt.clone()]),
+        MachineKind::derive(None, &[virt.clone()], NOW),
         MachineKind::Physical
     );
     virt.value = Some("kvm".to_owned());
-    assert_eq!(MachineKind::derive(None, &[virt.clone()]), MachineKind::Vm);
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Vm
+    );
     virt.value = Some("lxc".to_owned());
-    assert_eq!(MachineKind::derive(None, &[virt.clone()]), MachineKind::Lxc);
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Lxc
+    );
     virt.status = CapabilityStatus::Unavailable;
     assert_eq!(
-        MachineKind::derive(None, &[virt.clone()]),
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Unknown
+    );
+    virt.status = CapabilityStatus::Known;
+    virt.observed_at = Timestamp::from_unix_millis(NOW - FRESHNESS - 1);
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
         MachineKind::Unknown
     );
     let link = GuestLink {
@@ -41,7 +53,10 @@ fn kind_comes_from_confirmed_link_or_known_virtualization() {
         node: "node".to_owned(),
         vmid: 101,
     };
-    assert_eq!(MachineKind::derive(Some(&link), &[virt]), MachineKind::Vm);
+    assert_eq!(
+        MachineKind::derive(Some(&link), &[virt], NOW),
+        MachineKind::Vm
+    );
 }
 
 fn principal() -> ActingPrincipal {

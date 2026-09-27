@@ -946,9 +946,13 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             id: (*id).to_owned(),
             account: (*account).to_owned(),
             kind: (*kind).to_owned(),
-            vmid: vmid.parse().map_err(|_| CliError {
-                message: "--vmid must be a positive number".to_owned(),
-            })?,
+            vmid: vmid
+                .parse::<u32>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| CliError {
+                    message: "--vmid must be a positive number".to_owned(),
+                })?,
         },
         ["machines", "unlink-guest", id] => Command::MachinesUnlinkGuest {
             id: (*id).to_owned(),

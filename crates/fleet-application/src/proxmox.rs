@@ -1184,9 +1184,16 @@ impl ProxmoxAccounts {
             .machines
             .get(authorizer, principal, machine_id, now)
             .await
-            .map_err(|error| ProxmoxUseCaseError::Backend {
-                context: "association",
-                detail: error.to_string(),
+            .map_err(|error| match error {
+                MachineUseCaseError::Denied(decision) => ProxmoxUseCaseError::Denied(decision),
+                MachineUseCaseError::NotFound { what } => ProxmoxUseCaseError::NotFound { what },
+                MachineUseCaseError::Invalid { detail } => ProxmoxUseCaseError::Invalid { detail },
+                MachineUseCaseError::Conflict { detail } => {
+                    ProxmoxUseCaseError::Conflict { detail }
+                }
+                MachineUseCaseError::Backend { context, detail } => {
+                    ProxmoxUseCaseError::Backend { context, detail }
+                }
             })?;
         let account = self.trusted_account(account_id).await?;
         let secret = self.require_secret(&account).await?;

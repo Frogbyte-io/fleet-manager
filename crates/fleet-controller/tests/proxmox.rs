@@ -447,6 +447,14 @@ async fn the_machine_guest_link_contract_requires_a_candidate_and_round_trips() 
         )
         .await;
     assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "conflict");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not a current candidate"),
+        "{body}"
+    );
     let (status, body) = harness
         .post(
             &path,
