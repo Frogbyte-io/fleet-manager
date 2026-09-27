@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
 use fleet_controller::Settings;
 use fleet_controller::build_router;
 use fleet_controller::proxmox_store::compose_proxmox;
@@ -388,6 +389,93 @@ async fn the_proxmox_surface_walks_create_observe_confirm_discover_delete() {
     let (status, body) = harness.get("/api/v1/proxmox/accounts").await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn the_machine_guest_link_contract_requires_a_candidate_and_round_trips() {
+    let harness = harness().await;
+    let (status, body) = harness
+        .post(
+            "/api/v1/proxmox/accounts",
+            json!({
+                "name": "pve-main", "host": "192.168.68.223", "port": 8006,
+                "tokenId": "root@pam!GLM-AGENT", "tokenSecret": "test-secret"
+            }),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+    let account = body["data"]["id"].as_str().unwrap();
+    assert_eq!(
+        harness
+            .post(
+                &format!("/api/v1/proxmox/accounts/{account}/observe"),
+                json!({})
+            )
+            .await
+            .0,
+        axum::http::StatusCode::OK
+    );
+    assert_eq!(
+        harness
+            .post(
+                &format!("/api/v1/proxmox/accounts/{account}/confirm"),
+                json!({"fingerprint": FP})
+            )
+            .await
+            .0,
+        axum::http::StatusCode::OK
+    );
+    let machines = MachineRepository::new(harness.pool.clone());
+    let machine = machines
+        .register(&RegisterMachine {
+            name: "fleet-test-01".to_owned(),
+            description: String::new(),
+            endpoints: vec![NewEndpoint {
+                kind: fleet_core::EndpointKind::Ssh,
+                reference: "ops@192.168.68.240:22".to_owned(),
+            }],
+            tags: Vec::new(),
+            groups: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let path = format!("/api/v1/machines/{}/guest-link", machine.id);
+    let (status, body) = harness
+        .post(
+            &path,
+            json!({"accountId": account, "guestKind": "qemu", "vmid": 100}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "conflict");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not a current candidate"),
+        "{body}"
+    );
+    let (status, body) = harness
+        .post(
+            &path,
+            json!({"accountId": account, "guestKind": "qemu", "vmid": 101}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["kind"], "vm");
+    assert_eq!(body["data"]["runsOn"]["vmid"], 101);
+    let (status, body) = harness
+        .get(&format!("/api/v1/machines/{}", machine.id))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["runsOn"]["accountId"], account);
+    let (status, body) = harness.delete(&path).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["runsOn"], Value::Null);
+    assert_eq!(body["data"]["kind"], "unknown");
+    let (status, body) = harness.get("/api/v1/audit?action=machine.link.guest").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]

@@ -3,10 +3,62 @@
 //! pagination, and cascade delete.
 
 use fleet_application::machine::{
-    Endpoint, MachineFilter, MachinePort as _, NewEndpoint, RegisterMachine,
+    Endpoint, GuestLink, GuestLinkPort as _, MachineFilter, MachinePort as _, NewEndpoint,
+    RegisterMachine,
 };
 use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind};
-use fleet_storage_sqlite::{MachineRepository, Store};
+use fleet_storage_sqlite::{GuestLinkRepository, MachineRepository, Store};
+
+#[tokio::test]
+async fn confirmed_guest_links_are_unique_and_cascade_with_machine_or_account() {
+    let (_dir, machines, pool) = repository_with_pool().await;
+    let first = machines.register(&registration("linked-1")).await.unwrap();
+    let second = machines.register(&registration("linked-2")).await.unwrap();
+    sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES ('account-1', 'pve', 'pve.lan', 8006, 'operator@pam!fleet', 1)")
+        .execute(&pool).await.unwrap();
+    let links = GuestLinkRepository::new(pool.clone());
+    let link = GuestLink {
+        account_id: "account-1".to_owned(),
+        guest_kind: "qemu".to_owned(),
+        node: "pve-1".to_owned(),
+        vmid: 101,
+    };
+    links.confirm(&first.id, &link).await.unwrap();
+    assert_eq!(links.get(&first.id).await.unwrap(), Some(link.clone()));
+    assert!(
+        links
+            .confirm(&second.id, &link)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already")
+    );
+    assert!(
+        links
+            .confirm(
+                &first.id,
+                &GuestLink {
+                    vmid: 102,
+                    ..link.clone()
+                }
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already")
+    );
+    links.unlink(&first.id).await.unwrap();
+    assert!(links.get(&first.id).await.unwrap().is_none());
+    links.confirm(&second.id, &link).await.unwrap();
+    machines.delete(&second.id).await.unwrap();
+    assert!(links.get(&second.id).await.unwrap().is_none());
+    links.confirm(&first.id, &link).await.unwrap();
+    sqlx::query("DELETE FROM proxmox_accounts WHERE id = 'account-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(links.get(&first.id).await.unwrap().is_none());
+}
 use std::sync::Arc;
 
 async fn repository() -> (tempfile::TempDir, Arc<MachineRepository>) {

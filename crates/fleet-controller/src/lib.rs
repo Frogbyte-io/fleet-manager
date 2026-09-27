@@ -155,7 +155,10 @@ pub fn compose_onboarding(
     let machines = fleet_application::machine::Machines::new(
         std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(db.clone())),
         std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
-    );
+    )
+    .with_guest_links(std::sync::Arc::new(
+        fleet_storage_sqlite::GuestLinkRepository::new(db.clone()),
+    ));
     fleet_application::onboarding::Onboarding::new(
         std::sync::Arc::new(fleet_storage_sqlite::OnboardingRepository::new(db.clone())),
         std::sync::Arc::new(onboard::SshTrustAdapter::new(ssh_work_dir)),
@@ -199,7 +202,10 @@ fn api_state(
         let machines = fleet_application::machine::Machines::new(
             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
-        );
+        )
+        .with_guest_links(std::sync::Arc::new(
+            fleet_storage_sqlite::GuestLinkRepository::new(pool.clone()),
+        ));
         let system = ControllerSystemInfo { pool: pool.clone() };
         let audit = fleet_application::audit::AuditQueries::new(std::sync::Arc::new(
             fleet_storage_sqlite::AuditLedger::new(&pool),

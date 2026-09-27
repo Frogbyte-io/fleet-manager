@@ -57,6 +57,7 @@ function machine(): MachineDto {
     tags: ['linux'],
     groups: [],
     machineStatus: 'connected',
+    kind: 'unknown',
     lastSeenAt: NOW - 30_000,
     lastObservation: null,
     capabilities: [
@@ -88,6 +89,7 @@ function discovery(): ProxmoxDiscoveryDto {
     observedAt: NOW,
     pveVersion: '8.2.4',
     reportedCount: 3,
+    nodeCapacities: [],
     warnings: [],
     resources: [
       { accountId: 'acc1', id: 'node-pve', kind: 'node', name: 'pve', node: null, status: 'online', vmid: null, observedAt: NOW, pveVersion: '8.2.4' },

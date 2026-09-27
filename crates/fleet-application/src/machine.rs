@@ -204,6 +204,10 @@ pub struct MachineView {
     pub groups: Vec<String>,
     /// The derived connectivity state at the read time.
     pub machine_status: MachineStatus,
+    /// The explicitly confirmed Proxmox guest, if one is linked.
+    pub runs_on: Option<GuestLink>,
+    /// Physical, VM, LXC, or unknown, derived from the link or inventory.
+    pub kind: MachineKind,
     /// The last gateway observation time, when the node ever connected
     /// (epoch milliseconds).
     pub last_seen_at: Option<i64>,
@@ -261,11 +265,94 @@ impl MachineView {
             tags: machine.tags,
             groups: machine.groups,
             machine_status,
+            runs_on: None,
+            kind: MachineKind::derive(None, &machine.capabilities, now),
             last_seen_at: machine.node.and_then(|node| node.last_seen_at),
             last_observation: machine.last_observation,
             capabilities,
             created_at: machine.created_at,
             updated_at: machine.updated_at,
+        }
+    }
+}
+
+/// A durable, explicitly confirmed association to one Proxmox guest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestLink {
+    /// The Proxmox account that contains the guest.
+    pub account_id: String,
+    /// The provider guest kind: `qemu` or `lxc`.
+    pub guest_kind: String,
+    /// The cluster node where the guest was seen at confirmation.
+    pub node: String,
+    /// The guest VMID within the account.
+    pub vmid: u32,
+}
+
+/// The provider identity selected for explicit guest confirmation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GuestIdentity {
+    /// Configured Proxmox account identity.
+    pub account_id: String,
+    /// `qemu` or `lxc`.
+    pub guest_kind: String,
+    /// VMID within the account.
+    pub vmid: u32,
+}
+
+/// The machine's derived hardware kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineKind {
+    /// An observed bare-metal machine.
+    Physical,
+    /// A virtual machine.
+    Vm,
+    /// A Linux container.
+    Lxc,
+    /// No reliable observation yet.
+    Unknown,
+}
+
+impl MachineKind {
+    /// Derives kind from a confirmed link first, then a fresh virtualization fact.
+    #[must_use]
+    pub fn derive(link: Option<&GuestLink>, facts: &[CapabilityFact], now: i64) -> Self {
+        if let Some(link) = link {
+            return match link.guest_kind.as_str() {
+                "qemu" => Self::Vm,
+                "lxc" => Self::Lxc,
+                _ => Self::Unknown,
+            };
+        }
+        let Some(fact) = facts.iter().find(|fact| {
+            fact.namespace == "host"
+                && fact.name == "virtualization"
+                && fact.effective_status(Timestamp::from_unix_millis(now), CAPABILITY_FRESHNESS_MS)
+                    == CapabilityStatus::Known
+        }) else {
+            return Self::Unknown;
+        };
+        match fact.value.as_deref() {
+            Some("none") => Self::Physical,
+            Some("lxc") => Self::Lxc,
+            Some(
+                "kvm" | "qemu" | "vmware" | "oracle" | "microsoft" | "xen" | "bochs" | "bhyve"
+                | "uml" | "zvm",
+            ) => Self::Vm,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// The stable API/CLI identifier.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Physical => "physical",
+            Self::Vm => "vm",
+            Self::Lxc => "lxc",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -488,18 +575,41 @@ pub trait MachinePort: fmt::Debug + Send + Sync {
     -> Result<Option<u64>, PortFailure>;
 }
 
+/// Durable one-to-one confirmed Proxmox guest links.
+#[async_trait]
+pub trait GuestLinkPort: fmt::Debug + Send + Sync {
+    /// Reads a machine's confirmed guest link, if present.
+    async fn get(&self, machine_id: &str) -> Result<Option<GuestLink>, PortFailure>;
+    /// Confirms a link, refusing either a machine or guest already linked elsewhere.
+    async fn confirm(&self, machine_id: &str, link: &GuestLink) -> Result<(), PortFailure>;
+    /// Removes a confirmed link, refusing a machine with no link.
+    async fn unlink(&self, machine_id: &str) -> Result<(), PortFailure>;
+}
+
 /// The authorized machine use cases.
 #[derive(Debug)]
 pub struct Machines {
     port: Arc<dyn MachinePort>,
     audit: Arc<dyn crate::operation::AuditPort>,
+    guest_links: Option<Arc<dyn GuestLinkPort>>,
 }
 
 impl Machines {
     /// Composes the service from its ports.
     #[must_use]
     pub fn new(port: Arc<dyn MachinePort>, audit: Arc<dyn crate::operation::AuditPort>) -> Self {
-        Self { port, audit }
+        Self {
+            port,
+            audit,
+            guest_links: None,
+        }
+    }
+
+    /// Enables the confirmed Proxmox guest association surface.
+    #[must_use]
+    pub fn with_guest_links(mut self, guest_links: Arc<dyn GuestLinkPort>) -> Self {
+        self.guest_links = Some(guest_links);
+        self
     }
 
     /// Registers a machine.
@@ -571,7 +681,7 @@ impl Machines {
             .get(id)
             .await
             .map_err(|failure| map_port("get", failure))?;
-        Ok(MachineView::assemble(machine, now, sensitive))
+        self.assemble_with_link(machine, now, sensitive).await
     }
 
     /// Lists machines, newest first, as the operator-facing view.
@@ -611,13 +721,176 @@ impl Machines {
                 },
                 failure => map_port("list", failure),
             })?;
-        Ok(machines
-            .into_iter()
-            .map(|machine| {
-                let sensitive = self.may_read_sensitive(authorizer, principal, &machine.id);
-                MachineView::assemble(machine, now, sensitive)
-            })
-            .collect())
+        let mut views = Vec::with_capacity(machines.len());
+        for machine in machines {
+            let sensitive = self.may_read_sensitive(authorizer, principal, &machine.id);
+            views.push(self.assemble_with_link(machine, now, sensitive).await?);
+        }
+        Ok(views)
+    }
+
+    async fn assemble_with_link(
+        &self,
+        machine: Machine,
+        now: i64,
+        sensitive: bool,
+    ) -> Result<MachineView, MachineUseCaseError> {
+        let link = match &self.guest_links {
+            Some(port) => port
+                .get(&machine.id)
+                .await
+                .map_err(|failure| map_port("guest_link", failure))?,
+            None => None,
+        };
+        let mut view = MachineView::assemble(machine, now, sensitive);
+        if let Some(link) = link {
+            view.kind = MachineKind::derive(Some(&link), &[], now);
+            view.runs_on = Some(link);
+        }
+        Ok(view)
+    }
+
+    /// Confirms a currently observed candidate as this machine's guest.
+    ///
+    /// # Errors
+    ///
+    /// Refuses denial, missing evidence, missing provider identity, or a
+    /// conflicting durable link.
+    pub async fn link_guest(
+        &self,
+        proxmox: &crate::proxmox::ProxmoxAccounts,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        guest_identity: &GuestIdentity,
+        now: i64,
+    ) -> Result<MachineView, MachineUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineLinkGuest,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineReadSensitive,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        if !matches!(guest_identity.guest_kind.as_str(), "qemu" | "lxc") || guest_identity.vmid == 0
+        {
+            return Err(MachineUseCaseError::Invalid {
+                detail: "guest kind must be qemu or lxc and VMID must be positive".to_owned(),
+            });
+        }
+        self.port
+            .get(machine_id)
+            .await
+            .map_err(|failure| map_port("get", failure))?;
+        let guest = proxmox
+            .current_guest_candidate(authorizer, principal, machine_id, guest_identity, now)
+            .await
+            .map_err(map_guest_discovery_error)?
+            .ok_or_else(|| MachineUseCaseError::Conflict {
+                detail: "the machine is not a current candidate for this guest".to_owned(),
+            })?;
+        let node = guest.node.ok_or_else(|| MachineUseCaseError::Conflict {
+            detail: "the guest has no current node".to_owned(),
+        })?;
+        let link = GuestLink {
+            account_id: guest_identity.account_id.clone(),
+            guest_kind: guest_identity.guest_kind.clone(),
+            node,
+            vmid: guest_identity.vmid,
+        };
+        let port = self
+            .guest_links
+            .as_ref()
+            .ok_or_else(|| MachineUseCaseError::Backend {
+                context: "guest_link",
+                detail: "the guest link store is not wired".to_owned(),
+            })?;
+        port.confirm(machine_id, &link)
+            .await
+            .map_err(|failure| map_port("guest_link", failure))?;
+        let GuestIdentity {
+            account_id,
+            guest_kind,
+            vmid,
+        } = guest_identity;
+        self.audit_machine(
+            principal,
+            Permission::MachineLinkGuest,
+            machine_id,
+            Some(format!("confirmed {account_id} {guest_kind}/{vmid}")),
+        )
+        .await?;
+        self.get(authorizer, principal, machine_id, now).await
+    }
+
+    /// Removes this machine's confirmed guest association.
+    ///
+    /// # Errors
+    ///
+    /// Refuses denial, a missing link, or a storage failure.
+    pub async fn unlink_guest(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        now: i64,
+    ) -> Result<MachineView, MachineUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineLinkGuest,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::MachineRead,
+                resource: Some(machine_id),
+            },
+        )
+        .map_err(MachineUseCaseError::Denied)?;
+        let port = self
+            .guest_links
+            .as_ref()
+            .ok_or_else(|| MachineUseCaseError::Backend {
+                context: "guest_link",
+                detail: "the guest link store is not wired".to_owned(),
+            })?;
+        port.unlink(machine_id)
+            .await
+            .map_err(|failure| map_port("guest_unlink", failure))?;
+        self.audit_machine(
+            principal,
+            Permission::MachineLinkGuest,
+            machine_id,
+            Some("unlinked Proxmox guest".to_owned()),
+        )
+        .await?;
+        self.get(authorizer, principal, machine_id, now).await
     }
 
     /// Asks the authorizer once for the sensitive endpoint detail of one
@@ -1082,6 +1355,23 @@ fn map_port(context: &'static str, failure: PortFailure) -> MachineUseCaseError 
         PortFailure::NotFound { what } => MachineUseCaseError::NotFound { what },
         PortFailure::Conflict { detail } => MachineUseCaseError::Conflict { detail },
         PortFailure::Backend { detail } => MachineUseCaseError::Backend { context, detail },
+    }
+}
+
+fn map_guest_discovery_error(error: crate::proxmox::ProxmoxUseCaseError) -> MachineUseCaseError {
+    use crate::proxmox::ProxmoxUseCaseError as Error;
+    match error {
+        Error::Denied(decision) => MachineUseCaseError::Denied(decision),
+        Error::Invalid { detail } => MachineUseCaseError::Invalid { detail },
+        Error::NotFound { what } => MachineUseCaseError::NotFound { what },
+        Error::Conflict { detail } => MachineUseCaseError::Conflict { detail },
+        Error::UnconfirmedTrust { account } => MachineUseCaseError::Conflict {
+            detail: format!("account {account} has no confirmed host fingerprint"),
+        },
+        other => MachineUseCaseError::Backend {
+            context: "guest_discovery",
+            detail: other.to_string(),
+        },
     }
 }
 

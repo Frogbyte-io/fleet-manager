@@ -71,6 +71,23 @@ export interface InventoryObservationDto {
 }
 
 /**
+ * One explicitly confirmed Proxmox guest association.
+ */
+export interface GuestLinkDto {
+  /** Proxmox account identity. */
+  accountId: string;
+  /** `qemu` or `lxc`. */
+  guestKind: string;
+  /** Node observed when the link was confirmed. */
+  node: string;
+  /**
+     * Proxmox VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * A machine, as the list and detail endpoints display it.
  */
 export interface MachineDto {
@@ -89,6 +106,8 @@ export interface MachineDto {
   groups: string[];
   /** The stable identity. */
   id: string;
+  /** Physical, VM, LXC, or unknown, derived from a link or inventory. */
+  kind: string;
   lastObservation?: null | InventoryObservationDto;
   /**
      * The last gateway observation time, when the node ever connected
@@ -103,6 +122,7 @@ export interface MachineDto {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
   /** Last mutation (epoch milliseconds). */
@@ -1123,6 +1143,21 @@ export interface LeaseDto {
 }
 
 /**
+ * The guest identity the operator explicitly confirms.
+ */
+export interface LinkGuestRequest {
+  /** The configured Proxmox account. */
+  accountId: string;
+  /** `qemu` or `lxc`. */
+  guestKind: string;
+  /**
+     * The guest VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
  * Non-authoritative description of the API this controller serves.
  */
 export interface Meta {
@@ -1866,6 +1901,8 @@ export type PageMachineDtoItemsItem = {
   groups: string[];
   /** The stable identity. */
   id: string;
+  /** Physical, VM, LXC, or unknown, derived from a link or inventory. */
+  kind: string;
   lastObservation?: null | InventoryObservationDto;
   /**
      * The last gateway observation time, when the node ever connected
@@ -1880,6 +1917,7 @@ export type PageMachineDtoItemsItem = {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
   /** Last mutation (epoch milliseconds). */
@@ -3034,6 +3072,8 @@ export type ResourceMachineDtoData = {
   groups: string[];
   /** The stable identity. */
   id: string;
+  /** Physical, VM, LXC, or unknown, derived from a link or inventory. */
+  kind: string;
   lastObservation?: null | InventoryObservationDto;
   /**
      * The last gateway observation time, when the node ever connected
@@ -3048,6 +3088,7 @@ export type ResourceMachineDtoData = {
   machineStatus: string;
   /** The mutable, unique label. */
   name: string;
+  runsOn?: null | GuestLinkDto;
   /** Tags. */
   tags: string[];
   /** Last mutation (epoch milliseconds). */
@@ -6758,6 +6799,140 @@ const res = await fetch(getStartFrogenvOperationUrl(machineId),
 
   const data: startFrogenvOperationResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startFrogenvOperationResponse
+}
+
+
+
+export type linkMachineGuestResponse200 = {
+  data: ResourceMachineDto
+  status: 200
+}
+
+export type linkMachineGuestResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type linkMachineGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type linkMachineGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type linkMachineGuestResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type linkMachineGuestResponseSuccess = (linkMachineGuestResponse200) & {
+  headers: Headers;
+};
+export type linkMachineGuestResponseError = (linkMachineGuestResponse400 | linkMachineGuestResponse403 | linkMachineGuestResponse404 | linkMachineGuestResponse409) & {
+  headers: Headers;
+};
+
+export type linkMachineGuestResponse = (linkMachineGuestResponseSuccess | linkMachineGuestResponseError)
+
+export const getLinkMachineGuestUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/guest-link`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on denial, missing evidence, or a
+ * conflicting link.
+ * @summary Confirms a current Proxmox guest candidate for a Fleet machine.
+ */
+export const linkMachineGuest = async (machineId: string,
+    linkGuestRequest: LinkGuestRequest, options?: RequestInit): Promise<linkMachineGuestResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getLinkMachineGuestUrl(machineId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(linkGuestRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: linkMachineGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as linkMachineGuestResponse
+}
+
+
+
+export type unlinkMachineGuestResponse200 = {
+  data: ResourceMachineDto
+  status: 200
+}
+
+export type unlinkMachineGuestResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type unlinkMachineGuestResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type unlinkMachineGuestResponseSuccess = (unlinkMachineGuestResponse200) & {
+  headers: Headers;
+};
+export type unlinkMachineGuestResponseError = (unlinkMachineGuestResponse403 | unlinkMachineGuestResponse404) & {
+  headers: Headers;
+};
+
+export type unlinkMachineGuestResponse = (unlinkMachineGuestResponseSuccess | unlinkMachineGuestResponseError)
+
+export const getUnlinkMachineGuestUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/guest-link`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on denial, a missing link, or failure.
+ * @summary Removes a machine's confirmed Proxmox guest association.
+ */
+export const unlinkMachineGuest = async (machineId: string, options?: RequestInit): Promise<unlinkMachineGuestResponse> => {
+
+  const res = await fetch(getUnlinkMachineGuestUrl(machineId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: unlinkMachineGuestResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as unlinkMachineGuestResponse
 }
 
 

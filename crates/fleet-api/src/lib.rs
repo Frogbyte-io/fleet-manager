@@ -85,6 +85,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         machines::EndpointDto,
         machines::InventoryObservationDto,
         machines::MachineDto,
+        machines::GuestLinkDto,
+        machines::LinkGuestRequest,
         onboarding::AddedMachineDto,
         projects::CheckoutFactDto,
         projects::CheckoutAuthDto,
@@ -246,6 +248,10 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(system::stream_fleet_events))
                 .routes(routes!(machines::list_machines))
                 .routes(routes!(machines::get_machine))
+                .routes(routes!(
+                    machines::link_machine_guest,
+                    machines::unlink_machine_guest
+                ))
                 .routes(routes!(projects::create_project, projects::list_projects))
                 .routes(routes!(projects::get_project))
                 .routes(routes!(projects::update_project))

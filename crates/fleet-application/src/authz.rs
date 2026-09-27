@@ -62,6 +62,8 @@ pub enum Permission {
     /// Change a machine's mutable facts: name, description, endpoints,
     /// tags, groups. A mutation.
     MachineUpdate,
+    /// Confirm or remove a Proxmox guest association. A mutation.
+    MachineLinkGuest,
     /// Remove a machine and its facts. A mutation.
     MachineDelete,
     /// Create a single-use enrollment token for a machine. A mutation: it
@@ -191,6 +193,7 @@ impl Permission {
         Permission::MachineReadSensitive,
         Permission::MachineCreate,
         Permission::MachineUpdate,
+        Permission::MachineLinkGuest,
         Permission::MachineDelete,
         Permission::NodeEnroll,
         Permission::NodeRead,
@@ -247,6 +250,7 @@ impl Permission {
             Permission::MachineReadSensitive => "machine.read.sensitive",
             Permission::MachineCreate => "machine.create",
             Permission::MachineUpdate => "machine.update",
+            Permission::MachineLinkGuest => "machine.link.guest",
             Permission::MachineDelete => "machine.delete",
             Permission::NodeEnroll => "node.enroll",
             Permission::NodeRead => "node.read",
@@ -310,6 +314,7 @@ impl Permission {
             | Permission::SecretDelete
             | Permission::MachineCreate
             | Permission::MachineUpdate
+            | Permission::MachineLinkGuest
             | Permission::MachineDelete
             | Permission::NodeEnroll
             | Permission::NodeRevoke
@@ -380,6 +385,7 @@ impl Permission {
             | Permission::SecretRead
             | Permission::SecretDelete
             | Permission::MachineUpdate
+            | Permission::MachineLinkGuest
             | Permission::MachineDelete
             | Permission::NodeEnroll
             | Permission::NodeRead

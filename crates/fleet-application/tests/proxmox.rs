@@ -10,8 +10,51 @@ use fleet_application::authz::{
     AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, ReasonId,
 };
 use fleet_application::machine::{
-    Endpoint, Machine, MachineFilter, MachinePort as _, Machines, NewEndpoint, RegisterMachine,
+    Endpoint, GuestIdentity, GuestLink, GuestLinkPort, Machine, MachineFilter, MachinePort as _,
+    Machines, NewEndpoint, RegisterMachine,
 };
+
+#[derive(Debug, Default)]
+struct FakeGuestLinks(Mutex<Vec<(String, GuestLink)>>);
+
+#[async_trait]
+impl GuestLinkPort for FakeGuestLinks {
+    async fn get(&self, machine_id: &str) -> Result<Option<GuestLink>, PortFailure> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| id == machine_id)
+            .map(|(_, link)| link.clone()))
+    }
+    async fn confirm(&self, machine_id: &str, link: &GuestLink) -> Result<(), PortFailure> {
+        let mut links = self.0.lock().unwrap();
+        if links.iter().any(|(id, existing)| {
+            id == machine_id
+                || (existing.account_id == link.account_id
+                    && existing.guest_kind == link.guest_kind
+                    && existing.vmid == link.vmid)
+        }) {
+            return Err(PortFailure::Conflict {
+                detail: "already linked".to_owned(),
+            });
+        }
+        links.push((machine_id.to_owned(), link.clone()));
+        Ok(())
+    }
+    async fn unlink(&self, machine_id: &str) -> Result<(), PortFailure> {
+        let mut links = self.0.lock().unwrap();
+        let before = links.len();
+        links.retain(|(id, _)| id != machine_id);
+        if before == links.len() {
+            return Err(PortFailure::NotFound {
+                what: "guest link".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
 use fleet_application::operation::AuditPort;
 use fleet_application::operation::PortFailure;
 use fleet_application::proxmox::{
@@ -1060,6 +1103,111 @@ async fn guests_list_with_evidence_only_candidates() {
     assert_eq!(lxc.candidates[0].machine_id, by_mac);
     assert_eq!(lxc.candidates[0].kind, "mac_match");
     assert_eq!(lxc.candidates[0].evidence, "de:ad:be:ef:00:02");
+}
+
+#[tokio::test]
+async fn confirmed_link_requires_current_evidence_and_is_audited() {
+    let (proxmox, audit, machine_port) = service_with_guests(
+        FakeDiscovery::with(Ok(discovery_ok())),
+        FakeGuestDiscovery::with(Ok(guest_discovery(vec![qemu_guest()]))),
+        FakeProbe::with(FP),
+    );
+    let account = create_account(&proxmox).await;
+    observe_and_confirm(&proxmox, &account.id).await;
+    let matching = register_machine(&machine_port, "matched", "ops@192.168.68.240:22", None).await;
+    let also_matching =
+        register_machine(&machine_port, "also-matched", "ops@192.168.68.240:22", None).await;
+    let unmatched = register_machine(&machine_port, "other", "ops@10.0.0.9:22", None).await;
+    let links = Arc::new(FakeGuestLinks::default());
+    let machines = Machines::new(machine_port, audit.clone()).with_guest_links(links.clone());
+    let identity = GuestIdentity {
+        account_id: account.id.clone(),
+        guest_kind: "qemu".to_owned(),
+        vmid: 101,
+    };
+    let denied = machines
+        .link_guest(&proxmox, &DenyAll, &principal(), &matching, &identity, NOW)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        fleet_application::machine::MachineUseCaseError::Denied(_)
+    ));
+    let rejected = machines
+        .link_guest(
+            &proxmox,
+            &AllowAll,
+            &principal(),
+            &unmatched,
+            &identity,
+            NOW,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        rejected,
+        fleet_application::machine::MachineUseCaseError::Conflict { .. }
+    ));
+    assert!(links.get(&unmatched).await.unwrap().is_none());
+    let view = machines
+        .link_guest(&proxmox, &AllowAll, &principal(), &matching, &identity, NOW)
+        .await
+        .unwrap();
+    assert_eq!(view.kind, fleet_application::machine::MachineKind::Vm);
+    assert_eq!(view.runs_on.unwrap().vmid, 101);
+    let conflict = machines
+        .link_guest(
+            &proxmox,
+            &AllowAll,
+            &principal(),
+            &also_matching,
+            &identity,
+            NOW,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        fleet_application::machine::MachineUseCaseError::Conflict { ref detail } if detail == "already linked"
+    ));
+    let unlinked = machines
+        .unlink_guest(&AllowAll, &principal(), &matching, NOW)
+        .await
+        .unwrap();
+    assert!(unlinked.runs_on.is_none());
+    let actions: Vec<_> = audit
+        .intents
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|intent| intent.action.clone())
+        .collect();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| action.as_str() == "machine.link.guest")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn targeted_guest_candidate_preserves_missing_machine_error() {
+    let (proxmox, _audit, _machine_port) = service_with_guests(
+        FakeDiscovery::with(Ok(discovery_ok())),
+        FakeGuestDiscovery::with(Ok(guest_discovery(vec![qemu_guest()]))),
+        FakeProbe::with(FP),
+    );
+    let identity = GuestIdentity {
+        account_id: "account".to_owned(),
+        guest_kind: "qemu".to_owned(),
+        vmid: 101,
+    };
+    let error = proxmox
+        .current_guest_candidate(&AllowAll, &principal(), "missing", &identity, NOW)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ProxmoxUseCaseError::NotFound { .. }));
 }
 
 #[tokio::test]

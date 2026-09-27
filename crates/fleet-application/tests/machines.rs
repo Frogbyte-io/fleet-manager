@@ -8,8 +8,8 @@ use fleet_application::authz::{
     AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, ReasonId,
 };
 use fleet_application::machine::{
-    CapabilityFactView, Endpoint, Machine, MachineFilter, MachinePort, MachineStatus,
-    MachineUseCaseError, Machines, NewEndpoint, NodeLink, RegisterMachine,
+    CapabilityFactView, Endpoint, GuestLink, Machine, MachineFilter, MachineKind, MachinePort,
+    MachineStatus, MachineUseCaseError, Machines, NewEndpoint, NodeLink, RegisterMachine,
 };
 use fleet_application::node::{GatewayState, NodeStatus};
 use fleet_application::operation::PortFailure;
@@ -17,6 +17,47 @@ use fleet_core::{CapabilityFact, CapabilityStatus, EndpointKind, Timestamp};
 
 const NOW: i64 = 1_800_000_000_000;
 const FRESHNESS: i64 = 24 * 60 * 60 * 1000;
+
+#[test]
+fn kind_comes_from_confirmed_link_or_known_virtualization() {
+    let mut virt = fact("host", "virtualization", CapabilityStatus::Known, NOW);
+    virt.value = Some("none".to_owned());
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Physical
+    );
+    virt.value = Some("kvm".to_owned());
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Vm
+    );
+    virt.value = Some("lxc".to_owned());
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Lxc
+    );
+    virt.status = CapabilityStatus::Unavailable;
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Unknown
+    );
+    virt.status = CapabilityStatus::Known;
+    virt.observed_at = Timestamp::from_unix_millis(NOW - FRESHNESS - 1);
+    assert_eq!(
+        MachineKind::derive(None, &[virt.clone()], NOW),
+        MachineKind::Unknown
+    );
+    let link = GuestLink {
+        account_id: "pve".to_owned(),
+        guest_kind: "qemu".to_owned(),
+        node: "node".to_owned(),
+        vmid: 101,
+    };
+    assert_eq!(
+        MachineKind::derive(Some(&link), &[virt], NOW),
+        MachineKind::Vm
+    );
+}
 
 fn principal() -> ActingPrincipal {
     ActingPrincipal {
