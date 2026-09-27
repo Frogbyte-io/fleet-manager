@@ -2,6 +2,9 @@
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import AppSidebar from '@/shell/AppSidebar.vue'
 import AppTopbar from '@/shell/AppTopbar.vue'
+import { useFleetEvents } from '@/shell/fleetEvents'
+
+const eventStatus = useFleetEvents()
 
 function skipToMain(event: MouseEvent) {
   event.preventDefault()
@@ -20,7 +23,7 @@ function skipToMain(event: MouseEvent) {
       >
         Skip to content
       </a>
-      <AppTopbar />
+      <AppTopbar :event-status="eventStatus" />
       <main
         id="main"
         tabindex="-1"
