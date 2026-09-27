@@ -66,6 +66,13 @@ describe('structured view', () => {
     expect(analyze('{"builders":[{"type":"docker"}]}')).toMatchObject({ editable: false, reason: expect.stringContaining('No proxmox') })
     expect(analyze('{"builders":[{"type":"proxmox-iso","node":"p","vmid":12345678901234567890}]}'))
       .toMatchObject({ editable: false, reason: expect.stringContaining('larger than the browser') })
+    // fleet-core gives no structured view without a string node.
+    expect(analyze('{"builders":[{"type":"proxmox-iso"}]}')).toMatchObject({ editable: false, reason: expect.stringContaining('"node"') })
+  })
+
+  it('reads cores and memory only within u32, as fleet-core does', () => {
+    expect(fields('{"builders":[{"type":"proxmox-iso","node":"p","cores":4294967296,"memory":4294967295}]}'))
+      .toMatchObject({ cores: null, memory: 4294967295 })
   })
 })
 
@@ -187,11 +194,16 @@ describe('pins and builds', () => {
     const op = (id: string, createdAt: number, state: string, resultJson: string | null = null) =>
       ({ id, kind: 'image.build', createdAt, state, resultJson }) as OperationDto
     const builds = latestBuilds([
-      op('old', 1, 'succeeded', '{"artifactId":"9000","recipeVersion":"r1@bbbb"}'),
-      op('new', 2, 'running'),
+      op('by-result', 1, 'succeeded', '{"artifactId":"9000","recipeVersion":"r1@aaaa"}'),
+      op('older-for-b', 1, 'succeeded', '{"artifactId":"8999","recipeVersion":"r1@bbbb"}'),
+      op('by-tab', 2, 'running'),
+      op('unknown', 4, 'running'),
       { ...op('other', 3, 'succeeded'), kind: 'lab.provision' },
-    ], { new: 'r1@bbbb' })
-    expect(builds.get('r1@bbbb')?.id).toBe('new')
-    expect(builds.size).toBe(1)
+    ], { 'by-tab': 'r1@bbbb' })
+    // Attributed through the result's recipeVersion.
+    expect(builds.get('r1@aaaa')?.id).toBe('by-result')
+    // Attributed through this tab, and newer than the result-attributed build.
+    expect(builds.get('r1@bbbb')?.id).toBe('by-tab')
+    expect(builds.size).toBe(2)
   })
 })

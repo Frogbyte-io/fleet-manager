@@ -78,7 +78,7 @@ async function mountAt(path: string) {
   const wrapper = mount(ImagesPage, { global: { plugins: [[VueQueryPlugin, { queryClient }], router] } })
   await flushPromises()
   await flushPromises()
-  return { wrapper, router }
+  return { wrapper, router, queryClient }
 }
 
 let operations: OperationDto[] = []
@@ -119,7 +119,7 @@ describe('pipeline', () => {
 
 describe('e2e: edit → publish → build → promote', () => {
   it('runs the whole flow against the API', async () => {
-    const { wrapper, router } = await mountAt('/images?select=recipe:r1')
+    const { wrapper, router, queryClient } = await mountAt('/images?select=recipe:r1')
 
     // Structured edit: only `cores` changes in the raw content.
     await wrapper.get('[data-testid="field-cores"]').setValue('4')
@@ -168,11 +168,11 @@ describe('e2e: edit → publish → build → promote', () => {
 
     // The build succeeds with an artifact: the evidence appears and promotion unlocks.
     operations = [{ id: 'op-build', kind: 'image.build', state: 'succeeded', createdAt: 10, resultJson: JSON.stringify({ artifactId: '9001', recipeVersion: 'r1@bbbb', says: ['proxmox-clone: template 9001 created'] }) } as OperationDto]
-    // The page polls operations while a build runs, and picks up the result.
-    await vi.waitFor(async () => {
-      await flushPromises()
-      expect(wrapper.get('[data-testid="promotion-evidence"]').text()).toContain('9001')
-    }, { timeout: 5000, interval: 200 })
+    // The page polls while a build runs; refetch now instead of waiting for the timers.
+    await queryClient.invalidateQueries({ queryKey: ['images', 'build-operations'] })
+    await queryClient.invalidateQueries({ queryKey: ['operation', 'op-build'] })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="promotion-evidence"]').text()).toContain('9001')
     expect(wrapper.get('[data-testid="promotion-evidence"]').text()).toContain('template 9001 created')
 
     promoteImageVersion.mockImplementation(async () => {
@@ -189,7 +189,27 @@ describe('e2e: edit → publish → build → promote', () => {
     expect(wrapper.get('[data-testid="version-r1@bbbb"]').text()).toContain('promoted')
     // The template still pins v1, which is now superseded.
     expect(wrapper.get('[data-testid="template-t1"]').text()).toContain('superseded')
-  }, 15000)
+  })
+
+  it('starts each version with a clean build form', async () => {
+    listImageRecipeVersions.mockResolvedValue(ok(page([version('r1@aaaa', 1), version('r1@bbbb', 2)])))
+    const { wrapper, router } = await mountAt('/images?select=version:r1@aaaa')
+    await wrapper.findAll('button').find(b => b.text() === '+ Secret variable')!.trigger('click')
+    await wrapper.get('input[aria-label="Secret reference id"]').setValue('secret-ref-1')
+    await router.replace({ query: { select: 'version:r1@bbbb' } })
+    await flushPromises()
+    expect(wrapper.find('input[aria-label="Secret reference id"]').exists()).toBe(false)
+  })
+
+  it('asks before building while a build started elsewhere is running', async () => {
+    listImageRecipeVersions.mockResolvedValue(ok(page([version('r1@aaaa', 1)])))
+    operations = [{ id: 'op-elsewhere', kind: 'image.build', state: 'running', createdAt: 1 } as OperationDto]
+    const { wrapper } = await mountAt('/images?select=version:r1@aaaa')
+    expect(wrapper.get('[data-testid="unattributed-builds"]').text()).toContain('1 build running')
+    expect(wrapper.get('[data-testid="build"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="concurrent-builds"] input').setValue(true)
+    expect(wrapper.get('[data-testid="build"]').attributes('disabled')).toBeUndefined()
+  })
 
   it('offers raw-only editing for a non-JSON template', async () => {
     listImageRecipes.mockResolvedValue(ok(page([recipe({ content: 'source "proxmox-iso" "x" {}' })])))

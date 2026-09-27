@@ -70,6 +70,9 @@ function parse(raw: string): { doc: JsonObject, builder: JsonObject } | { reason
   const builder = builders.find((b): b is JsonObject => isObject(b) && SUPPORTED.includes(b.type as BuilderType))
   if (!builder)
     return { reason: 'No proxmox-iso or proxmox-clone builder, so there is no structured view.' }
+  // fleet-core offers no structured view without a string `node`.
+  if (typeof builder.node !== 'string')
+    return { reason: 'The Proxmox builder has no "node" string, so fleet-core offers no structured view; add "node" in the raw template to use the form.' }
   return { doc, builder }
 }
 
@@ -77,8 +80,11 @@ function str(value: Json | undefined): string {
   return typeof value === 'string' ? value : ''
 }
 
+/** fleet-core reads cores and memory as `u32`; anything outside that is absent. */
+const U32_MAX = 0xFFFFFFFF
+
 function count(value: Json | undefined): number | null {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= U32_MAX ? value : null
 }
 
 /** The structured view of raw content, or why there is none. */
@@ -166,7 +172,11 @@ export function metadataFrom(fields: StructuredFields): { node: string, storageP
   return { node: fields.node.trim(), storagePool: fields.storagePool.trim(), source: fields.builderType === 'proxmox-clone' ? 'clone' : 'iso' }
 }
 
-/** fleet-core `RecipeContent::validate`, for the form. */
+/**
+ * fleet-core `RecipeContent::validate`, applied to the request as the editor
+ * sends it (name, node, and pool trimmed), so the form refuses early what
+ * the controller would refuse. The controller's check stays authoritative.
+ */
 export function recipeErrors(input: { name: string, description: string, node: string, storagePool: string, content: string }): string[] {
   const errors: string[] = []
   const length = (value: string) => [...value].length

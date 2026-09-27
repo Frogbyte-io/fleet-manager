@@ -356,6 +356,7 @@ const staleCount = computed(() => templateList.value.filter(t => templatePin(t).
         :label="versionLabel(selectedVersion)"
         :build="builds.get(selectedVersion.id) ?? null"
         :pinned-by="pinnedBy.get(selectedVersion.id) ?? []"
+        :unattributed-running="unattributed.length"
         @close="clear"
       />
       <p

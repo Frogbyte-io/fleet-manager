@@ -25,6 +25,8 @@ const props = defineProps<{
   label: string
   build: OperationDto | null
   pinnedBy: LabTemplateDto[]
+  /** Running builds whose version is not known yet (started elsewhere). */
+  unattributedRunning: number
 }>()
 const emit = defineEmits<{ close: [] }>()
 
@@ -40,10 +42,15 @@ const busy = ref(false)
 const error = ref('')
 const startedId = ref<string | null>(null)
 
+// Every per-version input and message starts over on another version.
 watch(() => props.version.id, () => {
   startedId.value = null
   error.value = ''
   confirming.value = false
+  promoteError.value = ''
+  secretVars.value = []
+  timeoutMinutes.value = DEFAULT_TIMEOUT / 60
+  concurrentAcknowledged.value = false
 })
 
 const varsValid = computed(() => secretVars.value.every(v => /^[A-Za-z_][\w-]*$/.test(v.name.trim()) && v.reference.trim() !== ''))
@@ -52,6 +59,10 @@ const timeoutSeconds = computed(() => Math.min(MAX_TIMEOUT, Math.max(60, Math.ro
 // with its fixed 4h deadline.
 const cliCommand = computed(() => (secretVars.value.length === 0 && timeoutSeconds.value === MAX_TIMEOUT ? buildCommand(props.version.id) : null))
 const buildRunning = computed(() => !!props.build && !isTerminal(props.build.state))
+// A build started elsewhere may be this version; the controller does not
+// refuse concurrent builds, so the operator has to rule it out.
+const concurrentAcknowledged = ref(false)
+const buildBlocked = computed(() => buildRunning.value || (props.unattributedRunning > 0 && !concurrentAcknowledged.value))
 
 async function startBuild() {
   if (!varsValid.value)
@@ -216,7 +227,7 @@ const structured = computed(() => props.version.structured ?? null)
         <button
           type="button"
           class="h-8 rounded-sm border border-fc-info/40 px-3 font-semibold text-fc-info hover:bg-fc-info/10 disabled:opacity-50"
-          :disabled="busy || !varsValid || buildRunning"
+          :disabled="busy || !varsValid || buildBlocked"
           :title="buildRunning ? 'A build of this version is still running' : ''"
           data-testid="build"
           @click="startBuild"
@@ -224,6 +235,18 @@ const structured = computed(() => props.version.structured ?? null)
           Build →
         </button>
       </div>
+      <label
+        v-if="unattributedRunning > 0 && !buildRunning"
+        class="flex items-start gap-2 rounded-sm border border-fc-warn/40 p-2 text-fc-muted"
+        data-testid="concurrent-builds"
+      >
+        <input
+          v-model="concurrentAcknowledged"
+          type="checkbox"
+          class="mt-0.5"
+        >
+        <span>{{ unattributedRunning }} build{{ unattributedRunning === 1 ? ' is' : 's are' }} running that {{ unattributedRunning === 1 ? 'was' : 'were' }} started elsewhere; the controller does not say which version. I checked Operations and none of them is this version.</span>
+      </label>
       <p
         v-if="error"
         class="text-fc-err"

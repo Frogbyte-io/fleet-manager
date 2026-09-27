@@ -61,8 +61,12 @@ watch(fields, (value) => {
   if (!value)
     return
   const meta = metadataFrom(value)
-  node.value = meta.node
-  storagePool.value = meta.storagePool
+  // An empty builder value (e.g. a new template) does not erase metadata
+  // the draft already has.
+  if (meta.node)
+    node.value = meta.node
+  if (meta.storagePool)
+    storagePool.value = meta.storagePool
   source.value = meta.source
 }, { immediate: true })
 
