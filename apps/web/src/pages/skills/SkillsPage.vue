@@ -47,7 +47,8 @@ const selected = computed<string | null>({
 // ARIA tabs: arrow keys, Home, and End move between tabs (roving tabindex).
 function onTabKey(event: KeyboardEvent, index: number) {
   const last = TABS.length - 1
-  const next = { ArrowRight: index === last ? 0 : index + 1, ArrowLeft: index === 0 ? last : index - 1, Home: 0, End: last }[event.key]
+  const moves: Record<string, number> = { ArrowRight: index === last ? 0 : index + 1, ArrowLeft: index === 0 ? last : index - 1, Home: 0, End: last }
+  const next = moves[event.key]
   if (next === undefined)
     return
   event.preventDefault()

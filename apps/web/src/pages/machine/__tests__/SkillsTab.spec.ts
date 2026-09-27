@@ -111,6 +111,8 @@ describe('machine Skills tab', () => {
     await wrapper.get('[data-testid="skills-preview"]').trigger('click')
     await flushPromises()
     await flushPromises()
+    expect(startSkillsOperation).toHaveBeenCalledWith('m1', expect.objectContaining({ operation: 'remove', dryRun: true }))
+    expect(wrapper.find('[data-testid="operation-status"]').text()).toContain('succeeded')
     expect(wrapper.find('[data-testid="skills-probe-hint"]').exists()).toBe(false)
   })
 
