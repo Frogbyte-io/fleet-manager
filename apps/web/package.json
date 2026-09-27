@@ -11,12 +11,16 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@codemirror/lang-json": "6.0.2",
+    "@codemirror/lint": "6.9.7",
+    "@codemirror/state": "6.7.6",
     "@frogbyte-io/fleet-api-client": "workspace:*",
     "@lucide/vue": "1.48.0",
     "@tanstack/vue-query": "5.103.2",
     "@vueuse/core": "15.0.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "codemirror": "6.0.2",
     "reka-ui": "2.10.5",
     "tailwind-merge": "3.7.0",
     "vue": "3.5.42",

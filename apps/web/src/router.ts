@@ -82,7 +82,7 @@ export const routes: RouteRecordRaw[] = [
   },
   {
     path: '/images',
-    component: () => import('./pages/NotYetAvailablePage.vue'),
+    component: () => import('./pages/images/ImagesPage.vue'),
     meta: { title: 'Images', group: 'Work' },
   },
   {
