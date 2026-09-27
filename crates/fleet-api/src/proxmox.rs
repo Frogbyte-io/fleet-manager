@@ -28,7 +28,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the Proxmox use cases from the API state, or answers with the
 /// standard envelope when the controller was composed without one.
-fn proxmox_or_error(
+pub(crate) fn proxmox_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<fleet_application::proxmox::ProxmoxAccounts>, ApiErrorResponse> {

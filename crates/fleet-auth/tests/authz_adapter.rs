@@ -134,7 +134,7 @@ fn every_catalog_action_has_a_unique_stable_id_and_a_risk_ruling() {
     assert!(Permission::MachineReadSensitive.is_risky());
     assert!(!Permission::SystemRead.is_risky());
     // The catalog is the complete vocabulary the adapter permits.
-    assert_eq!(Permission::ALL.len(), 50); // includes events.read and skills.modify
+    assert_eq!(Permission::ALL.len(), 51); // includes events.read, skills.modify, and machine.link.guest
 }
 
 #[test]

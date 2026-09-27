@@ -64,6 +64,7 @@ function machine(): MachineDto {
     tags: ['linux'],
     groups: ['ci'],
     machineStatus: 'connected',
+    kind: 'unknown',
     lastSeenAt: NOW - 30_000,
     lastObservation: { source: 'fleetd/1.2.0', collectedAt: NOW - 60_000 },
     capabilities: [

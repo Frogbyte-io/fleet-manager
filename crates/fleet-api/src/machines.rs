@@ -150,6 +150,10 @@ pub struct MachineDto {
     /// The derived connectivity state: `connected`, `stale`, `offline`, or
     /// `agentless`.
     pub machine_status: String,
+    /// Physical, VM, LXC, or unknown, derived from a link or inventory.
+    pub kind: String,
+    /// The explicitly confirmed Proxmox guest, when linked.
+    pub runs_on: Option<GuestLinkDto>,
     /// The last gateway observation time, when the node ever connected
     /// (epoch milliseconds).
     pub last_seen_at: Option<i64>,
@@ -181,6 +185,8 @@ impl From<MachineView> for MachineDto {
             tags: view.tags,
             groups: view.groups,
             machine_status: view.machine_status.id().to_owned(),
+            kind: view.kind.id().to_owned(),
+            runs_on: view.runs_on.map(GuestLinkDto::from),
             last_seen_at: view.last_seen_at,
             last_observation: view
                 .last_observation
@@ -206,6 +212,43 @@ impl From<MachineView> for MachineDto {
             updated_at: view.updated_at,
         }
     }
+}
+
+/// One explicitly confirmed Proxmox guest association.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestLinkDto {
+    /// Proxmox account identity.
+    pub account_id: String,
+    /// `qemu` or `lxc`.
+    pub guest_kind: String,
+    /// Node observed when the link was confirmed.
+    pub node: String,
+    /// Proxmox VMID.
+    pub vmid: u32,
+}
+
+impl From<fleet_application::machine::GuestLink> for GuestLinkDto {
+    fn from(link: fleet_application::machine::GuestLink) -> Self {
+        Self {
+            account_id: link.account_id,
+            guest_kind: link.guest_kind,
+            node: link.node,
+            vmid: link.vmid,
+        }
+    }
+}
+
+/// The guest identity the operator explicitly confirms.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkGuestRequest {
+    /// The configured Proxmox account.
+    pub account_id: String,
+    /// `qemu` or `lxc`.
+    pub guest_kind: String,
+    /// The guest VMID.
+    pub vmid: u32,
 }
 
 /// The list-machines query parameters.
@@ -419,5 +462,96 @@ pub async fn get_machine(
         )
         .await
         .map_err(|error| map_machine_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(MachineDto::from(view))))
+}
+
+/// Confirms a current Proxmox guest candidate for a Fleet machine.
+///
+/// # Errors
+///
+/// Returns the public error envelope on denial, missing evidence, or a
+/// conflicting link.
+#[utoipa::path(
+    post,
+    path = "/machines/{machineId}/guest-link",
+    tag = "machines",
+    operation_id = "linkMachineGuest",
+    params(("machineId" = String, Path, description = "The machine identity.")),
+    request_body = LinkGuestRequest,
+    responses(
+        (status = 200, description = "The machine with its confirmed link.", body = Resource<MachineDto>),
+        (status = 403, description = "The caller may not link this guest.", body = crate::error::ApiError),
+        (status = 404, description = "The machine does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The guest is not a current candidate or is already linked.", body = crate::error::ApiError)
+    )
+)]
+pub async fn link_machine_guest(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(machine_id): Path<String>,
+    Json(request): Json<LinkGuestRequest>,
+) -> Result<Json<Resource<MachineDto>>, ApiErrorResponse> {
+    let machines = machines_or_error(&state, correlation_id)?;
+    let proxmox = crate::proxmox::proxmox_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let view = machines
+        .link_guest(
+            proxmox.as_ref(),
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            &fleet_application::machine::GuestIdentity {
+                account_id: request.account_id,
+                guest_kind: request.guest_kind,
+                vmid: request.vmid,
+            },
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_machine_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
+    Ok(Json(Resource::new(MachineDto::from(view))))
+}
+
+/// Removes a machine's confirmed Proxmox guest association.
+///
+/// # Errors
+///
+/// Returns the public error envelope on denial, a missing link, or failure.
+#[utoipa::path(
+    delete,
+    path = "/machines/{machineId}/guest-link",
+    tag = "machines",
+    operation_id = "unlinkMachineGuest",
+    params(("machineId" = String, Path, description = "The machine identity.")),
+    responses(
+        (status = 200, description = "The machine without a confirmed link.", body = Resource<MachineDto>),
+        (status = 403, description = "The caller may not unlink this guest.", body = crate::error::ApiError),
+        (status = 404, description = "The link does not exist.", body = crate::error::ApiError)
+    )
+)]
+pub async fn unlink_machine_guest(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(machine_id): Path<String>,
+) -> Result<Json<Resource<MachineDto>>, ApiErrorResponse> {
+    let machines = machines_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let view = machines
+        .unlink_guest(
+            state.authorizer.as_ref(),
+            &principal,
+            &machine_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_machine_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::MachineChanged);
     Ok(Json(Resource::new(MachineDto::from(view))))
 }

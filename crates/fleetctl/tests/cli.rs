@@ -250,6 +250,39 @@ fn parsing_accepts_the_machine_grammar() {
 }
 
 #[test]
+fn parsing_accepts_confirmed_guest_link_commands() {
+    let args = [
+        "machines",
+        "link-guest",
+        "machine-1",
+        "--account",
+        "account-1",
+        "--kind",
+        "qemu",
+        "--vmid",
+        "101",
+    ]
+    .map(ToString::to_string);
+    let invocation = fleetctl::parse(&args).unwrap();
+    assert_eq!(
+        invocation.command,
+        fleetctl::Command::MachinesLinkGuest {
+            id: "machine-1".to_owned(),
+            account: "account-1".to_owned(),
+            kind: "qemu".to_owned(),
+            vmid: 101,
+        }
+    );
+    let args = ["machines", "unlink-guest", "machine-1"].map(ToString::to_string);
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::MachinesUnlinkGuest {
+            id: "machine-1".to_owned()
+        }
+    );
+}
+
+#[test]
 fn text_output_renders_a_page_as_a_table() {
     let page = json!({
         "items": [

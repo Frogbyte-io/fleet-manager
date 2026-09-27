@@ -2334,6 +2334,128 @@
         }
       }
     },
+    "/api/v1/machines/{machineId}/guest-link": {
+      "post": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Confirms a current Proxmox guest candidate for a Fleet machine.",
+        "operationId": "linkMachineGuest",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkGuestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The machine with its confirmed link.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not link this guest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The guest is not a current candidate or is already linked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Removes a machine's confirmed Proxmox guest association.",
+        "operationId": "unlinkMachineGuest",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The machine without a confirmed link.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not unlink this guest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The link does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{machineId}/mise/operations": {
       "post": {
         "tags": [
@@ -6564,6 +6686,36 @@
         ],
         "description": "How a Frogenv operation's endpoint authenticates."
       },
+      "GuestLinkDto": {
+        "type": "object",
+        "description": "One explicitly confirmed Proxmox guest association.",
+        "required": [
+          "accountId",
+          "guestKind",
+          "node",
+          "vmid"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "Proxmox account identity."
+          },
+          "guestKind": {
+            "type": "string",
+            "description": "`qemu` or `lxc`."
+          },
+          "node": {
+            "type": "string",
+            "description": "Node observed when the link was confirmed."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Proxmox VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "ImportTailnetDeviceRequest": {
         "type": "object",
         "description": "The import request: the SSH login user and port for the draft.",
@@ -6917,6 +7069,31 @@
           }
         }
       },
+      "LinkGuestRequest": {
+        "type": "object",
+        "description": "The guest identity the operator explicitly confirms.",
+        "required": [
+          "accountId",
+          "guestKind",
+          "vmid"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The configured Proxmox account."
+          },
+          "guestKind": {
+            "type": "string",
+            "description": "`qemu` or `lxc`."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest VMID.",
+            "minimum": 0
+          }
+        }
+      },
       "MachineDto": {
         "type": "object",
         "description": "A machine, as the list and detail endpoints display it.",
@@ -6928,6 +7105,7 @@
           "tags",
           "groups",
           "machineStatus",
+          "kind",
           "capabilities",
           "createdAt",
           "updatedAt"
@@ -6967,6 +7145,10 @@
             "type": "string",
             "description": "The stable identity."
           },
+          "kind": {
+            "type": "string",
+            "description": "Physical, VM, LXC, or unknown, derived from a link or inventory."
+          },
           "lastObservation": {
             "oneOf": [
               {
@@ -6993,6 +7175,17 @@
           "name": {
             "type": "string",
             "description": "The mutable, unique label."
+          },
+          "runsOn": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GuestLinkDto",
+                "description": "The explicitly confirmed Proxmox guest, when linked."
+              }
+            ]
           },
           "tags": {
             "type": "array",
@@ -8366,6 +8559,7 @@
                 "tags",
                 "groups",
                 "machineStatus",
+                "kind",
                 "capabilities",
                 "createdAt",
                 "updatedAt"
@@ -8405,6 +8599,10 @@
                   "type": "string",
                   "description": "The stable identity."
                 },
+                "kind": {
+                  "type": "string",
+                  "description": "Physical, VM, LXC, or unknown, derived from a link or inventory."
+                },
                 "lastObservation": {
                   "oneOf": [
                     {
@@ -8431,6 +8629,17 @@
                 "name": {
                   "type": "string",
                   "description": "The mutable, unique label."
+                },
+                "runsOn": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GuestLinkDto",
+                      "description": "The explicitly confirmed Proxmox guest, when linked."
+                    }
+                  ]
                 },
                 "tags": {
                   "type": "array",
@@ -10427,6 +10636,7 @@
               "tags",
               "groups",
               "machineStatus",
+              "kind",
               "capabilities",
               "createdAt",
               "updatedAt"
@@ -10466,6 +10676,10 @@
                 "type": "string",
                 "description": "The stable identity."
               },
+              "kind": {
+                "type": "string",
+                "description": "Physical, VM, LXC, or unknown, derived from a link or inventory."
+              },
               "lastObservation": {
                 "oneOf": [
                   {
@@ -10492,6 +10706,17 @@
               "name": {
                 "type": "string",
                 "description": "The mutable, unique label."
+              },
+              "runsOn": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/GuestLinkDto",
+                    "description": "The explicitly confirmed Proxmox guest, when linked."
+                  }
+                ]
               },
               "tags": {
                 "type": "array",

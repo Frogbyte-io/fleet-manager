@@ -31,6 +31,8 @@ A crate implements only the ports it can honor. Read and write capabilities are 
 
 The application chooses a route from machine endpoints and observed provider capabilities. A provider never selects another provider or bypasses authorization.
 
+Proxmox guest discovery reports evidence-only Fleet machine candidates. The runtime association is a separate, explicitly confirmed one-to-one link between a Fleet machine and an account/kind/VMID guest identity. Confirmation rediscovers that guest and requires current evidence for the selected machine; conflicts are refused by the runtime store. A machine's displayed kind comes from its confirmed guest link first, then its observed `host.virtualization` fact. Names never create links automatically.
+
 ## Provider contract requirements
 
 Each call receives operation context containing correlation/operation ID, deadline, cancellation, actor decision digest, target, and redaction policy. It returns:

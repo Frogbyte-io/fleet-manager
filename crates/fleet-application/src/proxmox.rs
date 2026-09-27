@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
-use crate::machine::{MachineFilter, MachineUseCaseError, MachineView, Machines};
+use crate::machine::{GuestIdentity, MachineFilter, MachineUseCaseError, MachineView, Machines};
 use crate::operation::AuditPort;
 use fleet_core::{CapabilityFact, CapabilityStatus, SensitiveString, Timestamp};
 
@@ -1144,6 +1144,62 @@ impl ProxmoxAccounts {
             warnings: raw.warnings,
             observed_at: now,
         })
+    }
+
+    /// Rediscovers one guest and checks evidence for one specific machine.
+    /// This uses a targeted machine read so list pagination cannot hide an
+    /// otherwise current candidate.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing read permissions, trust, secret, or provider failure.
+    pub async fn current_guest_candidate(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        machine_id: &str,
+        guest_identity: &GuestIdentity,
+        now: i64,
+    ) -> Result<Option<ProviderGuest>, ProxmoxUseCaseError> {
+        let GuestIdentity {
+            account_id,
+            guest_kind,
+            vmid,
+        } = guest_identity;
+        for (action, resource) in [
+            (Permission::ProxmoxRead, Some(account_id.as_str())),
+            (Permission::MachineReadSensitive, Some(machine_id)),
+        ] {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id: &principal.id,
+                    action,
+                    resource,
+                },
+            )
+            .map_err(ProxmoxUseCaseError::Denied)?;
+        }
+        let machine = self
+            .machines
+            .get(authorizer, principal, machine_id, now)
+            .await
+            .map_err(|error| ProxmoxUseCaseError::Backend {
+                context: "association",
+                detail: error.to_string(),
+            })?;
+        let account = self.trusted_account(account_id).await?;
+        let secret = self.require_secret(&account).await?;
+        let raw = self
+            .guests
+            .guest_discover(&account, &SensitiveString::new(secret))
+            .await
+            .map_err(ProxmoxUseCaseError::Source)?;
+        Ok(raw.guests.into_iter().find(|guest| {
+            guest.kind == *guest_kind
+                && guest.vmid == Some(*vmid)
+                && association_candidate(guest, &machine).is_some()
+        }))
     }
 
     /// Records one guest's facts onto a confirmed Fleet machine as
