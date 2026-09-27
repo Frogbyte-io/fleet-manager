@@ -25,7 +25,7 @@ const fill = computed(() => ({
     <div
       class="h-1.5 overflow-hidden rounded-sm bg-fc-inset"
       role="progressbar"
-      :aria-label="`${label} used`"
+      :aria-label="label ? `${label} used` : 'capacity used'"
       :aria-valuenow="value === null ? undefined : Math.round(value * 100)"
       aria-valuemin="0"
       aria-valuemax="100"
