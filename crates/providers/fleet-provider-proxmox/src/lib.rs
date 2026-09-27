@@ -1862,6 +1862,8 @@ const MAX_STATUS_CHARS: usize = 64;
 /// separators and control characters from a provider response before use.
 fn safe_node_path_segment(node: &str) -> bool {
     !node.is_empty()
+        && node != "."
+        && node != ".."
         && node
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
@@ -2038,7 +2040,15 @@ mod tests {
         for node in ["pve-1", "pve_1", "node.example"] {
             assert!(safe_node_path_segment(node), "{node}");
         }
-        for node in ["", "../version", "pve/status", "pve?x=1", "pve\n"] {
+        for node in [
+            "",
+            ".",
+            "..",
+            "../version",
+            "pve/status",
+            "pve?x=1",
+            "pve\n",
+        ] {
             assert!(!safe_node_path_segment(node), "{node:?}");
         }
     }

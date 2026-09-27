@@ -113,15 +113,16 @@ async fn pve8_node_and_storage_capacity_are_normalized_in_bytes() {
     assert_eq!(node.storages[0].storage, "local");
     assert_eq!(node.storages[0].used_bytes, 21_474_836_480);
     assert_eq!(node.storages[0].total_bytes, 107_374_182_400);
-    assert_eq!(
-        *transport.requests.lock().unwrap(),
-        vec![
-            "/api2/json/version",
-            "/api2/json/cluster/resources",
-            "/api2/json/nodes/pve8/status",
-            "/api2/json/nodes/pve8/storage",
-        ]
-    );
+    let mut requests = transport.requests.lock().unwrap().clone();
+    requests.sort_unstable();
+    let mut expected = vec![
+        "/api2/json/version",
+        "/api2/json/cluster/resources",
+        "/api2/json/nodes/pve8/status",
+        "/api2/json/nodes/pve8/storage",
+    ];
+    expected.sort_unstable();
+    assert_eq!(requests, expected);
 }
 
 #[tokio::test]

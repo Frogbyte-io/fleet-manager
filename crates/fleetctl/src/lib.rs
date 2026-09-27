@@ -5107,6 +5107,9 @@ fn render_proxmox_nodes(value: Option<&Value>) -> String {
     if let Some(version) = value.get("pveVersion").and_then(Value::as_str) {
         lines.push(format!("PVE {version}"));
     }
+    if let Some(observed_at) = value.get("observedAt").and_then(Value::as_i64) {
+        lines.push(format!("observed at: {observed_at} (epoch ms)"));
+    }
     let capacities = value
         .get("nodeCapacities")
         .and_then(Value::as_array)
@@ -5128,11 +5131,16 @@ fn render_proxmox_nodes(value: Option<&Value>) -> String {
             human_bytes(capacity["memoryUsedBytes"].as_u64()),
             human_bytes(capacity["memoryTotalBytes"].as_u64())
         );
+        let observed_at = capacity
+            .get("observedAt")
+            .and_then(Value::as_i64)
+            .map_or_else(|| "-".to_owned(), |timestamp| timestamp.to_string());
         lines.push(format!(
-            "{:<20} {:<10} {:<8} {}",
+            "{:<20} {:<10} {:<8} observed {:<17} {}",
             capacity["node"].as_str().unwrap_or("-"),
             cpu,
             cpu_count,
+            observed_at,
             memory
         ));
         if let Some(storages) = capacity["storages"].as_array() {

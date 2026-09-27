@@ -2098,6 +2098,7 @@ fn text_output_renders_proxmox_accounts_and_discoveries() {
 fn text_output_renders_proxmox_node_capacity_and_partial_warnings() {
     let discovery = json!({
         "pveVersion": "9.2.2",
+        "observedAt": 1_699_999_999_999_i64,
         "nodeCapacities": [{
             "node": "pve-a",
             "cpuUsageRatio": 0.125,
@@ -2115,6 +2116,11 @@ fn text_output_renders_proxmox_node_capacity_and_partial_warnings() {
     });
     let text = fleetctl::render_proxmox_nodes_for_test(&discovery);
     assert!(text.contains("PVE 9.2.2"), "{text}");
+    assert!(
+        text.contains("observed at: 1699999999999 (epoch ms)"),
+        "{text}"
+    );
+    assert!(text.contains("observed 1700000000000"), "{text}");
     assert!(text.contains("pve-a"), "{text}");
     assert!(text.contains("12.5%"), "{text}");
     assert!(text.contains("16.0 GiB / 64.0 GiB"), "{text}");

@@ -10,4 +10,6 @@ Values and host names are synthetic so the fixtures contain no environment data.
 
 The test transport verifies the request paths and normalized values. A real
 PVE 8.x/9.x integration run remains the compatibility gate before claiming
-live-cluster validation.
+live-cluster validation. The PVE 9 memory example includes buffers and cache
+in the remainder between `used`, `free`, and `total`, reflecting PVE's
+cache-excluding `used` calculation.
