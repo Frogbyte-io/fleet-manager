@@ -13,18 +13,18 @@ describe('NotYetAvailablePage', () => {
     wrapper = null
   })
 
-  it('shows the route meta title for /lab', async () => {
+  it('shows the route meta title for an unbuilt page', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes,
     })
-    await router.push('/lab')
+    await router.push('/proxmox')
     await router.isReady()
 
     wrapper = mount(NotYetAvailablePage, {
       global: { plugins: [router] },
     })
-    expect(wrapper.text()).toContain('Lab')
+    expect(wrapper.text()).toContain('Proxmox')
     expect(wrapper.text()).toContain('not built yet')
   })
 })
