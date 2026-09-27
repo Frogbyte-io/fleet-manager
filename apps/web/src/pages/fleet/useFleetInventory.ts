@@ -10,6 +10,7 @@ import {
   listTailnetDevices,
   type PageAssociatedGuestDtoItemsItem,
   type PageCorrelatedDeviceDtoItemsItem,
+  type PageMachineDtoItemsItem,
   type PageProxmoxAccountDtoItemsItem,
   type ProxmoxDiscoveryDto,
 } from '@frogbyte-io/fleet-api-client'
@@ -74,17 +75,12 @@ export function useFleetInventory(): {
   const machinesQuery = useQuery({
     queryKey: ['fleet', 'machines'],
     queryFn: async () => {
-      // The machines endpoint takes no cursor (only `limit`), so one request
-      // is the whole list; a reported next cursor means it was cut short,
-      // which is surfaced rather than hidden (#151).
-      const response = await listMachines({ limit: 200 })
-      if (response.status !== 200)
-        throw new Error(`listMachines failed (${response.status})`)
-      if (response.data.page?.nextCursor)
-        setPaginationWarning('machines', `Showing the first ${response.data.page.limit} machines — the machines API cannot page further yet (#151).`)
-      else
-        setPaginationWarning('machines', null)
-      return response.data.items
+      // The machines endpoint pages by cursor now (#156), so every machine
+      // loads; the 20-page safety cap and its warning still apply.
+      const { items, truncated } = await fetchAllPages(cursor =>
+        listMachines({ limit: 200, cursor }) as unknown as Promise<PagedResponse<PageMachineDtoItemsItem>>)
+      setPaginationWarning('machines', truncated ? 'Machines hit the 20-page safety cap — some machines may be missing.' : null)
+      return items
     },
   })
 
