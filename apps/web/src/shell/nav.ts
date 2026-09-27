@@ -36,7 +36,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Infrastructure',
     items: [
       { title: 'Fleet', to: '/fleet', icon: Server, available: true },
-      { title: 'Proxmox', to: '/proxmox', icon: Shield, available: false },
+      { title: 'Proxmox', to: '/proxmox', icon: Shield, available: true },
       { title: 'Tailnet', to: '/tailnet', icon: Network, available: false },
       { title: 'Containers', to: '/containers', icon: Boxes, available: false },
     ],
