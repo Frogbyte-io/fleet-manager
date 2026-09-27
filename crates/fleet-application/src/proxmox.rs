@@ -222,9 +222,41 @@ pub struct ProxmoxResource {
     pub observed_at: i64,
 }
 
-/// The discovery snapshot: every resource the cluster reported, plus the
-/// honest record of what failed normalization.
+/// Current capacity observed for one Proxmox node.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxNodeCapacity {
+    /// The Proxmox node name.
+    pub node: String,
+    /// CPU usage as a fraction between 0.0 and 1.0.
+    pub cpu_usage_ratio: Option<f64>,
+    /// The node's logical CPU count, when available.
+    pub cpu_count: Option<u64>,
+    /// Used memory in bytes.
+    pub memory_used_bytes: Option<u64>,
+    /// Total memory in bytes.
+    pub memory_total_bytes: Option<u64>,
+    /// Per-storage capacity observed from this node.
+    pub storages: Vec<ProxmoxStorageCapacity>,
+    /// When the application completed the observation (epoch millis).
+    pub observed_at: i64,
+}
+
+/// Capacity observed for one storage pool on a Proxmox node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxmoxStorageCapacity {
+    /// The Proxmox storage identifier.
+    pub storage: String,
+    /// Used capacity in bytes.
+    pub used_bytes: u64,
+    /// Total capacity in bytes.
+    pub total_bytes: u64,
+}
+
+/// The discovery snapshot: every resource the cluster reported, per-node
+/// capacity observations, plus the honest record of what failed normalization.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxmoxDiscovery {
     /// The account that produced the snapshot.
@@ -233,6 +265,8 @@ pub struct ProxmoxDiscovery {
     pub pve_version: String,
     /// The normalized resources.
     pub resources: Vec<ProxmoxResource>,
+    /// Current CPU, memory, and storage observations, one entry per node.
+    pub node_capacities: Vec<ProxmoxNodeCapacity>,
     /// The per-resource normalization warnings. A partial failure never
     /// drops the snapshot.
     pub warnings: Vec<String>,
@@ -557,12 +591,14 @@ pub trait ProxmoxDiscoverPort: fmt::Debug + Send + Sync {
 /// The resources' provenance fields (`account_id`, `pve_version`,
 /// `observed_at`) are placeholders here; [`ProxmoxAccounts::discover`]
 /// overwrites all three with authoritative values.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RawDiscovery {
     /// The PVE version seen.
     pub version: String,
     /// The normalized resources, provenance pending.
     pub resources: Vec<ProxmoxResource>,
+    /// Current per-node capacity, with observation times pending.
+    pub node_capacities: Vec<ProxmoxNodeCapacity>,
     /// The per-resource normalization warnings.
     pub warnings: Vec<String>,
     /// The count the API reported.
@@ -993,10 +1029,19 @@ impl ProxmoxAccounts {
                 resource
             })
             .collect();
+        let node_capacities = raw
+            .node_capacities
+            .into_iter()
+            .map(|mut capacity| {
+                capacity.observed_at = now;
+                capacity
+            })
+            .collect();
         Ok(ProxmoxDiscovery {
             account_id: account.id,
             pve_version: raw.version,
             resources,
+            node_capacities,
             warnings: raw.warnings,
             reported_count: raw.reported_count,
             observed_at: now,

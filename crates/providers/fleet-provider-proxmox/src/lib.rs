@@ -513,14 +513,47 @@ pub struct PveResource {
     pub status: Option<String>,
 }
 
-/// The discovery result: the API version seen and the normalized resources.
+/// One Proxmox node's current resource usage and storage capacity.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveNodeCapacity {
+    /// The Proxmox node name.
+    pub node: String,
+    /// CPU usage as a fraction in the range 0.0 through 1.0.
+    pub cpu_usage_ratio: Option<f64>,
+    /// Logical CPU count, when PVE reports it.
+    pub cpu_count: Option<u64>,
+    /// Used memory in bytes.
+    pub memory_used_bytes: Option<u64>,
+    /// Total memory in bytes.
+    pub memory_total_bytes: Option<u64>,
+    /// Storage pools visible from this node.
+    pub storages: Vec<PveStorageCapacity>,
+}
+
+/// One Proxmox storage pool's current capacity.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveStorageCapacity {
+    /// The Proxmox storage identifier.
+    pub storage: String,
+    /// Used storage in bytes.
+    pub used_bytes: u64,
+    /// Total storage in bytes.
+    pub total_bytes: u64,
+}
+
+/// The discovery result: the API version, normalized resources, and current
+/// per-node capacity observations.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PveDiscovery {
     /// The PVE version string, e.g. `9.2.2`.
     pub version: String,
     /// The normalized resources, per-resource failures isolated away.
     pub resources: Vec<PveResource>,
+    /// Current per-node capacity; endpoint failures are reflected in warnings.
+    pub node_capacities: Vec<PveNodeCapacity>,
     /// The resources that failed normalization, as bounded per-resource
     /// warnings. A partial failure never drops the whole snapshot.
     pub warnings: Vec<String>,
@@ -1030,6 +1063,87 @@ impl ProxmoxClient {
         Self::status_to_result(&response)
     }
 
+    /// Reads CPU/memory and storage independently so either PVE endpoint can
+    /// fail without hiding the other observation or the rest of discovery.
+    async fn node_capacity(
+        &self,
+        request: &PveHttpRequest,
+        node: String,
+    ) -> (PveNodeCapacity, Vec<String>) {
+        let mut warnings = Vec::new();
+        if !safe_node_path_segment(&node) {
+            warnings.push(format!(
+                "node {node:?} capacity: the node name is not a safe API path segment"
+            ));
+            return (
+                PveNodeCapacity {
+                    node,
+                    cpu_usage_ratio: None,
+                    cpu_count: None,
+                    memory_used_bytes: None,
+                    memory_total_bytes: None,
+                    storages: Vec::new(),
+                },
+                warnings,
+            );
+        }
+        let status_request = PveHttpRequest {
+            path: format!("/api2/json/nodes/{node}/status"),
+            ..request.clone()
+        };
+        let (cpu_usage_ratio, cpu_count, memory_used_bytes, memory_total_bytes) =
+            match self.call(status_request).await {
+                Ok(status) => normalize_node_status(&status, &node, &mut warnings),
+                Err(error) => {
+                    warnings.push(format!("node {node} status: {error}"));
+                    (None, None, None, None)
+                }
+            };
+
+        let storage_request = PveHttpRequest {
+            path: format!("/api2/json/nodes/{node}/storage"),
+            ..request.clone()
+        };
+        let storages = match self.call(storage_request).await {
+            Ok(serde_json::Value::Array(entries)) => entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| match normalize_storage(entry) {
+                    Ok(storage) => Some(storage),
+                    Err(detail) => {
+                        warnings.push(format!("node {node} storage #{index}: {detail}"));
+                        None
+                    }
+                })
+                .collect(),
+            // As with cluster resources, null is an empty result.
+            Ok(serde_json::Value::Null) => Vec::new(),
+            Ok(other) => {
+                warnings.push(format!(
+                    "node {node} storage: the payload is not a list (it is a {})",
+                    type_name_of(&other)
+                ));
+                Vec::new()
+            }
+            Err(error) => {
+                warnings.push(format!("node {node} storage: {error}"));
+                Vec::new()
+            }
+        };
+
+        (
+            PveNodeCapacity {
+                node,
+                cpu_usage_ratio,
+                cpu_count,
+                memory_used_bytes,
+                memory_total_bytes,
+                storages,
+            },
+            warnings,
+        )
+    }
+
     /// Maps one response onto the envelope: statuses become caller-safe
     /// errors, a good body unwraps `{"data": ...}`.
     fn status_to_result(response: &PveHttpResponse) -> Result<serde_json::Value, PveApiError> {
@@ -1113,9 +1227,38 @@ impl ProxmoxSource for ProxmoxClient {
                 Err(detail) => warnings.push(format!("resource #{index}: {detail}")),
             }
         }
+        let mut nodes = resources
+            .iter()
+            .filter(|resource| resource.kind == "node")
+            .filter_map(|resource| {
+                resource
+                    .node
+                    .clone()
+                    .or_else(|| resource.id.strip_prefix("node/").map(str::to_owned))
+            })
+            .collect::<Vec<_>>();
+        nodes.sort();
+        nodes.dedup();
+        // Bound the number of simultaneous extra reads while keeping large
+        // clusters from paying two network round trips serially per node.
+        let mut capacities = futures_util::stream::iter(
+            nodes
+                .into_iter()
+                .map(|node| self.node_capacity(&request, node)),
+        )
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        capacities.sort_by(|left, right| left.0.node.cmp(&right.0.node));
+        let mut node_capacities = Vec::with_capacity(capacities.len());
+        for (capacity, mut node_warnings) in capacities {
+            node_capacities.push(capacity);
+            warnings.append(&mut node_warnings);
+        }
         Ok(PveDiscovery {
             version,
             resources,
+            node_capacities,
             warnings,
             reported_count,
         })
@@ -1715,6 +1858,17 @@ const MAX_NAME_CHARS: usize = 256;
 /// The bound on a status string.
 const MAX_STATUS_CHARS: usize = 64;
 
+/// PVE node names are interpolated into endpoint path segments; reject
+/// separators and control characters from a provider response before use.
+fn safe_node_path_segment(node: &str) -> bool {
+    !node.is_empty()
+        && node != "."
+        && node != ".."
+        && node
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 /// Reads a bounded string field, refusing overlong values rather than
 /// truncating them: a silently altered identity is worse than a warning.
 fn bounded_str(entry: &serde_json::Value, key: &str, max: usize) -> Result<Option<String>, String> {
@@ -1774,6 +1928,67 @@ fn normalize_resource(entry: &serde_json::Value) -> Result<Option<PveResource>, 
     }))
 }
 
+/// Normalizes the capacity fields from GET `/nodes/{node}/status` while
+/// keeping each metric independent so a partial response remains useful.
+fn normalize_node_status(
+    status: &serde_json::Value,
+    node: &str,
+    warnings: &mut Vec<String>,
+) -> (Option<f64>, Option<u64>, Option<u64>, Option<u64>) {
+    let cpu_usage_ratio = if let Some(value) = status.get("cpu") {
+        let ratio = value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()));
+        match ratio {
+            Some(ratio) if ratio.is_finite() && (0.0..=1.0).contains(&ratio) => Some(ratio),
+            _ => {
+                warnings.push(format!(
+                    "node {node} status: cpu usage is missing or outside the 0..=1 range"
+                ));
+                None
+            }
+        }
+    } else {
+        warnings.push(format!("node {node} status: cpu usage is missing"));
+        None
+    };
+
+    let cpu_count = status
+        .get("cpuinfo")
+        .and_then(|cpuinfo| loose_number(cpuinfo, "cpus"));
+    let memory = status.get("memory");
+    let memory_used_bytes = memory.and_then(|memory| loose_number(memory, "used"));
+    let memory_total_bytes = memory.and_then(|memory| loose_number(memory, "total"));
+    if memory_used_bytes.is_none() || memory_total_bytes.is_none() {
+        warnings.push(format!(
+            "node {node} status: memory used or total is missing or invalid"
+        ));
+    }
+
+    (
+        cpu_usage_ratio,
+        cpu_count,
+        memory_used_bytes,
+        memory_total_bytes,
+    )
+}
+
+/// Normalizes one row from GET `/nodes/{node}/storage`.
+fn normalize_storage(entry: &serde_json::Value) -> Result<PveStorageCapacity, String> {
+    let storage = bounded_str(entry, "storage", MAX_ID_CHARS)?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "the storage entry carries no storage id".to_owned())?;
+    let used_bytes = loose_number(entry, "used")
+        .ok_or_else(|| format!("storage {storage} carries no non-negative used byte count"))?;
+    let total_bytes = loose_number(entry, "total")
+        .ok_or_else(|| format!("storage {storage} carries no non-negative total byte count"))?;
+    Ok(PveStorageCapacity {
+        storage,
+        used_bytes,
+        total_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1818,6 +2033,59 @@ mod tests {
         let mystery = serde_json::json!({"id": "weird/1", "type": "mystery"});
         let error = normalize_resource(&mystery).unwrap_err();
         assert!(error.contains("unrecognized type"), "{error}");
+    }
+
+    #[test]
+    fn node_api_paths_accept_only_safe_segments() {
+        for node in ["pve-1", "pve_1", "node.example"] {
+            assert!(safe_node_path_segment(node), "{node}");
+        }
+        for node in [
+            "",
+            ".",
+            "..",
+            "../version",
+            "pve/status",
+            "pve?x=1",
+            "pve\n",
+        ] {
+            assert!(!safe_node_path_segment(node), "{node:?}");
+        }
+    }
+
+    #[test]
+    fn node_status_keeps_valid_metrics_when_other_fields_are_malformed() {
+        let mut warnings = Vec::new();
+        let (cpu, cpus, used, total) = normalize_node_status(
+            &serde_json::json!({
+                "cpu": 1.5,
+                "cpuinfo": {"cpus": "8"},
+                "memory": {"used": "-1", "total": "32768"}
+            }),
+            "pve",
+            &mut warnings,
+        );
+        assert_eq!(cpu, None);
+        assert_eq!(cpus, Some(8));
+        assert_eq!(used, None);
+        assert_eq!(total, Some(32_768));
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn malformed_storage_rows_are_rejected_without_coercion() {
+        let valid = normalize_storage(&serde_json::json!({
+            "storage": "local-lvm", "used": "10", "total": 100
+        }))
+        .unwrap();
+        assert_eq!(valid.used_bytes, 10);
+        assert_eq!(valid.total_bytes, 100);
+        assert!(
+            normalize_storage(&serde_json::json!({
+                "storage": "local", "used": -1, "total": 100
+            }))
+            .is_err()
+        );
     }
 
     #[test]

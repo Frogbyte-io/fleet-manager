@@ -272,6 +272,29 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
                         observed_at: 0,
                     })
                     .collect(),
+                node_capacities: discovery
+                    .node_capacities
+                    .into_iter()
+                    .map(|capacity| fleet_application::proxmox::ProxmoxNodeCapacity {
+                        node: capacity.node,
+                        cpu_usage_ratio: capacity.cpu_usage_ratio,
+                        cpu_count: capacity.cpu_count,
+                        memory_used_bytes: capacity.memory_used_bytes,
+                        memory_total_bytes: capacity.memory_total_bytes,
+                        storages: capacity
+                            .storages
+                            .into_iter()
+                            .map(
+                                |storage| fleet_application::proxmox::ProxmoxStorageCapacity {
+                                    storage: storage.storage,
+                                    used_bytes: storage.used_bytes,
+                                    total_bytes: storage.total_bytes,
+                                },
+                            )
+                            .collect(),
+                        observed_at: 0,
+                    })
+                    .collect(),
                 warnings: discovery.warnings,
                 reported_count: discovery.reported_count,
             }),

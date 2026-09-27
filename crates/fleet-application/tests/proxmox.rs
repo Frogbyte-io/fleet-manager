@@ -271,6 +271,19 @@ fn discovery_ok() -> RawDiscovery {
             pve_version: String::new(),
             observed_at: 0,
         }],
+        node_capacities: vec![fleet_application::proxmox::ProxmoxNodeCapacity {
+            node: "pve".to_owned(),
+            cpu_usage_ratio: Some(0.375),
+            cpu_count: Some(12),
+            memory_used_bytes: Some(100),
+            memory_total_bytes: Some(200),
+            storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                storage: "local-lvm".to_owned(),
+                used_bytes: 300,
+                total_bytes: 600,
+            }],
+            observed_at: 0,
+        }],
         warnings: Vec::new(),
         reported_count: 1,
     }
@@ -641,6 +654,11 @@ async fn observe_confirm_then_discover_walks_the_trust_flow() {
     assert_eq!(snapshot.resources[0].account_id, account.id);
     assert_eq!(snapshot.resources[0].pve_version, "9.2.2");
     assert_eq!(snapshot.resources[0].observed_at, NOW);
+    assert_eq!(snapshot.node_capacities.len(), 1);
+    assert_eq!(snapshot.node_capacities[0].node, "pve");
+    assert_eq!(snapshot.node_capacities[0].observed_at, NOW);
+    assert_eq!(snapshot.node_capacities[0].cpu_usage_ratio, Some(0.375));
+    assert_eq!(snapshot.node_capacities[0].storages[0].used_bytes, 300);
     assert_eq!(snapshot.observed_at, NOW);
 
     // The trust flow is audited as account mutations.

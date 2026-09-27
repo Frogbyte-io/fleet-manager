@@ -2095,6 +2095,40 @@ fn text_output_renders_proxmox_accounts_and_discoveries() {
 }
 
 #[test]
+fn text_output_renders_proxmox_node_capacity_and_partial_warnings() {
+    let discovery = json!({
+        "pveVersion": "9.2.2",
+        "observedAt": 1_699_999_999_999_i64,
+        "nodeCapacities": [{
+            "node": "pve-a",
+            "cpuUsageRatio": 0.125,
+            "cpuCount": 16,
+            "memoryUsedBytes": 17_179_869_184_u64,
+            "memoryTotalBytes": 68_719_476_736_u64,
+            "observedAt": 1_700_000_000_000_i64,
+            "storages": [{
+                "storage": "local-lvm",
+                "usedBytes": 107_374_182_400_u64,
+                "totalBytes": 536_870_912_000_u64
+            }]
+        }],
+        "warnings": ["node pve-b status: unavailable"]
+    });
+    let text = fleetctl::render_proxmox_nodes_for_test(&discovery);
+    assert!(text.contains("PVE 9.2.2"), "{text}");
+    assert!(
+        text.contains("observed at: 1699999999999 (epoch ms)"),
+        "{text}"
+    );
+    assert!(text.contains("observed 1700000000000"), "{text}");
+    assert!(text.contains("pve-a"), "{text}");
+    assert!(text.contains("12.5%"), "{text}");
+    assert!(text.contains("16.0 GiB / 64.0 GiB"), "{text}");
+    assert!(text.contains("local-lvm"), "{text}");
+    assert!(text.contains("node pve-b status: unavailable"), "{text}");
+}
+
+#[test]
 fn parsing_walks_the_proxmox_forms() {
     let args: Vec<String> = ["proxmox", "accounts"]
         .iter()
@@ -2159,6 +2193,15 @@ fn parsing_walks_the_proxmox_forms() {
     assert!(matches!(
         fleetctl::parse(&args).unwrap().command,
         fleetctl::Command::ProxmoxDiscover { .. }
+    ));
+
+    let args: Vec<String> = ["proxmox", "nodes", "acc-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ProxmoxNodes { .. }
     ));
 }
 
