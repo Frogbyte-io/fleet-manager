@@ -115,7 +115,7 @@ async function runPreview() {
   previewing.value = false
 }
 
-type Started = { machineId: string, operationId: string | null, error: string | null, settled: OperationDto | null }
+type Started = { key: string, machineId: string, versionLabel: string, operationId: string | null, error: string | null, settled: OperationDto | null }
 const started = ref<Started[]>([])
 const starting = ref(false)
 
@@ -123,15 +123,19 @@ async function start() {
   if (!previewOk.value)
     return
   starting.value = true
-  started.value = await Promise.all(requests.value.map(async (request): Promise<Started> => {
+  const versionLabel = `${props.version.name}@${shortDigest(props.version.contentDigest)}`
+  const batch = await Promise.all(requests.value.map(async (request): Promise<Started> => {
+    const base = { key: `${Date.now()}-${request.machineId}`, machineId: request.machineId, versionLabel, settled: null }
     try {
       const operation = unwrap<OperationDto>(await startSkillCatalogRollout(request), [202])
-      return { machineId: request.machineId, operationId: operation.id, error: null, settled: null }
+      return { ...base, key: operation.id, operationId: operation.id, error: null }
     }
     catch (error) {
-      return { machineId: request.machineId, operationId: null, error: errorMessage(error), settled: null }
+      return { ...base, operationId: null, error: errorMessage(error) }
     }
   }))
+  // Earlier rollouts keep polling until they settle; newest first.
+  started.value = [...batch, ...started.value]
   preview.value = null
   starting.value = false
 }
@@ -141,10 +145,9 @@ function onSettled(entry: Started, operation: OperationDto) {
   void queryClient.invalidateQueries({ queryKey: MATRIX_KEY })
 }
 
-// A different version starts a fresh rollout.
+// A different version needs its own preview; running rollouts stay listed.
 watch(() => props.version.id, () => {
   preview.value = null
-  started.value = []
 })
 
 const names = computed(() => new Map(props.machines.map(m => [m.id, m.name])))
@@ -327,13 +330,13 @@ const commands = computed(() => (missing.value
     >
       <div
         v-for="entry in started"
-        :key="entry.machineId"
+        :key="entry.key"
         class="space-y-1"
       >
         <OperationStatus
           v-if="entry.operationId"
           :operation-id="entry.operationId"
-          :label="`rollout ${version.name} → ${names.get(entry.machineId) ?? entry.machineId}`"
+          :label="`rollout ${entry.versionLabel} → ${names.get(entry.machineId) ?? entry.machineId}`"
           @settled="op => onSettled(entry, op)"
         />
         <p

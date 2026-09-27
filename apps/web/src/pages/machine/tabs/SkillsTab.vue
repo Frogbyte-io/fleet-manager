@@ -103,10 +103,19 @@ function onStarted(operation: OperationDto, label: string) {
   track(operation, label)
 }
 
-function onSettled(operation: OperationDto) {
-  if (operation.state === 'succeeded')
+function onSettled(operation: OperationDto, dryRun: boolean) {
+  if (operation.state === 'succeeded' && !dryRun)
     changed.value = true
 }
+
+function onProbeSettled(operation: OperationDto) {
+  void refresh()
+  if (operation.state === 'succeeded')
+    changed.value = false
+}
+
+/** Actions need a supported CLI; a machine never probed may still have one. */
+const actionsBlocked = computed(() => snapshot.value !== null && snapshot.value.availability !== 'available')
 
 const availabilityTone = computed(() => {
   if (!snapshot.value)
@@ -211,7 +220,7 @@ const availabilityTone = computed(() => {
         v-if="probeId"
         :operation-id="probeId"
         label="skills probe"
-        @settled="refresh(); changed = false"
+        @settled="onProbeSettled"
       />
       <CopyFleetctl
         :command="target ? skillsProbeCommand(machine.id, target.endpointId, target.auth) : null"
@@ -413,10 +422,21 @@ const availabilityTone = computed(() => {
       <h2 class="fc-kicker border-b-2 border-fc-ink pb-1">
         Actions
       </h2>
-      <p class="text-xs text-fc-muted">
+      <p
+        v-if="actionsBlocked"
+        class="text-xs text-fc-muted"
+        data-testid="skills-actions-blocked"
+      >
+        Library and preset actions need a supported skills-manager-cli on this machine. Probe again once it is installed.
+      </p>
+      <p
+        v-else
+        class="text-xs text-fc-muted"
+      >
         Each action is a durable, audited operation through skills-manager-cli. Remove, adopt, and preset delete preview with a dry run first. Conflicts are reported as paths for you to resolve; Fleet never forces or deletes them.
       </p>
       <ActionForm
+        v-if="!actionsBlocked"
         v-model:input="input"
         :target="target"
         :data="data"

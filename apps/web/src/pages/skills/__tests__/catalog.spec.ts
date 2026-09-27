@@ -40,6 +40,10 @@ describe('parseFrontmatter', () => {
     expect(parseFrontmatter('---\nname: a\nname: b\ndescription: d\n---')).toMatchObject({ ok: false, error: expect.stringContaining('twice') })
     expect(parseFrontmatter('---\nname: a\n---')).toMatchObject({ ok: false, error: 'frontmatter needs a description' })
     expect(parseFrontmatter('---\nname: a\ndescription: >\n  folded\n---')).toMatchObject({ ok: false, error: expect.stringContaining('single-line') })
+    // YAML would read these as a number and a boolean, which the controller refuses.
+    expect(parseFrontmatter('---\nname: 123\ndescription: d\n---')).toMatchObject({ ok: false })
+    expect(parseFrontmatter('---\nname: a\ndescription: true\n---')).toMatchObject({ ok: false })
+    expect(parseFrontmatter('---\nname: a\ndescription: "true"\n---')).toEqual({ ok: true, name: 'a', description: 'true' })
   })
 })
 
@@ -80,6 +84,11 @@ describe('referenced drafts', () => {
     expect(referencedErrors({ ...base, subpath: 'rust' })).toContain('a Git subpath and revision are pinned together; Fleet does not guess a default branch')
     expect(referencedErrors({ ...base, reference: 'https://gitlab.com/org/skills', subpath: 'rust', revision: 'abc' }))
       .toContain('separate subpath and revision pins need an HTTPS GitHub repository URL')
+    expect(referencedErrors({ ...base, subpath: 'rust', revision: 'abc!' }))
+      .toContain('the GitHub repository, subpath, or revision contains unsupported URL path characters')
+    expect(referencedErrors({ ...base, subpath: 'rust', revision: 'a'.repeat(257) }))
+      .toContain('the revision must be 1..=256 printable characters')
+    expect(referencedErrors({ ...base, subpath: 'rust', revision: '0123456789abcdef0123456789abcdef01234567' })).toEqual([])
   })
 })
 

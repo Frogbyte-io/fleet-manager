@@ -117,7 +117,7 @@ const KNOWN_AGENT_SHORT: Record<string, string> = {
 
 /** A two-letter badge for an agent id, e.g. `claude_code` → `CC`. */
 export function agentShort(id: string): string {
-  const known = KNOWN_AGENT_SHORT[id]
+  const known = Object.hasOwn(KNOWN_AGENT_SHORT, id) ? KNOWN_AGENT_SHORT[id] : undefined
   if (known)
     return known
   const words = id.split(/[_\-\s.]+/).filter(Boolean)
@@ -243,11 +243,14 @@ export function buildMatrix(
       continue
     const skills = new Map<string, SkillEntry>()
     for (const skill of parseSkillsData(snapshot.data).skills) {
-      skills.set(skill.id, skill)
-      if (!rows.has(skill.id)) {
-        const catalogId = catalogByName.get(skill.id) ?? null
-        rows.set(skill.id, {
-          skillId: skill.id,
+      // Catalog entries are keyed by their Agent Skills name; a library entry
+      // matches one by id or by name, and then shares the catalog's row.
+      const key = catalogByName.has(skill.id) ? skill.id : catalogByName.has(skill.name) ? skill.name : skill.id
+      skills.set(key, skill)
+      if (!rows.has(key)) {
+        const catalogId = catalogByName.get(key) ?? null
+        rows.set(key, {
+          skillId: key,
           name: skill.name,
           group: catalogId ? 'catalog' : 'local',
           catalogId,

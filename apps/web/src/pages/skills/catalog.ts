@@ -1,5 +1,6 @@
-// Pure catalog helpers: SKILL.md frontmatter checks that mirror
-// fleet-core `skill_catalog.rs` (the controller still validates everything),
+// Pure catalog helpers: early checks modelled on fleet-core
+// `skill_catalog.rs`, so most refusals show while typing (the controller's
+// validation stays authoritative and may refuse what these miss),
 // a line diff for version history, and the `SkillPreset` desired-state
 // resource an assignment is committed as.
 
@@ -72,6 +73,9 @@ export function secretShapedError(content: string): string | null {
   return null
 }
 
+/** Plain scalars YAML resolves to something other than a string. */
+const YAML_RESERVED = /^(?:true|false|yes|no|on|off|null|~|[-+]?(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?|0x[\da-f]+|0o[0-7]+|[-+]?\.inf|\.nan)$/i
+
 export type Frontmatter =
   | { ok: true, name: string, description: string }
   | { ok: false, error: string }
@@ -95,7 +99,9 @@ function unquote(raw: string): string | null {
   // A plain scalar: a trailing ` #` starts a comment.
   const comment = value.search(/\s#/)
   const plain = (comment >= 0 ? value.slice(0, comment) : value).trim()
-  if (plain === '' || /^[|>&*!%@`[{]/.test(plain) || /:\s/.test(plain))
+  // YAML reads `true`, `null`, or `123` as non-strings, which the
+  // controller refuses; those must be quoted.
+  if (plain === '' || /^[|>&*!%@`[{]/.test(plain) || /:\s/.test(plain) || YAML_RESERVED.test(plain))
     return null
   return plain
 }
@@ -130,7 +136,7 @@ export function parseFrontmatter(markdown: string): Frontmatter {
     if (!fields.has(key))
       return { error: `frontmatter needs a ${key}` }
     const value = unquote(fields.get(key)!)
-    return value === null ? { error: `frontmatter ${key} must be a single-line string` } : { value }
+    return value === null ? { error: `frontmatter ${key} must be a single-line string (quote values YAML would read as a number, boolean, or null)` } : { value }
   }
   const name = read('name')
   if ('error' in name)
@@ -223,12 +229,22 @@ export function referencedErrors(input: ReferencedInput): string[] {
   const revision = input.revision.trim()
   if ((subpath === '') !== (revision === ''))
     errors.push('a Git subpath and revision are pinned together; Fleet does not guess a default branch')
+  // eslint-disable-next-line no-control-regex
+  if (revision.length > 256 || /[\x00-\x1f\x7f]/.test(revision))
+    errors.push('the revision must be 1..=256 printable characters')
   if (subpath) {
     const pathError = relativePathError(subpath)
     if (pathError)
       errors.push(pathError)
-    if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\.git)?\/?$/.test(reference))
+    // fleet-core `validate_github_pin`: each component is a safe URL segment.
+    const safe = (part: string) => part !== '' && part !== '.' && part !== '..' && /^[A-Za-z0-9._-]+$/.test(part)
+    const repository = reference.startsWith('https://github.com/')
+      ? reference.slice('https://github.com/'.length).replace(/\.git$/, '').replace(/\/+$/, '')
+      : null
+    if (repository === null)
       errors.push('separate subpath and revision pins need an HTTPS GitHub repository URL')
+    else if (repository.split('/').length !== 2 || !repository.split('/').every(safe) || !/^[A-Za-z0-9._-]+$/.test(revision) || !subpath.split('/').every(safe))
+      errors.push('the GitHub repository, subpath, or revision contains unsupported URL path characters')
   }
   return errors
 }
@@ -378,8 +394,10 @@ export function assignmentErrors(assignment: Assignment): string[] {
   const errors: string[] = []
   if (!RESOURCE_NAME.test(assignment.name) || assignment.name.length > 63)
     errors.push('the resource name must be 1..=63 lowercase letters or digits separated by single hyphens')
+  // The catalog accepts 64-character names, but the desired-state schema
+  // caps `skillId` at 63, so such a skill cannot be assigned yet.
   if (assignment.skillId === '' || assignment.skillId.length > 63)
-    errors.push('the skill id must be 1..=63 characters')
+    errors.push('the desired-state schema limits skill ids to 1..=63 characters, so this skill cannot be assigned')
   if (assignment.deployTo.length === 0 || assignment.deployTo.length > 16)
     errors.push('pick 1..=16 agents to deploy to')
   if (assignment.denyAgents.length > 16)
@@ -400,7 +418,6 @@ export function uuidv7(now: number = Date.now(), random: Uint8Array = crypto.get
 }
 
 const PLAIN_YAML = /^[A-Za-z0-9_][\w.@/-]*$/
-const YAML_RESERVED = /^(?:true|false|yes|no|on|off|null|~|[-+]?(?:\d[\d_]*(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?|0x[\da-f]+|0o[0-7]+|\.inf|\.nan)$/i
 
 /** A YAML scalar: plain when unambiguous, JSON-quoted (valid YAML) otherwise. */
 export function yamlScalar(value: string): string {

@@ -98,6 +98,22 @@ describe('machine Skills tab', () => {
     expect(wrapper.find('[data-testid="skills-not-probed"]').exists()).toBe(true)
   })
 
+  it('offers no actions on an unsupported CLI', async () => {
+    getMachineSkills.mockResolvedValue(ok({ data: { machineId: 'm1', availability: 'unsupported', cliVersion: '1.30.0', updateCheck: 'unsupported', observedAt: 0, stale: false, data: {} } }))
+    const wrapper = await mountTab()
+    expect(wrapper.find('[data-testid="skills-actions-blocked"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="skills-action-form"]').exists()).toBe(false)
+  })
+
+  it('does not ask for a refresh after a preview', async () => {
+    const wrapper = await mountTab()
+    await wrapper.get('[data-testid="remove-notes"]').trigger('click')
+    await wrapper.get('[data-testid="skills-preview"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="skills-probe-hint"]').exists()).toBe(false)
+  })
+
   it('unlocks remove only after a successful dry run of the same request', async () => {
     const wrapper = await mountTab()
     await wrapper.get('[data-testid="remove-notes"]').trigger('click')

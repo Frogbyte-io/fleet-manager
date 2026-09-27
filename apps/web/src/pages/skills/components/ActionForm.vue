@@ -29,7 +29,7 @@ const props = defineProps<{
   data: SkillsData
 }>()
 const input = defineModel<ActionInput>('input', { required: true })
-const emit = defineEmits<{ started: [operation: OperationDto, label: string], settled: [operation: OperationDto] }>()
+const emit = defineEmits<{ started: [operation: OperationDto, label: string], settled: [operation: OperationDto, dryRun: boolean] }>()
 
 const ACTIONS: { value: SkillAction, label: string, group: string }[] = [
   { value: 'install', label: 'Install', group: 'Library' },
@@ -102,7 +102,9 @@ const preview = ref<{ key: string, operationId: string, operation: OperationDto 
 const previewCurrent = computed(() => preview.value?.key === requestKey.value)
 const previewOk = computed(() => previewCurrent.value && preview.value?.operation?.state === 'succeeded')
 
-const runId = ref<string | null>(null)
+// The last real (or explicitly dry) run, with the label it was sent under,
+// so later form edits never relabel an earlier result.
+const run = ref<{ id: string, label: string, dryRun: boolean } | null>(null)
 const runOperation = ref<OperationDto | null>(null)
 const busy = ref(false)
 const error = ref('')
@@ -132,7 +134,7 @@ async function start(asPreview: boolean) {
       preview.value = { key, operationId: operation.id, operation: null }
     }
     else {
-      runId.value = operation.id
+      run.value = { id: operation.id, label: text, dryRun: dry }
       runOperation.value = null
       confirming.value = false
       preview.value = null
@@ -152,8 +154,10 @@ function onPreviewSettled(operation: OperationDto) {
 }
 
 function onRunSettled(operation: OperationDto) {
+  if (run.value?.id !== operation.id)
+    return
   runOperation.value = operation
-  emit('settled', operation)
+  emit('settled', operation, run.value.dryRun)
 }
 
 const command = computed(() => (props.target && !missing.value
@@ -524,12 +528,13 @@ const command = computed(() => (props.target && !missing.value
     </div>
 
     <div
-      v-if="runId"
+      v-if="run"
       class="space-y-2"
     >
       <OperationStatus
-        :operation-id="runId"
-        :label="label"
+        :key="run.id"
+        :operation-id="run.id"
+        :label="run.label"
         @settled="onRunSettled"
       />
       <OutcomePanel

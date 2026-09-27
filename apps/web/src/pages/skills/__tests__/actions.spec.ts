@@ -53,10 +53,21 @@ describe('readOutcome', () => {
     expect(outcome.conflicts).toEqual(['/home/me/.claude/skills/db'])
   })
 
-  it('reads held-back removals from a successful update', () => {
+  it('reads held-back removals from a machine update, which the CLI reports without failing', () => {
     const outcome = readOutcome({ resultJson: JSON.stringify({ outcome: { held_back_removals: ['library: templates/mine.pptx'] } }) })
     expect(outcome.heldBack).toEqual(['library: templates/mine.pptx'])
     expect(outcome.code).toBeNull()
+  })
+
+  it('reads held-back removals from a failed catalog rollout (exit 4)', () => {
+    const outcome = readOutcome({ errorJson: JSON.stringify({ reason: 'cli_failed', detail: 'update held back removals', data: { held_back_removals: ['library: templates/mine.pptx'] } }) })
+    expect(outcome.heldBack).toEqual(['library: templates/mine.pptx'])
+    expect(outcome.code).toBe('cli_failed')
+  })
+
+  it('treats reported paths on a target conflict as the conflicting paths', () => {
+    const outcome = readOutcome({ errorJson: JSON.stringify({ reason: 'TARGET_CONFLICT', data: { code: 'TARGET_CONFLICT', paths: ['/home/me/.codex/skills/db'] } }) })
+    expect(outcome.conflicts).toEqual(['/home/me/.codex/skills/db'])
   })
 
   it('tolerates missing or malformed JSON', () => {

@@ -14,7 +14,7 @@ import { useSkills } from './useSkills'
 // Fleet-wide skills (docs/planning/web-console.md, Skills): the observed
 // matrix, Fleet's catalog with rollout and assignments, per-machine presets,
 // and skills.sh. Per-machine library actions live on the machine page.
-const { matrix, machines, catalog, snapshots, entries, model, agents } = useSkills()
+const { matrix, machines, machineList, catalog, snapshots, entries, model, agents } = useSkills()
 const route = useRoute()
 const router = useRouter()
 
@@ -44,6 +44,17 @@ const selected = computed<string | null>({
   },
 })
 
+// ARIA tabs: arrow keys, Home, and End move between tabs (roving tabindex).
+function onTabKey(event: KeyboardEvent, index: number) {
+  const last = TABS.length - 1
+  const next = { ArrowRight: index === last ? 0 : index + 1, ArrowLeft: index === 0 ? last : index - 1, Home: 0, End: last }[event.key]
+  if (next === undefined)
+    return
+  event.preventDefault()
+  tab.value = TABS[next]!.id
+  document.getElementById(`skills-tab-${TABS[next]!.id}`)?.focus()
+}
+
 function openCatalog(id: string) {
   router.replace({ query: { ...route.query, tab: 'catalog', entry: id } })
 }
@@ -58,7 +69,7 @@ const loadError = computed(() => {
   ].filter(Boolean)
   return failed.length ? failed.join(' · ') : ''
 })
-const truncated = computed(() => matrix.data.value?.truncated || catalog.data.value?.truncated)
+const truncated = computed(() => matrix.data.value?.truncated || catalog.data.value?.truncated || machines.data.value?.truncated)
 const loading = computed(() => matrix.isLoading.value || machines.isLoading.value || catalog.isLoading.value)
 </script>
 
@@ -90,15 +101,19 @@ const loading = computed(() => matrix.isLoading.value || machines.isLoading.valu
       role="tablist"
     >
       <button
-        v-for="item in TABS"
+        v-for="(item, index) in TABS"
+        :id="`skills-tab-${item.id}`"
         :key="item.id"
         type="button"
         role="tab"
+        :tabindex="tab === item.id ? 0 : -1"
+        aria-controls="skills-tabpanel"
         class="pb-2 text-[13px] font-semibold"
         :class="tab === item.id ? 'text-fc-ink shadow-[inset_0_-2px_0_var(--fc-g1)]' : 'text-fc-muted hover:text-fc-ink'"
         :aria-selected="tab === item.id"
         :data-testid="`tab-${item.id}`"
         @click="tab = item.id"
+        @keydown="onTabKey($event, index)"
       >
         {{ item.label }}<span
           v-if="item.count() !== null"
@@ -133,29 +148,36 @@ const loading = computed(() => matrix.isLoading.value || machines.isLoading.valu
       />
     </div>
 
-    <MatrixTab
-      v-else-if="tab === 'matrix'"
-      :matrix="model"
-      :agents="agents"
-      @open-catalog="openCatalog"
-    />
-    <CatalogTab
-      v-else-if="tab === 'catalog'"
-      v-model:selected="selected"
-      :entries="entries"
-      :rows="model.rows"
-      :machines="machines.data.value ?? []"
-      :columns="model.columns"
-      :agents="agents"
-    />
-    <PresetsTab
-      v-else-if="tab === 'presets'"
-      :snapshots="snapshots"
-      :columns="model.columns"
-    />
-    <SearchTab
+    <div
       v-else
-      @reference="selected = 'new:referenced'"
-    />
+      id="skills-tabpanel"
+      role="tabpanel"
+      :aria-labelledby="`skills-tab-${tab}`"
+    >
+      <MatrixTab
+        v-if="tab === 'matrix'"
+        :matrix="model"
+        :agents="agents"
+        @open-catalog="openCatalog"
+      />
+      <CatalogTab
+        v-else-if="tab === 'catalog'"
+        v-model:selected="selected"
+        :entries="entries"
+        :rows="model.rows"
+        :machines="machineList"
+        :columns="model.columns"
+        :agents="agents"
+      />
+      <PresetsTab
+        v-else-if="tab === 'presets'"
+        :snapshots="snapshots"
+        :columns="model.columns"
+      />
+      <SearchTab
+        v-else
+        @reference="selected = 'new:referenced'"
+      />
+    </div>
   </div>
 </template>

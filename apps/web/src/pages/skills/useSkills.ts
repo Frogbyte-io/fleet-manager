@@ -23,8 +23,7 @@ import { buildMatrix, fleetAgents } from './model'
 
 export const MATRIX_KEY = ['skills', 'matrix'] as const
 export const CATALOG_KEY = ['skills', 'catalog'] as const
-// Shared with the Fleet page, which caches the same list under this key.
-export const MACHINES_KEY = ['fleet', 'machines'] as const
+export const MACHINES_KEY = ['skills', 'machines'] as const
 
 export function versionsKey(catalogId: string) {
   return ['skills', 'catalog', catalogId, 'versions'] as const
@@ -47,13 +46,8 @@ async function allPages<T>(fetchPage: (cursor?: string) => Promise<unknown>) {
   })
 }
 
-export async function allMachines(): Promise<MachineDto[]> {
-  // The machines endpoint takes no cursor (#151); the Fleet page reports
-  // truncation, and this cache entry has the same shape.
-  const response = await listMachines({ limit: 200 })
-  if (response.status !== 200)
-    unwrap(response)
-  return (response.data as { items: MachineDto[] }).items
+export async function allMachines() {
+  return allPages<MachineDto>(cursor => listMachines({ limit: 200, ...(cursor ? { cursor } : {}) }))
 }
 
 export function useSkills() {
@@ -72,10 +66,11 @@ export function useSkills() {
   const snapshots = computed(() => matrix.data.value?.items ?? [])
   const entries = computed(() => catalog.data.value?.items ?? [])
   const catalogByName = computed(() => new Map(entries.value.map(e => [e.content.name, e.id])))
-  const model = computed(() => buildMatrix(snapshots.value, machines.data.value ?? [], catalogByName.value))
+  const machineList = computed(() => machines.data.value?.items ?? [])
+  const model = computed(() => buildMatrix(snapshots.value, machineList.value, catalogByName.value))
   const agents = computed(() => fleetAgents(snapshots.value))
 
-  return { matrix, machines, catalog, snapshots, entries, model, agents }
+  return { matrix, machines, machineList, catalog, snapshots, entries, model, agents }
 }
 
 export function useCatalogVersions(catalogId: MaybeRefOrGetter<string | null>) {
@@ -84,8 +79,8 @@ export function useCatalogVersions(catalogId: MaybeRefOrGetter<string | null>) {
     enabled: computed(() => !!toValue(catalogId)),
     queryFn: async () => {
       const id = toValue(catalogId)!
-      const { items } = await allPages<CatalogVersionDto>(cursor => listSkillCatalogVersions(id, { limit: 200, cursor }))
-      return newestFirst(items)
+      const { items, truncated } = await allPages<CatalogVersionDto>(cursor => listSkillCatalogVersions(id, { limit: 200, cursor }))
+      return { items: newestFirst(items), truncated }
     },
     retry: retryTransient,
   })

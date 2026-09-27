@@ -81,6 +81,16 @@ describe('buildMatrix', () => {
     expect(matrix.rows[1]!.cells.m1!.state).toBe('missing')
   })
 
+  it('matches a library entry to the catalog by name when its id differs', () => {
+    const renamed = buildMatrix(
+      [snapshot('m1', { data: { skills: [{ id: 'sm-42', name: 'fleet', enabled: true, presetIds: [], deployedTo: ['codex'], updateStatus: 'up_to_date' }] } })],
+      machines,
+      new Map([['fleet', 'cat-1']]),
+    )
+    expect(renamed.rows.map(r => [r.skillId, r.group])).toEqual([['fleet', 'catalog']])
+    expect(renamed.rows[0]!.cells.m1!.state).toBe('deployed')
+  })
+
   it('filters by name, agent, and state', () => {
     expect(filterRows(matrix.rows, { text: 'rust', agent: '', state: 'any' }).map(r => r.skillId)).toEqual(['rust-review'])
     expect(filterRows(matrix.rows, { text: '', agent: 'codex', state: 'any' }).map(r => r.skillId)).toEqual(['fleet'])
@@ -95,6 +105,7 @@ describe('agents', () => {
     expect(agentShort('opencode')).toBe('OC')
     expect(agentShort('roo_code')).toBe('RC')
     expect(agentShort('windsurf')).toBe('WI')
+    expect(agentShort('constructor')).toBe('CO')
   })
 
   it('unions agents across machines, installed anywhere wins', () => {

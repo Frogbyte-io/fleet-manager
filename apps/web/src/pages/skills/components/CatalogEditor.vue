@@ -140,7 +140,7 @@ async function save() {
 }
 
 const versionsQuery = useCatalogVersions(() => props.entry?.id ?? null)
-const versions = computed<CatalogVersionDto[]>(() => versionsQuery.data.value ?? [])
+const versions = computed<CatalogVersionDto[]>(() => versionsQuery.data.value?.items ?? [])
 const latest = computed(() => versions.value[0] ?? null)
 const alreadyPublished = computed(() => !!props.entry && !!latest.value && sameContent(props.entry.content, latest.value.content))
 
@@ -279,6 +279,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
           </button>
           <input
             v-model="newPath"
+            :disabled="saving"
             placeholder="references/notes.md"
             class="h-6 w-40 rounded-sm border border-input bg-background px-1.5 font-mono text-[11px] text-foreground"
             aria-label="New file path"
@@ -287,7 +288,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
           <button
             type="button"
             class="font-mono text-[10px] uppercase tracking-wider text-fc-info disabled:opacity-50"
-            :disabled="!newPath.trim() || !!pathError"
+            :disabled="saving || !newPath.trim() || !!pathError"
             @click="addFile"
           >
             + File
@@ -318,6 +319,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
           <textarea
             :id="`file-${active}`"
             v-model="files[active]!.content"
+            :readonly="saving"
             rows="16"
             spellcheck="false"
             class="w-full rounded-sm border border-input bg-fc-inset p-2.5 font-mono text-[12px] leading-relaxed text-foreground"
@@ -335,6 +337,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Name</span>
             <input
               v-model="referenced.name"
+              :readonly="saving"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
               data-testid="ref-name"
             >
@@ -343,6 +346,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Description</span>
             <input
               v-model="referenced.description"
+              :readonly="saving"
               class="h-8 rounded-sm border border-input bg-background px-2 text-foreground"
               data-testid="ref-description"
             >
@@ -351,6 +355,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Reference (skills.sh ref or Git URL)</span>
             <input
               v-model="referenced.reference"
+              :readonly="saving"
               placeholder="https://github.com/org/skills"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
               data-testid="ref-reference"
@@ -360,6 +365,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Subpath (pinned with revision)</span>
             <input
               v-model="referenced.subpath"
+              :readonly="saving"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
             >
           </label>
@@ -367,6 +373,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Revision (full commit id)</span>
             <input
               v-model="referenced.revision"
+              :readonly="saving"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
             >
           </label>
@@ -390,7 +397,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
         class="text-xs text-fc-ok"
         data-testid="catalog-valid"
       >
-        Frontmatter and content pass the console's checks; the controller validates again on save.
+        {{ kind === 'authored' ? 'Frontmatter and content pass the console\'s early checks' : 'The name, description, and source pin pass the console\'s early checks' }}; the controller validates again on save.
       </p>
 
       <div class="flex flex-wrap items-center gap-2 text-xs">
@@ -460,6 +467,13 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
         Nothing published yet. Save the draft and publish it to create the first immutable version.
       </p>
       <template v-else>
+        <p
+          v-if="versionsQuery.data.value?.truncated"
+          class="text-xs text-fc-warn"
+          role="status"
+        >
+          Version history hit the 20-page safety cap; older versions are not listed.
+        </p>
         <ul
           class="divide-y divide-fc-line text-xs"
           data-testid="catalog-versions"

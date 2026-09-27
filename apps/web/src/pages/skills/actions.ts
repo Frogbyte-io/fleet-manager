@@ -101,7 +101,11 @@ export interface Target {
   auth: SshAuth
 }
 
-/** The request body; `dryRun` previews, and `confirm` is sent only for a real removal. */
+/**
+ * The request body; `dryRun` previews. Remove and preset delete always carry
+ * `confirm`: the API and `fleetctl` refuse them without it even as a dry run,
+ * so a preview is the confirmed request with `dryRun` set.
+ */
 export function operationRequest(target: Target, input: ActionInput, dryRun: boolean): StartSkillsOperationRequest {
   const base = {
     machineId: target.machineId,
@@ -341,7 +345,8 @@ export function readOutcome(operation: { errorJson?: string | null, resultJson?:
     : typeof data?.message === 'string' ? data.message : null
   // Skills Manager reports conflicts under `details.conflicts`; the
   // controller currently keeps only `target_conflict`/`targetConflict`.
-  const details = code === 'TARGET_CONFLICT' ? pathList(data?.details) : []
+  const isConflict = code === 'TARGET_CONFLICT'
+  const details = isConflict ? [...pathList(data?.details), ...pathList(data?.paths)] : []
   const conflicts = [...new Set([...pathList(data?.targetConflict), ...pathList(data?.target_conflict), ...details])]
   const heldBack = [...new Set([...pathList(data?.heldBackRemovals), ...pathList(data?.held_back_removals)])]
   return { code, detail, conflicts, heldBack, paths: pathList(data?.paths), skills: skillList(data?.skills) }
