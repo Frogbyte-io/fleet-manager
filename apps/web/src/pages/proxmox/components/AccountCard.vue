@@ -54,6 +54,10 @@ const matchesPin = computed(() => sameFingerprint(observed.value, pinned.value))
 const needsPin = computed(() => state.value === 'unconfirmed' || state.value === 'changed')
 
 async function observe() {
+  // Each confirmation needs the current observation and a fresh
+  // acknowledgement, even if the host presents the same fingerprint again.
+  observed.value = null
+  acknowledged.value = false
   busy.value = true
   error.value = ''
   try {

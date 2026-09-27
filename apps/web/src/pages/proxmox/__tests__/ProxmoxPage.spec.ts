@@ -107,6 +107,8 @@ describe('accounts and trust', () => {
     const { wrapper, router } = await mountAt('/proxmox')
     const card = () => wrapper.get('[data-testid="account-acc1"]')
     expect(card().attributes('data-state')).toBe('changed')
+    // The mismatch is caught by discovery; guests are never asked for.
+    expect(listProxmoxGuests).not.toHaveBeenCalled()
     // Both values, side by side, before anything is observed.
     expect(card().get('[data-testid="fingerprint-pinned"]').text()).toBe('AA:BB:CC')
     expect(card().get('[data-testid="fingerprint-observed"]').text()).toBe('DD:EE:FF')
@@ -144,6 +146,23 @@ describe('accounts and trust', () => {
     expect(wrapper.get('[data-testid="guest-actions-101"]').attributes('disabled')).toBeUndefined()
   })
 
+  it('needs a fresh acknowledgement after observing again', async () => {
+    listProxmoxAccounts.mockResolvedValue(ok(page([account({ fingerprint: null, fingerprintState: 'unconfirmed' })])))
+    observeProxmoxFingerprint.mockResolvedValue(ok({ data: { accountId: 'acc1', fingerprint: 'DD:EE:FF' } }))
+    const { wrapper } = await mountAt('/proxmox')
+    await wrapper.get('[data-testid="observe"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="acknowledge"]').setValue(true)
+    observeProxmoxFingerprint.mockResolvedValue(ok({ code: 'proxmox_source', message: 'unreachable' }, 502))
+    await wrapper.get('[data-testid="observe"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="confirm"]').exists()).toBe(false)
+    observeProxmoxFingerprint.mockResolvedValue(ok({ data: { accountId: 'acc1', fingerprint: 'DD:EE:FF' } }))
+    await wrapper.get('[data-testid="observe"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="confirm"]').attributes('disabled')).toBeDefined()
+  })
+
   it('does not pin without the out-of-band acknowledgement', async () => {
     listProxmoxAccounts.mockResolvedValue(ok(page([account({ fingerprint: null, fingerprintState: 'unconfirmed' })])))
     observeProxmoxFingerprint.mockResolvedValue(ok({ data: { accountId: 'acc1', fingerprint: 'DD:EE:FF' } }))
@@ -175,6 +194,20 @@ describe('discovered resources', () => {
     await flushPromises()
     expect(startProxmoxLifecycle).toHaveBeenCalledWith('acc1', 101, 'shutdown', { node: 'pve1', vmid: 101, timeoutSeconds: 300 })
     expect(wrapper.text()).toContain('succeeded')
+  })
+
+  it('distinguishes a failed guest load and a filter with no matches from an empty cluster', async () => {
+    listProxmoxGuests.mockResolvedValue(ok({ code: 'proxmox_auth', message: 'refused' }, 403))
+    const failed = await mountAt('/proxmox?tab=guests')
+    expect(failed.wrapper.get('[data-testid="guests-error"]').text()).toContain('homelab')
+    expect(failed.wrapper.find('[data-testid="guests-empty"]').exists()).toBe(false)
+    failed.wrapper.unmount()
+
+    listProxmoxGuests.mockResolvedValue(ok(page([guest])))
+    const { wrapper } = await mountAt('/proxmox?tab=guests')
+    await wrapper.get('input[placeholder="VMID, name, or node"]').setValue('nothing-like-this')
+    expect(wrapper.find('[data-testid="guests-no-match"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="guests-table"]').exists()).toBe(false)
   })
 
   it('states that recent tasks have no API yet', async () => {

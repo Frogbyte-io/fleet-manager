@@ -102,6 +102,10 @@ export interface AccountView {
   state: TrustState
   discovery: ProxmoxDiscoveryDto | null
   guests: AssociatedGuestDto[]
+  guestsLoading?: boolean
+  guestsError?: unknown
+  /** The guest list hit the paging safety cap. */
+  guestsTruncated?: boolean
 }
 
 export interface NodeRow {
@@ -123,7 +127,7 @@ export function nodeRows(views: AccountView[]): NodeRow[] {
       continue
     const capacities = new Map(discovery.nodeCapacities.map(c => [c.node, c]))
     for (const resource of discovery.resources.filter(r => r.kind === 'node')) {
-      const node = resource.node ?? resource.name ?? resource.id
+      const node = resource.node ?? resource.name ?? resource.id.replace(/^node\//, '')
       rows.push({
         accountId: view.account.id,
         accountName: view.account.name,
@@ -199,6 +203,8 @@ function storageName(resource: ProxmoxResourceDto): string {
 }
 
 export interface TemplateRow {
+  /** The cluster-visible resource id, unique per account. */
+  id: string
   accountId: string
   accountName: string
   node: string | null
@@ -211,6 +217,7 @@ export function templateRows(views: AccountView[]): TemplateRow[] {
   return views.flatMap(view => (view.discovery?.resources ?? [])
     .filter(r => r.kind === 'qemu-template')
     .map(r => ({
+      id: r.id,
       accountId: view.account.id,
       accountName: view.account.name,
       node: r.node ?? null,

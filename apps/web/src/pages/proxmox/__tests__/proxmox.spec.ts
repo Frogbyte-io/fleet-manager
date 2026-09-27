@@ -84,6 +84,11 @@ describe('joins', () => {
     expect(templateRows(views)).toMatchObject([{ vmid: 9000, name: 'ubuntu-tpl', node: 'pve1' }])
   })
 
+  it('derives a node name from its id when the resource carries none', () => {
+    const bare = { ...discovery, resources: [{ ...discovery.resources[0]!, name: null, node: null }] }
+    expect(nodeRows([{ account, state: 'pinned', discovery: bare, guests: [] }])[0]).toMatchObject({ node: 'pve1', capacity: { cpuCount: 8 } })
+  })
+
   it('shows nothing for an account without discovery', () => {
     expect(nodeRows([{ account, state: 'changed', discovery: null, guests: [] }])).toEqual([])
   })

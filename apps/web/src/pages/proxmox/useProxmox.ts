@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/vue-query'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import { listProxmoxGuests, type AssociatedGuestDto } from '@frogbyte-io/fleet-api-client'
 
@@ -21,14 +21,25 @@ export function guestsKey(accountId: string) {
   return ['fleet', 'proxmox-guests', accountId] as const
 }
 
+/** Accounts whose guest list hit the paging safety cap. */
+const truncatedGuests = ref(new Set<string>())
+
 async function allGuests(accountId: string): Promise<AssociatedGuestDto[]> {
-  const { items } = await fetchAllPages<AssociatedGuestDto>(async (cursor) => {
+  // The cache entry is shared with the Fleet page as a plain list, so a
+  // truncated result is recorded beside it rather than inside it.
+  const { items, truncated } = await fetchAllPages<AssociatedGuestDto>(async (cursor) => {
     const response = await listProxmoxGuests(accountId, { limit: 200, cursor }) as { status: number, data: unknown }
     // A refused page keeps the API's code (e.g. a fingerprint mismatch).
     if (response.status !== 200)
       unwrap(response)
     return response as PagedResponse<AssociatedGuestDto>
   })
+  const next = new Set(truncatedGuests.value)
+  if (truncated)
+    next.add(accountId)
+  else
+    next.delete(accountId)
+  truncatedGuests.value = next
   return items
 }
 
@@ -46,12 +57,18 @@ export function useProxmox() {
       retry: retryTransient,
     }))),
   })
+  // Guests are asked for only after discovery verified the pin, so a changed
+  // certificate is caught before any guest request goes out.
   const guests = useQueries({
-    queries: computed(() => confirmed.value.map(accountId => ({
-      queryKey: guestsKey(accountId),
-      queryFn: () => allGuests(accountId),
-      retry: retryTransient,
-    }))),
+    queries: computed(() => confirmed.value.map((accountId, index) => {
+      const discovery = discoveries.value[index]
+      return {
+        queryKey: guestsKey(accountId),
+        queryFn: () => allGuests(accountId),
+        retry: retryTransient,
+        enabled: !!discovery?.data && !discovery.error,
+      }
+    })),
   })
 
   const views = computed<AccountView[]>(() => list.value.map((account) => {
@@ -66,6 +83,9 @@ export function useProxmox() {
       state,
       discovery: usable ? discovery?.data ?? null : null,
       guests: usable ? guestList?.data ?? [] : [],
+      guestsLoading: usable && (guestList?.isLoading ?? false),
+      guestsError: usable ? guestList?.error ?? null : null,
+      guestsTruncated: usable && truncatedGuests.value.has(account.id),
     }
   }))
 
@@ -77,7 +97,7 @@ export function useProxmox() {
     const index = confirmed.value.indexOf(account.id)
     return [account.id, index >= 0 ? guests.value[index]?.error ?? null : null] as const
   })))
-  const loading = computed(() => accounts.isLoading.value || discoveries.value.some(q => q.isLoading))
+  const loading = computed(() => accounts.isLoading.value || discoveries.value.some(q => q.isLoading) || views.value.some(v => v.guestsLoading))
 
   return { accounts, views, discoveryErrors, guestErrors, loading }
 }

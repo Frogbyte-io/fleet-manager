@@ -32,6 +32,9 @@ const filtered = computed(() => {
     : props.rows
 })
 const blocked = computed(() => props.views.filter(v => v.state === 'changed' || v.state === 'unconfirmed'))
+const loadingAccounts = computed(() => props.views.filter(v => v.guestsLoading))
+const failedAccounts = computed(() => props.views.filter(v => v.guestsError))
+const truncatedAccounts = computed(() => props.views.filter(v => v.guestsTruncated))
 const accounts = computed(() => new Map(props.views.map(v => [v.account.id, v.account])))
 
 function key(row: GuestRow) {
@@ -93,6 +96,30 @@ function settled(row: GuestRow) {
       Guests of {{ blocked.map(v => v.account.name).join(', ') }} are not listed and cannot be acted on until {{ blocked.length === 1 ? 'its' : 'their' }} fingerprint is confirmed (Accounts).
     </div>
 
+    <div
+      v-for="view in failedAccounts"
+      :key="`failed-${view.account.id}`"
+      class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
+      role="alert"
+      data-testid="guests-error"
+    >
+      Could not load guests of {{ view.account.name }}: {{ errorMessage(view.guestsError) }}
+    </div>
+    <div
+      v-if="truncatedAccounts.length"
+      class="border-l-2 border-l-fc-warn bg-card px-3 py-2 text-xs text-fc-muted"
+      role="status"
+    >
+      Guests of {{ truncatedAccounts.map(v => v.account.name).join(', ') }} hit the 20-page safety cap; some guests are missing.
+    </div>
+    <p
+      v-if="loadingAccounts.length"
+      class="text-xs text-fc-faint"
+      data-testid="guests-loading"
+    >
+      Loading guests of {{ loadingAccounts.map(v => v.account.name).join(', ') }}…
+    </p>
+
     <label class="flex flex-col gap-1 text-xs">
       <span class="fc-kicker">Filter</span>
       <input
@@ -103,14 +130,21 @@ function settled(row: GuestRow) {
     </label>
 
     <p
-      v-if="rows.length === 0"
+      v-if="rows.length === 0 && loadingAccounts.length === 0 && failedAccounts.length === 0"
       class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
       data-testid="guests-empty"
     >
       No guests on pinned accounts.
     </p>
+    <p
+      v-else-if="rows.length > 0 && filtered.length === 0"
+      class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
+      data-testid="guests-no-match"
+    >
+      No guests match "{{ text }}".
+    </p>
     <table
-      v-else
+      v-if="filtered.length > 0"
       class="w-full border border-fc-line bg-card text-xs"
       data-testid="guests-table"
     >

@@ -56,7 +56,7 @@ defineProps<{ storage: StorageRow[], templates: TemplateRow[] }>()
             <td class="py-1.5">
               <UsageBar
                 v-if="row.totalBytes !== null"
-                label=""
+                :label="row.storage"
                 :value="ratio(row.usedBytes, row.totalBytes)"
                 :detail="`${formatBytes(row.usedBytes)} / ${formatBytes(row.totalBytes)}`"
               />
@@ -87,7 +87,7 @@ defineProps<{ storage: StorageRow[], templates: TemplateRow[] }>()
       >
         <li
           v-for="row in templates"
-          :key="`${row.accountId}/${row.vmid}`"
+          :key="`${row.accountId}/${row.id}`"
           class="flex flex-wrap items-center gap-2 py-1.5"
         >
           <span class="font-mono text-fc-faint">{{ row.vmid ?? '—' }}</span>
