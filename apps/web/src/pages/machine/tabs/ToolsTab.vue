@@ -24,8 +24,8 @@ import {
 import { useMachineOperations } from '../operations'
 
 // mise, Frogenv, and Skills Manager operations over the machine's SSH
-// endpoint. Each is a durable operation; the fleet-wide skills console is
-// FM-925.
+// endpoint. Each is a durable operation; library and preset actions live on
+// the Skills tab.
 const props = defineProps<{ machine: MachineDto }>()
 
 const TIMEOUT_SECONDS = 300
@@ -212,7 +212,7 @@ async function run(tool: Tool) {
         Skills Manager
       </h2>
       <p class="text-xs text-fc-muted">
-        Probes the machine's skills library. Fleet-wide skills management arrives with the Skills console (FM-925).
+        Probes the machine's skills library. Library, preset, and deployment actions are on the Skills tab.
       </p>
       <button
         type="button"
