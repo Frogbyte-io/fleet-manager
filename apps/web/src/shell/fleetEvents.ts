@@ -6,7 +6,7 @@ export type FleetEventStatus = 'connecting' | 'live' | 'disconnected'
 // The stream contains no resource payloads. Every notification refreshes the
 // corresponding authorized API reads already held by the web query cache.
 const QUERY_KEYS: Record<string, readonly (readonly string[])[]> = {
-  'machine.changed': [['fleet', 'machines'], ['machine'], ['machines', 'matrix']],
+  'machine.changed': [['fleet', 'machines'], ['machine'], ['machines', 'matrix'], ['skills', 'machines']],
   'operation.changed': [['operation']],
   'lease.changed': [['lab', 'leases'], ['lab', 'provisions']],
   'onboarding.changed': [['add', 'drafts'], ['onboarding-draft']],

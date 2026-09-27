@@ -39,7 +39,7 @@ function isInvalidated(client: QueryClient, key: string[]) {
 
 describe('fleet event query invalidation', () => {
   const cases: [string, ...string[][]][] = [
-    ['machine.changed', ['fleet', 'machines'], ['machine', 'm1'], ['machines', 'matrix']],
+    ['machine.changed', ['fleet', 'machines'], ['machine', 'm1'], ['machines', 'matrix'], ['skills', 'machines']],
     ['operation.changed', ['operation', 'o1']],
     ['lease.changed', ['lab', 'leases'], ['lab', 'provisions']],
     ['onboarding.changed', ['add', 'drafts'], ['onboarding-draft', 'd1']],
@@ -95,6 +95,7 @@ describe('fleet event connection', () => {
     await nextTick()
     expect(wrapper.text()).toBe('live')
     expect(isInvalidated(client, ['projects', 'all'])).toBe(true)
+    client.removeQueries()
     seed(client, ['fleet', 'machines'], ['projects', 'all'])
     stream.emit('machine.changed')
     expect(isInvalidated(client, ['fleet', 'machines'])).toBe(true)
@@ -104,6 +105,7 @@ describe('fleet event connection', () => {
     stream.emit('error')
     await nextTick()
     expect(wrapper.text()).toBe('disconnected')
+    client.removeQueries()
     seed(client, ['projects', 'all'])
     stream.emit('open')
     await nextTick()

@@ -10,6 +10,12 @@ import type { FleetEventStatus } from '@/shell/fleetEvents'
 
 defineProps<{ eventStatus: FleetEventStatus }>()
 
+const eventStatusView: Record<FleetEventStatus, { label: string, tone: string }> = {
+  connecting: { label: 'Connecting', tone: 'text-fc-muted' },
+  live: { label: 'Live', tone: 'text-fc-ok' },
+  disconnected: { label: 'Disconnected', tone: 'text-fc-err' },
+}
+
 const route = useRoute()
 const { theme, toggle } = useTheme()
 
@@ -44,13 +50,13 @@ const isLight = computed(() => theme.value === 'light')
         role="status"
         aria-live="polite"
         class="inline-flex items-center gap-1.5 text-xs"
-        :class="eventStatus === 'live' ? 'text-fc-ok' : eventStatus === 'disconnected' ? 'text-fc-err' : 'text-fc-muted'"
+        :class="eventStatusView[eventStatus].tone"
       >
         <span
           aria-hidden="true"
           class="size-1.5 rounded-full bg-current"
         />
-        {{ eventStatus === 'live' ? 'Live' : eventStatus === 'disconnected' ? 'Disconnected' : 'Connecting' }}
+        {{ eventStatusView[eventStatus].label }}
       </span>
       <button
         type="button"
