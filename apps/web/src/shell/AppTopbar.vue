@@ -6,6 +6,9 @@ import { RouterLink, useRoute } from 'vue-router'
 import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@/components/ui/breadcrumb'
 import { SidebarTrigger } from '@/components/ui/sidebar'
 import { useTheme } from '@/shell/theme'
+import type { FleetEventStatus } from '@/shell/fleetEvents'
+
+defineProps<{ eventStatus: FleetEventStatus }>()
 
 const route = useRoute()
 const { theme, toggle } = useTheme()
@@ -37,6 +40,18 @@ const isLight = computed(() => theme.value === 'light')
     </Breadcrumb>
 
     <div class="ml-auto flex items-center gap-2">
+      <span
+        role="status"
+        aria-live="polite"
+        class="inline-flex items-center gap-1.5 text-xs"
+        :class="eventStatus === 'live' ? 'text-fc-ok' : eventStatus === 'disconnected' ? 'text-fc-err' : 'text-fc-muted'"
+      >
+        <span
+          aria-hidden="true"
+          class="size-1.5 rounded-full bg-current"
+        />
+        {{ eventStatus === 'live' ? 'Live' : eventStatus === 'disconnected' ? 'Disconnected' : 'Connecting' }}
+      </span>
       <button
         type="button"
         disabled
