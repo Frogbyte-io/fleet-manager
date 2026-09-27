@@ -2428,6 +2428,59 @@ export interface ProxmoxAccountDto {
 }
 
 /**
+ * Used and total capacity for one storage pool.
+ */
+export interface ProxmoxStorageCapacityDto {
+  /** The Proxmox storage identifier. */
+  storage: string;
+  /**
+     * Total capacity in bytes.
+     * @minimum 0
+     */
+  totalBytes: number;
+  /**
+     * Used capacity in bytes.
+     * @minimum 0
+     */
+  usedBytes: number;
+}
+
+/**
+ * Current CPU, memory, and storage usage observed for one node.
+ */
+export interface ProxmoxNodeCapacityDto {
+  /**
+     * The node's logical CPU count, when available.
+     * @minimum 0
+     * @nullable
+     */
+  cpuCount?: number | null;
+  /**
+     * CPU usage as a fraction between 0.0 and 1.0.
+     * @nullable
+     */
+  cpuUsageRatio?: number | null;
+  /**
+     * Total memory in bytes.
+     * @minimum 0
+     * @nullable
+     */
+  memoryTotalBytes?: number | null;
+  /**
+     * Used memory in bytes.
+     * @minimum 0
+     * @nullable
+     */
+  memoryUsedBytes?: number | null;
+  /** The Proxmox node name. */
+  node: string;
+  /** When the observation was taken. */
+  observedAt: number;
+  /** Storage capacity reported by this node. */
+  storages: ProxmoxStorageCapacityDto[];
+}
+
+/**
  * One normalized discovery observation.
  */
 export interface ProxmoxResourceDto {
@@ -2473,6 +2526,8 @@ export interface ProxmoxResourceDto {
 export interface ProxmoxDiscoveryDto {
   /** The account that produced the snapshot. */
   accountId: string;
+  /** Current capacity observations for each discovered node. */
+  nodeCapacities: ProxmoxNodeCapacityDto[];
   /** When the snapshot was taken. */
   observedAt: number;
   /** The PVE version seen. */
@@ -3396,6 +3451,8 @@ export interface ResourceProxmoxAccountDto {
 export type ResourceProxmoxDiscoveryDtoData = {
   /** The account that produced the snapshot. */
   accountId: string;
+  /** Current capacity observations for each discovered node. */
+  nodeCapacities: ProxmoxNodeCapacityDto[];
   /** When the snapshot was taken. */
   observedAt: number;
   /** The PVE version seen. */
