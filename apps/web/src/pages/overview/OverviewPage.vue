@@ -146,7 +146,7 @@ const severityLabel = { err: 'error', warn: 'warning', info: 'to do' } as const
           role="alert"
           data-testid="activity-error"
         >
-          Audit events unavailable: {{ errorMessage(audit.error.value) }}. Only operations are shown.
+          Audit events unavailable: {{ errorMessage(audit.error.value) }}. {{ audit.data.value?.length ? 'Audit events below are from the last successful read and may be stale.' : 'Only operations are shown.' }}
         </p>
         <p
           v-else-if="feed.length === 0"
