@@ -141,8 +141,12 @@ async fn an_operator_entry_that_owns_the_name_is_left_alone() {
         .await
         .unwrap();
 
+    let before = audit_count(&store).await;
     let seed = seed_builtin_skills(store.pool(), 2).await.unwrap();
     assert!(matches!(seed, BuiltinSeed::NameTaken { .. }));
+    // Restarts that create nothing record nothing.
+    seed_builtin_skills(store.pool(), 3).await.unwrap();
+    assert_eq!(audit_count(&store).await, before);
     let auth = fleet_auth::LanAllowAllAuthorizer;
     let still_mine = catalog.get(&auth, &operator(), &mine.id).await.unwrap();
     assert_eq!(still_mine, mine);

@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use super::{Command, Output, parse, request_for};
+use super::{Command, EVENTS_PATH, Output, SYSTEM_PATH, parse, request_for};
 
 const SKILL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills/fleet/SKILL.md");
 const SNAPSHOT_PATH: &str = concat!(
@@ -92,8 +92,10 @@ fn summarize(line: &str) -> String {
         "documented command must pass --output json before the command word: {line}"
     );
     let request = match &invocation.command {
-        Command::Status => "local fleetd socket (GET /api/v1/system only with --url)".to_owned(),
-        Command::Events => "GET /api/v1/events (event stream)".to_owned(),
+        // Neither goes through `request_for`; their routes are the constants
+        // the real request code uses.
+        Command::Status => format!("local fleetd socket (GET {SYSTEM_PATH} only with --url)"),
+        Command::Events => format!("GET {EVENTS_PATH} (event stream)"),
         command => {
             let (method, path, query, body) = request_for(command).unwrap_or_else(|error| {
                 panic!("documented command has no request: {line}\n{error}")
@@ -104,17 +106,9 @@ fn summarize(line: &str) -> String {
                 let _ = write!(out, "?{}", pairs.join("&"));
             }
             if let Some(body) = body.as_ref().and_then(serde_json::Value::as_object) {
-                // Keys, plus the value of every boolean flag (a dry run and a
-                // real run must not look alike).
-                let mut fields: Vec<String> = body
-                    .iter()
-                    .map(|(key, value)| match value {
-                        serde_json::Value::Bool(flag) => format!("{key}={flag}"),
-                        _ => key.clone(),
-                    })
-                    .collect();
-                fields.sort();
-                let _ = write!(out, " body{{{}}}", fields.join(","));
+                // The whole body (keys sorted), so a wrong value for any
+                // field (machine, endpoint, root, timeout, dry run) shows.
+                let _ = write!(out, " body {}", serde_json::Value::Object(body.clone()));
             }
             out
         }

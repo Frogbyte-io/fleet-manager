@@ -19,7 +19,9 @@ text.
 3. **Mutations are durable operations.** Commands that change something return
    an operation. Pass `--wait` where the command accepts it, or follow the
    operation with `operations get` until its `state` is `succeeded`, `failed`,
-   `cancelled`, or `timed_out`.
+   `cancelled`, `timed_out`, or `blocked_manual_approval`. The last one means a
+   person has to act (for example approve a Frogenv request): stop polling and
+   tell the user.
 4. **Preview first.** Where a command offers `--dry-run`, run it before the real
    thing and read the plan.
 5. **Never put secrets in arguments.** Commands that need a secret read it from
@@ -109,4 +111,4 @@ fleetctl --output json skills list <machine-id>
 
 The matrix shows, per machine, which skills are installed and which agents they
 are deployed to. This skill itself is the controller's built-in `fleet` catalog
-entry; the controller keeps it deployed, so do not remove or edit it by hand.
+entry: it changes only with a controller release, so do not edit it by hand.

@@ -274,7 +274,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
         class="border-l-2 border-l-fc-info bg-fc-inset px-3 py-2 text-xs text-fc-muted"
         data-testid="catalog-builtin"
       >
-        Built into the controller: this skill changes only with a controller release, so it cannot be edited or published here. It is assigned to every machine by default; Fleet Git takes it over with its own <span class="font-mono">SkillPreset</span> (an empty <span class="font-mono">deployTo</span> removes it everywhere). Roll out and Assign still work.
+        Built into the controller: this skill changes only with a controller release, so it cannot be edited or published here. Roll out and Assign still work. Once Fleet Git activation composes assignments, it is assigned by default to Claude Code and Codex on every machine; Fleet Git takes it over with its own <span class="font-mono">SkillPreset</span>, and an empty <span class="font-mono">deployTo</span> removes it everywhere.
       </p>
       <template v-if="kind === 'authored'">
         <div class="flex flex-wrap items-center gap-1 text-xs">
@@ -321,7 +321,8 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <button
               v-if="files[active]!.path !== 'SKILL.md'"
               type="button"
-              class="ml-auto font-mono text-[10px] uppercase tracking-wider text-fc-err"
+              class="ml-auto font-mono text-[10px] uppercase tracking-wider text-fc-err disabled:opacity-50"
+              :disabled="locked"
               @click="removeFile(active)"
             >
               Remove file
@@ -451,8 +452,8 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
         {{ publishError }}
       </p>
       <CopyFleetctl
-        :command="dirty ? saveCommand : entry ? catalogPublishCommand(entry.id) : null"
-        missing="Fix the draft to see the command."
+        :command="builtin ? null : dirty ? saveCommand : entry ? catalogPublishCommand(entry.id) : null"
+        :missing="builtin ? 'Built-in entries change only with a controller release; there is no command to edit or publish them.' : 'Fix the draft to see the command.'"
       />
     </template>
 

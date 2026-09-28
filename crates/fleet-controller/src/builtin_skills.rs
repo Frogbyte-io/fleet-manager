@@ -1,10 +1,12 @@
 //! The skills this controller release ships (FM-924): the official `fleet`
 //! skill, embedded at build time and seeded into the skill catalog at
-//! startup under its reserved identity (ADR 0011).
+//! startup under its reserved identity (ADR 0012). Its implicit global
+//! assignment is the desired-state composition rule
+//! `with_builtin_assignments`, which takes effect once Fleet Git activation
+//! (M4) composes assignments at runtime.
 
 use std::sync::Arc;
 
-use fleet_application::composition::{BuiltinSkillAssignment, DEFAULT_BUILTIN_SKILL_AGENTS};
 use fleet_application::skill_catalog::{
     BuiltinSeed, SkillCatalog, SkillCatalogContent, SkillCatalogFile, SkillCatalogSource,
 };
@@ -71,28 +73,6 @@ pub async fn seed_builtin_skills(pool: &SqlitePool, now: i64) -> Result<BuiltinS
         .map_err(|error| error.to_string())
 }
 
-/// The implicit global assignment of the seeded `fleet` skill, for
-/// desired-state composition (`with_builtin_assignments`). `None` when the
-/// seed did not produce a version (an operator entry owns the name).
-#[must_use]
-pub fn fleet_skill_assignment(seed: &BuiltinSeed) -> Option<BuiltinSkillAssignment> {
-    let version_id = match seed {
-        BuiltinSeed::Current { version_id }
-        | BuiltinSeed::Published { version_id }
-        | BuiltinSeed::Updated { version_id } => version_id,
-        BuiltinSeed::NameTaken { .. } => return None,
-    };
-    Some(BuiltinSkillAssignment {
-        skill_id: "fleet".to_owned(),
-        catalog_id: fleet_core::BUILTIN_FLEET_SKILL_CATALOG_ID.to_owned(),
-        catalog_version_id: version_id.clone(),
-        deploy_to: DEFAULT_BUILTIN_SKILL_AGENTS
-            .iter()
-            .map(|agent| (*agent).to_owned())
-            .collect(),
-    })
-}
-
 /// A one-line startup log of what seeding did.
 #[must_use]
 pub fn describe(seed: &BuiltinSeed) -> String {
@@ -114,7 +94,7 @@ pub fn describe(seed: &BuiltinSeed) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fleet_skill_assignment, fleet_skill_content, frontmatter_field};
+    use super::{fleet_skill_content, frontmatter_field};
 
     #[test]
     fn the_shipped_skill_is_valid_catalog_content() {
@@ -130,13 +110,5 @@ mod tests {
         assert_eq!(frontmatter_field(markdown, "name"), Some("x"));
         assert_eq!(frontmatter_field(markdown, "description"), Some("y: z"));
         assert_eq!(frontmatter_field("no frontmatter", "name"), None);
-    }
-
-    #[test]
-    fn an_operator_owned_name_yields_no_implicit_assignment() {
-        let seed = fleet_application::skill_catalog::BuiltinSeed::NameTaken {
-            detail: "taken".to_owned(),
-        };
-        assert!(fleet_skill_assignment(&seed).is_none());
     }
 }

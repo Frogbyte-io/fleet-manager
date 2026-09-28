@@ -316,13 +316,27 @@ describe('catalog: edit → publish → roll out', () => {
 
 describe('built-in skill', () => {
   it('is read-only in the editor but can still be rolled out', async () => {
-    listSkillCatalog.mockResolvedValue(ok(page([entry({ id: 'builtin-fleet', publishedFrom: 'builtin-fleet@aa' })])))
+    const builtinVersion = { ...version('1111111111111111aaaa', entry().content, 1000), id: `builtin-fleet@${'a'.repeat(64)}`, catalogId: 'builtin-fleet' }
+    listSkillCatalog.mockResolvedValue(ok(page([entry({ id: 'builtin-fleet', publishedFrom: builtinVersion.id })])))
+    listSkillCatalogVersions.mockResolvedValue(ok(page([builtinVersion])))
     const { wrapper } = await mountAt('/skills?tab=catalog&entry=builtin-fleet')
     expect(wrapper.get('[data-testid="catalog-builtin"]').text()).toContain('Built into the controller')
     expect(wrapper.get('[data-testid="skill-md"]').attributes('readonly')).toBeDefined()
     expect(wrapper.get('[data-testid="catalog-save"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="catalog-publish"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('[data-testid="editor-rollout"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="fleetctl-command"]').exists()).toBe(false)
+
+    // Roll out the built-in's published version.
+    previewSkillCatalogRollout.mockResolvedValue(ok({ data: { versionId: builtinVersion.id, contentDigest: 'a'.repeat(64), machineId: 'm1', agents: ['codex'], stagingPath: '~/.local/share/fleet/skills/fleet', steps: ['stage and verify authored files'] } }))
+    startSkillCatalogRollout.mockResolvedValue(ok({ data: { id: 'op-builtin', kind: 'skills.catalog-rollout', state: 'queued' } }, 202))
+    await wrapper.get('[data-testid="editor-rollout"]').trigger('click')
+    await wrapper.get('[data-testid="rollout-machine-m1"]').setValue(true)
+    await wrapper.get('[data-testid="rollout-agent-codex"]').trigger('click')
+    await wrapper.get('[data-testid="rollout-preview"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="rollout-start"]').trigger('click')
+    await flushPromises()
+    expect(startSkillCatalogRollout).toHaveBeenCalledWith(expect.objectContaining({ versionId: builtinVersion.id, machineId: 'm1', agents: ['codex'] }))
   })
 
   it('can build the Fleet Git resource that removes it everywhere', async () => {

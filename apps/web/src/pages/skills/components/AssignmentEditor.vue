@@ -196,7 +196,7 @@ async function copyYaml() {
       class="text-fc-muted"
       data-testid="assignment-builtin"
     >
-      This skill ships with the controller and is assigned to every machine by default. Committing any <span class="font-mono">SkillPreset</span> for it hands it to Fleet Git; <strong v-if="deployTo.length === 0">with no agents selected, this resource removes it everywhere.</strong><span v-else>this one replaces the default with the scope and agents above.</span>
+      This skill ships with the controller. Once Fleet Git activation composes assignments, it is assigned by default to Claude Code and Codex on every machine. Committing any <span class="font-mono">SkillPreset</span> for it hands it to Fleet Git; <strong v-if="deployTo.length === 0">with no agents selected, this resource removes it everywhere.</strong><span v-else>this one replaces the default with the scope and agents above.</span>
     </p>
     <ul
       v-if="errors.length"

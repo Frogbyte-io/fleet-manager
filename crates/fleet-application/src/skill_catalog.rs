@@ -485,6 +485,14 @@ impl SkillCatalog {
         let mut changed = false;
         match entry {
             None => {
+                // An operator entry that owns the name wins. Checked before
+                // the audit intent, so a restart that creates nothing records
+                // nothing.
+                if let Some(owner) = self.entry_named(&content.name).await? {
+                    return Ok(BuiltinSeed::NameTaken {
+                        detail: format!("catalog entry {owner} is named {:?}", content.name),
+                    });
+                }
                 self.audit(&system, Some(id), "skill_catalog_builtin_created")
                     .await?;
                 if let Err(e) = self.port.create_with_id(id, &content, now).await {
@@ -539,6 +547,28 @@ impl SkillCatalog {
         } else {
             BuiltinSeed::Current { version_id }
         })
+    }
+
+    /// The id of the entry with this skill name, paging the whole catalog.
+    async fn entry_named(&self, name: &str) -> Result<Option<String>, SkillCatalogError> {
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .port
+                .list(cursor.as_deref(), MAX_SKILL_CATALOG_PAGE_SIZE)
+                .await
+                .map_err(SkillCatalogError::Backend)?;
+            if let Some(entry) = page.iter().find(|entry| entry.content.name == name) {
+                return Ok(Some(entry.id.clone()));
+            }
+            // The port returns one extra row when another page follows.
+            if page.len() <= MAX_SKILL_CATALOG_PAGE_SIZE as usize {
+                return Ok(None);
+            }
+            cursor = page
+                .get(MAX_SKILL_CATALOG_PAGE_SIZE as usize - 1)
+                .map(|entry| entry.id.clone());
+        }
     }
 
     async fn audit(

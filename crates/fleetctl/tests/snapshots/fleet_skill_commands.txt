@@ -15,23 +15,23 @@ fleetctl --output json projects list
 fleetctl --output json projects get <project-id>
   -> GET /api/v1/projects/project-id-example
 fleetctl --output json projects ready <project-id> <machine-id> --root <path> --dry-run --endpoint <endpoint-id> --auth agent --wait
-  -> POST /api/v1/projects/project-id-example/ready body{auth,dryRun=true,endpointId,machineId,root,timeoutSeconds}
+  -> POST /api/v1/projects/project-id-example/ready body {"auth":{"type":"agent"},"dryRun":true,"endpointId":"endpoint-id-example","machineId":"machine-id-example","root":"/home/dev/src","timeoutSeconds":1800}
 fleetctl --output json projects ready <project-id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent --wait
-  -> POST /api/v1/projects/project-id-example/ready body{auth,dryRun=false,endpointId,machineId,root,timeoutSeconds}
+  -> POST /api/v1/projects/project-id-example/ready body {"auth":{"type":"agent"},"dryRun":false,"endpointId":"endpoint-id-example","machineId":"machine-id-example","root":"/home/dev/src","timeoutSeconds":1800}
 fleetctl --output json lab templates
   -> GET /api/v1/lab/templates
 fleetctl --output json lab lease <template-version-id> --purpose "reproduce flaky test"
-  -> POST /api/v1/lab/leases body{purpose,templateVersionId}
+  -> POST /api/v1/lab/leases body {"purpose":"reproduce flaky test","templateVersionId":"template-version-id-example"}
 fleetctl --output json lab provision-lease <lease-id> --account <account-id>
-  -> POST /api/v1/lab/leases/lease-id-example/provision body{accountId}
+  -> POST /api/v1/lab/leases/lease-id-example/provision body {"accountId":"account-id-example"}
 fleetctl --output json lab leases
   -> GET /api/v1/lab/leases
 fleetctl --output json lab provisions
   -> GET /api/v1/lab/provisions
 fleetctl --output json lab extend <lease-id> --seconds 3600
-  -> POST /api/v1/lab/leases/lease-id-example/extend body{bySeconds}
+  -> POST /api/v1/lab/leases/lease-id-example/extend body {"bySeconds":3600}
 fleetctl --output json lab release <lease-id>
-  -> POST /api/v1/lab/leases/lease-id-example/release body{keep=false}
+  -> POST /api/v1/lab/leases/lease-id-example/release body {"keep":false}
 fleetctl --output json operations list --limit 20
   -> GET /api/v1/operations?limit=20
 fleetctl --output json operations get <operation-id>
