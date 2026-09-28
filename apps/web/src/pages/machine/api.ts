@@ -26,13 +26,16 @@ export function unwrap<T>(response: { status: number, data: unknown }, ok: numbe
   throw new ApiRequestError(response.status, body.code ?? null, body.code ? `${body.code}: ${detail}` : detail)
 }
 
-/** The operation states that never change again (fleet-core `OperationState`). */
-const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'timed_out'])
+/**
+ * The operation states that never change again (fleet-core
+ * `OperationState::is_terminal`). `blocked_manual_approval` is one of them:
+ * the workflow stops and is started again once the approval exists.
+ */
+const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'blocked_manual_approval'])
 
 /**
- * Whether an operation has settled. `cancelling` and
- * `blocked_manual_approval` are still live, and so is any state this client
- * does not know yet.
+ * Whether an operation has settled. `cancelling` is still live, and so is
+ * any state this client does not know yet.
  */
 export function isTerminal(state: string): boolean {
   return TERMINAL.has(state)
