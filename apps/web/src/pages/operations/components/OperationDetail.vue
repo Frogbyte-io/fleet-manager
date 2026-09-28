@@ -27,6 +27,9 @@ const live = ref(false)
 const timeline = ref<{ at: number, state: string, progress: string }[]>([])
 
 function record(snapshot: OperationDto) {
+  // A slow refetch must not replace a newer snapshot the stream delivered.
+  if (operation.value && operation.value.id === snapshot.id && snapshot.updatedAt < operation.value.updatedAt)
+    return
   operation.value = snapshot
   const progress = [
     snapshot.progressCurrent !== null && snapshot.progressCurrent !== undefined ? `${snapshot.progressCurrent}/${snapshot.progressTotal ?? '?'}` : '',
@@ -209,6 +212,27 @@ function time(ms: number | null | undefined): string {
         <p class="text-fc-ink">
           {{ blocked.detail }}
         </p>
+        <dl
+          v-if="blocked.blockedAt || blocked.completed.length || blocked.remaining.length"
+          class="grid grid-cols-[90px_1fr] gap-x-3 font-mono text-[11px]"
+          data-testid="blocked-steps"
+        >
+          <template v-if="blocked.blockedAt">
+            <dt class="text-fc-faint">
+              blocked at
+            </dt><dd>{{ blocked.blockedAt }}</dd>
+          </template>
+          <template v-if="blocked.completed.length">
+            <dt class="text-fc-faint">
+              done
+            </dt><dd>{{ blocked.completed.join(', ') }}</dd>
+          </template>
+          <template v-if="blocked.remaining.length">
+            <dt class="text-fc-faint">
+              remaining
+            </dt><dd>{{ blocked.remaining.join(', ') }}</dd>
+          </template>
+        </dl>
         <ol class="list-decimal pl-5 text-fc-muted">
           <li
             v-for="step in blocked.steps"

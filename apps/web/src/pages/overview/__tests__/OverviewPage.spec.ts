@@ -144,6 +144,12 @@ describe('Overview attention queue', () => {
     expect(wrapper.find('[data-testid="attention-empty"]').exists()).toBe(false)
   })
 
+  it('says when audit events could not be read instead of showing no activity', async () => {
+    listAuditEvents.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
+    const wrapper = await mountPage()
+    expect(wrapper.get('[data-testid="activity-error"]').text()).toContain('Audit events unavailable')
+  })
+
   it('states that skill drift is not available yet', async () => {
     const wrapper = await mountPage()
     expect(wrapper.get('[data-testid="drift-gap"]').text()).toContain('Skill drift')

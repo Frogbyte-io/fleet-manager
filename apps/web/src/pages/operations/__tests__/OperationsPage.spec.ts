@@ -130,6 +130,29 @@ describe('Operations page', () => {
     expect(wrapper.get('[data-testid="operation-detail"]').text()).toContain('9000')
   })
 
+  it('ignores a refetch that is older than the snapshot the stream delivered', async () => {
+    let resolve: (value: unknown) => void = () => {}
+    getOperation.mockImplementation(() => new Promise(r => (resolve = r)))
+    const { wrapper } = await mountAt('/operations?op=op-1')
+    const stream = FakeEventSource.instances.at(-1)!
+    stream.emit('operation', operation({ state: 'succeeded', updatedAt: 50 }))
+    await flushPromises()
+    resolve(ok({ data: operation({ state: 'running', updatedAt: 10 }) }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="operation-detail"]').text()).toContain('succeeded')
+  })
+
+  it('warns about truncation only when the API reports more', async () => {
+    const { wrapper } = await mountAt('/operations')
+    expect(wrapper.text()).not.toContain('does not page further')
+  })
+
+  it('shows the recorded steps of a blocked workflow', async () => {
+    getOperation.mockResolvedValue(ok({ data: operation({ id: 'op-3', kind: 'ready.workflow', state: 'blocked_manual_approval', errorJson: JSON.stringify({ detail: 'the setup ceremony requires manual approval: r', blockedAt: 'frogenv_setup', completed: ['clone'], remaining: ['configure Frogenv'] }) }) }))
+    const { wrapper } = await mountAt('/operations?op=op-3')
+    expect(wrapper.get('[data-testid="blocked-steps"]').text()).toContain('configure Frogenv')
+  })
+
   it('explains a blocked operation instead of offering cancel', async () => {
     const { wrapper } = await mountAt('/operations?op=op-3')
     const guidance = wrapper.get('[data-testid="blocked-guidance"]').text()

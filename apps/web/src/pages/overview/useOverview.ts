@@ -15,6 +15,7 @@ import { fetchAllPages, type PagedResponse } from '../fleet/useFleetInventory'
 import { useImages } from '../images/useImages'
 import { retryTransient, unwrap } from '../machine/api'
 import { useOperationsList } from '../operations/useOperations'
+import { isFingerprintMismatch } from '../proxmox/proxmox'
 import { useProxmox } from '../proxmox/useProxmox'
 
 import {
@@ -102,9 +103,17 @@ export function useOverview() {
     images.leases.error.value && 'Lab leases',
     images.templates.error.value && 'Lab templates',
     images.loadError.value.some(([what]) => what === 'versions' || what === 'recipes') && 'image versions',
+    [...proxmox.discoveryErrors.value.values(), ...proxmox.guestErrors.value.values()].some(e => e && !isFingerprintMismatch(e)) && 'Proxmox discovery',
   ].filter((name): name is string => !!name))
 
-  const loading = computed(() => machines.isLoading.value || operations.isLoading.value || images.leases.isLoading.value)
+  // "Nothing needs attention" waits for every source.
+  const loading = computed(() => machines.isLoading.value
+    || operations.isLoading.value
+    || drafts.isLoading.value
+    || proxmox.loading.value
+    || images.leases.isLoading.value
+    || images.templates.isLoading.value
+    || images.loading.value)
 
   return { attention, figures, feed, failures, loading, audit, proxmox }
 }

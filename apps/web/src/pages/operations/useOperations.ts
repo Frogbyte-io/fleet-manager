@@ -18,8 +18,9 @@ export function useOperationsList() {
       const response = await listOperations({ limit: OPERATIONS_LIMIT })
       if (response.status !== 200)
         unwrap(response)
-      const items = (response.data as { items: OperationDto[] }).items
-      return { items, truncated: items.length >= OPERATIONS_LIMIT }
+      const page = response.data as { items: OperationDto[], page?: { nextCursor?: string | null } }
+      // The API reports more only through the page's cursor.
+      return { items: page.items, truncated: Boolean(page.page?.nextCursor) }
     },
     retry: retryTransient,
   })

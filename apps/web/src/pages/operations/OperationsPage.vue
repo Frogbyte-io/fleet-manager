@@ -164,14 +164,19 @@ const selectedInitial = computed(() => all.value.find(o => o.id === selected.val
               :key="operation.id"
               class="cursor-pointer border-t border-fc-line hover:bg-fc-inset"
               :class="operation.id === selected ? 'bg-fc-inset' : ''"
-              :aria-selected="operation.id === selected"
-              tabindex="0"
               :data-testid="`operation-${operation.id}`"
               @click="select(operation.id)"
-              @keydown.enter="select(operation.id)"
             >
               <td class="px-2 py-1.5">
-                <span class="font-mono text-fc-ink">{{ operation.kind }}</span>
+                <button
+                  type="button"
+                  class="text-left font-mono text-fc-ink hover:underline"
+                  :aria-current="operation.id === selected ? 'true' : undefined"
+                  :aria-label="`Open ${operation.kind} ${operation.id}`"
+                  @click.stop="select(operation.id)"
+                >
+                  {{ operation.kind }}
+                </button>
                 <span class="block font-mono text-[10px] text-fc-faint">{{ operation.id }}</span>
               </td>
               <td class="px-2 py-1.5">

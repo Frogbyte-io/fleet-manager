@@ -41,57 +41,65 @@ export function cancellable(operation: Pick<OperationDto, 'state' | 'cancelReque
 export interface BlockedGuidance {
   /** The blocked reason the controller recorded. */
   detail: string
+  /** The step that blocked, when the workflow recorded it. */
+  blockedAt: string | null
+  /** Steps that already ran, and the ones still to run. */
+  completed: string[]
+  remaining: string[]
   /** What the operator does next. */
   steps: string[]
   /** Where to act, when a page covers it. */
   link: { to: RouteLocationRaw, label: string } | null
 }
 
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
 /**
  * `blocked_manual_approval` is terminal (fleet-core `OperationState`): the
- * operation will not resume by itself. The workflows that block are
- * idempotent, so the way forward is to satisfy the approval and start the
- * same action again; it skips what is already done.
+ * operation will not resume by itself. What unblocks it depends on what the
+ * controller recorded: a Frogenv ceremony either needs an approval, or ran
+ * out of time on interactive steps only a person on the machine can do
+ * (fleet-controller `frogenv.rs`); an apply names the actions it needs
+ * approved. The workflows are idempotent, so the last step is always to
+ * start the same action again.
  */
 export function blockedGuidance(operation: Pick<OperationDto, 'kind' | 'errorJson'>): BlockedGuidance {
-  let detail = 'A step needs a person to approve it.'
+  let recorded: Record<string, unknown> = {}
   try {
-    const parsed = JSON.parse(operation.errorJson ?? '') as { detail?: unknown }
-    if (typeof parsed.detail === 'string')
-      detail = parsed.detail
+    const parsed = JSON.parse(operation.errorJson ?? '') as unknown
+    if (parsed && typeof parsed === 'object')
+      recorded = parsed as Record<string, unknown>
   }
   catch {
     // Keep the generic detail.
   }
-  if (operation.kind === 'ready.workflow') {
-    return {
-      detail,
-      steps: [
-        'Approve the pending Frogenv request for this checkout (Frogenv shows it to its approvers).',
-        'Run Make ready again for the same project and machine: the plan skips the steps already done and continues from the blocked one.',
-      ],
-      link: { to: '/projects', label: 'Projects' },
-    }
+  const detail = typeof recorded.detail === 'string' && recorded.detail ? recorded.detail : 'A step needs a person to act.'
+  const base = {
+    detail,
+    blockedAt: typeof recorded.blockedAt === 'string' ? recorded.blockedAt : null,
+    completed: strings(recorded.completed),
+    remaining: strings(recorded.remaining),
   }
-  if (operation.kind === 'apply.workflow') {
-    return {
-      detail,
-      steps: [
-        'Review the actions the plan named above.',
-        'Start apply again with approvals for those actions (fleetctl apply … with the approved plan); nothing ran while it was blocked.',
-      ],
-      link: null,
-    }
-  }
-  if (operation.kind.startsWith('frogenv.')) {
-    return {
-      detail,
-      steps: [
-        'Approve the request in Frogenv.',
-        'Run the same Frogenv action again from the machine\'s Tools tab.',
-      ],
-      link: { to: '/fleet', label: 'Fleet' },
-    }
-  }
-  return { detail, steps: ['Resolve the approval the detail names, then start the action again.'], link: null }
+  const interactive = /interactive steps|run it on the machine yourself/i.test(detail)
+  const approval = /manual approval|approval/i.test(detail)
+  const rerun = operation.kind === 'ready.workflow'
+    ? 'Run Make ready again for the same project and machine: it skips the steps already done and continues from the blocked one.'
+    : operation.kind.startsWith('frogenv.')
+      ? 'Run the same Frogenv action again from the machine\'s Tools tab.'
+      : operation.kind === 'apply.workflow'
+        ? 'Start apply again with approvals for the actions named above (fleetctl apply with the approved plan); nothing ran while it was blocked.'
+        : 'Start the same action again.'
+  const first = interactive
+    ? 'Run the ceremony interactively on the machine yourself; Fleet cannot perform its interactive steps.'
+    : operation.kind === 'apply.workflow'
+      ? 'Review the actions the plan named above.'
+      : approval
+        ? 'Get the request approved (the detail above says which one).'
+        : 'Resolve what the detail above describes.'
+  const link = operation.kind === 'ready.workflow'
+    ? { to: '/projects', label: 'Projects' }
+    : operation.kind.startsWith('frogenv.') ? { to: '/fleet', label: 'Fleet' } : null
+  return { ...base, steps: [first, rerun], link }
 }

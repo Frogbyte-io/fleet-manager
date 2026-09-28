@@ -7,6 +7,7 @@ import SystemPanel from '@/components/SystemPanel.vue'
 import { Skeleton } from '@/components/ui/skeleton'
 
 import { formatBytes, relativeTime } from '../fleet/inventory'
+import { errorMessage } from '../machine/api'
 import UsageBar from '../proxmox/components/UsageBar.vue'
 import { nodeRows, ratio } from '../proxmox/proxmox'
 import { useOverview } from './useOverview'
@@ -14,7 +15,7 @@ import { useOverview } from './useOverview'
 // The landing view: how the fleet is, what needs a person, what just
 // happened, and how much room the Proxmox nodes have
 // (docs/planning/web-console.md, Overview).
-const { attention, figures, feed, failures, loading, proxmox } = useOverview()
+const { attention, figures, feed, failures, loading, audit, proxmox } = useOverview()
 
 const nodes = computed(() => nodeRows(proxmox.views.value))
 
@@ -140,7 +141,15 @@ const severityLabel = { err: 'error', warn: 'warning', info: 'to do' } as const
           </RouterLink>
         </h2>
         <p
-          v-if="feed.length === 0"
+          v-if="audit.error.value"
+          class="text-xs text-fc-err"
+          role="alert"
+          data-testid="activity-error"
+        >
+          Audit events unavailable: {{ errorMessage(audit.error.value) }}. Only operations are shown.
+        </p>
+        <p
+          v-else-if="feed.length === 0"
           class="text-xs text-fc-muted"
         >
           No recent activity.
@@ -190,10 +199,17 @@ const severityLabel = { err: 'error', warn: 'warning', info: 'to do' } as const
         </RouterLink>
       </h2>
       <p
-        v-if="nodes.length === 0"
+        v-if="proxmox.accounts.error.value"
+        class="text-xs text-fc-err"
+        role="alert"
+      >
+        Proxmox accounts unavailable: {{ errorMessage(proxmox.accounts.error.value) }}
+      </p>
+      <p
+        v-else-if="nodes.length === 0"
         class="text-xs text-fc-muted"
       >
-        No capacity observed: add and pin a Proxmox account to see its nodes.
+        {{ proxmox.views.value.length ? 'No capacity observed: discovery has not answered for any pinned account.' : 'No capacity observed: add and pin a Proxmox account to see its nodes.' }}
       </p>
       <div
         class="grid gap-3 md:grid-cols-2 xl:grid-cols-3"

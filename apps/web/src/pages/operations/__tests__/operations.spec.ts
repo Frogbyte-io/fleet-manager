@@ -35,6 +35,16 @@ describe('operations helpers', () => {
     expect(ready.steps.join(' ')).toContain('Run Make ready again')
     expect(ready.link).toEqual({ to: '/projects', label: 'Projects' })
     expect(blockedGuidance({ kind: 'apply.workflow', errorJson: null }).steps.join(' ')).toContain('approvals')
-    expect(blockedGuidance({ kind: 'frogenv.request', errorJson: 'garbage' }).detail).toBe('A step needs a person to approve it.')
+    expect(blockedGuidance({ kind: 'frogenv.request', errorJson: 'garbage' }).detail).toBe('A step needs a person to act.')
+  })
+
+  it('bases the guidance on what the controller recorded', () => {
+    const interactive = blockedGuidance({ kind: 'frogenv.setup', errorJson: JSON.stringify({ detail: 'the setup ceremony did not complete within its deadline; it requires interactive steps Fleet cannot perform — run it on the machine yourself' }) })
+    expect(interactive.steps[0]).toContain('interactively on the machine')
+    expect(interactive.steps.join(' ')).not.toContain('approved')
+
+    const ready = blockedGuidance({ kind: 'ready.workflow', errorJson: JSON.stringify({ detail: 'the setup ceremony requires manual approval: request 42', blockedAt: 'frogenv_setup', completed: ['clone'], remaining: ['configure Frogenv', 'install node 22'] }) })
+    expect(ready.steps[0]).toContain('approved')
+    expect(ready).toMatchObject({ blockedAt: 'frogenv_setup', completed: ['clone'], remaining: ['configure Frogenv', 'install node 22'] })
   })
 })
