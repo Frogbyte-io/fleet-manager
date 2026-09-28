@@ -603,12 +603,11 @@
                 "type": "array"
               },
               "deployTo": {
-                "description": "The coding agents receiving the skill.",
+                "description": "The coding agents receiving the skill. Empty means Fleet manages\nthe skill but deploys it nowhere: for the controller's built-in\nskills, this is how Fleet Git removes the default global assignment.",
                 "items": {
                   "type": "string"
                 },
                 "maxItems": 16,
-                "minItems": 1,
                 "type": "array"
               },
               "scope": {

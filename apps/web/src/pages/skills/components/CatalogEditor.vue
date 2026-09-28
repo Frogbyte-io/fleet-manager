@@ -57,6 +57,10 @@ Instructions for the agent.
 `
 
 const kind = computed(() => props.entry?.content.source.kind ?? props.kind)
+// Built-in entries (ADR 0012) change only with a controller release; the
+// API refuses edits, so the editor offers none.
+const builtin = computed(() => props.entry?.id.startsWith('builtin-') ?? false)
+const locked = computed(() => saving.value || builtin.value)
 
 function initialFiles(): EditableFile[] {
   const files = props.entry?.content.files ?? []
@@ -265,6 +269,13 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
 
     <!-- Draft -->
     <template v-if="section === 'edit'">
+      <p
+        v-if="builtin"
+        class="border-l-2 border-l-fc-info bg-fc-inset px-3 py-2 text-xs text-fc-muted"
+        data-testid="catalog-builtin"
+      >
+        Built into the controller: this skill changes only with a controller release, so it cannot be edited or published here. It is assigned to every machine by default; Fleet Git takes it over with its own <span class="font-mono">SkillPreset</span> (an empty <span class="font-mono">deployTo</span> removes it everywhere). Roll out and Assign still work.
+      </p>
       <template v-if="kind === 'authored'">
         <div class="flex flex-wrap items-center gap-1 text-xs">
           <button
@@ -279,7 +290,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
           </button>
           <input
             v-model="newPath"
-            :disabled="saving"
+            :disabled="locked"
             placeholder="references/notes.md"
             class="h-6 w-40 rounded-sm border border-input bg-background px-1.5 font-mono text-[11px] text-foreground"
             aria-label="New file path"
@@ -288,7 +299,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
           <button
             type="button"
             class="font-mono text-[10px] uppercase tracking-wider text-fc-info disabled:opacity-50"
-            :disabled="saving || !newPath.trim() || !!pathError"
+            :disabled="locked || !newPath.trim() || !!pathError"
             @click="addFile"
           >
             + File
@@ -319,7 +330,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
           <textarea
             :id="`file-${active}`"
             v-model="files[active]!.content"
-            :readonly="saving"
+            :readonly="locked"
             rows="16"
             spellcheck="false"
             class="w-full rounded-sm border border-input bg-fc-inset p-2.5 font-mono text-[12px] leading-relaxed text-foreground"
@@ -337,7 +348,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Name</span>
             <input
               v-model="referenced.name"
-              :readonly="saving"
+              :readonly="locked"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
               data-testid="ref-name"
             >
@@ -346,7 +357,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Description</span>
             <input
               v-model="referenced.description"
-              :readonly="saving"
+              :readonly="locked"
               class="h-8 rounded-sm border border-input bg-background px-2 text-foreground"
               data-testid="ref-description"
             >
@@ -355,7 +366,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Reference (skills.sh ref or Git URL)</span>
             <input
               v-model="referenced.reference"
-              :readonly="saving"
+              :readonly="locked"
               placeholder="https://github.com/org/skills"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
               data-testid="ref-reference"
@@ -365,7 +376,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Subpath (pinned with revision)</span>
             <input
               v-model="referenced.subpath"
-              :readonly="saving"
+              :readonly="locked"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
             >
           </label>
@@ -373,7 +384,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
             <span class="fc-kicker">Revision (full commit id)</span>
             <input
               v-model="referenced.revision"
-              :readonly="saving"
+              :readonly="locked"
               class="h-8 rounded-sm border border-input bg-background px-2 font-mono text-foreground"
             >
           </label>
@@ -404,7 +415,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
         <button
           type="button"
           class="h-8 rounded-sm border border-input px-3 font-head font-bold hover:border-fc-muted disabled:opacity-50"
-          :disabled="!dirty || errors.length > 0 || saving"
+          :disabled="builtin || !dirty || errors.length > 0 || saving"
           data-testid="catalog-save"
           @click="save"
         >
@@ -413,7 +424,7 @@ const saveCommand = computed(() => (content.value && !errors.value.length ? cata
         <button
           type="button"
           class="fc-grad-bg h-8 rounded-sm px-3 font-head font-bold disabled:opacity-50"
-          :disabled="!entry || dirty || errors.length > 0 || publishing || alreadyPublished"
+          :disabled="builtin || !entry || dirty || errors.length > 0 || publishing || alreadyPublished"
           :title="!entry || dirty ? 'Save the draft first' : alreadyPublished ? 'The latest version already has this content' : ''"
           data-testid="catalog-publish"
           @click="publish"

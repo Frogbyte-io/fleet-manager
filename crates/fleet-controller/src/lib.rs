@@ -12,6 +12,7 @@
 pub mod apply;
 pub mod artifacts;
 pub mod browser;
+pub mod builtin_skills;
 pub mod checkout;
 pub mod exec;
 pub mod frogenv;

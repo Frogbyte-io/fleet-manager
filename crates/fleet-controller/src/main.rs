@@ -71,6 +71,18 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             }
         };
         eprintln!("runtime state at {}", store.database_path().display());
+        // The skills this release ships are seeded before the listener binds.
+        // A failure is logged, not fatal: the controller still serves, just
+        // without the built-in skill.
+        match fleet_controller::builtin_skills::seed_builtin_skills(
+            store.pool(),
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        {
+            Ok(seed) => eprintln!("{}", fleet_controller::builtin_skills::describe(&seed)),
+            Err(error) => eprintln!("built-in fleet skill not seeded: {error}"),
+        }
         // The secret store fails closed on a wrong or missing key, so a
         // configured key file is validated here, before readiness; an unset
         // one is a loud pre-secrets state, not an error.

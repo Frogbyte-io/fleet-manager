@@ -389,8 +389,13 @@ export interface Assignment {
 
 const RESOURCE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
-/** `schemas/generated/desired-resource.schema.json` for `SkillPreset`. */
-export function assignmentErrors(assignment: Assignment): string[] {
+/**
+ * `schemas/generated/desired-resource.schema.json` for `SkillPreset`. An
+ * empty `deployTo` is schema-valid ("manage it, deploy it nowhere") but is
+ * only meaningful for a built-in skill, where it removes the default global
+ * assignment (ADR 0012); elsewhere it is refused as a likely mistake.
+ */
+export function assignmentErrors(assignment: Assignment, options: { allowNoAgents?: boolean } = {}): string[] {
   const errors: string[] = []
   if (!RESOURCE_NAME.test(assignment.name) || assignment.name.length > 63)
     errors.push('the resource name must be 1..=63 lowercase letters or digits separated by single hyphens')
@@ -398,7 +403,7 @@ export function assignmentErrors(assignment: Assignment): string[] {
   // caps `skillId` at 63, so such a skill cannot be assigned yet.
   if (assignment.skillId === '' || assignment.skillId.length > 63)
     errors.push('the desired-state schema limits skill ids to 1..=63 characters, so this skill cannot be assigned')
-  if (assignment.deployTo.length === 0 || assignment.deployTo.length > 16)
+  if (assignment.deployTo.length > 16 || (assignment.deployTo.length === 0 && !options.allowNoAgents))
     errors.push('pick 1..=16 agents to deploy to')
   if (assignment.denyAgents.length > 16)
     errors.push('at most 16 agents can be denied')
@@ -442,7 +447,11 @@ export function assignmentYaml(assignment: Assignment, id: string): string {
   lines.push('  scope:', `    type: ${assignment.scope.type}`)
   if (assignment.scope.type !== 'all')
     lines.push(`    value: ${yamlScalar(assignment.scope.value.trim())}`)
-  lines.push('  deployTo:', ...assignment.deployTo.map(agent => `    - ${yamlScalar(agent)}`))
+  // An empty list must be written as `[]`: a bare `deployTo:` is YAML null.
+  if (assignment.deployTo.length === 0)
+    lines.push('  deployTo: []')
+  else
+    lines.push('  deployTo:', ...assignment.deployTo.map(agent => `    - ${yamlScalar(agent)}`))
   if (assignment.denyAgents.length > 0)
     lines.push('  denyAgents:', ...assignment.denyAgents.map(agent => `    - ${yamlScalar(agent)}`))
   return `${lines.join('\n')}\n`

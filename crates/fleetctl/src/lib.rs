@@ -2684,6 +2684,9 @@ fn render_stream_event(
 }
 
 #[cfg(test)]
+mod skill_doc_tests;
+
+#[cfg(test)]
 mod event_output_tests {
     use super::{
         Command, Output, event_stream_http_error, event_stream_request, merge_skills_matrix_pages,

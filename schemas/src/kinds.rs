@@ -93,8 +93,10 @@ pub struct SkillPresetSpec {
     /// behavior of early `SkillPreset` resources.
     #[serde(default = "global_skill_scope")]
     pub scope: SkillAssignmentScope,
-    /// The coding agents receiving the skill.
-    #[schemars(length(min = 1, max = 16))]
+    /// The coding agents receiving the skill. Empty means Fleet manages
+    /// the skill but deploys it nowhere: for the controller's built-in
+    /// skills, this is how Fleet Git removes the default global assignment.
+    #[schemars(length(max = 16))]
     pub deploy_to: Vec<String>,
     /// Agents explicitly excluded even if another matching assignment
     /// includes the skill. Deny wins over include.

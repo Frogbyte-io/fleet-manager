@@ -175,6 +175,66 @@ pub enum SkillAssignmentCompositionError {
     },
 }
 
+/// A skill the controller ships and assigns to every machine by default
+/// (the official `fleet` skill, FM-924).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltinSkillAssignment {
+    /// The Skills Manager skill identity.
+    pub skill_id: String,
+    /// The reserved built-in catalog identity.
+    pub catalog_id: String,
+    /// The immutable version this controller release ships.
+    pub catalog_version_id: String,
+    /// The agents the implicit assignment deploys to.
+    pub deploy_to: Vec<String>,
+}
+
+/// The agents a built-in skill deploys to when Fleet Git has not taken it
+/// over. Fleet Git overrides this with its own `SkillPreset`.
+pub const DEFAULT_BUILTIN_SKILL_AGENTS: &[&str] = &["claude_code", "codex"];
+
+/// Adds each built-in skill's implicit global assignment, unless Fleet Git
+/// already assigns that skill (by skill id or catalog id). Once Git names
+/// the skill, Git owns it completely: its presets replace the default,
+/// and a preset with no `deployTo` agents removes the skill everywhere.
+/// The controller never writes Git, so a new release cannot re-add a
+/// built-in skill that Git has removed.
+#[must_use]
+pub fn with_builtin_assignments(
+    assignments: &[SkillAssignment],
+    builtins: &[BuiltinSkillAssignment],
+) -> Vec<SkillAssignment> {
+    let mut out = assignments.to_vec();
+    for builtin in builtins {
+        let owned_by_git = assignments.iter().any(|assignment| {
+            assignment.skill_id == builtin.skill_id
+                || assignment
+                    .catalog_version
+                    .as_ref()
+                    .is_some_and(|(catalog_id, _)| catalog_id == &builtin.catalog_id)
+        });
+        if owned_by_git {
+            continue;
+        }
+        out.push(SkillAssignment {
+            skill_id: builtin.skill_id.clone(),
+            deploy_to: builtin.deploy_to.clone(),
+            deny_agents: Vec::new(),
+            catalog_version: Some((
+                builtin.catalog_id.clone(),
+                builtin.catalog_version_id.clone(),
+            )),
+            scope: SkillAssignmentScope::All,
+            provenance: ProvenanceRecord {
+                resource_id: format!("builtin:{}", builtin.catalog_id),
+                resource_name: builtin.skill_id.clone(),
+                path: "controller release default".to_owned(),
+            },
+        });
+    }
+    out
+}
+
 /// Composes global, group, tag, and machine assignments for one machine.
 /// Duplicate skill/agent pairs collapse to one entry, choosing provenance
 /// deterministically by resource name, id, and path.
@@ -479,8 +539,9 @@ fn compose_into(
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposedProfile, CompositionError, MachineSkillTarget, ProfileResource, RequirementValue,
-        SkillAssignment, SkillAssignmentScope, compose_profile, compose_skill_assignments,
+        ComposedProfile, CompositionError, MachineSkillTarget, ProfileResource, ProvenanceRecord,
+        RequirementValue, SkillAssignment, SkillAssignmentScope, compose_profile,
+        compose_skill_assignments,
     };
     use std::collections::BTreeMap;
 
@@ -518,6 +579,99 @@ mod tests {
             namespace: namespace.to_owned(),
             name: name.to_owned(),
         }
+    }
+
+    fn builtin() -> super::BuiltinSkillAssignment {
+        super::BuiltinSkillAssignment {
+            skill_id: "fleet".to_owned(),
+            catalog_id: "builtin-fleet".to_owned(),
+            catalog_version_id: format!("builtin-fleet@{}", "a".repeat(64)),
+            deploy_to: vec!["claude_code".to_owned(), "codex".to_owned()],
+        }
+    }
+
+    fn builtin_target() -> MachineSkillTarget {
+        MachineSkillTarget {
+            machine_id: "m-1".to_owned(),
+            groups: vec![],
+            tags: vec![],
+        }
+    }
+
+    fn git_preset(
+        skill_id: &str,
+        deploy_to: &[&str],
+        scope: SkillAssignmentScope,
+    ) -> SkillAssignment {
+        SkillAssignment {
+            skill_id: skill_id.to_owned(),
+            deploy_to: deploy_to.iter().map(|agent| (*agent).to_owned()).collect(),
+            deny_agents: vec![],
+            catalog_version: None,
+            scope,
+            provenance: ProvenanceRecord {
+                resource_id: format!("git-{skill_id}"),
+                resource_name: skill_id.to_owned(),
+                path: "spec".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_builtin_fleet_skill_is_assigned_globally_by_default() {
+        let assignments = super::with_builtin_assignments(&[], &[builtin()]);
+        let composed = compose_skill_assignments(&builtin_target(), &assignments).unwrap();
+        let version = format!("builtin-fleet@{}", "a".repeat(64));
+        assert_eq!(
+            composed.catalog_skills,
+            vec![
+                (
+                    "builtin-fleet".to_owned(),
+                    version.clone(),
+                    "claude_code".to_owned()
+                ),
+                ("builtin-fleet".to_owned(), version, "codex".to_owned()),
+            ]
+        );
+        assert_eq!(
+            composed.provenance["catalog-skill:builtin-fleet/codex"].resource_id,
+            "builtin:builtin-fleet"
+        );
+    }
+
+    #[test]
+    fn fleet_git_takes_over_the_builtin_skill_once_it_names_it() {
+        // Git narrows the skill to one agent: the default is not added.
+        let narrowed = super::with_builtin_assignments(
+            &[git_preset("fleet", &["codex"], SkillAssignmentScope::All)],
+            &[builtin()],
+        );
+        let composed = compose_skill_assignments(&builtin_target(), &narrowed).unwrap();
+        assert_eq!(
+            composed.skills,
+            vec![("fleet".to_owned(), "codex".to_owned())]
+        );
+        assert!(composed.catalog_skills.is_empty());
+
+        // A preset with no agents removes it everywhere, and stays removed.
+        let removed = super::with_builtin_assignments(
+            &[git_preset("fleet", &[], SkillAssignmentScope::All)],
+            &[builtin()],
+        );
+        let composed = compose_skill_assignments(&builtin_target(), &removed).unwrap();
+        assert!(composed.skills.is_empty());
+        assert!(composed.catalog_skills.is_empty());
+
+        // An unrelated preset leaves the default in place.
+        let unrelated = super::with_builtin_assignments(
+            &[git_preset(
+                "rust-style",
+                &["codex"],
+                SkillAssignmentScope::All,
+            )],
+            &[builtin()],
+        );
+        assert_eq!(unrelated.len(), 2);
     }
 
     #[test]

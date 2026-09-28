@@ -72,11 +72,19 @@ impl SkillCatalogPort for SkillCatalogRepository {
         now: i64,
     ) -> Result<SkillCatalogEntry, String> {
         let id = Uuid::now_v7().to_string();
+        self.create_with_id(&id, content, now).await
+    }
+    async fn create_with_id(
+        &self,
+        id: &str,
+        content: &SkillCatalogContent,
+        now: i64,
+    ) -> Result<SkillCatalogEntry, String> {
         let json =
             serde_json::to_string(content).map_err(|e| format!("encode draft failed: {e}"))?;
         sqlx::query("INSERT INTO skill_catalog_entries (id, name, content_json, published_from, created_at, updated_at) VALUES (?1, ?2, ?3, NULL, ?4, ?4)")
-            .bind(&id).bind(&content.name).bind(json).bind(now).execute(&self.pool).await.map_err(|e| if is_unique(&e) { format!("catalog name {:?} is already taken", content.name) } else { format!("create failed: {e}") })?;
-        self.get(&id).await
+            .bind(id).bind(&content.name).bind(json).bind(now).execute(&self.pool).await.map_err(|e| if is_unique(&e) { format!("catalog name {:?} is already taken", content.name) } else { format!("create failed: {e}") })?;
+        self.get(id).await
     }
     async fn get(&self, id: &str) -> Result<SkillCatalogEntry, String> {
         sqlx::query("SELECT id, content_json, published_from, created_at, updated_at FROM skill_catalog_entries WHERE id = ?1").bind(id).fetch_optional(&self.pool).await.map_err(|e| format!("get failed: {e}"))?.as_ref().ok_or_else(|| format!("catalog entry {id} not found")).and_then(Self::entry)

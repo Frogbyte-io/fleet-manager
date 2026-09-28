@@ -314,6 +314,28 @@ describe('catalog: edit → publish → roll out', () => {
   })
 })
 
+describe('built-in skill', () => {
+  it('is read-only in the editor but can still be rolled out', async () => {
+    listSkillCatalog.mockResolvedValue(ok(page([entry({ id: 'builtin-fleet', publishedFrom: 'builtin-fleet@aa' })])))
+    const { wrapper } = await mountAt('/skills?tab=catalog&entry=builtin-fleet')
+    expect(wrapper.get('[data-testid="catalog-builtin"]').text()).toContain('Built into the controller')
+    expect(wrapper.get('[data-testid="skill-md"]').attributes('readonly')).toBeDefined()
+    expect(wrapper.get('[data-testid="catalog-save"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="catalog-publish"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="editor-rollout"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('can build the Fleet Git resource that removes it everywhere', async () => {
+    listSkillCatalog.mockResolvedValue(ok(page([entry({ id: 'builtin-fleet', publishedFrom: 'builtin-fleet@aa' })])))
+    listSkillCatalogVersions.mockResolvedValue(ok(page([{ ...version('1111111111111111aaaa', entry().content, 1000), id: `builtin-fleet@${'a'.repeat(64)}`, catalogId: 'builtin-fleet' }])))
+    const { wrapper } = await mountAt('/skills?tab=catalog&entry=builtin-fleet')
+    await wrapper.get('[data-testid="editor-assign"]').trigger('click')
+    expect(wrapper.get('[data-testid="assignment-builtin"]').text()).toContain('removes it everywhere')
+    expect(wrapper.find('[data-testid="assignment-errors"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="assignment-yaml"]').text()).toContain('deployTo: []')
+  })
+})
+
 describe('presets and search', () => {
   it('lists presets for machines with a usable CLI', async () => {
     const { wrapper } = await mountAt('/skills?tab=presets')
