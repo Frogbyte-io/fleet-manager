@@ -154,6 +154,13 @@ spec:
     ])
   })
 
+  it('accepts no agents only where it removes a built-in default', () => {
+    const none = { ...assignment, deployTo: [] }
+    expect(assignmentErrors(none)).toContain('pick 1..=16 agents to deploy to')
+    expect(assignmentErrors(none, { allowNoAgents: true })).toEqual([])
+    expect(assignmentYaml(none, '01890f3e-9b4a-7cc2-98c3-d24e8f58a008')).toContain('  deployTo: []\n')
+  })
+
   it('quotes ambiguous YAML scalars', () => {
     expect(yamlScalar('dev')).toBe('dev')
     expect(yamlScalar('true')).toBe('"true"')

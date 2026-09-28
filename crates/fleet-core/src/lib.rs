@@ -49,8 +49,9 @@ pub use redact::{
 };
 pub use sensitive::{SecretReference, SensitiveString};
 pub use skill_catalog::{
-    MAX_SKILL_CATALOG_BYTES, MAX_SKILL_CATALOG_FILES, SkillCatalogContent, SkillCatalogFile,
-    SkillCatalogSource,
+    BUILTIN_FLEET_SKILL_CATALOG_ID, BUILTIN_SKILL_CATALOG_PREFIX, MAX_SKILL_CATALOG_BYTES,
+    MAX_SKILL_CATALOG_FILES, SkillCatalogContent, SkillCatalogFile, SkillCatalogSource,
+    is_builtin_skill_catalog_id,
 };
 pub use source::CandidateDigest;
 pub use time::{Clock, Deadline, FixedClock, SystemClock, Timestamp};

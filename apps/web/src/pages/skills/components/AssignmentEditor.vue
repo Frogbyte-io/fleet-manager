@@ -62,8 +62,10 @@ const assignment = computed<Assignment>(() => ({
   deployTo: [...deployTo.value].sort(),
   denyAgents: [...denyAgents.value].sort(),
 }))
+// A built-in skill with no agents is how Fleet Git removes its default.
+const builtin = computed(() => props.catalogId.startsWith('builtin-'))
 const errors = computed(() => [
-  ...assignmentErrors(assignment.value),
+  ...assignmentErrors(assignment.value, { allowNoAgents: builtin.value }),
   ...(versionId.value ? [] : ['publish a version first: assignments pin a catalog version']),
 ])
 const yaml = computed(() => (errors.value.length ? null : assignmentYaml(assignment.value, id.value)))
@@ -189,6 +191,13 @@ async function copyYaml() {
       </div>
     </fieldset>
 
+    <p
+      v-if="builtin"
+      class="text-fc-muted"
+      data-testid="assignment-builtin"
+    >
+      This skill ships with the controller. Once Fleet Git activation composes assignments, it is assigned by default to Claude Code and Codex on every machine. Committing any <span class="font-mono">SkillPreset</span> for it hands it to Fleet Git; <strong v-if="deployTo.length === 0">with no agents selected, this resource removes it everywhere.</strong><span v-else>this one replaces the default with the scope and agents above.</span>
+    </p>
     <ul
       v-if="errors.length"
       class="list-disc pl-5 text-fc-warn"

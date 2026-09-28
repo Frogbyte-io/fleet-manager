@@ -56,6 +56,15 @@ is `unknown` and remains queued; a missing or unsupported Skills Manager
 CLI is `unsupported` and cannot produce apply steps. Manual changes appear
 as drift and are never imported into desired state.
 
+Composition contract for built-in skills (not yet active: Fleet Git activation
+does not compose assignments at runtime until M4): the skills the controller
+ships (the official `fleet` skill) receive an implicit global assignment to the
+default agents (`claude_code`, `codex`) unless Fleet Git already names the skill
+in a `SkillPreset`. Once Git names it, Git owns it: its presets
+replace the default, and a preset with an empty `deployTo` removes the skill
+everywhere. Because the controller never writes Git, a later release cannot
+re-add a removed built-in skill ([ADR 0012](../adr/0012-builtin-skills.md)).
+
 Legacy roles/packs provide fixtures for these semantics but do not force the old wrapper/filename schema into v1.
 
 ## Import and activation

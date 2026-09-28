@@ -85,7 +85,6 @@ function account() {
 function discovery(): ProxmoxDiscoveryDto {
   return {
     accountId: 'acc1',
-    nodeCapacities: [],
     observedAt: NOW,
     pveVersion: '8.2.4',
     reportedCount: 3,

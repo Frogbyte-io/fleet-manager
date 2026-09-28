@@ -57,7 +57,6 @@ function machine(overrides: Partial<MachineDto> = {}): MachineDto {
 function discovery(overrides: Partial<ProxmoxDiscoveryDto> = {}): ProxmoxDiscoveryDto {
   return {
     accountId: 'acc1',
-    nodeCapacities: [],
     observedAt: NOW,
     pveVersion: '8.2.4',
     reportedCount: 3,

@@ -23,6 +23,11 @@ type RequestShape = (
 
 use serde_json::Value;
 
+/// The controller's system route, which `status --url` calls directly.
+pub(crate) const SYSTEM_PATH: &str = "/api/v1/system";
+/// The fleet-wide event stream route.
+pub(crate) const EVENTS_PATH: &str = "/api/v1/events";
+
 /// The controller address used when `--url` is absent: the safe default, the
 /// controller's own documented loopback listener.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8080";
@@ -2409,7 +2414,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
         // The explicit direct-controller override.
         let client = http_client()?;
         let response = client
-            .get(format!("{}/api/v1/system", invocation.url))
+            .get(format!("{}{SYSTEM_PATH}", invocation.url))
             .header("x-correlation-id", uuid::Uuid::now_v7().to_string())
             .send()
             .map_err(|error| CliError {
@@ -2580,7 +2585,7 @@ fn event_stream_request(
     last_event_id: Option<&str>,
 ) -> Result<reqwest::blocking::Response, reqwest::Error> {
     let mut request = client
-        .get(format!("{base_url}/api/v1/events"))
+        .get(format!("{base_url}{EVENTS_PATH}"))
         .header("accept", "text/event-stream")
         .header("x-correlation-id", uuid::Uuid::now_v7().to_string());
     if let Some(cursor) = last_event_id {
@@ -2682,6 +2687,9 @@ fn render_stream_event(
         Output::Text => Ok(format!("{} {}", event_type, event_id.unwrap_or(""))),
     }
 }
+
+#[cfg(test)]
+mod skill_doc_tests;
 
 #[cfg(test)]
 mod event_output_tests {

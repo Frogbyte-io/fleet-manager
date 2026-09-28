@@ -10,6 +10,20 @@ pub const MAX_SKILL_CATALOG_BYTES: usize = 512 * 1024;
 /// Maximum number of files accepted for one authored skill version.
 pub const MAX_SKILL_CATALOG_FILES: usize = 64;
 
+/// Prefix reserved for catalog entries the controller ships and manages.
+/// Uploaded entries get `UUIDv7` identities, so they can never collide.
+pub const BUILTIN_SKILL_CATALOG_PREFIX: &str = "builtin-";
+/// Catalog identity of the official `fleet` skill that ships with the
+/// controller (FM-924).
+pub const BUILTIN_FLEET_SKILL_CATALOG_ID: &str = "builtin-fleet";
+
+/// Whether a catalog identity belongs to a controller-managed built-in
+/// entry, which the API refuses to edit or publish.
+#[must_use]
+pub fn is_builtin_skill_catalog_id(id: &str) -> bool {
+    id.starts_with(BUILTIN_SKILL_CATALOG_PREFIX)
+}
+
 /// A skill source authored in Fleet or referenced from an external catalog.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

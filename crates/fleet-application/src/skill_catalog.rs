@@ -13,6 +13,11 @@ use crate::{
 };
 pub use fleet_core::{SkillCatalogContent, SkillCatalogFile, SkillCatalogSource};
 
+/// The resource that collection-level catalog actions (list, create) are
+/// authorized against: `skills.read` and `skills.modify` require a resource,
+/// and without one the funnel refuses every such request.
+pub const SKILL_CATALOG_RESOURCE: &str = "skill-catalog";
+
 /// Largest catalog page returned by application use cases.
 pub const MAX_SKILL_CATALOG_PAGE_SIZE: u32 = 200;
 
@@ -71,6 +76,13 @@ pub trait SkillCatalogPort: fmt::Debug + Send + Sync {
     /// Creates a draft.
     async fn create(
         &self,
+        content: &SkillCatalogContent,
+        now: i64,
+    ) -> Result<SkillCatalogEntry, String>;
+    /// Creates a draft under a caller-chosen identity (built-in entries).
+    async fn create_with_id(
+        &self,
+        id: &str,
         content: &SkillCatalogContent,
         now: i64,
     ) -> Result<SkillCatalogEntry, String>;
@@ -134,6 +146,49 @@ impl fmt::Display for SkillCatalogError {
 }
 impl std::error::Error for SkillCatalogError {}
 
+/// The audit actor for changes the controller makes on its own behalf,
+/// such as seeding built-in catalog entries at startup.
+pub const CONTROLLER_ACTOR: &str = "system:fleet-controller";
+
+/// Built-in entries are managed by the controller: the API may read them
+/// but never edit or publish them, so a restart cannot overwrite operator
+/// work and operator work cannot fork a release's skill.
+fn refuse_builtin(id: &str) -> Result<(), SkillCatalogError> {
+    if fleet_core::is_builtin_skill_catalog_id(id) {
+        return Err(SkillCatalogError::Conflict(format!(
+            "catalog entry {id} is built into the controller and changes only with a controller release"
+        )));
+    }
+    Ok(())
+}
+
+/// What seeding one built-in entry did.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuiltinSeed {
+    /// The entry and its published version match this release.
+    Current {
+        /// The published version this release ships.
+        version_id: String,
+    },
+    /// The entry was created or updated and this release's version published.
+    Published {
+        /// The newly published version.
+        version_id: String,
+    },
+    /// The draft was brought back to this release's content, whose version
+    /// was already published (for example after a controller downgrade).
+    Updated {
+        /// The already-published version this release ships.
+        version_id: String,
+    },
+    /// An operator-owned entry already uses the built-in skill's name, so
+    /// the built-in was not created; the operator's entry is left untouched.
+    NameTaken {
+        /// The conflict detail.
+        detail: String,
+    },
+}
+
 /// Authorized catalog actions.
 #[derive(Debug)]
 pub struct SkillCatalog {
@@ -165,7 +220,7 @@ impl SkillCatalog {
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::SkillsRead,
-                resource: None,
+                resource: Some(SKILL_CATALOG_RESOURCE),
             },
         )
         .map_err(SkillCatalogError::Denied)?;
@@ -223,7 +278,7 @@ impl SkillCatalog {
             AccessRequest {
                 principal_id: &principal.id,
                 action: Permission::SkillsModify,
-                resource: None,
+                resource: Some(SKILL_CATALOG_RESOURCE),
             },
         )
         .map_err(SkillCatalogError::Denied)?;
@@ -263,6 +318,7 @@ impl SkillCatalog {
             },
         )
         .map_err(SkillCatalogError::Denied)?;
+        refuse_builtin(id)?;
         content
             .validate_and_digest()
             .map_err(SkillCatalogError::Invalid)?;
@@ -301,6 +357,7 @@ impl SkillCatalog {
             },
         )
         .map_err(SkillCatalogError::Denied)?;
+        refuse_builtin(id)?;
         let entry = self.port.get(id).await.map_err(|e| {
             if e.contains("not found") {
                 SkillCatalogError::NotFound(format!("catalog entry {id}"))
@@ -388,6 +445,130 @@ impl SkillCatalog {
             .list_versions(id, cursor, limit)
             .await
             .map_err(SkillCatalogError::Backend)
+    }
+
+    /// Makes a built-in entry match the content this controller release
+    /// ships: creates it under its reserved identity when missing, replaces
+    /// its draft when the content changed, and publishes the release's
+    /// immutable version when that version does not exist yet. Idempotent:
+    /// a restart with the same release changes nothing and writes no audit
+    /// event. This is the controller acting for itself at startup, not a
+    /// request, so it is audited under [`CONTROLLER_ACTOR`] rather than
+    /// authorized for a principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shipped content is invalid, auditing
+    /// fails, or the catalog backend fails.
+    pub async fn seed_builtin(
+        &self,
+        id: &str,
+        content: SkillCatalogContent,
+        now: i64,
+    ) -> Result<BuiltinSeed, SkillCatalogError> {
+        if !fleet_core::is_builtin_skill_catalog_id(id) {
+            return Err(SkillCatalogError::Invalid(format!(
+                "{id} is not a reserved built-in catalog identity"
+            )));
+        }
+        let digest = content
+            .validate_and_digest()
+            .map_err(SkillCatalogError::Invalid)?;
+        let system = ActingPrincipal {
+            id: CONTROLLER_ACTOR.to_owned(),
+        };
+        let entry = match self.port.get(id).await {
+            Ok(entry) => Some(entry),
+            Err(e) if e.contains("not found") => None,
+            Err(e) => return Err(SkillCatalogError::Backend(e)),
+        };
+        let mut changed = false;
+        match entry {
+            None => {
+                // An operator entry that owns the name wins. Checked before
+                // the audit intent, so a restart that creates nothing records
+                // nothing.
+                if let Some(owner) = self.entry_named(&content.name).await? {
+                    return Ok(BuiltinSeed::NameTaken {
+                        detail: format!("catalog entry {owner} is named {:?}", content.name),
+                    });
+                }
+                self.audit(&system, Some(id), "skill_catalog_builtin_created")
+                    .await?;
+                if let Err(e) = self.port.create_with_id(id, &content, now).await {
+                    if e.contains("taken") || e.contains("UNIQUE") {
+                        return Ok(BuiltinSeed::NameTaken { detail: e });
+                    }
+                    return Err(SkillCatalogError::Backend(e));
+                }
+                changed = true;
+            }
+            Some(entry) if entry.content != content => {
+                self.audit(&system, Some(id), "skill_catalog_builtin_updated")
+                    .await?;
+                self.port
+                    .update(id, &content, now)
+                    .await
+                    .map_err(SkillCatalogError::Backend)?;
+                changed = true;
+            }
+            Some(_) => {}
+        }
+        let version_id = format!("{id}@{digest}");
+        let published = match self.port.get_version(&version_id).await {
+            Ok(_) => false,
+            Err(e) if e.contains("not found") => true,
+            Err(e) => return Err(SkillCatalogError::Backend(e)),
+        };
+        // Publishing is idempotent by digest and also records the entry's
+        // `publishedFrom`, so a changed draft whose version already exists
+        // (a downgrade) is re-pointed at this release's version too.
+        if published || changed {
+            self.audit(&system, Some(id), "skill_catalog_builtin_published")
+                .await?;
+            let version = SkillCatalogVersion {
+                id: version_id.clone(),
+                catalog_id: id.to_owned(),
+                name: content.name.clone(),
+                description: content.description.clone(),
+                content_digest: digest,
+                content,
+                published_at: now,
+            };
+            self.port
+                .publish(id, &version)
+                .await
+                .map_err(SkillCatalogError::Backend)?;
+        }
+        Ok(if published {
+            BuiltinSeed::Published { version_id }
+        } else if changed {
+            BuiltinSeed::Updated { version_id }
+        } else {
+            BuiltinSeed::Current { version_id }
+        })
+    }
+
+    /// The id of the entry with this skill name, paging the whole catalog.
+    async fn entry_named(&self, name: &str) -> Result<Option<String>, SkillCatalogError> {
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .port
+                .list(cursor.as_deref(), MAX_SKILL_CATALOG_PAGE_SIZE)
+                .await
+                .map_err(SkillCatalogError::Backend)?;
+            if let Some(entry) = page.iter().find(|entry| entry.content.name == name) {
+                return Ok(Some(entry.id.clone()));
+            }
+            // The port returns one extra row when another page follows.
+            if page.len() <= MAX_SKILL_CATALOG_PAGE_SIZE as usize {
+                return Ok(None);
+            }
+            cursor = page
+                .get(MAX_SKILL_CATALOG_PAGE_SIZE as usize - 1)
+                .map(|entry| entry.id.clone());
+        }
     }
 
     async fn audit(
