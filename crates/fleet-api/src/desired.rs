@@ -96,7 +96,12 @@ fn principal(
 /// # Errors
 ///
 /// Returns an API error when authentication, authorization, or storage fails.
-#[utoipa::path(get, path = "/desired/revision", tag = "desired", operation_id = "getDesiredRevision", responses((status = 200, body = Resource<DesiredStatusDto>)))]
+#[utoipa::path(get, path = "/desired/revision", tag = "desired", operation_id = "getDesiredRevision", responses(
+        (status = 200, body = Resource<DesiredStatusDto>),
+        (status = 403, description = "The caller may not read the desired state.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    ))]
 pub async fn get_desired_revision(
     State(state): State<Arc<ApiState>>,
     acting: Option<Extension<crate::ActingPrincipal>>,
@@ -123,7 +128,12 @@ pub async fn get_desired_revision(
 /// # Errors
 ///
 /// Returns an API error when authentication, authorization, or storage fails.
-#[utoipa::path(get, path = "/desired/resources", tag = "desired", operation_id = "listDesiredResources", params(DesiredResourcesParams), responses((status = 200, body = Page<DesiredResourceDto>)))]
+#[utoipa::path(get, path = "/desired/resources", tag = "desired", operation_id = "listDesiredResources", params(DesiredResourcesParams), responses(
+        (status = 200, body = Page<DesiredResourceDto>),
+        (status = 403, description = "The caller may not read the desired state.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    ))]
 pub async fn list_desired_resources(
     State(state): State<Arc<ApiState>>,
     acting: Option<Extension<crate::ActingPrincipal>>,

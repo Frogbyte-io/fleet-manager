@@ -95,7 +95,7 @@ impl fleet_application::source::SourcePort for SourceRepository {
         let now = fleet_core::SystemClock::now_unix_millis();
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| format!("the revision record failed: {error}"))?;
         sqlx::query(

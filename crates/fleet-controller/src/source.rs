@@ -38,6 +38,10 @@ struct ActivatePayload {
 pub struct SourceExecutor {
     source: GitSource,
     desired_source: Arc<fleet_application::source::DesiredSource>,
+    /// Serializes worktree materialization and reads: a fetch replaces the
+    /// SHA-named worktree, so a concurrent duplicate fetch or activation
+    /// must never observe it half-written.
+    worktrees: tokio::sync::Mutex<()>,
 }
 
 impl SourceExecutor {
@@ -55,6 +59,7 @@ impl SourceExecutor {
         Self {
             source: GitSource::new(work_root),
             desired_source,
+            worktrees: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -88,6 +93,7 @@ impl SourceExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
+        let _worktrees = self.worktrees.lock().await;
         // The provider runs on the controller's own machine; the
         // validation closure rides the schemas crate's validate_paths.
         let outcome = {
@@ -183,6 +189,7 @@ impl SourceExecutor {
         // The candidate must have been fetched: the worktree named by the
         // SHA proves it. Validation re-runs against the materialized
         // worktree so the activation gate holds even across restarts.
+        let _worktrees = self.worktrees.lock().await;
         let worktree = self
             .source
             .work_root()

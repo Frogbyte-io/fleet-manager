@@ -4603,12 +4603,29 @@ export type listDesiredResourcesResponse200 = {
   status: 200
 }
 
+export type listDesiredResourcesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDesiredResourcesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listDesiredResourcesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type listDesiredResourcesResponseSuccess = (listDesiredResourcesResponse200) & {
   headers: Headers;
 };
-;
+export type listDesiredResourcesResponseError = (listDesiredResourcesResponse403 | listDesiredResourcesResponse500 | listDesiredResourcesResponse503) & {
+  headers: Headers;
+};
 
-export type listDesiredResourcesResponse = (listDesiredResourcesResponseSuccess)
+export type listDesiredResourcesResponse = (listDesiredResourcesResponseSuccess | listDesiredResourcesResponseError)
 
 export const getListDesiredResourcesUrl = (params?: ListDesiredResourcesParams,) => {
   const normalizedParams = new URLSearchParams();
@@ -4656,12 +4673,29 @@ export type getDesiredRevisionResponse200 = {
   status: 200
 }
 
+export type getDesiredRevisionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDesiredRevisionResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDesiredRevisionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type getDesiredRevisionResponseSuccess = (getDesiredRevisionResponse200) & {
   headers: Headers;
 };
-;
+export type getDesiredRevisionResponseError = (getDesiredRevisionResponse403 | getDesiredRevisionResponse500 | getDesiredRevisionResponse503) & {
+  headers: Headers;
+};
 
-export type getDesiredRevisionResponse = (getDesiredRevisionResponseSuccess)
+export type getDesiredRevisionResponse = (getDesiredRevisionResponseSuccess | getDesiredRevisionResponseError)
 
 export const getGetDesiredRevisionUrl = () => {
 

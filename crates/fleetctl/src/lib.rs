@@ -2905,18 +2905,18 @@ mod event_output_tests {
     #[test]
     fn desired_text_output_says_when_nothing_is_active_or_held() {
         assert_eq!(
-            super::render_desired_status(&serde_json::json!({"data": {"active": null}})),
+            super::render_desired_status(&serde_json::json!({"active": null})),
             "No desired revision is active.\n"
         );
-        let unheld = super::render_desired_status(&serde_json::json!({"data": {"active": {
+        let unheld = super::render_desired_status(&serde_json::json!({"active": {
             "commitSha": "abc", "contentDigest": "d", "resourcesAvailable": false,
             "resourceCounts": {}
-        }}}));
+        }}));
         assert!(unheld.contains("not held"), "{unheld}");
-        let held = super::render_desired_status(&serde_json::json!({"data": {"active": {
+        let held = super::render_desired_status(&serde_json::json!({"active": {
             "commitSha": "abc", "contentDigest": "d", "resourcesAvailable": true,
             "resourceCounts": {"Machine": 2}
-        }}}));
+        }}));
         assert!(held.contains("Machine: 2"), "{held}");
         assert_eq!(
             super::render_desired_resources(&serde_json::json!({"items": [], "page": {}})),
@@ -3424,7 +3424,7 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
 
 fn render_desired_status(payload: &Value) -> String {
     use std::fmt::Write as _;
-    let active = &payload["data"]["active"];
+    let active = &payload["active"];
     if active.is_null() {
         return "No desired revision is active.\n".to_owned();
     }

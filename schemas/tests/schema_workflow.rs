@@ -191,6 +191,12 @@ fn parse_resources_returns_the_valid_collection_sorted_by_kind_and_identity() {
     sorted.sort();
     assert_eq!(keys, sorted);
     assert!(resources.iter().all(|resource| !resource.id.is_empty()));
+    let preset = resources
+        .iter()
+        .find(|resource| resource.kind == "SkillPreset")
+        .expect("skill-preset.yaml is parsed");
+    assert_eq!(preset.name, "db-skill");
+    assert_eq!(preset.spec["skillId"], "db");
 }
 
 #[test]
