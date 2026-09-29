@@ -20,6 +20,7 @@ import {
   SETTINGS_SECTION_GROUPS,
   isSectionId,
 } from './sections'
+import DesiredStateSection from './sections/DesiredStateSection.vue'
 import DiagnosticsSection from './sections/DiagnosticsSection.vue'
 import FleetdSection from './sections/FleetdSection.vue'
 import GapSection from './sections/GapSection.vue'
@@ -91,11 +92,6 @@ const GAP_SECTIONS: Record<string, { title: string; detail: string }> = {
     title: 'Lab defaults',
     detail:
       'TTL, max lifetime, and cleanup strategy are set per lease and per template; a fleet-wide defaults surface has no backing API yet.',
-  },
-  'desired-state': {
-    title: 'Desired state',
-    detail:
-      'Git sources are configured per apply workflow; a fleet-wide desired-state view has no backing API yet.',
   },
   notifications: {
     title: 'Notifications',
@@ -272,6 +268,7 @@ void load()
           :machines-unavailable="machinesUnavailable"
           :machines-truncated="machinesTruncated"
         />
+        <DesiredStateSection v-else-if="section === 'desired-state'" />
         <DiagnosticsSection
           v-else-if="section === 'diagnostics'"
           :system="system"

@@ -48,6 +48,26 @@ export function skillsProbeCommand(machineId: string, endpointId: string, auth: 
   return join(['fleetctl', 'skills', 'probe', machineId, ...endpointFlags(endpointId, auth), '--wait'])
 }
 
+export function planCommand(machineId: string): string {
+  return join(['fleetctl', 'plan', machineId])
+}
+
+export function applyPlanCommand(machineId: string, planId: string, endpointId: string, auth: SshAuth, approvals: { order: number, kind: string }[]): string {
+  return join(['fleetctl', 'apply-plan', machineId, '--plan-id', planId, ...approvals.flatMap(a => ['--approve', `${a.order}:${a.kind}`]), ...endpointFlags(endpointId, auth), '--wait'])
+}
+
+export function desiredSourceSetCommand(remote: string): string {
+  return join(['fleetctl', 'desired', 'source', 'set', remote])
+}
+
+export function desiredFetchCommand(commitSha: string): string {
+  return join(['fleetctl', 'desired', 'fetch', commitSha, '--wait'])
+}
+
+export function desiredRevisionCommand(action: 'activate' | 'rollback', commitSha: string, contentDigest: string): string {
+  return join(['fleetctl', 'desired', action, commitSha, contentDigest, '--wait'])
+}
+
 export function projectDiscoverCommand(projectId: string, machineId: string, endpointId: string, auth: SshAuth): string {
   return join(['fleetctl', 'projects', 'discover', projectId, machineId, ...endpointFlags(endpointId, auth), '--wait'])
 }
