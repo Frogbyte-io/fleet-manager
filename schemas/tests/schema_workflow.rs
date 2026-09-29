@@ -169,3 +169,42 @@ fn invalid_fixtures_match_cli_diagnostic_goldens() {
         );
     }
 }
+
+#[test]
+fn parse_resources_returns_the_valid_collection_sorted_by_kind_and_identity() {
+    let valid = |name: &str| {
+        let path = repository_root().join("schemas/fixtures/valid").join(name);
+        SourceDocument {
+            yaml: fs::read_to_string(&path).unwrap(),
+            path,
+        }
+    };
+    let resources =
+        fleet_schema::parse_resources(&[valid("skill-preset.yaml"), valid("minimal.yaml")])
+            .expect("the fixtures are valid");
+    assert!(!resources.is_empty());
+    let keys: Vec<_> = resources
+        .iter()
+        .map(|resource| (resource.kind.clone(), resource.id.clone()))
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted);
+    assert!(resources.iter().all(|resource| !resource.id.is_empty()));
+    let preset = resources
+        .iter()
+        .find(|resource| resource.kind == "SkillPreset")
+        .expect("skill-preset.yaml is parsed");
+    assert_eq!(preset.name, "db-skill");
+    assert_eq!(preset.spec["skillId"], "db");
+}
+
+#[test]
+fn parse_resources_refuses_any_invalid_document() {
+    let diagnostics = fleet_schema::parse_resources(&[SourceDocument {
+        path: "inline/bad.yaml".into(),
+        yaml: "apiVersion: fleet.frogbyte.io/v1\nkind: Nope\n".to_owned(),
+    }])
+    .unwrap_err();
+    assert!(!diagnostics.is_empty());
+}

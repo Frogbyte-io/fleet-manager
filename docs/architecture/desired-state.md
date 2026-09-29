@@ -79,6 +79,12 @@ Legacy roles/packs provide fixtures for these semantics but do not force the old
 
 Database tables may cache parsed active resources and validation diagnostics for performance. That cache is rebuildable from the recorded Git revision and is not a second desired-state authority.
 
+### Active snapshot (FM-404)
+
+A fetch that produces a candidate without diagnostics stores that revision's validated resources (kind, identity, name, and non-secret spec) as an immutable snapshot keyed by commit SHA and content digest, in the same transaction that records the revision as a rollback point. An invalid candidate stores nothing. Activation only switches to a revision whose snapshot is held; a revision activated before snapshots existed reports `resourcesAvailable: false` until it is fetched again.
+
+Reads go straight to SQLite, so a controller restart resumes on the same revision with the same resources. `GET /api/v1/desired/revision` reports the active revision and per-kind counts; `GET /api/v1/desired/resources` pages the resources by identity and filters by kind. Both use the `source.fetch` read permission.
+
 ## Observed state
 
 An observation includes resource identity, source, source version, observed timestamp, expiry/staleness policy, payload schema version, and confidence/availability. Inventory snapshots may normalize frequently queried facts while retaining provider raw metadata only when needed for debugging and after redaction.

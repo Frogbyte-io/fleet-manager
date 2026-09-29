@@ -236,6 +236,12 @@ fn api_state(
             proxmox,
             images,
             lab,
+            desired: Some(std::sync::Arc::new(
+                fleet_application::source::DesiredSource::new(
+                    std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(pool.clone())),
+                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+                ),
+            )),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -258,6 +264,7 @@ fn api_state(
         proxmox: None,
         images: None,
         lab: None,
+        desired: None,
     }
 }
 

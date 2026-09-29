@@ -56,6 +56,7 @@ fn test_state() -> (Arc<ApiState>, Arc<FakePort>, Arc<RecordingAuditQuery>) {
         proxmox: None,
         images: None,
         lab: None,
+        desired: None,
     });
     (state, port, audit)
 }
@@ -529,6 +530,7 @@ fn operation_state_with_hub(
         proxmox: None,
         images: None,
         lab: None,
+        desired: None,
     })
 }
 
@@ -1779,6 +1781,7 @@ fn machine_state(
         proxmox: None,
         images: None,
         lab: None,
+        desired: None,
     })
 }
 
