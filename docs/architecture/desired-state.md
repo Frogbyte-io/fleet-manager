@@ -89,6 +89,10 @@ Reads go straight to SQLite, so a controller restart resumes on the same revisio
 
 The remote is configured with `PUT /api/v1/desired/source` (permission `source.activate`, audited before the write). It must be non-secret text: a leading `-`, whitespace, and embedded credentials (`user:password@`) are refused, and git authenticates with the controller host's own configuration (ssh agent, credential helper) — Fleet stores no Git credentials. `POST /api/v1/desired/{fetch,activate,rollback}` create the `source.fetch`, `source.activate`, and `source.rollback` operations; the fetch remote always comes from the configured source. A rollback names a revision in the append-only history whose snapshot is held and activates from that snapshot, so it needs no worktree. `GET /api/v1/desired/history` lists the recorded revisions and marks the active one.
 
+### Per-machine observed-state assembly (FM-406)
+
+`ObservedStateAssembler` builds a machine's `ObservedState` from the stores that hold its observations, mapping each store's freshness onto the answered flags the comparison already understands: tool facts past the 24 h window are `unknown` and a machine with no fresh tool fact leaves the inventory unanswered; a missing or stale Skills Manager snapshot is `stale`, an unreachable machine is `offline`, and fresh `absent`/`unsupported` snapshots pass through; checkouts join the project remote, and because nothing is stored when discovery finds nothing, an unobserved checkout is `unknown` rather than assumed missing. Fleet catalog versions have no observation source yet, so those differences stay `unknown`. Assembly reads only; the planner authorizes.
+
 ## Observed state
 
 An observation includes resource identity, source, source version, observed timestamp, expiry/staleness policy, payload schema version, and confidence/availability. Inventory snapshots may normalize frequently queried facts while retaining provider raw metadata only when needed for debugging and after redaction.
