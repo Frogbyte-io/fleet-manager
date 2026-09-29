@@ -168,6 +168,28 @@ pub fn compose_onboarding(
     )
 }
 
+/// Composes the server-side planning use cases (FM-407) over the store: the
+/// active desired revision, the machine's observations, and the skill
+/// catalog that supplies the built-in default's pinned version.
+#[must_use]
+pub fn compose_planning(db: &SqlitePool) -> fleet_application::planning::Planning {
+    let machines = std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(db.clone()));
+    let assembler = fleet_application::observed_assembly::ObservedStateAssembler::new(
+        machines.clone(),
+        std::sync::Arc::new(fleet_storage_sqlite::SkillsRepository::new(db.clone())),
+        std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(db.clone())),
+    );
+    fleet_application::planning::Planning::new(
+        std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(db.clone())),
+        machines,
+        assembler,
+        std::sync::Arc::new(fleet_storage_sqlite::SkillCatalogRepository::new(
+            db.clone(),
+        )),
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(db.clone())),
+    )
+}
+
 /// Builds the API state over an opened store, or a state whose backends
 /// answer nothing when the caller has none (tests). The authorization policy
 /// is the trusted-LAN adapter in both cases.
@@ -242,6 +264,7 @@ fn api_state(
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
                 ),
             )),
+            planning: Some(std::sync::Arc::new(compose_planning(&pool))),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -265,6 +288,7 @@ fn api_state(
         images: None,
         lab: None,
         desired: None,
+        planning: None,
     }
 }
 

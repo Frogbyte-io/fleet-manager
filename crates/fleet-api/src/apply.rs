@@ -150,8 +150,30 @@ pub async fn start_apply_workflow(
     Path(machine_id): Path<String>,
     Json(request): Json<StartApplyRequest>,
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
-    let machines = crate::machines::machines_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    start_apply(
+        &state,
+        &principal,
+        correlation_id,
+        &headers,
+        &machine_id,
+        request,
+    )
+    .await
+}
+
+/// Validates an apply request and creates the durable workflow. Shared by
+/// the caller-supplied path and the controller-computed plan path.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn start_apply(
+    state: &Arc<crate::operations::ApiState>,
+    principal: &crate::ActingPrincipal,
+    correlation_id: CorrelationId,
+    headers: &axum::http::HeaderMap,
+    machine_id: &str,
+    request: StartApplyRequest,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let machines = crate::machines::machines_or_error(state, correlation_id)?;
     if request.machine_id != machine_id {
         return Err(crate::machines::invalid_request(
             "the body's machineId does not match the path's machine",
@@ -161,8 +183,8 @@ pub async fn start_apply_workflow(
     let _machine = machines
         .get(
             state.authorizer.as_ref(),
-            &principal,
-            &machine_id,
+            principal,
+            machine_id,
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await
@@ -172,7 +194,7 @@ pub async fn start_apply_workflow(
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
             action: fleet_application::authz::Permission::ApplyExecute,
-            resource: Some(&machine_id),
+            resource: Some(machine_id),
         },
     ) {
         return Err(crate::machines::denied_error(decision, correlation_id));

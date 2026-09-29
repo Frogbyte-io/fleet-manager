@@ -93,6 +93,10 @@ The remote is configured with `PUT /api/v1/desired/source` (permission `source.a
 
 `ObservedStateAssembler` builds a machine's `ObservedState` from the stores that hold its observations, mapping each store's freshness onto the answered flags the comparison already understands: tool facts past the 24 h window are `unknown` and a machine with no fresh tool fact leaves the inventory unanswered; a missing or stale Skills Manager snapshot is `stale`, an unreachable machine is `offline`, and fresh `absent`/`unsupported` snapshots pass through; checkouts join the project remote, and because nothing is stored when discovery finds nothing, an unobserved checkout is `unknown` rather than assumed missing. Fleet catalog versions have no observation source yet, so those differences stay `unknown`. Assembly reads only; the planner authorizes.
 
+### Server-side planning (FM-407, ADR 0013)
+
+`POST /api/v1/machines/{id}/plans` composes the active revision's `SkillPreset` assignments (plus the built-in default, ADR 0012) for the machine's groups and tags, compares them with its assembled observed state, and returns the planner's actions and unactionable differences. The plan id is a SHA-256 digest of the machine, the active revision, and the ordered actions; `POST /api/v1/machines/{id}/plans/{planId}/apply` recomputes the plan and refuses with `409 stale_plan` if the id differs, then runs the controller's own actions through the apply workflow. An observed skill that no `SkillPreset` names is reported as unactionable and never planned for removal. Catalog-pinned skills (including the built-in) stay `unknown` until installed catalog versions are observed. Tool versions and checkouts wait on a machine-to-profile/project binding the schema does not have yet.
+
 ## Observed state
 
 An observation includes resource identity, source, source version, observed timestamp, expiry/staleness policy, payload schema version, and confidence/availability. Inventory snapshots may normalize frequently queried facts while retaining provider raw metadata only when needed for debugging and after redaction.

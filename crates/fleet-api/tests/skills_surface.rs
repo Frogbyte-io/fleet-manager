@@ -431,6 +431,7 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         images: None,
         lab: None,
         desired: None,
+        planning: None,
     })
 }
 

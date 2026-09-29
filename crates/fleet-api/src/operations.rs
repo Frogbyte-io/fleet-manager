@@ -72,6 +72,8 @@ pub struct ApiState {
     pub lab: Option<Arc<fleet_application::lab::Lab>>,
     /// The desired-state source reads, when the controller has a store.
     pub desired: Option<Arc<fleet_application::source::DesiredSource>>,
+    /// The server-side planning use cases, when the controller has a store.
+    pub planning: Option<Arc<fleet_application::planning::Planning>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -93,6 +95,7 @@ impl std::fmt::Debug for ApiState {
             .field("images", &self.images)
             .field("lab", &self.lab)
             .field("desired", &self.desired)
+            .field("planning", &self.planning)
             .finish()
     }
 }
@@ -276,6 +279,7 @@ impl ApiState {
             images: None,
             lab: None,
             desired: None,
+            planning: None,
         }
     }
 }
