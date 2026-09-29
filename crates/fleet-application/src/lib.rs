@@ -14,6 +14,7 @@ pub mod lab;
 pub mod machine;
 pub mod node;
 pub mod observed;
+pub mod observed_assembly;
 pub mod onboarding;
 pub mod operation;
 pub mod planner;
