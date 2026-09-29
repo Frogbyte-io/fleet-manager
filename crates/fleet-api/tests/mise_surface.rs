@@ -356,6 +356,7 @@ fn state_for(
             images: None,
             lab: None,
             desired: None,
+            planning: None,
         }),
         handle,
     )

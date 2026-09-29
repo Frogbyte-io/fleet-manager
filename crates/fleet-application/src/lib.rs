@@ -18,6 +18,7 @@ pub mod observed_assembly;
 pub mod onboarding;
 pub mod operation;
 pub mod planner;
+pub mod planning;
 pub mod project;
 pub mod proxmox;
 pub mod ready;

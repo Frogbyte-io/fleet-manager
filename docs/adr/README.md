@@ -18,5 +18,6 @@ The [2026-08-27 master-plan scope revision](../PLAN.md#confirmed-2026-08-27-prod
 | [0008](0008-durable-operations-and-lab-leases.md) | Durable operations and explicit Lab lease/reservation state machines | Accepted | 2026-08-25 | FM-S03 |
 | [0010](0010-tailscale-serve-identity.md) | Optional Tailscale Serve request principal | Accepted | 2026-09-25 | — |
 | [0012](0012-builtin-skills.md) | Built-in skills ship with the controller and are assigned by default | Proposed | — | — |
+| [0013](0013-server-side-planning.md) | The controller computes plans; apply executes by plan identity | Proposed | — | — |
 
 FM-S02 (authenticated authorization engine) is not scoped by an existing ADR. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. FM-S02 is expected to produce ADR-0011 before that engine lands.

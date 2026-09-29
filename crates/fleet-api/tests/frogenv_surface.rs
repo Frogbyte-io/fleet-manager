@@ -354,6 +354,7 @@ fn state_for(authorizer: Arc<dyn fleet_application::authz::Authorizer>) -> Arc<A
         images: None,
         lab: None,
         desired: None,
+        planning: None,
     })
 }
 
@@ -447,6 +448,7 @@ async fn an_env_run_carries_its_root_and_command() {
         images: None,
         lab: None,
         desired: None,
+        planning: None,
     });
     let mut body = body_for("envRun");
     body["root"] = serde_json::json!("/srv/repo");

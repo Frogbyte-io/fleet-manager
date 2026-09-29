@@ -27,6 +27,7 @@ pub mod mise;
 pub mod node;
 pub mod onboarding;
 pub mod operations;
+pub mod plans;
 pub mod projects;
 pub mod proxmox;
 pub mod ready;
@@ -103,6 +104,11 @@ pub const API_BASE_PATH: &str = "/api/v1";
         desired::DesiredHistoryEntryDto,
         desired::DesiredSourceDto,
         desired::DesiredStatusDto,
+        plans::ApplyPlanRequest,
+        plans::PlanActionDto,
+        plans::PlanApprovalDto,
+        plans::PlanDto,
+        plans::PlanRevisionDto,
         desired::FetchDesiredRequest,
         desired::RevisionRequest,
         skill_catalog::CatalogContentDto,
@@ -295,6 +301,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(ready::start_ready_workflow))
                 .routes(routes!(apply::start_apply_workflow))
+                .routes(routes!(plans::create_machine_plan))
+                .routes(routes!(plans::apply_machine_plan))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,
                     onboarding::list_onboarding_drafts

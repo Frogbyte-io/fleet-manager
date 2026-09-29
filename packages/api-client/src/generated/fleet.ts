@@ -258,6 +258,36 @@ export type ApplyAuthDto = {
 };
 
 /**
+ * One approval of a computed plan's action. The plan id comes from the path.
+ */
+export interface PlanApprovalDto {
+  /**
+     * The action's order the approval covers.
+     * @minimum 0
+     */
+  actionOrder: number;
+  /** The action's operation kind the approval covers. */
+  kind: string;
+}
+
+/**
+ * Applies a computed plan.
+ */
+export interface ApplyPlanRequest {
+  /** The approvals for the plan's risky actions. */
+  approvals?: PlanApprovalDto[];
+  /** How the endpoint authenticates. */
+  auth: ApplyAuthDto;
+  /** The SSH endpoint id to act through. */
+  endpointId: string;
+  /**
+     * The deadline, in seconds, for the whole workflow.
+     * @minimum 0
+     */
+  timeoutSeconds?: number;
+}
+
+/**
  * One guest network interface.
  */
 export interface ProviderInterfaceDto {
@@ -2512,6 +2542,54 @@ export interface PageSkillsSnapshotDto {
 }
 
 /**
+ * One planned action.
+ */
+export interface PlanActionDto {
+  /** The difference the action resolves. */
+  difference: FieldDifferenceDto;
+  /** The operation kind that resolves the difference. */
+  kind: string;
+  /**
+     * The execution order, starting at 1.
+     * @minimum 0
+     */
+  order: number;
+  /** Why the action sits at this position. */
+  reason: string;
+  /** Whether applying this action needs an explicit approval. */
+  requiresApproval: boolean;
+}
+
+/**
+ * The desired revision a plan was computed against.
+ */
+export interface PlanRevisionDto {
+  /** The commit SHA. */
+  commitSha: string;
+  /** The content digest. */
+  contentDigest: string;
+}
+
+/**
+ * A controller-computed plan.
+ */
+export interface PlanDto {
+  /** The ordered actions. */
+  actions: PlanActionDto[];
+  /** The machine the plan is for. */
+  machineId: string;
+  /** The content digest identifying this plan; approvals and apply bind to it. */
+  planId: string;
+  /** The desired revision the plan was computed against. */
+  revision: PlanRevisionDto;
+  /**
+     * The differences the planner refused to act on (`unknown`,
+     * `unsupported`), reported and never acted on.
+     */
+  unactionable: FieldDifferenceDto[];
+}
+
+/**
  * A project as the detail view displays it.
  */
 export interface ProjectDto {
@@ -3537,6 +3615,36 @@ export interface ResourceOperationDto {
      * cannot drift silently.
      */
   data: ResourceOperationDtoData;
+}
+
+/**
+ * A controller-computed plan.
+ */
+export type ResourcePlanDtoData = {
+  /** The ordered actions. */
+  actions: PlanActionDto[];
+  /** The machine the plan is for. */
+  machineId: string;
+  /** The content digest identifying this plan; approvals and apply bind to it. */
+  planId: string;
+  /** The desired revision the plan was computed against. */
+  revision: PlanRevisionDto;
+  /**
+     * The differences the planner refused to act on (`unknown`,
+     * `unsupported`), reported and never acted on.
+     */
+  unactionable: FieldDifferenceDto[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourcePlanDto {
+  /** A controller-computed plan. */
+  data: ResourcePlanDtoData;
 }
 
 /**
@@ -7994,6 +8102,158 @@ export const revokeNode = async (machineId: string, options?: RequestInit): Prom
 
   const data: revokeNodeResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as revokeNodeResponse
+}
+
+
+
+export type createMachinePlanResponse200 = {
+  data: ResourcePlanDto
+  status: 200
+}
+
+export type createMachinePlanResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createMachinePlanResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createMachinePlanResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createMachinePlanResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type createMachinePlanResponseSuccess = (createMachinePlanResponse200) & {
+  headers: Headers;
+};
+export type createMachinePlanResponseError = (createMachinePlanResponse403 | createMachinePlanResponse404 | createMachinePlanResponse409 | createMachinePlanResponse503) & {
+  headers: Headers;
+};
+
+export type createMachinePlanResponse = (createMachinePlanResponseSuccess | createMachinePlanResponseError)
+
+export const getCreateMachinePlanUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/plans`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when no revision is active, the machine is unknown,
+ * or authentication, authorization, or storage fails.
+ * @summary Computes a plan for the machine from the active desired revision.
+ */
+export const createMachinePlan = async (machineId: string, options?: RequestInit): Promise<createMachinePlanResponse> => {
+
+  const res = await fetch(getCreateMachinePlanUrl(machineId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createMachinePlanResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createMachinePlanResponse
+}
+
+
+
+export type applyMachinePlanResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type applyMachinePlanResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type applyMachinePlanResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type applyMachinePlanResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type applyMachinePlanResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type applyMachinePlanResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type applyMachinePlanResponseSuccess = (applyMachinePlanResponse202) & {
+  headers: Headers;
+};
+export type applyMachinePlanResponseError = (applyMachinePlanResponse400 | applyMachinePlanResponse403 | applyMachinePlanResponse404 | applyMachinePlanResponse409 | applyMachinePlanResponse503) & {
+  headers: Headers;
+};
+
+export type applyMachinePlanResponse = (applyMachinePlanResponseSuccess | applyMachinePlanResponseError)
+
+export const getApplyMachinePlanUrl = (machineId: string,
+    planId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/plans/${planId}/apply`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the plan is stale, or on refusal or backend failure.
+ * @summary Applies a plan by its identity: the controller recomputes the plan and
+runs it only if it is still exactly the plan that was reviewed.
+ */
+export const applyMachinePlan = async (machineId: string,
+    planId: string,
+    applyPlanRequest: ApplyPlanRequest, options?: RequestInit): Promise<applyMachinePlanResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getApplyMachinePlanUrl(machineId,planId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(applyPlanRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: applyMachinePlanResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as applyMachinePlanResponse
 }
 
 
