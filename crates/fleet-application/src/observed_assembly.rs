@@ -16,8 +16,11 @@
 //! - Checkouts are the machine's project checkouts. Nothing is recorded
 //!   when discovery finds nothing, so the desired checkout is `unknown`
 //!   (not assumed missing) unless a fresh observation exists.
-//! - Fleet catalog versions have no observation source yet, so that
-//!   observation stays unanswered and catalog differences stay `unknown`.
+//! - Fleet catalog versions come from Fleet's own verified installation
+//!   records (FM-411), kept only while the fresh skills snapshot still shows
+//!   the skill deployed to that agent. The observation is answered only with
+//!   a fresh, available snapshot and a readable record store; otherwise
+//!   catalog differences stay `unknown` (or `unsupported`), never in-sync.
 //!
 //! The assembler is an internal composition step: callers authorize the
 //! request (the planner does), the assembler only reads.
@@ -27,6 +30,7 @@ use std::sync::Arc;
 
 use fleet_core::{CapabilityFact, CapabilityStatus, CheckoutFact, Timestamp};
 
+use crate::catalog_installs::{CatalogInstall, CatalogInstallPort, install_holds};
 use crate::machine::{CAPABILITY_FRESHNESS_MS, Machine, MachinePort, MachineStatus};
 use crate::observed::{
     CheckoutObservation, ObservedSkill, ObservedState, SkillsObservationAvailability,
@@ -61,21 +65,51 @@ pub fn assemble_observed_state(
     machine: &Machine,
     skills: Option<&SkillsSnapshot>,
     checkouts: Option<&[CheckoutInput]>,
+    installs: Option<&[CatalogInstall]>,
     now: i64,
 ) -> ObservedState {
     let (tool_facts, mise_ran) = tool_facts(&machine.capabilities, now);
     let (skill_pairs, availability) = skills_observation(machine, skills, now);
     let (observed_checkouts, checkouts_ran) = checkout_observations(checkouts, now);
+    let (catalog_skills, catalog_answered) = catalog_observation(installs, skills, availability);
     ObservedState::from_observations_with_catalog_versions(
         normalize_tools(&tool_facts),
         skill_pairs,
-        Vec::new(),
+        catalog_skills,
         observed_checkouts,
         mise_ran,
         availability,
-        false,
+        catalog_answered,
         checkouts_ran,
     )
+}
+
+/// The catalog versions Fleet installed and the fresh snapshot still
+/// confirms, and whether that observation answered. Without a readable
+/// record store, or without a fresh available snapshot to confirm the
+/// records against, the version cannot be determined.
+fn catalog_observation(
+    installs: Option<&[CatalogInstall]>,
+    snapshot: Option<&SkillsSnapshot>,
+    availability: SkillsObservationAvailability,
+) -> (Vec<(String, String, String)>, bool) {
+    let (Some(installs), Some(snapshot), SkillsObservationAvailability::Available) =
+        (installs, snapshot, availability)
+    else {
+        return (Vec::new(), false);
+    };
+    let confirmed = installs
+        .iter()
+        .filter(|install| install_holds(install, snapshot))
+        .map(|install| {
+            (
+                install.catalog_id.clone(),
+                install.version_id.clone(),
+                install.agent.clone(),
+            )
+        })
+        .collect();
+    (confirmed, true)
 }
 
 /// The tool facts with the freshness rule applied, and whether the tool
@@ -216,6 +250,7 @@ pub struct ObservedStateAssembler {
     machines: Arc<dyn MachinePort>,
     skills: Arc<dyn SkillsPort>,
     projects: Arc<dyn ProjectPort>,
+    installs: Option<Arc<dyn CatalogInstallPort>>,
 }
 
 impl ObservedStateAssembler {
@@ -230,7 +265,16 @@ impl ObservedStateAssembler {
             machines,
             skills,
             projects,
+            installs: None,
         }
+    }
+
+    /// Adds Fleet's catalog installation records as the source of the
+    /// installed catalog versions. Without it those stay `unknown`.
+    #[must_use]
+    pub fn with_catalog_installs(mut self, installs: Arc<dyn CatalogInstallPort>) -> Self {
+        self.installs = Some(installs);
+        self
     }
 
     /// Assembles the machine's observed state at `now`. A store that fails
@@ -267,10 +311,19 @@ impl ObservedStateAssembler {
             .await
             .map_err(backend("skills"))?;
         let checkouts = self.checkouts(machine_id).await?;
+        let installs = match &self.installs {
+            Some(port) => Some(
+                port.list_installs(machine_id)
+                    .await
+                    .map_err(backend("catalog install"))?,
+            ),
+            None => None,
+        };
         Ok(assemble_observed_state(
             &machine,
             snapshot.as_ref(),
             checkouts.as_deref(),
+            installs.as_deref(),
             now,
         ))
     }
@@ -336,6 +389,7 @@ impl std::fmt::Debug for ObservedStateAssembler {
 #[cfg(test)]
 mod tests {
     use super::{CheckoutInput, assemble_observed_state};
+    use crate::catalog_installs::CatalogInstall;
     use crate::machine::{Machine, NodeLink};
     use crate::node::{GatewayState, NodeStatus};
     use crate::observed::{DesiredState, SkillsObservationAvailability, ToolAvailability, compare};
@@ -433,7 +487,7 @@ mod tests {
             ],
             None,
         );
-        let observed = assemble_observed_state(&m, None, None, NOW);
+        let observed = assemble_observed_state(&m, None, None, None, NOW);
         assert_eq!(observed.mise_answered, Some(true));
         let node = observed.tools.iter().find(|t| t.tool == "node").unwrap();
         assert_eq!(node.version.as_deref(), Some("22.1.0"));
@@ -460,7 +514,7 @@ mod tests {
             ],
             None,
         );
-        let observed = assemble_observed_state(&m, None, None, NOW);
+        let observed = assemble_observed_state(&m, None, None, None, NOW);
         assert_eq!(
             observed.mise_answered,
             Some(true),
@@ -472,12 +526,12 @@ mod tests {
 
         let all_stale = machine(vec![stale("node")], None);
         assert_eq!(
-            assemble_observed_state(&all_stale, None, None, NOW).mise_answered,
+            assemble_observed_state(&all_stale, None, None, None, NOW).mise_answered,
             Some(false)
         );
         let empty = machine(vec![], None);
         assert_eq!(
-            assemble_observed_state(&empty, None, None, NOW).mise_answered,
+            assemble_observed_state(&empty, None, None, None, NOW).mise_answered,
             Some(false)
         );
     }
@@ -488,6 +542,7 @@ mod tests {
         let fresh = assemble_observed_state(
             &m,
             Some(&snapshot(SkillsAvailability::Available, 10)),
+            None,
             None,
             NOW,
         );
@@ -505,7 +560,7 @@ mod tests {
         assert_eq!(
             fresh.catalog_skills_answered,
             Some(false),
-            "no catalog-version observation exists yet"
+            "no install records are supplied, so no catalog version is known"
         );
 
         let old = assemble_observed_state(
@@ -515,6 +570,7 @@ mod tests {
                 SKILLS_FRESHNESS_MS + 1,
             )),
             None,
+            None,
             NOW,
         );
         assert_eq!(
@@ -522,7 +578,7 @@ mod tests {
             Some(SkillsObservationAvailability::Stale)
         );
         assert!(old.skills.is_empty());
-        let never = assemble_observed_state(&m, None, None, NOW);
+        let never = assemble_observed_state(&m, None, None, None, NOW);
         assert_eq!(
             never.skills_availability,
             Some(SkillsObservationAvailability::Stale)
@@ -538,7 +594,7 @@ mod tests {
             ),
         ] {
             let observed =
-                assemble_observed_state(&m, Some(&snapshot(availability, 10)), None, NOW);
+                assemble_observed_state(&m, Some(&snapshot(availability, 10)), None, None, NOW);
             assert_eq!(observed.skills_availability, Some(expected));
         }
         let offline = machine(
@@ -548,6 +604,7 @@ mod tests {
         let observed = assemble_observed_state(
             &offline,
             Some(&snapshot(SkillsAvailability::Available, 10)),
+            None,
             None,
             NOW,
         );
@@ -560,7 +617,7 @@ mod tests {
             Some(node(NodeStatus::Revoked, GatewayState::Connected)),
         );
         assert_eq!(
-            assemble_observed_state(&revoked, None, None, NOW).skills_availability,
+            assemble_observed_state(&revoked, None, None, None, NOW).skills_availability,
             Some(SkillsObservationAvailability::Offline)
         );
     }
@@ -568,30 +625,30 @@ mod tests {
     #[test]
     fn checkouts_carry_the_project_remote_and_only_fresh_ones_answer() {
         let m = machine(vec![], None);
-        let fresh = assemble_observed_state(&m, None, Some(&[checkout(10)]), NOW);
+        let fresh = assemble_observed_state(&m, None, Some(&[checkout(10)]), None, NOW);
         assert_eq!(fresh.checkouts_answered, Some(true));
         assert_eq!(
             fresh.checkouts[0].remote.as_deref(),
             Some("github.com/acme/app")
         );
         assert_eq!(fresh.checkouts[0].root, "/srv/app");
-        let stale = assemble_observed_state(&m, None, Some(&[checkout(DAY + 1)]), NOW);
+        let stale = assemble_observed_state(&m, None, Some(&[checkout(DAY + 1)]), None, NOW);
         assert_eq!(stale.checkouts_answered, Some(false));
         assert!(stale.checkouts.is_empty());
-        let none = assemble_observed_state(&m, None, Some(&[]), NOW);
+        let none = assemble_observed_state(&m, None, Some(&[]), None, NOW);
         assert_eq!(
             none.checkouts_answered,
             Some(false),
             "nothing recorded is not a clean machine"
         );
-        let unread = assemble_observed_state(&m, None, None, NOW);
+        let unread = assemble_observed_state(&m, None, None, None, NOW);
         assert_eq!(unread.checkouts_answered, Some(false));
     }
 
     #[test]
     fn an_unobserved_machine_yields_unknowns_never_actionable_absences() {
         let m = machine(vec![], None);
-        let observed = assemble_observed_state(&m, None, None, NOW);
+        let observed = assemble_observed_state(&m, None, None, None, NOW);
         let desired = DesiredState {
             tools: vec![("node".into(), "22.1.0".into())],
             skills: vec![("fleet".into(), "codex".into())],
@@ -607,5 +664,155 @@ mod tests {
                 .all(|f| f.state == DifferenceState::Unknown),
             "{differences:?}"
         );
+    }
+
+    fn install(agent: &str, skill: &str, age: i64) -> CatalogInstall {
+        CatalogInstall {
+            machine_id: "m-1".into(),
+            catalog_id: "builtin-fleet".into(),
+            version_id: "builtin-fleet@abc".into(),
+            agent: agent.into(),
+            skill_name: skill.into(),
+            installed_at: NOW - age,
+        }
+    }
+
+    fn catalog_tuple(agent: &str) -> (String, String, String) {
+        (
+            "builtin-fleet".into(),
+            "builtin-fleet@abc".into(),
+            agent.into(),
+        )
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn catalog_versions_come_from_installs_the_fresh_snapshot_confirms() {
+        let m = machine(vec![], None);
+        let fresh = snapshot(SkillsAvailability::Available, 10);
+        // (installs, snapshot, expected answered, expected tuples)
+        let cases: Vec<(
+            &str,
+            Option<Vec<CatalogInstall>>,
+            Option<SkillsSnapshot>,
+            bool,
+            Vec<_>,
+        )> = vec![
+            (
+                "deployed skill",
+                Some(vec![install("codex", "fleet", 100)]),
+                Some(fresh.clone()),
+                true,
+                vec![catalog_tuple("codex")],
+            ),
+            (
+                "undeployed from that agent",
+                Some(vec![install("claude_code", "fleet", 100)]),
+                Some(fresh.clone()),
+                true,
+                vec![],
+            ),
+            (
+                "removed skill",
+                Some(vec![install("codex", "gone", 100)]),
+                Some(fresh.clone()),
+                true,
+                vec![],
+            ),
+            (
+                "no records",
+                Some(vec![]),
+                Some(fresh.clone()),
+                true,
+                vec![],
+            ),
+            (
+                "stale snapshot",
+                Some(vec![install("codex", "fleet", 100)]),
+                Some(snapshot(
+                    SkillsAvailability::Available,
+                    SKILLS_FRESHNESS_MS + 1,
+                )),
+                false,
+                vec![],
+            ),
+            (
+                "no snapshot",
+                Some(vec![install("codex", "fleet", 100)]),
+                None,
+                false,
+                vec![],
+            ),
+            (
+                "unsupported cli",
+                Some(vec![install("codex", "fleet", 100)]),
+                Some(snapshot(SkillsAvailability::Unsupported, 10)),
+                false,
+                vec![],
+            ),
+            (
+                "absent cli",
+                Some(vec![install("codex", "fleet", 100)]),
+                Some(snapshot(SkillsAvailability::Absent, 10)),
+                false,
+                vec![],
+            ),
+            ("no record store", None, Some(fresh.clone()), false, vec![]),
+        ];
+        for (name, installs, snapshot, answered, expected) in cases {
+            let observed =
+                assemble_observed_state(&m, snapshot.as_ref(), None, installs.as_deref(), NOW);
+            assert_eq!(observed.catalog_skills_answered, Some(answered), "{name}");
+            assert_eq!(observed.catalog_skills, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_offline_machine_leaves_catalog_versions_unanswered() {
+        let offline = machine(
+            vec![],
+            Some(node(NodeStatus::Active, GatewayState::Offline)),
+        );
+        let observed = assemble_observed_state(
+            &offline,
+            Some(&snapshot(SkillsAvailability::Available, 10)),
+            None,
+            Some(&[install("codex", "fleet", 100)]),
+            NOW,
+        );
+        assert_eq!(observed.catalog_skills_answered, Some(false));
+    }
+
+    #[test]
+    fn catalog_versions_compare_as_in_sync_changed_missing_and_unknown() {
+        let m = machine(vec![], None);
+        let desired = |version: &str| DesiredState {
+            catalog_skills: vec![("builtin-fleet".into(), version.into(), "codex".into())],
+            ..DesiredState::default()
+        };
+        let fresh = snapshot(SkillsAvailability::Available, 10);
+        let installs = [install("codex", "fleet", 100)];
+        let observed = assemble_observed_state(&m, Some(&fresh), None, Some(&installs), NOW);
+        assert!(
+            compare(&desired("builtin-fleet@abc"), &observed)
+                .fields
+                .iter()
+                .all(|d| !d.identity.starts_with("catalog-skill:")),
+            "the pinned version installed is in sync"
+        );
+        let changed = compare(&desired("builtin-fleet@def"), &observed)
+            .fields
+            .remove(0);
+        assert_eq!(changed.state, DifferenceState::Changed);
+        let none = assemble_observed_state(&m, Some(&fresh), None, Some(&[]), NOW);
+        let missing = compare(&desired("builtin-fleet@abc"), &none)
+            .fields
+            .remove(0);
+        assert_eq!(missing.state, DifferenceState::Missing);
+        let unread = assemble_observed_state(&m, Some(&fresh), None, None, NOW);
+        let unknown = compare(&desired("builtin-fleet@abc"), &unread)
+            .fields
+            .remove(0);
+        assert_eq!(unknown.state, DifferenceState::Unknown);
     }
 }

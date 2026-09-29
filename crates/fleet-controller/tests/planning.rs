@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use fleet_application::authz::{AccessRequest, Authorizer, Decision, ReasonId};
+use fleet_application::catalog_installs::{CatalogInstall, CatalogInstallPort as _};
 use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
 use fleet_application::observed_assembly::ObservedStateAssembler;
 use fleet_application::planning::{Planning, PlanningError};
@@ -55,7 +56,8 @@ async fn harness() -> Harness {
         Arc::new(MachineRepository::new(pool.clone())),
         Arc::new(SkillsRepository::new(pool.clone())),
         Arc::new(ProjectRepository::new(pool.clone())),
-    );
+    )
+    .with_catalog_installs(Arc::new(SkillsRepository::new(pool.clone())));
     let planning = Planning::new(
         Arc::new(SourceRepository::new(pool.clone())),
         Arc::new(machines),
@@ -239,28 +241,128 @@ async fn only_skills_fleet_git_manages_can_be_undeployed() {
     assert!(hand.reason.as_deref().unwrap().contains("will not remove"));
 }
 
+fn catalog_diffs(
+    computed: &fleet_application::planning::ComputedPlan,
+) -> Vec<(String, DifferenceState)> {
+    computed
+        .plan
+        .actions
+        .iter()
+        .map(|a| &a.difference)
+        .chain(computed.plan.unactionable.iter())
+        .filter(|d| d.identity.starts_with("catalog-skill:"))
+        .map(|d| (d.identity.clone(), d.state))
+        .collect()
+}
+
+impl Harness {
+    async fn builtin_version(&self) -> String {
+        use fleet_application::skill_catalog::SkillCatalogPort as _;
+        SkillCatalogRepository::new(self.store.pool().clone())
+            .get(fleet_core::BUILTIN_FLEET_SKILL_CATALOG_ID)
+            .await
+            .unwrap()
+            .published_from
+            .expect("the built-in is published")
+    }
+
+    async fn record_install(&self, version: &str, agent: &str, skill: &str, at: i64) {
+        SkillsRepository::new(self.store.pool().clone())
+            .record_installs(&[CatalogInstall {
+                machine_id: self.machine_id.clone(),
+                catalog_id: fleet_core::BUILTIN_FLEET_SKILL_CATALOG_ID.to_owned(),
+                version_id: version.to_owned(),
+                agent: agent.to_owned(),
+                skill_name: skill.to_owned(),
+                installed_at: at,
+            }])
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
-async fn the_builtin_default_is_composed_and_stays_unknown_until_observed() {
+async fn the_builtin_skill_deploys_through_a_reviewed_plan_and_converges() {
     let harness = harness().await;
     fleet_controller::builtin_skills::seed_builtin_skills(harness.store.pool(), NOW)
         .await
         .unwrap();
     harness.activate("aaa", &[]).await;
     harness.observe_skills(&[]).await;
+
+    // Nothing installed: the pinned version is missing and planned.
     let computed = harness.plan().await;
-    let builtin: Vec<_> = computed
+    let rollouts: Vec<_> = computed
         .plan
-        .unactionable
+        .actions
         .iter()
-        .filter(|d| d.identity.starts_with("catalog-skill:builtin-fleet/"))
+        .filter(|a| a.kind == "skills.catalog-rollout")
         .collect();
-    assert_eq!(
-        builtin.len(),
-        2,
-        "claude_code and codex: {:?}",
-        computed.plan.unactionable
+    assert_eq!(rollouts.len(), 2, "claude_code and codex: {computed:?}");
+    let version = harness.builtin_version().await;
+    assert!(rollouts.iter().all(|a| {
+        a.difference.state == DifferenceState::Missing
+            && a.difference.desired.as_deref() == Some(version.as_str())
+    }));
+
+    // An older Fleet install is changed, still planned as a rollout.
+    harness.observe_skills(&[("fleet", &["codex"])]).await;
+    harness
+        .record_install("builtin-fleet@old", "codex", "fleet", NOW - 2000)
+        .await;
+    let changed = catalog_diffs(&harness.plan().await);
+    assert!(changed.contains(&(
+        "catalog-skill:builtin-fleet/codex".to_owned(),
+        DifferenceState::Changed
+    )));
+    assert!(changed.contains(&(
+        "catalog-skill:builtin-fleet/claude_code".to_owned(),
+        DifferenceState::Missing
+    )));
+
+    // The pinned version installed everywhere: no drift, nothing planned.
+    harness
+        .observe_skills(&[("fleet", &["codex", "claude_code"])])
+        .await;
+    harness
+        .record_install(&version, "codex", "fleet", NOW - 2000)
+        .await;
+    harness
+        .record_install(&version, "claude_code", "fleet", NOW - 2000)
+        .await;
+    let synced = harness.plan().await;
+    assert!(catalog_diffs(&synced).is_empty(), "{synced:?}");
+    assert!(synced.plan.actions.is_empty(), "{synced:?}");
+
+    // The skill removed from the machine invalidates the record: planned again.
+    harness.observe_skills(&[]).await;
+    let removed = catalog_diffs(&harness.plan().await);
+    assert_eq!(removed.len(), 2);
+    assert!(
+        removed
+            .iter()
+            .all(|(_, state)| *state == DifferenceState::Missing)
     );
-    assert!(builtin.iter().all(|d| d.state == DifferenceState::Unknown));
+
+    // An unreadable machine (stale snapshot) never counts as in sync.
+    SkillsRepository::new(harness.store.pool().clone())
+        .record(&SkillsSnapshot {
+            machine_id: harness.machine_id.clone(),
+            availability: SkillsAvailability::Available,
+            cli_version: None,
+            data: serde_json::json!({"skills": [{"id": "fleet", "deployedTo": ["codex", "claude_code"]}]}),
+            update_check: "complete".to_owned(),
+            observed_at: NOW - 30 * 60 * 60 * 1000,
+        })
+        .await
+        .unwrap();
+    let stale = catalog_diffs(&harness.plan().await);
+    assert!(
+        stale
+            .iter()
+            .all(|(_, state)| *state == DifferenceState::Unknown)
+    );
+    assert_eq!(stale.len(), 2);
 
     // Git taking the skill over with an empty deployTo removes the default.
     harness
@@ -274,13 +376,34 @@ async fn the_builtin_default_is_composed_and_stays_unknown_until_observed() {
             )],
         )
         .await;
-    let taken = harness.plan().await;
-    assert!(
-        taken
-            .plan
-            .unactionable
-            .iter()
-            .all(|d| !d.identity.starts_with("catalog-skill:builtin-fleet/"))
+    assert!(catalog_diffs(&harness.plan().await).is_empty());
+}
+
+#[tokio::test]
+async fn an_installed_catalog_version_fleet_does_not_manage_is_reported_never_removed() {
+    let harness = harness().await;
+    harness.activate("aaa", &[]).await;
+    harness.observe_skills(&[("other", &["codex"])]).await;
+    SkillsRepository::new(harness.store.pool().clone())
+        .record_installs(&[CatalogInstall {
+            machine_id: harness.machine_id.clone(),
+            catalog_id: "catalog-x".to_owned(),
+            version_id: "catalog-x@1".to_owned(),
+            agent: "codex".to_owned(),
+            skill_name: "other".to_owned(),
+            installed_at: NOW - 2000,
+        }])
+        .await
+        .unwrap();
+    let computed = harness.plan().await;
+    assert!(computed.plan.actions.is_empty(), "{computed:?}");
+    let reported = catalog_diffs(&computed);
+    assert_eq!(
+        reported,
+        [(
+            "catalog-skill:catalog-x/codex".to_owned(),
+            DifferenceState::Unsupported
+        )]
     );
 }
 

@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use fleet_application::catalog_installs::CatalogInstall;
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
@@ -199,6 +200,7 @@ pub struct SkillsExecutor {
     limiter: Arc<ExecutionLimiter>,
     snapshots: Option<Arc<dyn fleet_application::skills::SkillsPort>>,
     catalog: Option<Arc<dyn fleet_application::skill_catalog::SkillCatalogPort>>,
+    installs: Option<Arc<dyn fleet_application::catalog_installs::CatalogInstallPort>>,
     /// Retained for the provider's isolated directory lifetime.
     #[allow(dead_code)]
     work_dir: std::path::PathBuf,
@@ -294,6 +296,18 @@ impl SkillsExecutor {
                 .await;
             }
         };
+        let installed: Vec<CatalogInstall> = payload
+            .agents
+            .iter()
+            .map(|agent| CatalogInstall {
+                machine_id: payload.machine_id.clone(),
+                catalog_id: payload.catalog_id.clone(),
+                version_id: version.id.clone(),
+                agent: agent.clone(),
+                skill_name: version.name.clone(),
+                installed_at: 0,
+            })
+            .collect();
         let digest = version.content.validate_and_digest()?;
         if digest != version.content_digest
             || version.content.name != version.name
@@ -374,6 +388,7 @@ impl SkillsExecutor {
                 &version.content_digest,
                 revision,
                 subpath.as_deref().unwrap_or_default(),
+                self.installs.as_deref().map(|port| (port, &installed[..])),
             )
             .await;
         }
@@ -414,6 +429,14 @@ impl SkillsExecutor {
         let (result, detail) = self
             .run(&spec, &catalog_rollout_script(), &metadata, remaining)
             .await;
+        if result
+            .as_ref()
+            .is_some_and(|result| !result.killed_by_deadline && result.exit_code == Some(0))
+            && let Some(port) = self.installs.as_deref()
+            && let Err(failure) = record_installs(port, &installed).await
+        {
+            return failure.complete(operations, &operation.id).await;
+        }
         finish_cli(operations, &operation.id, result, detail, "catalog rollout").await
     }
 
@@ -437,6 +460,7 @@ impl SkillsExecutor {
             limiter,
             snapshots: None,
             catalog: None,
+            installs: None,
             work_dir,
         }
     }
@@ -448,6 +472,17 @@ impl SkillsExecutor {
         snapshots: Arc<dyn fleet_application::skills::SkillsPort>,
     ) -> Self {
         self.snapshots = Some(snapshots);
+        self
+    }
+
+    /// Attach the record of verified catalog installations: a successful
+    /// rollout writes it and each probe prunes it (FM-411).
+    #[must_use]
+    pub fn with_catalog_installs(
+        mut self,
+        installs: Arc<dyn fleet_application::catalog_installs::CatalogInstallPort>,
+    ) -> Self {
+        self.installs = Some(installs);
         self
     }
 
@@ -955,6 +990,16 @@ impl SkillsExecutor {
                     port.record(&snapshot)
                         .await
                         .map_err(|_| "skills snapshot persistence failed".to_owned())?;
+                    // A removed or undeployed skill invalidates Fleet's
+                    // record of the catalog version installed for it.
+                    if let Some(installs) = &self.installs {
+                        fleet_application::catalog_installs::prune_installs(
+                            installs.as_ref(),
+                            &snapshot,
+                        )
+                        .await
+                        .map_err(|_| "catalog install pruning failed".to_owned())?;
+                    }
                 }
                 // Operation results are readable with operations.read. Keep
                 // the sensitive inventory behind the skills.read endpoints.
@@ -1786,6 +1831,43 @@ async fn finish_cli(
     }
 }
 
+/// The rollout ran and verified, but Fleet could not persist what it
+/// installed. The machine changed, so the operation fails loudly rather than
+/// leaving a plan that keeps reporting the version as missing without a cause.
+struct UnrecordedInstall;
+
+impl UnrecordedInstall {
+    async fn complete(self, operations: &Operations, operation_id: &str) -> Result<(), String> {
+        complete_failure(
+            operations,
+            operation_id,
+            "catalog_install_unrecorded",
+            "the pinned version was installed and verified, but Fleet could not record it; run a skills probe and re-plan",
+        )
+        .await
+    }
+}
+
+/// Persists the verified installations at the moment of verification.
+async fn record_installs(
+    port: &dyn fleet_application::catalog_installs::CatalogInstallPort,
+    installed: &[CatalogInstall],
+) -> Result<(), UnrecordedInstall> {
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let stamped: Vec<CatalogInstall> = installed
+        .iter()
+        .cloned()
+        .map(|install| CatalogInstall {
+            installed_at: now,
+            ..install
+        })
+        .collect();
+    port.record_installs(&stamped)
+        .await
+        .map_err(|_| UnrecordedInstall)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn finish_referenced_rollout(
     operations: &Operations,
     operation_id: &str,
@@ -1794,6 +1876,10 @@ async fn finish_referenced_rollout(
     expected_digest: &str,
     expected_revision: &str,
     expected_subpath: &str,
+    installs: Option<(
+        &dyn fleet_application::catalog_installs::CatalogInstallPort,
+        &[CatalogInstall],
+    )>,
 ) -> Result<(), String> {
     if !result
         .as_ref()
@@ -1817,6 +1903,11 @@ async fn finish_referenced_rollout(
             "Skills Manager did not report the pinned Git commit and subpath as installed",
         )
         .await;
+    }
+    if let Some((port, installed)) = installs
+        && let Err(failure) = record_installs(port, installed).await
+    {
+        return failure.complete(operations, operation_id).await;
     }
     let result_json = serde_json::json!({
         "outcome": {

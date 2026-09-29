@@ -25,6 +25,7 @@ struct Fixture {
     operations: Operations,
     executor: fleet_controller::skills::SkillsExecutor,
     snapshots: std::sync::Arc<fleet_storage_sqlite::SkillsRepository>,
+    pool: SqlitePool,
     machine_id: String,
     endpoint_id: String,
     identity_file: String,
@@ -69,16 +70,23 @@ async fn compose(sshd: &TestSshd) -> Fixture {
         dir.path().join("ssh"),
         ExecutionLimiter::new(4),
     )
-    .with_snapshot_port(snapshots.clone());
-    let operations = Operations::new(
+    .with_snapshot_port(snapshots.clone())
+    .with_catalog_installs(snapshots.clone())
+    .with_catalog_port(std::sync::Arc::new(
+        fleet_storage_sqlite::SkillCatalogRepository::new(pool.clone()),
+    ));
+    let operations = Operations::new_with_events_and_catalog_rollout_targets(
         std::sync::Arc::new(OperationRepository::new(pool.clone())),
         std::sync::Arc::new(AuditSink::new(pool.clone())),
+        std::sync::Arc::new(fleet_application::events::EventHub::new(16)),
+        std::sync::Arc::new(MachineRepository::new(pool.clone())),
     );
     Fixture {
         _dir: dir,
         operations,
         executor,
         snapshots,
+        pool,
         machine_id: machine.id,
         endpoint_id,
         identity_file: format!("{}/user_ed25519", sshd.keys_dir.path().display()),
@@ -143,6 +151,7 @@ fn install_stub_cli(home: &str, sha_of_stub: Option<&str>) -> String {
 echo "$@" >> /tmp/fleet-stub-cli.log
 printf '%q\n' "$@" >> /tmp/fleet-stub-argv.log
 [ "$1" = "--json" ] && shift
+[ -e /tmp/fleet-stub-fail-deploy ] && [ "$1" = skills ] && [ "$2" = deploy ] && { echo "deploy refused" >&2; exit 1; }
 case "$1" in
   --version) echo '{"version":"1.40.0"}' ;;
   agents) echo '[{"id":"claude_code","name":"Claude Code","skillsDir":"/secret/agent/path"}]' ;;
@@ -584,4 +593,120 @@ async fn credential_shaped_cli_output_is_redacted() {
     assert!(!error.contains("secret"), "{error}");
     assert!(error.contains("***@host.invalid"), "{error}");
     let _ = std::fs::remove_file(&path);
+}
+
+/// Seeds the built-in catalog entry and returns its published version id.
+async fn builtin_version(fixture: &Fixture) -> String {
+    use fleet_application::skill_catalog::SkillCatalogPort as _;
+    fleet_controller::builtin_skills::seed_builtin_skills(
+        &fixture.pool,
+        fleet_core::SystemClock::now_unix_millis(),
+    )
+    .await
+    .unwrap();
+    fleet_storage_sqlite::SkillCatalogRepository::new(fixture.pool.clone())
+        .get(fleet_core::BUILTIN_FLEET_SKILL_CATALOG_ID)
+        .await
+        .unwrap()
+        .published_from
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_verified_catalog_rollout_records_the_installed_version_and_a_failed_one_does_not() {
+    use fleet_application::catalog_installs::CatalogInstallPort as _;
+    let _guard = CLI_LOCK.lock().await;
+    let sshd = start_sshd();
+    let fixture = compose(&sshd).await;
+    let home = std::env::var("HOME").unwrap();
+    let _path = install_stub_cli(&home, None);
+    let version = builtin_version(&fixture).await;
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "catalogId": "builtin-fleet",
+        "versionId": version,
+        "agents": ["codex", "claude_code"],
+        "timeoutSeconds": 60,
+    });
+
+    // The CLI refuses the deploy: nothing verified, nothing recorded.
+    std::fs::write("/tmp/fleet-stub-fail-deploy", "").unwrap();
+    let (state, _, error) = fixture
+        .run_kind("skills.catalog-rollout", payload.clone())
+        .await;
+    std::fs::remove_file("/tmp/fleet-stub-fail-deploy").ok();
+    assert_eq!(state, "failed", "{error:?}");
+    assert!(
+        fixture
+            .snapshots
+            .list_installs(&fixture.machine_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A verified rollout records the version for each explicit agent.
+    let (state, _, error) = fixture.run_kind("skills.catalog-rollout", payload).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let recorded = fixture
+        .snapshots
+        .list_installs(&fixture.machine_id)
+        .await
+        .unwrap();
+    let mut agents: Vec<_> = recorded.iter().map(|i| i.agent.as_str()).collect();
+    agents.sort_unstable();
+    assert_eq!(agents, ["claude_code", "codex"]);
+    assert!(recorded.iter().all(|i| i.version_id == version
+        && i.catalog_id == "builtin-fleet"
+        && i.skill_name == "fleet"));
+}
+
+#[tokio::test]
+async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
+    use fleet_application::catalog_installs::{CatalogInstall, CatalogInstallPort as _};
+    let _guard = CLI_LOCK.lock().await;
+    let sshd = start_sshd();
+    let fixture = compose(&sshd).await;
+    let home = std::env::var("HOME").unwrap();
+    let _path = install_stub_cli(&home, None);
+    let install = |skill: &str, agent: &str| CatalogInstall {
+        machine_id: fixture.machine_id.clone(),
+        catalog_id: format!("catalog-{skill}"),
+        version_id: format!("catalog-{skill}@v"),
+        agent: agent.to_owned(),
+        skill_name: skill.to_owned(),
+        installed_at: 1,
+    };
+    // The stub inventory lists only `hello`, deployed to claude_code.
+    fixture
+        .snapshots
+        .record_installs(&[
+            install("hello", "claude_code"),
+            install("hello", "codex"),
+            install("gone", "claude_code"),
+        ])
+        .await
+        .unwrap();
+    let payload = serde_json::json!({
+        "machineId": fixture.machine_id,
+        "endpointId": fixture.endpoint_id,
+        "auth": fixture.auth_json(),
+        "timeoutSeconds": 60,
+    });
+    let (state, _, error) = fixture.run_kind("skills.probe", payload).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let kept = fixture
+        .snapshots
+        .list_installs(&fixture.machine_id)
+        .await
+        .unwrap();
+    use fleet_application::skills::SkillsPort as _;
+    let snapshot = fixture.snapshots.get(&fixture.machine_id).await.unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?} {snapshot:?}");
+    assert_eq!(
+        (kept[0].skill_name.as_str(), kept[0].agent.as_str()),
+        ("hello", "claude_code")
+    );
 }
