@@ -60,6 +60,47 @@ pub struct ComputedPlan {
     pub plan: Plan,
 }
 
+/// What drift computation found for one machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DriftOutcome {
+    /// Drift was computed against the active revision. Only fields that
+    /// differ are listed; a field absent from the list is in sync.
+    Computed {
+        /// The revision the machine was compared with.
+        revision: ActiveRevision,
+        /// The differences: actionable ones first (in plan order), then
+        /// the `unknown` and `unsupported` ones the planner will not act on.
+        differences: Vec<fleet_core::FieldDifference>,
+    },
+    /// No desired revision is active, so nothing can drift.
+    NoRevision,
+    /// Drift could not be computed for this machine.
+    Unavailable {
+        /// Why, caller-safe.
+        detail: String,
+    },
+}
+
+/// One machine's drift.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriftEntry {
+    /// The machine.
+    pub machine_id: String,
+    /// The machine's current name.
+    pub machine_name: String,
+    /// What was found.
+    pub outcome: DriftOutcome,
+}
+
+/// One page of fleet drift, newest machines first.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriftPage {
+    /// The entries for machines the caller may read.
+    pub entries: Vec<DriftEntry>,
+    /// The cursor for the next page, when more machines follow.
+    pub next_cursor: Option<String>,
+}
+
 /// Why a plan could not be computed or applied.
 #[derive(Debug)]
 pub enum PlanningError {
@@ -223,6 +264,127 @@ impl Planning {
                 current: computed.plan_id,
             })
         }
+    }
+
+    /// One machine's drift against the active revision. Reading drift
+    /// needs `skills.read` for the machine, as the Skills matrix does.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or an unknown machine; every other failure is
+    /// reported in the entry's outcome.
+    pub async fn machine_drift(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        machine_id: &str,
+        now: i64,
+    ) -> Result<DriftEntry, PlanningError> {
+        Self::authorize_read(authorizer, principal_id, machine_id)?;
+        let machine = self.machines.get(machine_id).await.map_err(|failure| {
+            if matches!(failure, PortFailure::NotFound { .. }) {
+                PlanningError::UnknownMachine
+            } else {
+                PlanningError::Backend {
+                    context: "machine",
+                    detail: failure_detail(failure),
+                }
+            }
+        })?;
+        Ok(self.entry_for(&machine.id, &machine.name, now).await)
+    }
+
+    /// Drift across the machines the caller may read, one page at a time.
+    /// A machine whose drift cannot be computed is reported as such and
+    /// never fails the page.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the machine list cannot be read.
+    pub async fn drift_page(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+        now: i64,
+    ) -> Result<DriftPage, PlanningError> {
+        let mut machines = self
+            .machines
+            .list(
+                &crate::machine::MachineFilter {
+                    cursor: cursor.map(str::to_owned),
+                    ..crate::machine::MachineFilter::default()
+                },
+                limit.saturating_add(1),
+            )
+            .await
+            .map_err(|failure| PlanningError::Backend {
+                context: "machines",
+                detail: failure_detail(failure),
+            })?;
+        let more = machines.len() > limit as usize;
+        machines.truncate(limit as usize);
+        let next_cursor = more
+            .then(|| machines.last().map(|machine| machine.id.clone()))
+            .flatten();
+        let mut entries = Vec::new();
+        for machine in &machines {
+            if Self::authorize_read(authorizer, principal_id, &machine.id).is_err() {
+                continue;
+            }
+            entries.push(self.entry_for(&machine.id, &machine.name, now).await);
+        }
+        Ok(DriftPage {
+            entries,
+            next_cursor,
+        })
+    }
+
+    async fn entry_for(&self, machine_id: &str, name: &str, now: i64) -> DriftEntry {
+        let outcome = match self.compute(machine_id, now).await {
+            Ok(computed) => DriftOutcome::Computed {
+                revision: computed.revision,
+                differences: computed
+                    .plan
+                    .actions
+                    .into_iter()
+                    .map(|action| action.difference)
+                    .chain(computed.plan.unactionable)
+                    .collect(),
+            },
+            Err(PlanningError::NoActiveRevision) => DriftOutcome::NoRevision,
+            Err(PlanningError::Backend { context, .. }) => DriftOutcome::Unavailable {
+                detail: format!(
+                    "reading the {context} failed; the detail is in the controller log"
+                ),
+            },
+            Err(other) => DriftOutcome::Unavailable {
+                detail: other.to_string(),
+            },
+        };
+        DriftEntry {
+            machine_id: machine_id.to_owned(),
+            machine_name: name.to_owned(),
+            outcome,
+        }
+    }
+
+    fn authorize_read(
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        machine_id: &str,
+    ) -> Result<(), PlanningError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::SkillsRead,
+                resource: Some(machine_id),
+            },
+        )
+        .map(|_| ())
+        .map_err(PlanningError::Denied)
     }
 
     fn authorize(

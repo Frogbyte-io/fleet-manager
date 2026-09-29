@@ -68,20 +68,36 @@ impl Harness {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
-        let app = router(self.state.clone()).layer(axum::Extension(fleet_api::ActingPrincipal {
+        self.send("POST", path, body, self.state.clone()).await
+    }
+
+    async fn get(&self, path: &str) -> (StatusCode, serde_json::Value) {
+        self.send("GET", path, None, self.state.clone()).await
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+        state: Arc<ApiState>,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router(state).layer(axum::Extension(fleet_api::ActingPrincipal {
             id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
         }));
         let request = Request::builder()
-            .method("POST")
+            .method(method)
             .uri(format!("{API_BASE_PATH}{path}"))
             .header(
                 CORRELATION_ID_HEADER,
                 "01900000-0000-7000-8000-000000000000",
             )
             .header("content-type", "application/json")
-            .body(Body::from(
-                body.unwrap_or(serde_json::json!({})).to_string(),
-            ))
+            .body(if method == "GET" {
+                Body::empty()
+            } else {
+                Body::from(body.unwrap_or(serde_json::json!({})).to_string())
+            })
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
@@ -254,4 +270,142 @@ async fn an_empty_plan_has_nothing_to_apply() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[derive(Debug)]
+struct DenyAll;
+impl fleet_application::authz::Authorizer for DenyAll {
+    fn decide(
+        &self,
+        _request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        fleet_application::authz::Decision::deny(
+            fleet_application::authz::ReasonId::UnknownPrincipal,
+        )
+    }
+}
+
+fn entry<'a>(page: &'a serde_json::Value, machine_id: &str) -> &'a serde_json::Value {
+    page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["machineId"] == machine_id)
+        .expect("the machine is listed")
+}
+
+#[tokio::test]
+async fn drift_says_no_revision_before_anything_is_active() {
+    let harness = harness().await;
+    let (status, page) = harness.get("/desired/drift").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let mine = entry(&page, &harness.machine_id);
+    assert_eq!(mine["status"], "no_revision");
+    assert_eq!(mine["counts"]["missing"], 0);
+    assert!(mine["revision"].is_null());
+}
+
+#[tokio::test]
+async fn drift_lists_missing_extra_and_unknown_and_omits_what_is_in_sync() {
+    let harness = harness().await;
+    harness.activate("aaa").await;
+
+    // Nothing observed yet: the desired skill is unknown, never clean.
+    let (_, before) = harness
+        .get(&format!("/machines/{}/drift", harness.machine_id))
+        .await;
+    let unknown = &before["data"];
+    assert_eq!(unknown["status"], "computed");
+    assert_eq!(unknown["revision"]["commitSha"], "aaa");
+    assert_eq!(unknown["counts"]["unknown"], 1);
+    assert_eq!(unknown["counts"]["missing"], 0);
+
+    harness.observe_fresh_skills().await;
+    let (_, missing) = harness
+        .get(&format!("/machines/{}/drift", harness.machine_id))
+        .await;
+    assert_eq!(missing["data"]["counts"]["missing"], 1);
+    assert_eq!(
+        missing["data"]["differences"][0]["identity"],
+        "skill:db/codex"
+    );
+    assert_eq!(missing["data"]["differences"][0]["state"], "missing");
+
+    SkillsRepository::new(harness.store.pool().clone())
+        .record(&SkillsSnapshot {
+            machine_id: harness.machine_id.clone(),
+            availability: SkillsAvailability::Available,
+            cli_version: None,
+            data: serde_json::json!({"skills": [{"id": "db", "deployedTo": ["codex"]}]}),
+            update_check: "complete".to_owned(),
+            observed_at: fleet_core::SystemClock::now_unix_millis(),
+        })
+        .await
+        .unwrap();
+    let (_, clean) = harness
+        .get(&format!("/machines/{}/drift", harness.machine_id))
+        .await;
+    let counts = &clean["data"]["counts"];
+    assert!(
+        ["missing", "changed", "extra", "unknown", "unsupported"]
+            .iter()
+            .all(|state| counts[state] == 0),
+        "{clean}"
+    );
+    assert!(clean["data"]["differences"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fleet_drift_is_paged_and_isolates_each_machine() {
+    let harness = harness().await;
+    harness.activate("aaa").await;
+    MachineRepository::new(harness.store.pool().clone())
+        .register(&RegisterMachine {
+            name: "second".to_owned(),
+            description: String::new(),
+            endpoints: vec![],
+            tags: vec![],
+            groups: vec![],
+        })
+        .await
+        .unwrap();
+    let (_, first) = harness.get("/desired/drift?limit=1").await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let cursor = first["page"]["nextCursor"]
+        .as_str()
+        .expect("another machine follows");
+    let (_, second) = harness
+        .get(&format!("/desired/drift?limit=1&cursor={cursor}"))
+        .await;
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert!(second["page"]["nextCursor"].is_null());
+}
+
+#[tokio::test]
+async fn drift_requires_skills_read_for_each_machine() {
+    let harness = harness().await;
+    harness.activate("aaa").await;
+    let denied = Arc::new(ApiState {
+        authorizer: Arc::new(DenyAll),
+        ..(*harness.state).clone()
+    });
+    let (status, page) = harness
+        .send("GET", "/desired/drift", None, denied.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(
+        page["items"].as_array().unwrap().is_empty(),
+        "unreadable machines are omitted"
+    );
+    let (status, _) = harness
+        .send(
+            "GET",
+            &format!("/machines/{}/drift", harness.machine_id),
+            None,
+            denied,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = harness.get("/machines/no-such-machine/drift").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

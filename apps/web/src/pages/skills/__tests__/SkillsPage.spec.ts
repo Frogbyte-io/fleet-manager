@@ -16,6 +16,7 @@ const publishSkillCatalog = vi.fn()
 const previewSkillCatalogRollout = vi.fn()
 const startSkillCatalogRollout = vi.fn()
 const getOperation = vi.fn()
+const listDesiredDrift = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   getSkillsMatrix: (...args: unknown[]) => getSkillsMatrix(...args),
@@ -29,6 +30,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   startSkillCatalogRollout: (...args: unknown[]) => startSkillCatalogRollout(...args),
   getOperation: (...args: unknown[]) => getOperation(...args),
   cancelOperation: vi.fn(),
+  listDesiredDrift: (...args: unknown[]) => listDesiredDrift(...args),
 }))
 
 import SkillsPage from '../SkillsPage.vue'
@@ -126,8 +128,9 @@ enableAutoUnmount(afterEach)
 beforeEach(() => {
   document.body.innerHTML = ''
   for (const mock of [getSkillsMatrix, listMachines, listSkillCatalog, listSkillCatalogVersions, createSkillCatalog, updateSkillCatalog,
-    publishSkillCatalog, previewSkillCatalogRollout, startSkillCatalogRollout, getOperation])
+    publishSkillCatalog, previewSkillCatalogRollout, startSkillCatalogRollout, getOperation, listDesiredDrift])
     mock.mockReset()
+  listDesiredDrift.mockResolvedValue(ok(page([])))
   listMachines.mockResolvedValue(ok(page([
     machine('m1', 'workstation'),
     machine('m2', 'rpi-kitchen'),
@@ -180,6 +183,40 @@ describe('fleet matrix', () => {
     getSkillsMatrix.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
     const { wrapper } = await mountAt('/skills')
     expect(wrapper.text()).toContain('Could not load skills matrix')
+  })
+})
+
+describe('drift against Fleet Git', () => {
+  const entry = (machineId: string, status: string, counts: Record<string, number>, differences: unknown[] = []) => ({
+    machineId,
+    machineName: machineId,
+    status,
+    revision: status === 'computed' ? { commitSha: 'abc', contentDigest: 'd' } : null,
+    counts: { missing: 0, changed: 0, extra: 0, unknown: 0, unsupported: 0, ...counts },
+    differences,
+    detail: null,
+  })
+
+  it('shows each machine\'s drift and marks the skills that differ', async () => {
+    listDesiredDrift.mockResolvedValue(ok(page([
+      entry('m1', 'computed', { extra: 1 }, [{ identity: 'skill:home-notes/codex', state: 'extra', desired: null, observed: 'deployed', reason: null }]),
+      entry('m2', 'computed', { unknown: 1 }),
+      entry('m3', 'no_revision', {}),
+    ])))
+    const { wrapper } = await mountAt('/skills')
+    expect(wrapper.get('[data-testid="matrix-drift-m1"]').text()).toContain('1 drifted')
+    expect(wrapper.get('[data-testid="matrix-drift-m1"] a').attributes('href')).toBe('/fleet/machines/m1?tab=desired')
+    expect(wrapper.get('[data-testid="matrix-drift-m2"]').text()).toContain('unknown')
+    expect(wrapper.get('[data-testid="matrix-drift-m3"]').text()).toContain('no revision')
+    expect(wrapper.get('[data-testid="cell-drift-home-notes-m1"]').text()).toBe('extra')
+    expect(wrapper.find('[data-testid="cell-drift-fleet-m1"]').exists()).toBe(false)
+  })
+
+  it('says the drift could not be read instead of leaving the row blank', async () => {
+    listDesiredDrift.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
+    const { wrapper } = await mountAt('/skills')
+    expect(wrapper.get('[data-testid="matrix-drift-m1"]').text()).toContain('unread')
+    expect(wrapper.text()).toContain('drift:')
   })
 })
 

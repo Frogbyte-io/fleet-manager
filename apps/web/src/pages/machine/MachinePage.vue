@@ -15,6 +15,7 @@ import { parseSshReference, sshCommand, vscodeRemoteUrl } from './handoff'
 import { provideMachineOperations } from './operations'
 import AuditTab from './tabs/AuditTab.vue'
 import ConnectionsTab from './tabs/ConnectionsTab.vue'
+import DesiredTab from './tabs/DesiredTab.vue'
 import GuestTab from './tabs/GuestTab.vue'
 import InventoryTab from './tabs/InventoryTab.vue'
 import OperationsTab from './tabs/OperationsTab.vue'
@@ -55,6 +56,7 @@ const TABS = [
   { value: 'projects', label: 'Projects' },
   { value: 'tools', label: 'Tools' },
   { value: 'skills', label: 'Skills' },
+  { value: 'desired', label: 'Desired' },
   { value: 'operations', label: 'Operations' },
   { value: 'audit', label: 'Audit' },
   { value: 'guest', label: 'Guest' },
@@ -225,6 +227,9 @@ async function copySsh() {
           </TabsContent>
           <TabsContent value="skills">
             <SkillsTab :machine="machine" />
+          </TabsContent>
+          <TabsContent value="desired">
+            <DesiredTab :machine="machine" />
           </TabsContent>
           <TabsContent value="operations">
             <OperationsTab />

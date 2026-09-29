@@ -97,6 +97,10 @@ The remote is configured with `PUT /api/v1/desired/source` (permission `source.a
 
 `POST /api/v1/machines/{id}/plans` composes the active revision's `SkillPreset` assignments (plus the built-in default, ADR 0012) for the machine's groups and tags, compares them with its assembled observed state, and returns the planner's actions and unactionable differences. The plan id is a SHA-256 digest of the machine, the active revision, and the ordered actions; `POST /api/v1/machines/{id}/plans/{planId}/apply` recomputes the plan and refuses with `409 stale_plan` if the id differs, then runs the controller's own actions through the apply workflow. An observed skill that no `SkillPreset` names is reported as unactionable and never planned for removal. Catalog-pinned skills (including the built-in) stay `unknown` until installed catalog versions are observed. Tool versions and checkouts wait on a machine-to-profile/project binding the schema does not have yet.
 
+### Drift read model (FM-408)
+
+`GET /api/v1/desired/drift` (paged over machines) and `GET /api/v1/machines/{id}/drift` return each machine's differences from the active revision, computed by the same path as plans, so drift and plan cannot disagree. Reading drift needs `skills.read` for the machine; unreadable machines are omitted from the list. Each entry is `computed`, `no_revision` (nothing is active, so nothing can drift), or `unavailable` (with a caller-safe reason); one machine's failure never fails the page. Only differing fields are listed, and `unknown`/`unsupported` are counted separately from actionable drift, so an unobserved machine is never reported as in sync. The console shows drift in the Skills matrix (an "Against Fleet Git" row and per-skill markers), the Overview attention queue, and the machine's Desired tab.
+
 ## Observed state
 
 An observation includes resource identity, source, source version, observed timestamp, expiry/staleness policy, payload schema version, and confidence/availability. Inventory snapshots may normalize frequently queried facts while retaining provider raw metadata only when needed for debugging and after redaction.

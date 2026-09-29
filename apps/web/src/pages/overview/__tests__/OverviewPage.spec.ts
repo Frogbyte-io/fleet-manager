@@ -16,6 +16,7 @@ const listImageRecipeVersions = vi.fn()
 const listLabTemplates = vi.fn()
 const listLabLeases = vi.fn()
 const getSystemInfo = vi.fn()
+const listDesiredDrift = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listMachines: (...a: unknown[]) => listMachines(...a),
@@ -30,6 +31,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listLabTemplates: (...a: unknown[]) => listLabTemplates(...a),
   listLabLeases: (...a: unknown[]) => listLabLeases(...a),
   getSystemInfo: (...a: unknown[]) => getSystemInfo(...a),
+  listDesiredDrift: (...a: unknown[]) => listDesiredDrift(...a),
 }))
 
 import OverviewPage from '../OverviewPage.vue'
@@ -46,6 +48,10 @@ const NOW = Date.now()
 const machine = (id: string, machineStatus: string) => ({ id, name: `box-${id}`, machineStatus, lastSeenAt: NOW - 60_000, endpoints: [], groups: [], tags: [], capabilities: [], description: '', lastObservation: null, createdAt: 0, updatedAt: 0 })
 const lease = (id: string, state: string, expiresAt: number | null) => ({ id, state, purpose: 'p', templateVersionId: 't1@1', owner: 'me', projectId: null, cleanup: 'destroy', ttlSeconds: 3600, createdAt: 1, readyAt: 1, expiresAt, maxLifetimeAt: NOW + 9e7 })
 
+function drift(machineId: string, machineName: string, status: string, counts: Partial<Record<'missing' | 'changed' | 'extra' | 'unknown' | 'unsupported', number>>, detail: string | null = null) {
+  return { machineId, machineName, status, revision: status === 'computed' ? { commitSha: 'abc', contentDigest: 'd' } : null, counts: { missing: 0, changed: 0, extra: 0, unknown: 0, unsupported: 0, ...counts }, differences: [], detail }
+}
+
 function everythingFine() {
   listMachines.mockResolvedValue(ok(page([machine('m1', 'connected')])))
   listOnboardingDrafts.mockResolvedValue(ok(page([])))
@@ -55,6 +61,7 @@ function everythingFine() {
   listImageRecipes.mockResolvedValue(ok(page([])))
   listLabTemplates.mockResolvedValue(ok(page([])))
   listLabLeases.mockResolvedValue(ok(page([])))
+  listDesiredDrift.mockResolvedValue(ok(page([])))
   getSystemInfo.mockResolvedValue(ok({ service: 'fleet-controller', version: '0.1.0', trustMode: 'trusted-lan', trustWarning: '', storageOk: true, queuePending: 0, queueRunning: 0, currentPrincipal: 'me' }))
 }
 
@@ -77,7 +84,7 @@ function row(wrapper: Awaited<ReturnType<typeof mountPage>>, source: string) {
 enableAutoUnmount(afterEach)
 
 beforeEach(() => {
-  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo])
+  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift])
     mock.mockReset()
   everythingFine()
 })
@@ -150,9 +157,41 @@ describe('Overview attention queue', () => {
     expect(wrapper.get('[data-testid="activity-error"]').text()).toContain('Audit events unavailable')
   })
 
-  it('states that skill drift is not available yet', async () => {
+  it('lists a machine that differs from Fleet Git and links to its Desired tab', async () => {
+    listDesiredDrift.mockResolvedValue(ok(page([drift('m1', 'box-m1', 'computed', { missing: 2, extra: 1 })])))
     const wrapper = await mountPage()
-    expect(wrapper.get('[data-testid="drift-gap"]').text()).toContain('Skill drift')
+    expect(row(wrapper, 'drift').text()).toContain('box-m1 differs from Fleet Git')
+    expect(row(wrapper, 'drift').text()).toContain('2 missing, 1 extra')
+    expect(row(wrapper, 'drift').attributes('href')).toBe('/fleet/machines/m1?tab=desired')
+  })
+
+  it('does not raise unknown or in-sync machines as drift', async () => {
+    listDesiredDrift.mockResolvedValue(ok(page([
+      drift('m1', 'box-m1', 'computed', { unknown: 3 }),
+      drift('m2', 'box-m2', 'computed', {}),
+    ])))
+    const wrapper = await mountPage()
+    expect(wrapper.find('[data-testid="attention-drift"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="attention-empty"]').exists()).toBe(true)
+  })
+
+  it('reports a machine whose drift could not be computed', async () => {
+    listDesiredDrift.mockResolvedValue(ok(page([drift('m1', 'box-m1', 'unavailable', {}, 'reading the machine failed')])))
+    const wrapper = await mountPage()
+    expect(row(wrapper, 'drift').text()).toContain('Drift could not be computed for box-m1')
+  })
+
+  it('says when drift is not measured because no revision is active', async () => {
+    listDesiredDrift.mockResolvedValue(ok(page([drift('m1', 'box-m1', 'no_revision', {})])))
+    const wrapper = await mountPage()
+    expect(wrapper.get('[data-testid="drift-note"]').text()).toContain('No desired revision is active')
+  })
+
+  it('does not call a failed drift read "all clear"', async () => {
+    listDesiredDrift.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
+    const wrapper = await mountPage()
+    expect(wrapper.get('[data-testid="attention-failures"]').text()).toContain('skill drift')
+    expect(wrapper.find('[data-testid="attention-empty"]').exists()).toBe(false)
   })
 })
 

@@ -15,7 +15,7 @@ import { useOverview } from './useOverview'
 // The landing view: how the fleet is, what needs a person, what just
 // happened, and how much room the Proxmox nodes have
 // (docs/planning/web-console.md, Overview).
-const { attention, figures, feed, failures, loading, audit, proxmox } = useOverview()
+const { attention, figures, feed, failures, loading, audit, proxmox, driftNote } = useOverview()
 
 const nodes = computed(() => nodeRows(proxmox.views.value))
 
@@ -123,10 +123,11 @@ const severityLabel = { err: 'error', warn: 'warning', info: 'to do' } as const
           </li>
         </ul>
         <p
+          v-if="driftNote"
           class="text-[11px] text-fc-faint"
-          data-testid="drift-gap"
+          data-testid="drift-note"
         >
-          Skill drift is not listed yet: no read API exposes the drift the planner composes, and Fleet Git activation is not wired into the controller.
+          {{ driftNote }}
         </p>
       </section>
 
