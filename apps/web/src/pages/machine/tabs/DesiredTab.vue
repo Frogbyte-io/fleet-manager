@@ -15,7 +15,7 @@ import {
 } from '../../drift/drift'
 import { useMachineDrift } from '../../drift/useDrift'
 import { errorMessage } from '../api'
-import CopyFleetctl from '../components/CopyFleetctl.vue'
+import PlanPanel from '../components/PlanPanel.vue'
 
 // The machine's drift against the active desired revision (FM-408): what
 // Fleet Git wants, compared with what was last observed. Nothing here acts;
@@ -121,13 +121,10 @@ const groups = computed(() => groupDifferences(entry.value?.differences ?? []))
         </ul>
       </div>
 
-      <div
-        v-if="view.kind === 'drifted'"
-        class="space-y-1 text-[11px] text-fc-faint"
-      >
-        <p>Review what would change, then apply the reviewed plan:</p>
-        <CopyFleetctl :command="`fleetctl plan ${machine.id}`" />
-      </div>
+      <PlanPanel
+        v-if="view.kind !== 'no-revision' && view.kind !== 'unavailable'"
+        :machine="machine"
+      />
     </template>
   </section>
 </template>

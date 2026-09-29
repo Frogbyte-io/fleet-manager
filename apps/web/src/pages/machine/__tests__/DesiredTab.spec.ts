@@ -1,5 +1,6 @@
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
+import { defineComponent, h } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { MachineDto } from '@frogbyte-io/fleet-api-client'
@@ -7,15 +8,27 @@ import type { MachineDto } from '@frogbyte-io/fleet-api-client'
 const getMachineDrift = vi.fn()
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   getMachineDrift: (...args: unknown[]) => getMachineDrift(...args),
+  createMachinePlan: vi.fn(),
+  applyMachinePlan: vi.fn(),
+  getOperation: vi.fn(),
+  cancelOperation: vi.fn(),
 }))
 
+import { provideMachineOperations } from '../operations'
 import DesiredTab from '../tabs/DesiredTab.vue'
 
 function ok<T>(data: T, status = 200) {
   return { status, data, headers: new Headers() }
 }
 
-const machine = { id: 'm1', name: 'workstation' } as unknown as MachineDto
+const machine = { id: 'm1', name: 'workstation', endpoints: [] } as unknown as MachineDto
+
+const Host = defineComponent({
+  setup() {
+    provideMachineOperations('m1')
+    return () => h(DesiredTab, { machine })
+  },
+})
 
 function drift(overrides: Record<string, unknown> = {}) {
   return {
@@ -32,7 +45,7 @@ function drift(overrides: Record<string, unknown> = {}) {
 
 async function mountTab() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
-  const wrapper = mount(DesiredTab, { props: { machine }, global: { plugins: [[VueQueryPlugin, { queryClient }]] } })
+  const wrapper = mount(Host, { global: { plugins: [[VueQueryPlugin, { queryClient }]] } })
   await flushPromises()
   return wrapper
 }
@@ -49,7 +62,7 @@ describe('Desired tab', () => {
     expect(wrapper.find('[data-testid="desired-in-sync"]').exists()).toBe(true)
   })
 
-  it('lists differences by state, actionable first, with the plan command', async () => {
+  it('lists differences by state, actionable first, and offers the plan', async () => {
     getMachineDrift.mockResolvedValue(ok({ data: drift({
       counts: { missing: 1, changed: 0, extra: 0, unknown: 1, unsupported: 0 },
       differences: [
@@ -63,6 +76,7 @@ describe('Desired tab', () => {
     expect(groups).toEqual(['desired-group-missing', 'desired-group-unknown'])
     expect(wrapper.get('[data-testid="difference-skill:db/codex"]').text()).toContain('on codex')
     expect(wrapper.get('[data-testid="difference-catalog-skill:builtin-fleet/codex"]').text()).toContain('did not answer')
+    expect(wrapper.find('[data-testid="plan-panel"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('fleetctl plan m1')
     expect(wrapper.find('[data-testid="desired-in-sync"]').exists()).toBe(false)
   })
