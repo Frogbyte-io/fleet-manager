@@ -428,6 +428,14 @@ impl Planning {
         let presets = self.skill_presets().await?;
         let managed: BTreeSet<String> = presets.iter().map(|p| p.skill_id.clone()).collect();
         let builtins = self.builtins().await?;
+        // Catalog entries a SkillPreset pins, plus the shipped built-in, are
+        // the ones Fleet manages; other installed catalog versions are
+        // reported, never removed.
+        let managed_catalogs: BTreeSet<String> = presets
+            .iter()
+            .filter_map(|p| p.catalog_version.as_ref().map(|(id, _)| id.clone()))
+            .chain(builtins.iter().map(|b| b.catalog_id.clone()))
+            .collect();
         let assignments = with_builtin_assignments(&presets, &builtins);
         let composed = compose_skill_assignments(
             &MachineSkillTarget {
@@ -453,7 +461,7 @@ impl Planning {
                         PlanningError::Backend { context, detail }
                     }
                 })?;
-        let computed = split_unmanaged(compare(&desired, &observed), &managed);
+        let computed = split_unmanaged(compare(&desired, &observed), &managed, &managed_catalogs);
         let mut resolved = plan(&computed.0);
         resolved.unactionable.extend(computed.1);
         let revision = summary.revision;
@@ -576,16 +584,22 @@ fn assignment_from(record: &DesiredResourceRecord) -> Result<SkillAssignment, Pl
 fn split_unmanaged(
     set: DifferenceSet,
     managed: &BTreeSet<String>,
+    managed_catalogs: &BTreeSet<String>,
 ) -> (DifferenceSet, Vec<fleet_core::FieldDifference>) {
     let mut kept = DifferenceSet::new();
     let mut unmanaged = Vec::new();
     for difference in set.fields {
         let unmanaged_extra = difference.state == DifferenceState::Extra
-            && difference
+            && (difference
                 .identity
                 .strip_prefix("skill:")
                 .and_then(|rest| rest.split('/').next())
-                .is_some_and(|skill_id| !managed.contains(skill_id));
+                .is_some_and(|skill_id| !managed.contains(skill_id))
+                || difference
+                    .identity
+                    .strip_prefix("catalog-skill:")
+                    .and_then(|rest| rest.split('/').next())
+                    .is_some_and(|catalog_id| !managed_catalogs.contains(catalog_id)));
         if unmanaged_extra {
             let mut difference = difference;
             difference.state = DifferenceState::Unsupported;

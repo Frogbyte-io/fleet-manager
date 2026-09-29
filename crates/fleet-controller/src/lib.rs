@@ -178,7 +178,10 @@ pub fn compose_planning(db: &SqlitePool) -> fleet_application::planning::Plannin
         machines.clone(),
         std::sync::Arc::new(fleet_storage_sqlite::SkillsRepository::new(db.clone())),
         std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(db.clone())),
-    );
+    )
+    .with_catalog_installs(std::sync::Arc::new(
+        fleet_storage_sqlite::SkillsRepository::new(db.clone()),
+    ));
     fleet_application::planning::Planning::new(
         std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(db.clone())),
         machines,
