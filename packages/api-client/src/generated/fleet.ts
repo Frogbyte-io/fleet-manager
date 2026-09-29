@@ -978,6 +978,37 @@ export interface DraftEndpointDto {
 }
 
 /**
+ * How many differences of each drift state a machine has.
+ */
+export interface DriftCountsDto {
+  /**
+     * Observed with a different value.
+     * @minimum 0
+     */
+  changed: number;
+  /**
+     * Observed but no longer desired.
+     * @minimum 0
+     */
+  extra: number;
+  /**
+     * Desired but not observed.
+     * @minimum 0
+     */
+  missing: number;
+  /**
+     * The observation did not answer, so the state is unknown.
+     * @minimum 0
+     */
+  unknown: number;
+  /**
+     * Fleet cannot manage this on the machine.
+     * @minimum 0
+     */
+  unsupported: number;
+}
+
+/**
  * The create-enrollment-token response. The token value is shown exactly
  * once; only its hash is stored.
  */
@@ -1269,6 +1300,44 @@ export interface LinkGuestRequest {
      * @minimum 0
      */
   vmid: number;
+}
+
+/**
+ * The desired revision a plan was computed against.
+ */
+export interface PlanRevisionDto {
+  /** The commit SHA. */
+  commitSha: string;
+  /** The content digest. */
+  contentDigest: string;
+}
+
+/**
+ * One machine's drift against the active desired revision.
+ */
+export interface MachineDriftDto {
+  /**
+     * The number of differences per state. A machine with `computed`
+     * status and all zeros is in sync.
+     */
+  counts: DriftCountsDto;
+  /**
+     * Why drift is unavailable, when it is.
+     * @nullable
+     */
+  detail?: string | null;
+  /** The differences. Fields that are in sync are not listed. */
+  differences: FieldDifferenceDto[];
+  /** The machine. */
+  machineId: string;
+  /** The machine's current name. */
+  machineName: string;
+  revision?: null | PlanRevisionDto;
+  /**
+     * `computed`, `no_revision` (nothing is active, so nothing can drift),
+     * or `unavailable` (drift could not be computed for this machine).
+     */
+  status: string;
 }
 
 /**
@@ -2049,6 +2118,47 @@ export interface PageLeaseDto {
 }
 
 /**
+ * One machine's drift against the active desired revision.
+ */
+export type PageMachineDriftDtoItemsItem = {
+  /**
+     * The number of differences per state. A machine with `computed`
+     * status and all zeros is in sync.
+     */
+  counts: DriftCountsDto;
+  /**
+     * Why drift is unavailable, when it is.
+     * @nullable
+     */
+  detail?: string | null;
+  /** The differences. Fields that are in sync are not listed. */
+  differences: FieldDifferenceDto[];
+  /** The machine. */
+  machineId: string;
+  /** The machine's current name. */
+  machineName: string;
+  revision?: null | PlanRevisionDto;
+  /**
+     * `computed`, `no_revision` (nothing is active, so nothing can drift),
+     * or `unavailable` (drift could not be computed for this machine).
+     */
+  status: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageMachineDriftDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageMachineDriftDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
  * A machine, as the list and detail endpoints display it.
  */
 export type PageMachineDtoItemsItem = {
@@ -2558,16 +2668,6 @@ export interface PlanActionDto {
   reason: string;
   /** Whether applying this action needs an explicit approval. */
   requiresApproval: boolean;
-}
-
-/**
- * The desired revision a plan was computed against.
- */
-export interface PlanRevisionDto {
-  /** The commit SHA. */
-  commitSha: string;
-  /** The content digest. */
-  contentDigest: string;
 }
 
 /**
@@ -3305,6 +3405,45 @@ export type ResourceLeaseDtoData = {
 export interface ResourceLeaseDto {
   /** One lease. */
   data: ResourceLeaseDtoData;
+}
+
+/**
+ * One machine's drift against the active desired revision.
+ */
+export type ResourceMachineDriftDtoData = {
+  /**
+     * The number of differences per state. A machine with `computed`
+     * status and all zeros is in sync.
+     */
+  counts: DriftCountsDto;
+  /**
+     * Why drift is unavailable, when it is.
+     * @nullable
+     */
+  detail?: string | null;
+  /** The differences. Fields that are in sync are not listed. */
+  differences: FieldDifferenceDto[];
+  /** The machine. */
+  machineId: string;
+  /** The machine's current name. */
+  machineName: string;
+  revision?: null | PlanRevisionDto;
+  /**
+     * `computed`, `no_revision` (nothing is active, so nothing can drift),
+     * or `unavailable` (drift could not be computed for this machine).
+     */
+  status: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceMachineDriftDto {
+  /** One machine's drift against the active desired revision. */
+  data: ResourceMachineDriftDtoData;
 }
 
 /**
@@ -4556,6 +4695,20 @@ cursor?: string;
 limit?: number;
 };
 
+export type ListDesiredDriftParams = {
+/**
+ * Opaque machine id returned as the previous page's cursor.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
 export type ListDesiredResourcesParams = {
 /**
  * Only resources of this kind.
@@ -4867,6 +5020,71 @@ const res = await fetch(getActivateDesiredRevisionUrl(),
 
   const data: activateDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as activateDesiredRevisionResponse
+}
+
+
+
+export type listDesiredDriftResponse200 = {
+  data: PageMachineDriftDto
+  status: 200
+}
+
+export type listDesiredDriftResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listDesiredDriftResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDesiredDriftResponseSuccess = (listDesiredDriftResponse200) & {
+  headers: Headers;
+};
+export type listDesiredDriftResponseError = (listDesiredDriftResponse500 | listDesiredDriftResponse503) & {
+  headers: Headers;
+};
+
+export type listDesiredDriftResponse = (listDesiredDriftResponseSuccess | listDesiredDriftResponseError)
+
+export const getListDesiredDriftUrl = (params?: ListDesiredDriftParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/desired/drift?${stringifiedParams}` : `/api/v1/desired/drift`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication or the machine list fails.
+ * @summary Lists each readable machine's drift against the active desired revision.
+ */
+export const listDesiredDrift = async (params?: ListDesiredDriftParams, options?: RequestInit): Promise<listDesiredDriftResponse> => {
+
+  const res = await fetch(getListDesiredDriftUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDesiredDriftResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDesiredDriftResponse
 }
 
 
@@ -7583,6 +7801,70 @@ const res = await fetch(getStartApplyWorkflowUrl(machineId),
 
   const data: startApplyWorkflowResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startApplyWorkflowResponse
+}
+
+
+
+export type getMachineDriftResponse200 = {
+  data: ResourceMachineDriftDto
+  status: 200
+}
+
+export type getMachineDriftResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getMachineDriftResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getMachineDriftResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getMachineDriftResponseSuccess = (getMachineDriftResponse200) & {
+  headers: Headers;
+};
+export type getMachineDriftResponseError = (getMachineDriftResponse403 | getMachineDriftResponse404 | getMachineDriftResponse503) & {
+  headers: Headers;
+};
+
+export type getMachineDriftResponse = (getMachineDriftResponseSuccess | getMachineDriftResponseError)
+
+export const getGetMachineDriftUrl = (machineId: string,) => {
+
+
+
+
+  return `/api/v1/machines/${machineId}/drift`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when the machine is unknown or authentication or
+ * authorization fails.
+ * @summary Reads one machine's drift against the active desired revision.
+ */
+export const getMachineDrift = async (machineId: string, options?: RequestInit): Promise<getMachineDriftResponse> => {
+
+  const res = await fetch(getGetMachineDriftUrl(machineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getMachineDriftResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getMachineDriftResponse
 }
 
 

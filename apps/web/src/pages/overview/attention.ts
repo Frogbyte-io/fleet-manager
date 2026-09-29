@@ -4,6 +4,7 @@
 
 import type {
   LabTemplateDto,
+  MachineDriftDto,
   LeaseDto,
   MachineDto,
   OnboardingDraftDto,
@@ -12,6 +13,7 @@ import type {
 } from '@frogbyte-io/fleet-api-client'
 import type { RouteLocationRaw } from 'vue-router'
 
+import { driftView } from '../drift/drift'
 import { pinState } from '../images/images'
 import type { AccountView } from '../proxmox/proxmox'
 
@@ -25,6 +27,7 @@ export type AttentionSource =
   | 'onboarding'
   | 'lease-expiring'
   | 'template-pin'
+  | 'drift'
 
 export interface AttentionRow {
   key: string
@@ -53,6 +56,46 @@ export function machineRows(machines: Pick<MachineDto, 'id' | 'name' | 'machineS
       to: `/fleet/machines/${m.id}`,
       at: m.lastSeenAt ?? 0,
     }))
+}
+
+/**
+ * Machines whose skills differ from the active desired revision, and
+ * machines whose drift could not be computed. Unknown or unsupported
+ * fields alone are not attention: they are unobserved, not drifted, and
+ * the machine's Desired tab explains them.
+ */
+export function driftRows(entries: Pick<MachineDriftDto, 'machineId' | 'machineName' | 'status' | 'counts' | 'detail'>[]): AttentionRow[] {
+  const rows: AttentionRow[] = []
+  for (const entry of entries) {
+    const view = driftView(entry)
+    const to = { path: `/fleet/machines/${entry.machineId}`, query: { tab: 'desired' } }
+    if (view.kind === 'drifted') {
+      const parts = (['missing', 'changed', 'extra'] as const)
+        .filter(state => entry.counts[state] > 0)
+        .map(state => `${entry.counts[state]} ${state}`)
+      rows.push({
+        key: `drift:${entry.machineId}`,
+        source: 'drift',
+        severity: 'warn',
+        title: `${entry.machineName} differs from Fleet Git`,
+        detail: `${parts.join(', ')}. Review a plan before applying.`,
+        to,
+        at: 0,
+      })
+    }
+    else if (view.kind === 'unavailable') {
+      rows.push({
+        key: `drift:${entry.machineId}`,
+        source: 'drift',
+        severity: 'info',
+        title: `Drift could not be computed for ${entry.machineName}`,
+        detail: view.detail,
+        to,
+        at: 0,
+      })
+    }
+  }
+  return rows
 }
 
 export function leaseRows(leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'expiresAt' | 'createdAt'>[], now: number): AttentionRow[] {

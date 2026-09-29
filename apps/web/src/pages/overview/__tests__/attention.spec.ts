@@ -4,6 +4,7 @@ import type { OperationDto } from '@frogbyte-io/fleet-api-client'
 
 import {
   activity,
+  driftRows,
   EXPIRING_WINDOW_MS,
   kpis,
   leaseRows,
@@ -89,6 +90,34 @@ describe('attention sources', () => {
       { ...base, key: 'warn-new', severity: 'warn', at: 5 },
     ])
     expect(sorted.map(r => r.key)).toEqual(['err', 'warn-new', 'warn-old', 'info'])
+  })
+})
+
+describe('drift attention', () => {
+  const entry = (machineId: string, status: string, counts: Record<string, number>, detail: string | null = null) => ({
+    machineId,
+    machineName: `box-${machineId}`,
+    status,
+    counts: { missing: 0, changed: 0, extra: 0, unknown: 0, unsupported: 0, ...counts },
+    detail,
+  })
+
+  it('raises drifted machines, links to the Desired tab, and skips the unobserved and in-sync ones', () => {
+    const rows = driftRows([
+      entry('m1', 'computed', { missing: 1, changed: 1 }),
+      entry('m2', 'computed', { unknown: 4 }),
+      entry('m3', 'computed', {}),
+      entry('m4', 'no_revision', {}),
+    ])
+    expect(rows.map(r => [r.key, r.severity, r.to])).toEqual([
+      ['drift:m1', 'warn', { path: '/fleet/machines/m1', query: { tab: 'desired' } }],
+    ])
+    expect(rows[0]!.detail).toContain('1 missing, 1 changed')
+  })
+
+  it('reports machines whose drift could not be computed', () => {
+    const rows = driftRows([entry('m1', 'unavailable', {}, 'reading the machine failed')])
+    expect(rows[0]).toMatchObject({ severity: 'info', title: 'Drift could not be computed for box-m1', detail: 'reading the machine failed' })
   })
 })
 

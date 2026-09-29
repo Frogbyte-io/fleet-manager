@@ -212,6 +212,76 @@
         }
       }
     },
+    "/api/v1/desired/drift": {
+      "get": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Lists each readable machine's drift against the active desired revision.",
+        "description": "# Errors\n\nReturns an API error when authentication or the machine list fails.",
+        "operationId": "listDesiredDrift",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque machine id returned as the previous page's cursor.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Drift per machine the caller may read; machines it may not read are omitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_MachineDriftDto"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The planning surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/desired/fetch": {
       "post": {
         "tags": [
@@ -2754,6 +2824,69 @@
           },
           "404": {
             "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{machineId}/drift": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Reads one machine's drift against the active desired revision.",
+        "description": "# Errors\n\nReturns an API error when the machine is unknown or authentication or\nauthorization fails.",
+        "operationId": "getMachineDrift",
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "description": "The machine.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_MachineDriftDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the machine's skills.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The machine does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The planning surface is not wired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7273,6 +7406,49 @@
           }
         }
       },
+      "DriftCountsDto": {
+        "type": "object",
+        "description": "How many differences of each drift state a machine has.",
+        "required": [
+          "missing",
+          "changed",
+          "extra",
+          "unknown",
+          "unsupported"
+        ],
+        "properties": {
+          "changed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Observed with a different value.",
+            "minimum": 0
+          },
+          "extra": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Observed but no longer desired.",
+            "minimum": 0
+          },
+          "missing": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Desired but not observed.",
+            "minimum": 0
+          },
+          "unknown": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The observation did not answer, so the state is unknown.",
+            "minimum": 0
+          },
+          "unsupported": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Fleet cannot manage this on the machine.",
+            "minimum": 0
+          }
+        }
+      },
       "DuplicateCandidateDto": {
         "type": "object",
         "description": "One existing machine whose endpoint matches a draft's host and port.\nCandidates warn; they never merge or block.",
@@ -7962,6 +8138,60 @@
             "format": "int32",
             "description": "The guest VMID.",
             "minimum": 0
+          }
+        }
+      },
+      "MachineDriftDto": {
+        "type": "object",
+        "description": "One machine's drift against the active desired revision.",
+        "required": [
+          "machineId",
+          "machineName",
+          "status",
+          "counts",
+          "differences"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/DriftCountsDto",
+            "description": "The number of differences per state. A machine with `computed`\nstatus and all zeros is in sync."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why drift is unavailable, when it is."
+          },
+          "differences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldDifferenceDto"
+            },
+            "description": "The differences. Fields that are in sync are not listed."
+          },
+          "machineId": {
+            "type": "string",
+            "description": "The machine."
+          },
+          "machineName": {
+            "type": "string",
+            "description": "The machine's current name."
+          },
+          "revision": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PlanRevisionDto",
+                "description": "The revision the machine was compared with, when computed."
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`computed`, `no_revision` (nothing is active, so nothing can drift),\nor `unavailable` (drift could not be computed for this machine)."
           }
         }
       },
@@ -9484,6 +9714,78 @@
                   "format": "int32",
                   "description": "The template's ready TTL, in seconds.",
                   "minimum": 0
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_MachineDriftDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One machine's drift against the active desired revision.",
+              "required": [
+                "machineId",
+                "machineName",
+                "status",
+                "counts",
+                "differences"
+              ],
+              "properties": {
+                "counts": {
+                  "$ref": "#/components/schemas/DriftCountsDto",
+                  "description": "The number of differences per state. A machine with `computed`\nstatus and all zeros is in sync."
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why drift is unavailable, when it is."
+                },
+                "differences": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FieldDifferenceDto"
+                  },
+                  "description": "The differences. Fields that are in sync are not listed."
+                },
+                "machineId": {
+                  "type": "string",
+                  "description": "The machine."
+                },
+                "machineName": {
+                  "type": "string",
+                  "description": "The machine's current name."
+                },
+                "revision": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PlanRevisionDto",
+                      "description": "The revision the machine was compared with, when computed."
+                    }
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "description": "`computed`, `no_revision` (nothing is active, so nothing can drift),\nor `unavailable` (drift could not be computed for this machine)."
                 }
               }
             },
@@ -11730,6 +12032,69 @@
                 "format": "int32",
                 "description": "The template's ready TTL, in seconds.",
                 "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Resource_MachineDriftDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One machine's drift against the active desired revision.",
+            "required": [
+              "machineId",
+              "machineName",
+              "status",
+              "counts",
+              "differences"
+            ],
+            "properties": {
+              "counts": {
+                "$ref": "#/components/schemas/DriftCountsDto",
+                "description": "The number of differences per state. A machine with `computed`\nstatus and all zeros is in sync."
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why drift is unavailable, when it is."
+              },
+              "differences": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/FieldDifferenceDto"
+                },
+                "description": "The differences. Fields that are in sync are not listed."
+              },
+              "machineId": {
+                "type": "string",
+                "description": "The machine."
+              },
+              "machineName": {
+                "type": "string",
+                "description": "The machine's current name."
+              },
+              "revision": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PlanRevisionDto",
+                    "description": "The revision the machine was compared with, when computed."
+                  }
+                ]
+              },
+              "status": {
+                "type": "string",
+                "description": "`computed`, `no_revision` (nothing is active, so nothing can drift),\nor `unavailable` (drift could not be computed for this machine)."
               }
             }
           }

@@ -2,7 +2,10 @@
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
+import type { MachineDriftDto } from '@frogbyte-io/fleet-api-client'
 import StatusChip from '@/components/fleet/StatusChip.vue'
+
+import { driftLabel, driftTone, driftView, skillDifferences, STATE_EXPLANATION, type DriftState } from '../../drift/drift'
 
 import {
   agentShort,
@@ -17,7 +20,14 @@ import {
 
 // The fleet matrix: skill × machine, one cell per machine showing which
 // agents the skill is deployed to (docs/planning/web-console.md, Skills).
-const props = defineProps<{ matrix: Matrix, agents: AgentEntry[] }>()
+const props = withDefaults(defineProps<{
+  matrix: Matrix
+  agents: AgentEntry[]
+  /** Drift against the active desired revision, by machine. */
+  drift?: Map<string, MachineDriftDto>
+  /** The drift read failed: say so instead of leaving the row blank. */
+  driftFailed?: boolean
+}>(), { drift: () => new Map(), driftFailed: false })
 const emit = defineEmits<{ openCatalog: [catalogId: string] }>()
 
 const text = ref('')
@@ -31,6 +41,14 @@ const groups = computed(() => [
 ].filter(g => g.rows.length > 0))
 
 const agentNames = computed(() => new Map(props.agents.map(a => [a.id, a.name])))
+
+function cellDrift(row: MatrixRow, machineId: string) {
+  return skillDifferences(props.drift.get(machineId), row.skillId)
+}
+
+function driftTitle(differences: ReturnType<typeof cellDrift>): string {
+  return differences.map(d => `${d.identity}: ${d.state}. ${STATE_EXPLANATION[d.state as DriftState] ?? ''}`).join('\n')
+}
 
 function cellTitle(row: MatrixRow, machineName: string, agents: string[], update: boolean): string {
   const deployed = agents.length ? `deployed to ${agents.map(a => agentNames.value.get(a) ?? a).join(', ')}` : 'in the library, not deployed'
@@ -126,6 +144,38 @@ function cellTitle(row: MatrixRow, machineName: string, agents: string[], update
               />
             </th>
           </tr>
+          <tr
+            class="bg-fc-inset"
+            data-testid="matrix-drift-row"
+          >
+            <th
+              scope="row"
+              class="border-b border-fc-line2 px-2 py-1.5 text-left font-mono text-[9.5px] font-semibold uppercase tracking-widest text-fc-faint"
+            >
+              Against Fleet Git
+            </th>
+            <td
+              v-for="column in matrix.columns"
+              :key="column.machineId"
+              class="border-b border-fc-line2 px-2 py-1.5 text-center"
+              :data-testid="`matrix-drift-${column.machineId}`"
+            >
+              <RouterLink
+                v-if="drift.get(column.machineId)"
+                :to="{ path: `/fleet/machines/${column.machineId}`, query: { tab: 'desired' } }"
+              >
+                <StatusChip
+                  :label="driftLabel(driftView(drift.get(column.machineId)!))"
+                  :tone="driftTone(driftView(drift.get(column.machineId)!))"
+                />
+              </RouterLink>
+              <span
+                v-else
+                class="font-mono text-[10px] text-fc-faint"
+                :title="driftFailed ? 'Drift could not be read' : 'No drift reported for this machine'"
+              >{{ driftFailed ? 'unread' : '—' }}</span>
+            </td>
+          </tr>
         </thead>
         <tbody>
           <tr v-if="rows.length === 0">
@@ -211,6 +261,13 @@ function cellTitle(row: MatrixRow, machineName: string, agents: string[], update
                   class="text-fc-faint"
                   :title="`${row.skillId} is not installed on ${column.name}`"
                 >—</span>
+                <span
+                  v-if="cellDrift(row, column.machineId).length"
+                  class="mt-0.5 block font-mono text-[9px] uppercase tracking-wide"
+                  :class="cellDrift(row, column.machineId).some(d => d.state === 'missing' || d.state === 'changed' || d.state === 'extra') ? 'text-fc-warn' : 'text-fc-faint'"
+                  :title="driftTitle(cellDrift(row, column.machineId))"
+                  :data-testid="`cell-drift-${row.skillId}-${column.machineId}`"
+                >{{ [...new Set(cellDrift(row, column.machineId).map(d => d.state))].join(' · ') }}</span>
               </td>
             </tr>
           </template>
@@ -228,7 +285,7 @@ function cellTitle(row: MatrixRow, machineName: string, agents: string[], update
         >{{ agentShort(a.id) }} {{ a.name }}</span>
       </p>
       <p class="mt-1 text-[11px] text-fc-faint">
-        Drift against Fleet Git assignments is computed by the apply planner; no read API exposes it yet, so this matrix shows observed state only.
+        The "Against Fleet Git" row compares each machine with the active desired revision. A skill that is desired but not installed has no row here; open the machine's Desired tab to see it. Unknown means the machine did not answer, never "in sync".
       </p>
     </div>
   </div>

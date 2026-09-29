@@ -11,6 +11,7 @@ import {
   type OnboardingDraftDto,
 } from '@frogbyte-io/fleet-api-client'
 
+import { useFleetDrift } from '../drift/useDrift'
 import { fetchAllPages, type PagedResponse } from '../fleet/useFleetInventory'
 import { useImages } from '../images/useImages'
 import { retryTransient, unwrap } from '../machine/api'
@@ -20,6 +21,7 @@ import { useProxmox } from '../proxmox/useProxmox'
 
 import {
   activity,
+  driftRows,
   kpis,
   leaseRows,
   machineRows,
@@ -71,6 +73,7 @@ export function useOverview() {
   const operations = useOperationsList()
   const proxmox = useProxmox()
   const images = useImages()
+  const drift = useFleetDrift()
 
   // One clock for "expires in N min".
   const now = ref(Date.now())
@@ -87,6 +90,7 @@ export function useOverview() {
       ...proxmoxRows(proxmox.views.value),
       ...onboardingRows(drafts.data.value ?? []),
       ...templatePinRows(images.templates.data.value ?? [], images.versions.value),
+      ...driftRows(drift.query.data.value?.items ?? []),
     ])
   })
 
@@ -100,6 +104,7 @@ export function useOverview() {
     drafts.error.value && 'onboarding drafts',
     operations.error.value && 'operations',
     proxmox.accounts.error.value && 'Proxmox accounts',
+    drift.query.error.value && 'skill drift',
     images.leases.error.value && 'Lab leases',
     images.templates.error.value && 'Lab templates',
     images.loadError.value.some(([what]) => what === 'versions' || what === 'recipes') && 'image versions',
@@ -108,6 +113,7 @@ export function useOverview() {
 
   // "Nothing needs attention" waits for every source.
   const loading = computed(() => machines.isLoading.value
+    || drift.query.isLoading.value
     || operations.isLoading.value
     || drafts.isLoading.value
     || proxmox.loading.value
@@ -115,5 +121,14 @@ export function useOverview() {
     || images.templates.isLoading.value
     || images.loading.value)
 
-  return { attention, figures, feed, failures, loading, audit, proxmox }
+  // Nothing is measured until a desired revision is active; say so instead
+  // of letting an empty drift list read as "in sync".
+  const driftNote = computed(() => {
+    const items = drift.query.data.value?.items ?? []
+    return items.length > 0 && items.every(entry => entry.status === 'no_revision')
+      ? 'No desired revision is active, so skill drift is not measured.'
+      : ''
+  })
+
+  return { attention, figures, feed, failures, loading, audit, proxmox, driftNote }
 }

@@ -105,6 +105,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         desired::DesiredSourceDto,
         desired::DesiredStatusDto,
         plans::ApplyPlanRequest,
+        plans::DriftCountsDto,
+        plans::MachineDriftDto,
         plans::PlanActionDto,
         plans::PlanApprovalDto,
         plans::PlanDto,
@@ -302,6 +304,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(ready::start_ready_workflow))
                 .routes(routes!(apply::start_apply_workflow))
                 .routes(routes!(plans::create_machine_plan))
+                .routes(routes!(plans::list_desired_drift))
+                .routes(routes!(plans::get_machine_drift))
                 .routes(routes!(plans::apply_machine_plan))
                 .routes(routes!(
                     onboarding::create_onboarding_draft,

@@ -9,12 +9,14 @@ import CatalogTab from './components/CatalogTab.vue'
 import MatrixTab from './components/MatrixTab.vue'
 import PresetsTab from './components/PresetsTab.vue'
 import SearchTab from './components/SearchTab.vue'
+import { useFleetDrift } from '../drift/useDrift'
 import { useSkills } from './useSkills'
 
 // Fleet-wide skills (docs/planning/web-console.md, Skills): the observed
 // matrix, Fleet's catalog with rollout and assignments, per-machine presets,
 // and skills.sh. Per-machine library actions live on the machine page.
 const { matrix, machines, machineList, catalog, snapshots, entries, model, agents } = useSkills()
+const { query: driftQuery, byMachine: driftByMachine } = useFleetDrift()
 const route = useRoute()
 const router = useRouter()
 
@@ -67,6 +69,7 @@ const loadError = computed(() => {
     matrix.error.value && `skills matrix: ${errorMessage(matrix.error.value)}`,
     machines.error.value && `machines: ${errorMessage(machines.error.value)}`,
     catalog.error.value && `catalog: ${errorMessage(catalog.error.value)}`,
+    driftQuery.error.value && `drift: ${errorMessage(driftQuery.error.value)}`,
   ].filter(Boolean)
   return failed.length ? failed.join(' · ') : ''
 })
@@ -159,6 +162,8 @@ const loading = computed(() => matrix.isLoading.value || machines.isLoading.valu
         v-if="tab === 'matrix'"
         :matrix="model"
         :agents="agents"
+        :drift="driftByMachine"
+        :drift-failed="!!driftQuery.error.value"
         @open-catalog="openCatalog"
       />
       <CatalogTab
