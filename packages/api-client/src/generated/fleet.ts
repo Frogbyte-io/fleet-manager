@@ -823,6 +823,51 @@ export interface CreateProxmoxAccountRequest {
 }
 
 /**
+ * One validated desired resource of the active revision.
+ */
+export interface DesiredResourceDto {
+  /** The stable resource identity. */
+  id: string;
+  /** The resource kind. */
+  kind: string;
+  /** The mutable human-facing label. */
+  name: string;
+  /** The kind-specific non-secret spec. */
+  spec: unknown;
+}
+
+/**
+ * The number of held resources per kind.
+ */
+export type DesiredRevisionDtoResourceCounts = {[key: string]: number};
+
+/**
+ * The active desired revision and what its snapshot holds.
+ */
+export interface DesiredRevisionDto {
+  /** When the revision was activated (epoch milliseconds). */
+  activatedAt: number;
+  /** The commit SHA of the active revision. */
+  commitSha: string;
+  /** The content digest of the active revision. */
+  contentDigest: string;
+  /** The number of held resources per kind. */
+  resourceCounts: DesiredRevisionDtoResourceCounts;
+  /**
+     * Whether the revision's resources are held. A revision activated
+     * before snapshots existed has none until it is fetched again.
+     */
+  resourcesAvailable: boolean;
+}
+
+/**
+ * The desired-state status: no revision is active until one is activated.
+ */
+export interface DesiredStatusDto {
+  active?: null | DesiredRevisionDto;
+}
+
+/**
  * One discovered checkout, as the discovery operation reported it.
  */
 export interface DiscoveredCheckoutDto {
@@ -1748,6 +1793,33 @@ export type PageCorrelatedDeviceDtoItemsItem = {
 export interface PageCorrelatedDeviceDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageCorrelatedDeviceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One validated desired resource of the active revision.
+ */
+export type PageDesiredResourceDtoItemsItem = {
+  /** The stable resource identity. */
+  id: string;
+  /** The resource kind. */
+  kind: string;
+  /** The mutable human-facing label. */
+  name: string;
+  /** The kind-specific non-secret spec. */
+  spec: unknown;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageDesiredResourceDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageDesiredResourceDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -2865,6 +2937,24 @@ export type ResourceCatalogVersionDtoData = {
 export interface ResourceCatalogVersionDto {
   /** Immutable published version response. */
   data: ResourceCatalogVersionDtoData;
+}
+
+/**
+ * The desired-state status: no revision is active until one is activated.
+ */
+export type ResourceDesiredStatusDtoData = {
+  active?: null | DesiredRevisionDto;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDesiredStatusDto {
+  /** The desired-state status: no revision is active until one is activated. */
+  data: ResourceDesiredStatusDtoData;
 }
 
 /**
@@ -4262,6 +4352,25 @@ cursor?: string;
 limit?: number;
 };
 
+export type ListDesiredResourcesParams = {
+/**
+ * Only resources of this kind.
+ * @nullable
+ */
+kind?: string | null;
+/**
+ * Opaque identifier returned as the previous page's cursor.
+ * @nullable
+ */
+cursor?: string | null;
+/**
+ * Requested page size, clamped to the API maximum.
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+};
+
 export type ListImageRecipesParams = {
 /**
  * The maximum number of recipes to return.
@@ -4485,6 +4594,105 @@ export const listAuditEvents = async (params?: ListAuditEventsParams, options?: 
 
   const data: listAuditEventsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listAuditEventsResponse
+}
+
+
+
+export type listDesiredResourcesResponse200 = {
+  data: PageDesiredResourceDto
+  status: 200
+}
+
+export type listDesiredResourcesResponseSuccess = (listDesiredResourcesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type listDesiredResourcesResponse = (listDesiredResourcesResponseSuccess)
+
+export const getListDesiredResourcesUrl = (params?: ListDesiredResourcesParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/desired/resources?${stringifiedParams}` : `/api/v1/desired/resources`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Lists the active revision's resources.
+ */
+export const listDesiredResources = async (params?: ListDesiredResourcesParams, options?: RequestInit): Promise<listDesiredResourcesResponse> => {
+
+  const res = await fetch(getListDesiredResourcesUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDesiredResourcesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDesiredResourcesResponse
+}
+
+
+
+export type getDesiredRevisionResponse200 = {
+  data: ResourceDesiredStatusDto
+  status: 200
+}
+
+export type getDesiredRevisionResponseSuccess = (getDesiredRevisionResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getDesiredRevisionResponse = (getDesiredRevisionResponseSuccess)
+
+export const getGetDesiredRevisionUrl = () => {
+
+
+
+
+  return `/api/v1/desired/revision`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Reads the active desired revision.
+ */
+export const getDesiredRevision = async ( options?: RequestInit): Promise<getDesiredRevisionResponse> => {
+
+  const res = await fetch(getGetDesiredRevisionUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDesiredRevisionResponse
 }
 
 

@@ -70,6 +70,8 @@ pub struct ApiState {
     /// The Lab use cases, when the controller was composed with a
     /// database; `None` only in document/test states.
     pub lab: Option<Arc<fleet_application::lab::Lab>>,
+    /// The desired-state source reads, when the controller has a store.
+    pub desired: Option<Arc<fleet_application::source::DesiredSource>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -90,6 +92,7 @@ impl std::fmt::Debug for ApiState {
             .field("proxmox", &self.proxmox)
             .field("images", &self.images)
             .field("lab", &self.lab)
+            .field("desired", &self.desired)
             .finish()
     }
 }
@@ -272,6 +275,7 @@ impl ApiState {
             proxmox: None,
             images: None,
             lab: None,
+            desired: None,
         }
     }
 }

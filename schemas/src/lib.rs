@@ -244,6 +244,91 @@ pub fn generated_schema_text() -> String {
     text
 }
 
+/// The strict YAML input policy shared by validation and parsing.
+fn strict_yaml_options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
+        duplicate_keys: DuplicateKeyPolicy::Error,
+        merge_keys: MergeKeyPolicy::Error,
+        strict_booleans: true,
+        budget: serde_saphyr::budget! {
+            max_nodes: 100_000,
+            max_anchors: 1_000,
+            max_aliases: 1_000,
+            max_depth: 128,
+        },
+    }
+}
+
+/// One validated desired resource, ready to persist as part of a snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedResource {
+    /// The resource kind id.
+    pub kind: String,
+    /// The stable resource identity.
+    pub id: String,
+    /// The mutable human-facing label.
+    pub name: String,
+    /// The kind-specific non-secret spec.
+    pub spec: Value,
+}
+
+/// Validates the sources as one candidate and returns their resources,
+/// sorted by kind then identity. A collection with any diagnostic yields
+/// no resources: an invalid document can never be parsed into a snapshot.
+///
+/// # Errors
+///
+/// Returns the rendered diagnostics when the collection is invalid.
+pub fn parse_resources(sources: &[SourceDocument]) -> Result<Vec<ParsedResource>, Vec<String>> {
+    let diagnostics = validate_sources(sources);
+    if !diagnostics.is_empty() {
+        return Err(diagnostics.iter().map(ToString::to_string).collect());
+    }
+    let mut resources = Vec::new();
+    for source in sources {
+        let documents: Vec<Value> =
+            serde_saphyr::from_multiple_with_options(&source.yaml, strict_yaml_options())
+                .map_err(|_| vec![format!("{} could not be parsed", source.path.display())])?;
+        for document in documents {
+            let text = |pointer: &str| {
+                document
+                    .pointer(pointer)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            resources.push(ParsedResource {
+                kind: text("/kind"),
+                id: text("/metadata/id"),
+                name: text("/metadata/name"),
+                spec: document.get("spec").cloned().unwrap_or(Value::Null),
+            });
+        }
+    }
+    resources.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
+    Ok(resources)
+}
+
+/// Reads the paths and parses them like [`parse_resources`].
+///
+/// # Errors
+///
+/// Returns the diagnostics, or a single message when a file is unreadable.
+pub fn parse_paths(paths: &[PathBuf]) -> Result<Vec<ParsedResource>, Vec<String>> {
+    let sources = paths
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path).map(|yaml| SourceDocument {
+                path: path.clone(),
+                yaml,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| vec![format!("a candidate file is unreadable: {error}")])?;
+    parse_resources(&sources)
+}
+
 /// Validates YAML sources as one candidate desired-state collection.
 ///
 /// # Panics
@@ -260,19 +345,8 @@ pub fn validate_sources(sources: &[SourceDocument]) -> Vec<Diagnostic> {
     let mut identities: HashMap<String, String> = HashMap::new();
 
     for source in sources {
-        let options = serde_saphyr::options! {
-            duplicate_keys: DuplicateKeyPolicy::Error,
-            merge_keys: MergeKeyPolicy::Error,
-            strict_booleans: true,
-            budget: serde_saphyr::budget! {
-                max_nodes: 100_000,
-                max_anchors: 1_000,
-                max_aliases: 1_000,
-                max_depth: 128,
-            },
-        };
         let documents: Vec<Value> =
-            match serde_saphyr::from_multiple_with_options(&source.yaml, options) {
+            match serde_saphyr::from_multiple_with_options(&source.yaml, strict_yaml_options()) {
                 Ok(documents) => documents,
                 Err(error) => {
                     let mut location = source.path.display().to_string();

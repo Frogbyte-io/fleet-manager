@@ -150,6 +150,90 @@
         }
       }
     },
+    "/api/v1/desired/resources": {
+      "get": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Lists the active revision's resources.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "listDesiredResources",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Only resources of this kind.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque identifier returned as the previous page's cursor.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Requested page size, clamped to the API maximum.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_DesiredResourceDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desired/revision": {
+      "get": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Reads the active desired revision.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "getDesiredRevision",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DesiredStatusDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -6357,6 +6441,91 @@
           }
         }
       },
+      "DesiredResourceDto": {
+        "type": "object",
+        "description": "One validated desired resource of the active revision.",
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "spec"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The stable resource identity."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The resource kind."
+          },
+          "name": {
+            "type": "string",
+            "description": "The mutable human-facing label."
+          },
+          "spec": {
+            "description": "The kind-specific non-secret spec."
+          }
+        }
+      },
+      "DesiredRevisionDto": {
+        "type": "object",
+        "description": "The active desired revision and what its snapshot holds.",
+        "required": [
+          "commitSha",
+          "contentDigest",
+          "activatedAt",
+          "resourcesAvailable",
+          "resourceCounts"
+        ],
+        "properties": {
+          "activatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the revision was activated (epoch milliseconds)."
+          },
+          "commitSha": {
+            "type": "string",
+            "description": "The commit SHA of the active revision."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "The content digest of the active revision."
+          },
+          "resourceCounts": {
+            "type": "object",
+            "description": "The number of held resources per kind.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "resourcesAvailable": {
+            "type": "boolean",
+            "description": "Whether the revision's resources are held. A revision activated\nbefore snapshots existed has none until it is fetched again."
+          }
+        }
+      },
+      "DesiredStatusDto": {
+        "type": "object",
+        "description": "The desired-state status: no revision is active until one is activated.",
+        "properties": {
+          "active": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DesiredRevisionDto",
+                "description": "The active revision, when one has been activated."
+              }
+            ]
+          }
+        }
+      },
       "DiscoveredCheckoutDto": {
         "type": "object",
         "description": "One discovered checkout, as the discovery operation reported it.",
@@ -8317,6 +8486,51 @@
                 "user": {
                   "type": "string",
                   "description": "The registering user."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_DesiredResourceDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One validated desired resource of the active revision.",
+              "required": [
+                "kind",
+                "id",
+                "name",
+                "spec"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "The stable resource identity."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "The resource kind."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "The mutable human-facing label."
+                },
+                "spec": {
+                  "description": "The kind-specific non-secret spec."
                 }
               }
             },
@@ -10330,6 +10544,32 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Publication time."
+              }
+            }
+          }
+        }
+      },
+      "Resource_DesiredStatusDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The desired-state status: no revision is active until one is activated.",
+            "properties": {
+              "active": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DesiredRevisionDto",
+                    "description": "The active revision, when one has been activated."
+                  }
+                ]
               }
             }
           }
@@ -12829,6 +13069,10 @@
     {
       "name": "audit",
       "description": "Authorized, metadata-only audit event queries."
+    },
+    {
+      "name": "desired",
+      "description": "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."
     },
     {
       "name": "operations",

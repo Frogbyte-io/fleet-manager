@@ -281,6 +281,7 @@ fn state_for(
         proxmox: None,
         images: None,
         lab: None,
+        desired: None,
     })
 }
 

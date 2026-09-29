@@ -95,21 +95,47 @@ impl SourceExecutor {
             let remote = payload.remote.clone();
             let commit_sha = payload.commit_sha.clone();
             tokio::task::spawn_blocking(move || {
-                source.fetch_candidate(&remote, &commit_sha, |sources| {
+                let mut candidate = source.fetch_candidate(&remote, &commit_sha, |sources| {
                     fleet_schema::validate_paths(sources)
                         .unwrap_or_default()
                         .iter()
                         .map(ToString::to_string)
                         .collect()
-                })
+                })?;
+                // A valid candidate's resources are read from the same
+                // worktree the validation ran on; the parse re-validates,
+                // so an invalid document can never enter a snapshot.
+                let mut resources = Vec::new();
+                if candidate.diagnostics.is_empty() {
+                    let mut paths = Vec::new();
+                    collect_yaml(&candidate.worktree, &candidate.worktree, &mut paths);
+                    match fleet_schema::parse_paths(&paths) {
+                        Ok(parsed) => {
+                            resources = parsed
+                                .into_iter()
+                                .map(
+                                    |resource| fleet_application::source::DesiredResourceRecord {
+                                        kind: resource.kind,
+                                        id: resource.id,
+                                        name: resource.name,
+                                        spec: resource.spec,
+                                    },
+                                )
+                                .collect();
+                        }
+                        Err(diagnostics) => candidate.diagnostics = diagnostics,
+                    }
+                }
+                Ok((candidate, resources))
             })
             .await
             .map_err(|join_error| format!("the fetch thread failed: {join_error}"))?
         };
         let outcome = match outcome {
-            Ok(candidate) => fleet_application::source::FetchOutcome::Candidate {
+            Ok((candidate, resources)) => fleet_application::source::FetchOutcome::Candidate {
                 digest: candidate.digest,
                 diagnostics: candidate.diagnostics,
+                resources,
             },
             Err(detail) => fleet_application::source::FetchOutcome::TransportFailed { detail },
         };
@@ -126,11 +152,13 @@ impl SourceExecutor {
             fleet_application::source::FetchOutcome::Candidate {
                 digest,
                 diagnostics,
+                resources,
             } => serde_json::json!({
                 "commitSha": digest.commit_sha,
                 "contentDigest": digest.content_digest,
                 "diagnostics": diagnostics,
                 "valid": diagnostics.is_empty(),
+                "resourceCount": resources.len(),
             })
             .to_string(),
             fleet_application::source::FetchOutcome::TransportFailed { detail } => {

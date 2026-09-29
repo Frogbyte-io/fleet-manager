@@ -15,6 +15,7 @@ pub mod apply;
 pub mod audit;
 pub mod auth;
 mod correlation;
+pub mod desired;
 mod envelope;
 mod error;
 pub mod frogenv;
@@ -96,6 +97,9 @@ pub const API_BASE_PATH: &str = "/api/v1";
         skills::SkillsAuthDto,
         skills::StartSkillsOperationRequest,
         skills::SkillsSnapshotDto,
+        desired::DesiredResourceDto,
+        desired::DesiredRevisionDto,
+        desired::DesiredStatusDto,
         skill_catalog::CatalogContentDto,
         skill_catalog::CatalogDto,
         skill_catalog::CatalogFileDto,
@@ -180,6 +184,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "system", description = "The controller's own view of itself."),
         (name = "events", description = "Payload-free SSE invalidation notifications."),
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
+        (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
         (name = "operations", description = "Durable operations: accepted remote work."),
         (
             name = "machines",
@@ -271,6 +276,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(skill_catalog::list_catalog_versions))
                 .routes(routes!(skill_catalog::preview_catalog_rollout))
                 .routes(routes!(skill_catalog::start_catalog_rollout))
+                .routes(routes!(desired::get_desired_revision))
+                .routes(routes!(desired::list_desired_resources))
                 .routes(routes!(frogenv::start_frogenv_operation))
                 .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(ready::start_ready_workflow))
