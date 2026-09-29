@@ -146,6 +146,9 @@ async fn a_fetched_and_activated_revision_serves_its_resources_after_a_reopen() 
         let digest = digest_of(&fetched);
         let activated = harness.activate(&sha, &digest).await;
         assert_eq!(activated["state"], "succeeded", "{activated}");
+        // Close every pooled connection before the reopen, as a stopping
+        // controller would.
+        harness.store.pool().close().await;
         digest
     };
 

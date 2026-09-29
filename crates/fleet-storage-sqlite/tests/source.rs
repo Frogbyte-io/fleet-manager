@@ -165,3 +165,24 @@ async fn an_empty_repository_is_a_held_snapshot_and_a_revision_without_one_is_re
     assert!(!summary.snapshot_held);
     assert!(summary.kind_counts.is_empty());
 }
+
+#[tokio::test]
+async fn the_remote_is_stored_replaced_and_survives_a_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, repository) = repository(&directory).await;
+    assert!(repository.remote().await.unwrap().is_none());
+    repository
+        .set_remote("ssh://git@example.test/a.git")
+        .await
+        .unwrap();
+    repository
+        .set_remote("ssh://git@example.test/b.git")
+        .await
+        .unwrap();
+    drop(store);
+    let (_store, repository) = self::repository(&directory).await;
+    assert_eq!(
+        repository.remote().await.unwrap().as_deref(),
+        Some("ssh://git@example.test/b.git")
+    );
+}

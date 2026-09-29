@@ -109,6 +109,18 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
         after: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DesiredResourceRecord>, String>;
+    /// The configured desired-source remote, when one is set.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn remote(&self) -> Result<Option<String>, String>;
+    /// Stores the desired-source remote (validated non-secret text).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn set_remote(&self, remote: &str) -> Result<(), String>;
     /// Atomically activates a revision: the backend serializes the
     /// check-and-set so concurrent activations cannot race — the method
     /// returns the revision that is active AFTER the call, which is the
@@ -330,6 +342,181 @@ impl DesiredSource {
             })
     }
 
+    /// The configured remote, when one is set.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn remote(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+    ) -> Result<Option<String>, crate::project::ProjectUseCaseError> {
+        Self::authorize_read(authorizer, principal_id)?;
+        self.port
+            .remote()
+            .await
+            .map_err(|detail| crate::project::ProjectUseCaseError::Backend {
+                context: "source_remote",
+                detail,
+            })
+    }
+
+    /// Configures the desired-source remote. The remote is validated as
+    /// non-secret text, and the audit intent lands before the write.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an invalid remote, or a backend failure.
+    pub async fn configure_remote(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+        remote: &str,
+    ) -> Result<String, crate::project::ProjectUseCaseError> {
+        use crate::authz::{AccessRequest, Permission, authorize};
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::SourceActivate,
+                resource: None,
+            },
+        )
+        .map_err(crate::project::ProjectUseCaseError::Denied)?;
+        let remote = validate_remote(remote)
+            .map_err(|detail| crate::project::ProjectUseCaseError::Invalid { detail })?;
+        self.record_source_intent(principal_id, "source_remote_configured", None, None)
+            .await?;
+        self.port.set_remote(&remote).await.map_err(|detail| {
+            crate::project::ProjectUseCaseError::Backend {
+                context: "source_remote",
+                detail,
+            }
+        })?;
+        Ok(remote)
+    }
+
+    /// The recorded revisions, newest first, and which one is active.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn history(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+    ) -> Result<(Vec<ActiveRevision>, Option<ActiveRevision>), crate::project::ProjectUseCaseError>
+    {
+        Self::authorize_read(authorizer, principal_id)?;
+        let backend = |detail| crate::project::ProjectUseCaseError::Backend {
+            context: "source_history",
+            detail,
+        };
+        let revisions = self.port.prior_revisions().await.map_err(backend)?;
+        let active = self.port.active_revision().await.map_err(backend)?;
+        Ok((revisions, active))
+    }
+
+    /// Returns to a prior valid revision. The revision must be in the
+    /// recorded history and its snapshot must be held; it activates from
+    /// that immutable snapshot, so no worktree is needed. Serialized and
+    /// audited like any activation.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown revision or missing snapshot, or a
+    /// backend failure.
+    pub async fn rollback(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+        target: &ActiveRevision,
+        operation_id: Option<&str>,
+    ) -> Result<ActiveRevision, crate::project::ProjectUseCaseError> {
+        use crate::authz::{AccessRequest, Permission, authorize};
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::SourceActivate,
+                resource: None,
+            },
+        )
+        .map_err(crate::project::ProjectUseCaseError::Denied)?;
+        let backend = |context| {
+            move |detail| crate::project::ProjectUseCaseError::Backend { context, detail }
+        };
+        let recorded = self
+            .port
+            .prior_revisions()
+            .await
+            .map_err(backend("source_verify"))?;
+        if !recorded.contains(target) {
+            return Err(crate::project::ProjectUseCaseError::Invalid {
+                detail: "the revision is not in the recorded history; only a prior valid revision can be rolled back to"
+                    .to_owned(),
+            });
+        }
+        if !self
+            .port
+            .snapshot_held(target)
+            .await
+            .map_err(backend("source_verify"))?
+        {
+            return Err(crate::project::ProjectUseCaseError::Invalid {
+                detail: "the revision holds no resource snapshot; fetch it again before activating"
+                    .to_owned(),
+            });
+        }
+        self.record_source_intent(
+            principal_id,
+            "source_rollback",
+            Some(&target.commit_sha),
+            operation_id,
+        )
+        .await?;
+        self.port
+            .activate_serialized(target)
+            .await
+            .map_err(backend("source_activate"))
+    }
+
+    async fn record_source_intent(
+        &self,
+        principal_id: &str,
+        event: &str,
+        commit_sha: Option<&str>,
+        operation_id: Option<&str>,
+    ) -> Result<(), crate::project::ProjectUseCaseError> {
+        use crate::authz::Permission;
+        let audit_error = |detail: String| crate::project::ProjectUseCaseError::Backend {
+            context: "audit",
+            detail,
+        };
+        let mut metadata = crate::audit::AuditMetadata::default();
+        metadata
+            .insert("event", event)
+            .map_err(|error| audit_error(error.to_string()))?;
+        if let Some(commit_sha) = commit_sha {
+            metadata
+                .insert("commitSha", commit_sha)
+                .map_err(|error| audit_error(error.to_string()))?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal_id.to_owned(),
+                action: Permission::SourceActivate.id().to_owned(),
+                resource: None,
+                decision: crate::authz::Decision::allow(),
+                correlation_id: None,
+                operation_id: operation_id.map(str::to_owned),
+                metadata,
+            })
+            .await
+            .map_err(audit_error)
+    }
+
     /// The active revision and what its snapshot holds.
     ///
     /// # Errors
@@ -420,6 +607,37 @@ impl DesiredSource {
     }
 }
 
+/// Validates a desired-source remote as non-secret text and returns its
+/// trimmed form: no leading `-` (git would read it as an option), no
+/// whitespace or control characters, and no embedded credentials.
+fn validate_remote(remote: &str) -> Result<String, String> {
+    let remote = remote.trim();
+    if remote.is_empty() || remote.len() > 2048 {
+        return Err("the remote must be between 1 and 2048 characters".to_owned());
+    }
+    if remote.starts_with('-') {
+        return Err("the remote must not start with '-'".to_owned());
+    }
+    if remote
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("the remote must not contain whitespace or control characters".to_owned());
+    }
+    let embedded_password = remote.split_once("://").is_some_and(|(_, rest)| {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        authority
+            .rsplit_once('@')
+            .is_some_and(|(userinfo, _)| userinfo.contains(':'))
+    });
+    if embedded_password || fleet_core::redact_schemeless_credentials(remote) != remote {
+        return Err(
+            "the remote must not embed credentials; Fleet Git never stores secrets".to_owned(),
+        );
+    }
+    Ok(remote.to_owned())
+}
+
 /// Reports the conflict between two revisions as data: the two digests
 /// and the divergent file paths. Fleet never auto-resolves conflicts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -455,6 +673,7 @@ mod tests {
         active: Mutex<Option<ActiveRevision>>,
         valid: Mutex<Vec<ActiveRevision>>,
         snapshots: Mutex<Vec<(ActiveRevision, Vec<DesiredResourceRecord>)>>,
+        remote: Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -475,6 +694,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((revision.clone(), resources.to_vec()));
+            Ok(())
+        }
+        async fn remote(&self) -> Result<Option<String>, String> {
+            Ok(self.remote.lock().unwrap().clone())
+        }
+        async fn set_remote(&self, remote: &str) -> Result<(), String> {
+            *self.remote.lock().unwrap() = Some(remote.to_owned());
             Ok(())
         }
         async fn snapshot_held(&self, revision: &ActiveRevision) -> Result<bool, String> {
@@ -820,5 +1046,173 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    fn revision(sha: &str, content: &str) -> ActiveRevision {
+        ActiveRevision {
+            commit_sha: sha.to_owned(),
+            content_digest: content.to_owned(),
+        }
+    }
+
+    async fn fetched(service: &DesiredSource, sha: &str, content: &str) {
+        service
+            .handle_fetch(
+                &AllowAll,
+                "anonymous-lan-admin",
+                FetchOutcome::Candidate {
+                    digest: digest(sha, content),
+                    diagnostics: vec![],
+                    resources: vec![resource(sha)],
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_remote_is_validated_audited_and_stored() {
+        let (service, audit, port) = service();
+        for bad in [
+            "",
+            "  ",
+            "--upload-pack=evil",
+            "https://user:hunter2@example.test/repo.git",
+            "user:hunter2@example.test:repo.git",
+            "https://example.test/a b",
+        ] {
+            let error = service
+                .configure_remote(&AllowAll, "anonymous-lan-admin", bad)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::project::ProjectUseCaseError::Invalid { .. }),
+                "{bad}"
+            );
+        }
+        assert!(
+            port.remote().await.unwrap().is_none(),
+            "a refusal stores nothing"
+        );
+        assert!(audit.intents.lock().unwrap().is_empty());
+        // A username without a password is not a secret.
+        let stored = service
+            .configure_remote(
+                &AllowAll,
+                "anonymous-lan-admin",
+                " ssh://git@example.test/fleet.git ",
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored, "ssh://git@example.test/fleet.git");
+        service
+            .configure_remote(
+                &AllowAll,
+                "anonymous-lan-admin",
+                "git@example.test:fleet.git",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .remote(&AllowAll, "anonymous-lan-admin")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("git@example.test:fleet.git")
+        );
+        assert_eq!(audit.intents.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rollback_returns_to_a_recorded_revision_and_is_audited() {
+        let (service, audit, port) = service();
+        fetched(&service, "aaa", "d1").await;
+        fetched(&service, "bbb", "d2").await;
+        service
+            .activate(
+                &AllowAll,
+                "anonymous-lan-admin",
+                &digest("bbb", "d2"),
+                true,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        audit.intents.lock().unwrap().clear();
+        let back = service
+            .rollback(
+                &AllowAll,
+                "anonymous-lan-admin",
+                &revision("aaa", "d1"),
+                Some("op-9"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(back.commit_sha, "aaa");
+        assert_eq!(
+            port.active_revision().await.unwrap().unwrap().commit_sha,
+            "aaa"
+        );
+        let intents = audit.intents.lock().unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].action, "source.activate");
+        assert_eq!(intents[0].operation_id.as_deref(), Some("op-9"));
+    }
+
+    #[tokio::test]
+    async fn rollback_refuses_an_unrecorded_revision_or_a_missing_snapshot() {
+        let (service, _, port) = service();
+        fetched(&service, "aaa", "d1").await;
+        let unknown = service
+            .rollback(
+                &AllowAll,
+                "anonymous-lan-admin",
+                &revision("zzz", "d9"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            unknown.to_string().contains("not in the recorded history"),
+            "{unknown}"
+        );
+        // Recorded before snapshots existed: in history, nothing held.
+        port.valid.lock().unwrap().push(revision("old", "d0"));
+        let unheld = service
+            .rollback(
+                &AllowAll,
+                "anonymous-lan-admin",
+                &revision("old", "d0"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(unheld.to_string().contains("fetch it again"), "{unheld}");
+        assert!(port.active_revision().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn history_lists_revisions_and_the_active_one() {
+        let (service, _, _) = service();
+        fetched(&service, "aaa", "d1").await;
+        service
+            .activate(
+                &AllowAll,
+                "anonymous-lan-admin",
+                &digest("aaa", "d1"),
+                true,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        let (revisions, active) = service
+            .history(&AllowAll, "anonymous-lan-admin")
+            .await
+            .unwrap();
+        assert_eq!(revisions, vec![revision("aaa", "d1")]);
+        assert_eq!(active, Some(revision("aaa", "d1")));
     }
 }

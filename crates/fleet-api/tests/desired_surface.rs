@@ -78,6 +78,12 @@ impl SourcePort for Source {
     ) -> Result<(), String> {
         unimplemented!("the read surface never writes")
     }
+    async fn remote(&self) -> Result<Option<String>, String> {
+        unimplemented!("the read surface never asks")
+    }
+    async fn set_remote(&self, _remote: &str) -> Result<(), String> {
+        unimplemented!("the read surface never writes")
+    }
     async fn snapshot_held(&self, _revision: &ActiveRevision) -> Result<bool, String> {
         unimplemented!("the read surface never asks")
     }

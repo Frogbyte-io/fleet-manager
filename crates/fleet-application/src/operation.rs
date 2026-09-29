@@ -45,7 +45,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 57] = [
+pub const CREATABLE_KINDS: [&str; 58] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -91,6 +91,7 @@ pub const CREATABLE_KINDS: [&str; 57] = [
     "apply.workflow",
     "source.fetch",
     "source.activate",
+    "source.rollback",
     "proxmox.guest.start",
     "proxmox.guest.stop",
     "proxmox.guest.shutdown",
@@ -122,7 +123,7 @@ fn machine_scoped_kind_permission(kind: &str, payload: Option<&str>) -> Option<P
 fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
     match kind {
         "source.fetch" => Some(Permission::SourceFetch),
-        "source.activate" => Some(Permission::SourceActivate),
+        "source.activate" | "source.rollback" => Some(Permission::SourceActivate),
         "proxmox.guest.start"
         | "proxmox.guest.stop"
         | "proxmox.guest.shutdown"

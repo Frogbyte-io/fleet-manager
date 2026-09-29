@@ -152,6 +152,28 @@ impl fleet_application::source::SourcePort for SourceRepository {
         Ok(())
     }
 
+    async fn remote(&self) -> Result<Option<String>, String> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT remote FROM source_remote LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("the remote read failed: {error}"))?;
+        Ok(row.map(|(remote,)| remote))
+    }
+
+    async fn set_remote(&self, remote: &str) -> Result<(), String> {
+        sqlx::query(
+            "INSERT INTO source_remote (singleton, remote, updated_at) VALUES ('remote', ?1, ?2) \
+             ON CONFLICT(singleton) DO UPDATE SET remote = excluded.remote, \
+             updated_at = excluded.updated_at",
+        )
+        .bind(remote)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("the remote write failed: {error}"))?;
+        Ok(())
+    }
+
     async fn snapshot_held(&self, revision: &ActiveRevision) -> Result<bool, String> {
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT 1 FROM source_revision_snapshots WHERE commit_sha = ?1 AND content_digest = ?2",

@@ -138,6 +138,8 @@ impl GitSource {
             "clone",
             "--quiet",
             "--no-recurse-submodules",
+            // An option-looking remote must never reach git as a flag.
+            "--",
             remote,
             worktree.to_str().unwrap_or_default(),
         ])?;
@@ -235,4 +237,21 @@ fn reject_symlinks(base: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GitSource;
+
+    #[test]
+    fn an_option_looking_remote_is_never_run_as_a_git_flag() {
+        let root = std::env::temp_dir().join(format!("fleet-git-flag-{}", std::process::id()));
+        let marker = root.join("ran");
+        let source = GitSource::new(root.clone());
+        let remote = format!("--upload-pack=touch {}", marker.display());
+        let result = source.fetch_candidate(&remote, &"a".repeat(40), |_| Vec::new());
+        assert!(result.is_err(), "the remote is a path, not an option");
+        assert!(!marker.exists(), "the option must not have executed");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
