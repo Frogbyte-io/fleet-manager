@@ -634,6 +634,13 @@ export interface CheckoutFactDto {
  * Sets the desired-source remote.
  */
 export interface ConfigureSourceRequest {
+  /**
+     * An optional reference returned by `POST /desired/source/credential`.
+     * Omitting it clears any reference: git then authenticates with the
+     * controller host's own configuration.
+     * @nullable
+     */
+  credentialRef?: string | null;
   /** The Git remote. Embedded credentials are refused. */
   remote: string;
 }
@@ -914,6 +921,12 @@ export interface DesiredRevisionDto {
  * The configured desired-source remote.
  */
 export interface DesiredSourceDto {
+  /**
+     * The Git credential reference (an opaque id), when one is
+     * configured. Never the credential value.
+     * @nullable
+     */
+  credentialRef?: string | null;
   /**
      * The remote, when one is configured. Never carries credentials.
      * @nullable
@@ -3186,6 +3199,12 @@ export interface ResourceCatalogVersionDto {
  */
 export type ResourceDesiredSourceDtoData = {
   /**
+     * The Git credential reference (an opaque id), when one is
+     * configured. Never the credential value.
+     * @nullable
+     */
+  credentialRef?: string | null;
+  /**
      * The remote, when one is configured. Never carries credentials.
      * @nullable
      */
@@ -4154,6 +4173,25 @@ export interface ResourceSkillsSnapshotDto {
 }
 
 /**
+ * The reference of a stored Git credential.
+ */
+export type ResourceStoredCredentialDtoData = {
+  /** The opaque reference to pass as `credentialRef`. */
+  credentialRef: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceStoredCredentialDto {
+  /** The reference of a stored Git credential. */
+  data: ResourceStoredCredentialDtoData;
+}
+
+/**
  * The integration's status: configured or not, the client id, and the
  * fixed read-only scope.
  */
@@ -4606,6 +4644,23 @@ export interface StartSkillsOperationRequest {
      * @minimum 0
      */
   timeoutSeconds: number;
+}
+
+/**
+ * A Git credential to store: an HTTPS access token, or an SSH private key
+ * in PEM/OpenSSH form. Write-only.
+ */
+export interface StoreCredentialRequest {
+  /** The credential value. */
+  value: string;
+}
+
+/**
+ * The reference of a stored Git credential.
+ */
+export interface StoredCredentialDto {
+  /** The opaque reference to pass as `credentialRef`. */
+  credentialRef: string;
 }
 
 /**
@@ -5557,6 +5612,82 @@ const res = await fetch(getConfigureDesiredSourceUrl(),
 
   const data: configureDesiredSourceResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as configureDesiredSourceResponse
+}
+
+
+
+export type storeDesiredSourceCredentialResponse201 = {
+  data: ResourceStoredCredentialDto
+  status: 201
+}
+
+export type storeDesiredSourceCredentialResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type storeDesiredSourceCredentialResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type storeDesiredSourceCredentialResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type storeDesiredSourceCredentialResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type storeDesiredSourceCredentialResponseSuccess = (storeDesiredSourceCredentialResponse201) & {
+  headers: Headers;
+};
+export type storeDesiredSourceCredentialResponseError = (storeDesiredSourceCredentialResponse400 | storeDesiredSourceCredentialResponse403 | storeDesiredSourceCredentialResponse500 | storeDesiredSourceCredentialResponse503) & {
+  headers: Headers;
+};
+
+export type storeDesiredSourceCredentialResponse = (storeDesiredSourceCredentialResponseSuccess | storeDesiredSourceCredentialResponseError)
+
+export const getStoreDesiredSourceCredentialUrl = () => {
+
+
+
+
+  return `/api/v1/desired/source/credential`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, validation, or storage fails.
+ * @summary Stores a Git credential (HTTPS token or SSH private key) in the
+controller's encrypted secret store and returns its reference. The value
+is write-only: no endpoint returns it.
+ */
+export const storeDesiredSourceCredential = async (storeCredentialRequest: StoreCredentialRequest, options?: RequestInit): Promise<storeDesiredSourceCredentialResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getStoreDesiredSourceCredentialUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(storeCredentialRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: storeDesiredSourceCredentialResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as storeDesiredSourceCredentialResponse
 }
 
 

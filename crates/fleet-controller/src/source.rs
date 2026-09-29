@@ -12,7 +12,13 @@ use std::sync::Arc;
 
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
-use fleet_provider_git::GitSource;
+use fleet_provider_git::{GitCredential, GitSource};
+
+/// The stable failure detail for a reference whose credential is missing
+/// or was revoked.
+pub const CREDENTIAL_UNAVAILABLE: &str = "the configured Git credential is missing or revoked; store it again and reconfigure the source";
+/// The stable failure detail for a credential store that could not be read.
+pub const CREDENTIAL_UNREADABLE: &str = "the configured Git credential could not be read";
 
 /// The `source.fetch` payload.
 #[derive(Debug, serde::Deserialize)]
@@ -22,6 +28,10 @@ struct FetchPayload {
     remote: String,
     /// The commit SHA to fetch.
     commit_sha: String,
+    /// The Git credential reference (an id, never a value), when the
+    /// configured source names one.
+    #[serde(default)]
+    credential_ref: Option<String>,
 }
 
 /// The `source.activate` payload.
@@ -39,6 +49,8 @@ struct ActivatePayload {
 pub struct SourceExecutor {
     source: GitSource,
     desired_source: Arc<fleet_application::source::DesiredSource>,
+    /// Resolves credential references just in time.
+    credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
     /// Serializes worktree materialization and reads: a fetch replaces the
     /// SHA-named worktree, so a concurrent duplicate fetch or activation
     /// must never observe it half-written.
@@ -60,8 +72,19 @@ impl SourceExecutor {
         Self {
             source: GitSource::new(work_root),
             desired_source,
+            credentials: None,
             worktrees: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Attaches the Git credential store that resolves references.
+    #[must_use]
+    pub fn with_credentials(
+        mut self,
+        credentials: Arc<dyn fleet_application::source::GitCredentialStore>,
+    ) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 }
 
@@ -96,6 +119,29 @@ impl SourceExecutor {
             .await
             .map_err(|error| error.to_string())?;
         let _worktrees = self.worktrees.lock().await;
+        // The credential is resolved here, just in time; a missing or
+        // revoked reference fails the fetch with a stable reason that
+        // names neither the reference nor any value.
+        let credential = match payload.credential_ref.as_deref() {
+            None => None,
+            Some(reference) => {
+                let resolved = match &self.credentials {
+                    Some(store) => store.resolve(reference).await,
+                    None => Ok(None),
+                };
+                match resolved {
+                    Ok(Some(value)) => Some(GitCredential::from_secret_value(&value)),
+                    Ok(None) => {
+                        return complete_failed(operations, &operation.id, CREDENTIAL_UNAVAILABLE)
+                            .await;
+                    }
+                    Err(_) => {
+                        return complete_failed(operations, &operation.id, CREDENTIAL_UNREADABLE)
+                            .await;
+                    }
+                }
+            }
+        };
         // The provider runs on the controller's own machine; the
         // validation closure rides the schemas crate's validate_paths.
         let outcome = {
@@ -103,13 +149,19 @@ impl SourceExecutor {
             let remote = payload.remote.clone();
             let commit_sha = payload.commit_sha.clone();
             tokio::task::spawn_blocking(move || {
-                let mut candidate = source.fetch_candidate(&remote, &commit_sha, |sources| {
+                let validate = |sources: &[std::path::PathBuf]| -> Vec<String> {
                     fleet_schema::validate_paths(sources)
                         .unwrap_or_default()
                         .iter()
                         .map(ToString::to_string)
                         .collect()
-                })?;
+                };
+                let mut candidate = match &credential {
+                    Some(credential) => {
+                        source.fetch_candidate_with(&remote, &commit_sha, credential, validate)?
+                    }
+                    None => source.fetch_candidate(&remote, &commit_sha, validate)?,
+                };
                 // A valid candidate's resources are read from the same
                 // worktree the validation ran on; the parse re-validates,
                 // so an invalid document can never enter a snapshot.

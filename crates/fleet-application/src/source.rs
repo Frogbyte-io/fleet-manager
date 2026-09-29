@@ -115,12 +115,20 @@ pub trait SourcePort: std::fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn remote(&self) -> Result<Option<String>, String>;
-    /// Stores the desired-source remote (validated non-secret text).
+    /// The credential reference configured with the remote, when one is
+    /// set. The reference is an opaque secret-record id, never a value.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors.
-    async fn set_remote(&self, remote: &str) -> Result<(), String>;
+    async fn credential_ref(&self) -> Result<Option<String>, String>;
+    /// Stores the desired-source remote (validated non-secret text) and
+    /// its optional credential reference, replacing both together.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn set_remote(&self, remote: &str, credential_ref: Option<&str>) -> Result<(), String>;
     /// Atomically activates a revision: the backend serializes the
     /// check-and-set so concurrent activations cannot race — the method
     /// returns the revision that is active AFTER the call, which is the
@@ -157,11 +165,48 @@ pub enum FetchOutcome {
     },
 }
 
+/// The controller-held Git credentials (an HTTPS token or an SSH private
+/// key), addressed by opaque reference. Only records created through this
+/// port are resolvable: a reference can never reach another integration's
+/// secret.
+#[async_trait::async_trait]
+pub trait GitCredentialStore: std::fmt::Debug + Send + Sync {
+    /// Stores a credential value and returns its new reference.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn create(&self, value: &str) -> Result<String, String>;
+    /// Whether the reference names a live Git credential.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn exists(&self, reference: &str) -> Result<bool, String>;
+    /// Resolves a reference to its value just in time. `None` means the
+    /// reference is missing or revoked.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a secret-free detail when the store errors.
+    async fn resolve(&self, reference: &str) -> Result<Option<String>, String>;
+}
+
+/// The configured desired-source remote with its credential reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceConfig {
+    /// The non-secret remote.
+    pub remote: String,
+    /// The credential reference, when one is configured.
+    pub credential_ref: Option<String>,
+}
+
 /// The authorized desired-source use cases.
 #[derive(Clone, Debug)]
 pub struct DesiredSource {
     port: std::sync::Arc<dyn SourcePort>,
     audit: std::sync::Arc<dyn crate::operation::AuditPort>,
+    credentials: Option<std::sync::Arc<dyn GitCredentialStore>>,
 }
 
 impl DesiredSource {
@@ -171,7 +216,19 @@ impl DesiredSource {
         port: std::sync::Arc<dyn SourcePort>,
         audit: std::sync::Arc<dyn crate::operation::AuditPort>,
     ) -> Self {
-        Self { port, audit }
+        Self {
+            port,
+            audit,
+            credentials: None,
+        }
+    }
+
+    /// Attaches the Git credential store. Without one, credential
+    /// references are refused rather than silently ignored.
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: std::sync::Arc<dyn GitCredentialStore>) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 
     /// Handles one fetch outcome: a valid candidate is recorded as a
@@ -362,18 +419,48 @@ impl DesiredSource {
             })
     }
 
-    /// Configures the desired-source remote. The remote is validated as
-    /// non-secret text, and the audit intent lands before the write.
+    /// The configured remote with its credential reference, when a remote
+    /// is set. The reference is an id, never a secret value.
     ///
     /// # Errors
     ///
-    /// Fails on denial, an invalid remote, or a backend failure.
+    /// Fails on denial or a backend failure.
+    pub async fn configuration(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+    ) -> Result<Option<SourceConfig>, crate::project::ProjectUseCaseError> {
+        Self::authorize_read(authorizer, principal_id)?;
+        let backend = |detail| crate::project::ProjectUseCaseError::Backend {
+            context: "source_remote",
+            detail,
+        };
+        let Some(remote) = self.port.remote().await.map_err(backend)? else {
+            return Ok(None);
+        };
+        let credential_ref = self.port.credential_ref().await.map_err(backend)?;
+        Ok(Some(SourceConfig {
+            remote,
+            credential_ref,
+        }))
+    }
+
+    /// Configures the desired-source remote and its optional credential
+    /// reference. The remote is validated as non-secret text, a reference
+    /// must name a live Git credential, and the audit intent (carrying the
+    /// reference id only) lands before the write.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an invalid remote or reference, or a backend
+    /// failure.
     pub async fn configure_remote(
         &self,
         authorizer: &dyn crate::authz::Authorizer,
         principal_id: &str,
         remote: &str,
-    ) -> Result<String, crate::project::ProjectUseCaseError> {
+        credential_ref: Option<&str>,
+    ) -> Result<SourceConfig, crate::project::ProjectUseCaseError> {
         use crate::authz::{AccessRequest, Permission, authorize};
         authorize(
             authorizer,
@@ -386,15 +473,97 @@ impl DesiredSource {
         .map_err(crate::project::ProjectUseCaseError::Denied)?;
         let remote = validate_remote(remote)
             .map_err(|detail| crate::project::ProjectUseCaseError::Invalid { detail })?;
-        self.record_source_intent(principal_id, "source_remote_configured", None, None)
-            .await?;
-        self.port.set_remote(&remote).await.map_err(|detail| {
-            crate::project::ProjectUseCaseError::Backend {
+        let credential_ref = match credential_ref.map(str::trim) {
+            None | Some("") => None,
+            Some(reference) => {
+                validate_credential_ref(reference)
+                    .map_err(|detail| crate::project::ProjectUseCaseError::Invalid { detail })?;
+                let store = self.credentials.as_ref().ok_or_else(|| {
+                    crate::project::ProjectUseCaseError::Invalid {
+                        detail: "no Git credential store is available on this controller"
+                            .to_owned(),
+                    }
+                })?;
+                let live = store.exists(reference).await.map_err(|detail| {
+                    crate::project::ProjectUseCaseError::Backend {
+                        context: "source_credential",
+                        detail,
+                    }
+                })?;
+                if !live {
+                    return Err(crate::project::ProjectUseCaseError::Invalid {
+                        detail: "the credential reference names no stored Git credential"
+                            .to_owned(),
+                    });
+                }
+                Some(reference.to_owned())
+            }
+        };
+        self.record_source_intent_with(
+            principal_id,
+            "source_remote_configured",
+            None,
+            None,
+            credential_ref.as_deref(),
+        )
+        .await?;
+        self.port
+            .set_remote(&remote, credential_ref.as_deref())
+            .await
+            .map_err(|detail| crate::project::ProjectUseCaseError::Backend {
                 context: "source_remote",
                 detail,
+            })?;
+        Ok(SourceConfig {
+            remote,
+            credential_ref,
+        })
+    }
+
+    /// Stores a Git credential value (HTTPS token or SSH private key) in
+    /// the controller's secret store and returns its reference. Storing is
+    /// a secret write and needs both `secret.write` and `source.activate`;
+    /// the audit intent names no value.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an empty or oversized value, or a backend failure.
+    pub async fn store_credential(
+        &self,
+        authorizer: &dyn crate::authz::Authorizer,
+        principal_id: &str,
+        value: &str,
+    ) -> Result<String, crate::project::ProjectUseCaseError> {
+        use crate::authz::{AccessRequest, Permission, authorize};
+        for action in [Permission::SecretWrite, Permission::SourceActivate] {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action,
+                    resource: None,
+                },
+            )
+            .map_err(crate::project::ProjectUseCaseError::Denied)?;
+        }
+        if value.trim().is_empty() || value.len() > 16 * 1024 {
+            return Err(crate::project::ProjectUseCaseError::Invalid {
+                detail: "the credential must be between 1 byte and 16 KiB".to_owned(),
+            });
+        }
+        let store = self.credentials.as_ref().ok_or_else(|| {
+            crate::project::ProjectUseCaseError::Invalid {
+                detail: "no Git credential store is available on this controller".to_owned(),
             }
         })?;
-        Ok(remote)
+        self.record_source_intent(principal_id, "source_credential_stored", None, None)
+            .await?;
+        store.create(value.trim_end()).await.map_err(|detail| {
+            crate::project::ProjectUseCaseError::Backend {
+                context: "source_credential",
+                detail,
+            }
+        })
     }
 
     /// The recorded revisions, newest first, and which one is active.
@@ -489,6 +658,18 @@ impl DesiredSource {
         commit_sha: Option<&str>,
         operation_id: Option<&str>,
     ) -> Result<(), crate::project::ProjectUseCaseError> {
+        self.record_source_intent_with(principal_id, event, commit_sha, operation_id, None)
+            .await
+    }
+
+    async fn record_source_intent_with(
+        &self,
+        principal_id: &str,
+        event: &str,
+        commit_sha: Option<&str>,
+        operation_id: Option<&str>,
+        credential_ref: Option<&str>,
+    ) -> Result<(), crate::project::ProjectUseCaseError> {
         use crate::authz::Permission;
         let audit_error = |detail: String| crate::project::ProjectUseCaseError::Backend {
             context: "audit",
@@ -501,6 +682,11 @@ impl DesiredSource {
         if let Some(commit_sha) = commit_sha {
             metadata
                 .insert("commitSha", commit_sha)
+                .map_err(|error| audit_error(error.to_string()))?;
+        }
+        if let Some(credential_ref) = credential_ref {
+            metadata
+                .insert("credentialRef", credential_ref)
                 .map_err(|error| audit_error(error.to_string()))?;
         }
         self.audit
@@ -607,6 +793,22 @@ impl DesiredSource {
     }
 }
 
+/// Validates a credential reference as an opaque record id: a bounded
+/// identifier alphabet, so it can never carry a value or a path.
+fn validate_credential_ref(reference: &str) -> Result<(), String> {
+    if reference.is_empty()
+        || reference.len() > 64
+        || !reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(
+            "the credential reference must be an opaque id of letters, digits, and '-'".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Validates a desired-source remote as non-secret text and returns its
 /// trimmed form: no leading `-` (git would read it as an option), no
 /// whitespace or control characters, and no embedded credentials.
@@ -674,6 +876,7 @@ mod tests {
         valid: Mutex<Vec<ActiveRevision>>,
         snapshots: Mutex<Vec<(ActiveRevision, Vec<DesiredResourceRecord>)>>,
         remote: Mutex<Option<String>>,
+        credential_ref: Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -699,8 +902,16 @@ mod tests {
         async fn remote(&self) -> Result<Option<String>, String> {
             Ok(self.remote.lock().unwrap().clone())
         }
-        async fn set_remote(&self, remote: &str) -> Result<(), String> {
+        async fn credential_ref(&self) -> Result<Option<String>, String> {
+            Ok(self.credential_ref.lock().unwrap().clone())
+        }
+        async fn set_remote(
+            &self,
+            remote: &str,
+            credential_ref: Option<&str>,
+        ) -> Result<(), String> {
             *self.remote.lock().unwrap() = Some(remote.to_owned());
+            *self.credential_ref.lock().unwrap() = credential_ref.map(str::to_owned);
             Ok(())
         }
         async fn snapshot_held(&self, revision: &ActiveRevision) -> Result<bool, String> {
@@ -1082,7 +1293,7 @@ mod tests {
             "https://example.test/a b",
         ] {
             let error = service
-                .configure_remote(&AllowAll, "anonymous-lan-admin", bad)
+                .configure_remote(&AllowAll, "anonymous-lan-admin", bad, None)
                 .await
                 .unwrap_err();
             assert!(
@@ -1101,15 +1312,17 @@ mod tests {
                 &AllowAll,
                 "anonymous-lan-admin",
                 " ssh://git@example.test/fleet.git ",
+                None,
             )
             .await
             .unwrap();
-        assert_eq!(stored, "ssh://git@example.test/fleet.git");
+        assert_eq!(stored.remote, "ssh://git@example.test/fleet.git");
         service
             .configure_remote(
                 &AllowAll,
                 "anonymous-lan-admin",
                 "git@example.test:fleet.git",
+                None,
             )
             .await
             .unwrap();
@@ -1122,6 +1335,119 @@ mod tests {
             Some("git@example.test:fleet.git")
         );
         assert_eq!(audit.intents.lock().unwrap().len(), 2);
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeCredentials {
+        stored: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::GitCredentialStore for FakeCredentials {
+        async fn create(&self, value: &str) -> Result<String, String> {
+            let mut stored = self.stored.lock().unwrap();
+            let id = format!("cred-{}", stored.len() + 1);
+            stored.push((id.clone(), value.to_owned()));
+            Ok(id)
+        }
+        async fn exists(&self, reference: &str) -> Result<bool, String> {
+            Ok(self
+                .stored
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(id, _)| id == reference))
+        }
+        async fn resolve(&self, reference: &str) -> Result<Option<String>, String> {
+            Ok(self
+                .stored
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(id, _)| id == reference)
+                .map(|(_, value)| value.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_credential_reference_is_verified_audited_by_id_and_stored() {
+        let (service, audit, port) = service();
+        let credentials = Arc::new(FakeCredentials::default());
+        let service = service.with_credentials(credentials.clone());
+        let secret = "ghp_supersecretvalue";
+        let reference = service
+            .store_credential(&AllowAll, "anonymous-lan-admin", secret)
+            .await
+            .unwrap();
+        // An unknown, malformed, or path-like reference is refused.
+        for bad in ["nope", "../etc/passwd", "a b"] {
+            let error = service
+                .configure_remote(
+                    &AllowAll,
+                    "anonymous-lan-admin",
+                    "https://h/r.git",
+                    Some(bad),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::project::ProjectUseCaseError::Invalid { .. }
+            ));
+        }
+        assert!(port.remote().await.unwrap().is_none());
+        let config = service
+            .configure_remote(
+                &AllowAll,
+                "anonymous-lan-admin",
+                "https://h/r.git",
+                Some(&reference),
+            )
+            .await
+            .unwrap();
+        assert_eq!(config.credential_ref.as_deref(), Some(reference.as_str()));
+        let read = service
+            .configuration(&AllowAll, "anonymous-lan-admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, config);
+        // Audit carries the reference id and never the value.
+        let dump = format!("{:?}", audit.intents.lock().unwrap());
+        assert!(dump.contains(&reference));
+        assert!(!dump.contains(secret));
+        // Reconfiguring without a reference clears it.
+        service
+            .configure_remote(&AllowAll, "anonymous-lan-admin", "https://h/r.git", None)
+            .await
+            .unwrap();
+        assert!(port.credential_ref().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_reference_without_a_credential_store_is_refused() {
+        let (service, _, _) = service();
+        let error = service
+            .configure_remote(
+                &AllowAll,
+                "anonymous-lan-admin",
+                "https://h/r.git",
+                Some("abc-123"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::project::ProjectUseCaseError::Invalid { .. }
+        ));
+        let error = service
+            .store_credential(&AllowAll, "anonymous-lan-admin", "tok")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::project::ProjectUseCaseError::Invalid { .. }
+        ));
     }
 
     #[tokio::test]

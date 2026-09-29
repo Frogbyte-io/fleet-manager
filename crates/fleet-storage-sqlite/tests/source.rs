@@ -171,12 +171,13 @@ async fn the_remote_is_stored_replaced_and_survives_a_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let (store, repository) = repository(&directory).await;
     assert!(repository.remote().await.unwrap().is_none());
+    assert!(repository.credential_ref().await.unwrap().is_none());
     repository
-        .set_remote("ssh://git@example.test/a.git")
+        .set_remote("ssh://git@example.test/a.git", Some("cred-1"))
         .await
         .unwrap();
     repository
-        .set_remote("ssh://git@example.test/b.git")
+        .set_remote("ssh://git@example.test/b.git", None)
         .await
         .unwrap();
     drop(store);
@@ -184,5 +185,15 @@ async fn the_remote_is_stored_replaced_and_survives_a_reopen() {
     assert_eq!(
         repository.remote().await.unwrap().as_deref(),
         Some("ssh://git@example.test/b.git")
+    );
+    // Replacing the remote replaces the reference with it.
+    assert!(repository.credential_ref().await.unwrap().is_none());
+    repository
+        .set_remote("ssh://git@example.test/b.git", Some("cred-2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.credential_ref().await.unwrap().as_deref(),
+        Some("cred-2")
     );
 }
