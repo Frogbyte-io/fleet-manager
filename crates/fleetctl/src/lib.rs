@@ -413,6 +413,29 @@ pub enum Command {
     SkillsMatrix,
     /// Read the active desired-state revision.
     DesiredStatus,
+    /// Read the configured desired-source remote.
+    DesiredSourceGet,
+    /// Configure the desired-source remote.
+    DesiredSourceSet {
+        /// The Git remote; embedded credentials are refused.
+        remote: String,
+    },
+    /// List the recorded desired revisions.
+    DesiredHistory,
+    /// Fetch, activate, or roll back a desired revision as a durable
+    /// operation.
+    DesiredMutate {
+        /// `fetch`, `activate`, or `rollback`.
+        action: String,
+        /// The commit SHA.
+        commit_sha: String,
+        /// The content digest; required by `activate` and `rollback`.
+        content_digest: Option<String>,
+        /// Wait for the operation to finish.
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// List the active desired revision's resources.
     DesiredResources {
         /// Only resources of this kind.
@@ -941,6 +964,16 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["audit", "list", rest @ ..] => parse_audit_list(rest, &mut output)?,
         ["skills", "matrix"] => Command::SkillsMatrix,
         ["desired", "status"] => Command::DesiredStatus,
+        ["desired", "source"] => Command::DesiredSourceGet,
+        ["desired", "source", "set", remote] => Command::DesiredSourceSet {
+            remote: (*remote).to_owned(),
+        },
+        ["desired", "history"] => Command::DesiredHistory,
+        [
+            "desired",
+            verb @ ("fetch" | "activate" | "rollback"),
+            rest @ ..,
+        ] => parse_desired_mutation(verb, rest)?,
         ["desired", "resources", rest @ ..] => parse_desired_resources(rest)?,
         ["skills", "catalog", rest @ ..] => parse_skills_catalog(rest)?,
         ["skills", "list", machine_id] => Command::SkillsList {
@@ -998,6 +1031,44 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         socket,
         output,
         command,
+    })
+}
+
+/// Parses `desired fetch|activate|rollback`: the revision arguments and
+/// the shared `--wait` / `--timeout` flags.
+fn parse_desired_mutation(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    let (mut wait, mut timeout) = (false, None);
+    let mut positional = Vec::new();
+    let mut flags = rest.iter().copied();
+    while let Some(word) = flags.next() {
+        match word {
+            "--wait" => wait = true,
+            "--timeout" => {
+                let raw = flags.next().ok_or_else(|| CliError {
+                    message: "--timeout requires a value".to_owned(),
+                })?;
+                timeout = Some(raw.parse().map_err(|_| CliError {
+                    message: format!("--timeout must be a number, not {raw:?}"),
+                })?);
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError {
+                    message: format!("unknown flag {other:?}; see the usage below\n\n{}", usage()),
+                });
+            }
+            other => positional.push(other),
+        }
+    }
+    let wanted = if verb == "fetch" { 1 } else { 2 };
+    if positional.len() != wanted {
+        return Err(CliError { message: usage() });
+    }
+    Ok(Command::DesiredMutate {
+        action: verb.to_owned(),
+        commit_sha: positional[0].to_owned(),
+        content_digest: positional.get(1).map(|digest| (*digest).to_owned()),
+        wait,
+        timeout,
     })
 }
 
@@ -2155,7 +2226,7 @@ fn parse_skills_catalog(rest: &[&str]) -> Result<Command, CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  desired status\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  desired status\n  desired source [set <remote>]\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox guests <account-id>\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases\n  lab lease <template-version-id> --purpose <text>\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
     )
 }
 
@@ -2903,6 +2974,78 @@ mod event_output_tests {
     }
 
     #[test]
+    fn desired_source_commands_target_the_management_endpoints() {
+        let strings = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let set = parse(&strings(&["desired", "source", "set", "ssh://git@h/r.git"])).unwrap();
+        let (method, path, _, body) = request_for(&set.command).unwrap();
+        assert_eq!(method, reqwest::Method::PUT);
+        assert_eq!(path, "/api/v1/desired/source");
+        assert_eq!(
+            body.unwrap(),
+            serde_json::json!({"remote": "ssh://git@h/r.git"})
+        );
+        let sha = "a".repeat(40);
+        let digest = "b".repeat(64);
+        let fetch = parse(&strings(&[
+            "desired",
+            "fetch",
+            &sha,
+            "--wait",
+            "--timeout",
+            "30",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            fetch.command,
+            Command::DesiredMutate {
+                wait: true,
+                timeout: Some(30),
+                ..
+            }
+        ));
+        let (method, path, _, body) = request_for(&fetch.command).unwrap();
+        assert_eq!(
+            (method, path.as_str()),
+            (reqwest::Method::POST, "/api/v1/desired/fetch")
+        );
+        assert_eq!(body.unwrap(), serde_json::json!({"commitSha": sha}));
+        let rollback = parse(&strings(&["desired", "rollback", &sha, &digest])).unwrap();
+        let (_, path, _, body) = request_for(&rollback.command).unwrap();
+        assert_eq!(path, "/api/v1/desired/rollback");
+        assert_eq!(
+            body.unwrap(),
+            serde_json::json!({"commitSha": sha, "contentDigest": digest})
+        );
+        assert!(
+            parse(&strings(&["desired", "activate", &sha])).is_err(),
+            "activate needs the digest"
+        );
+        assert!(parse(&strings(&["desired", "fetch", &sha, &digest])).is_err());
+        let history = parse(&strings(&["desired", "history"])).unwrap();
+        assert_eq!(
+            request_for(&history.command).unwrap().1,
+            "/api/v1/desired/history"
+        );
+    }
+
+    #[test]
+    fn desired_source_and_history_text_output() {
+        assert_eq!(
+            super::render_desired_source(&serde_json::json!({"remote": null})),
+            "No desired-source remote is configured.\n"
+        );
+        assert_eq!(
+            super::render_desired_source(&serde_json::json!({"remote": "ssh://h/r.git"})),
+            "Remote: ssh://h/r.git\n"
+        );
+        let history = super::render_desired_history(&serde_json::json!({"items": [
+            {"commitSha": "aaa", "contentDigest": "d1", "active": true},
+            {"commitSha": "bbb", "contentDigest": "d2", "active": false},
+        ]}));
+        assert_eq!(history, "* aaa d1\n  bbb d2\n");
+    }
+
+    #[test]
     fn desired_text_output_says_when_nothing_is_active_or_held() {
         assert_eq!(
             super::render_desired_status(&serde_json::json!({"active": null})),
@@ -3350,7 +3493,8 @@ fn follow_checkout_wait(
         | Command::ApplyWorkflow { wait, timeout, .. }
         | Command::ProxmoxLifecycle { wait, timeout, .. }
         | Command::ProxmoxDestructive { wait, timeout, .. }
-        | Command::ImagesBuild { wait, timeout, .. } => (*wait, *timeout),
+        | Command::ImagesBuild { wait, timeout, .. }
+        | Command::DesiredMutate { wait, timeout, .. } => (*wait, *timeout),
         _ => return Ok(body),
     };
     if !wait.0 {
@@ -3379,6 +3523,10 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             Command::SkillsList { .. } | Command::SkillsMatrix => render_skills(payload),
             Command::SkillsCatalog { .. } => render_catalog(payload),
             Command::DesiredStatus => render_desired_status(payload),
+            Command::DesiredSourceGet | Command::DesiredSourceSet { .. } => {
+                render_desired_source(payload)
+            }
+            Command::DesiredHistory => render_desired_history(payload),
             Command::DesiredResources { .. } => render_desired_resources(payload),
             Command::MachinesOnboardList { .. }
             | Command::MachinesOnboardGet { .. }
@@ -3441,6 +3589,36 @@ fn render_desired_status(payload: &Value) -> String {
         }
     } else {
         output.push_str("  Its resources are not held; fetch the revision again.\n");
+    }
+    output
+}
+
+fn render_desired_source(payload: &Value) -> String {
+    payload["remote"].as_str().map_or_else(
+        || "No desired-source remote is configured.\n".to_owned(),
+        |remote| format!("Remote: {remote}\n"),
+    )
+}
+
+fn render_desired_history(payload: &Value) -> String {
+    use std::fmt::Write as _;
+    let items = payload["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return "No desired revisions have been recorded.\n".to_owned();
+    }
+    let mut output = String::new();
+    for item in &items {
+        let _ = writeln!(
+            output,
+            "{} {} {}",
+            if item["active"].as_bool() == Some(true) {
+                "*"
+            } else {
+                " "
+            },
+            item["commitSha"].as_str().unwrap_or("?"),
+            item["contentDigest"].as_str().unwrap_or("?"),
+        );
     }
     output
 }
@@ -3561,6 +3739,40 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             "/api/v1/skills/matrix".to_owned(),
             Vec::new(),
             None,
+        ),
+        Command::DesiredSourceGet => (
+            reqwest::Method::GET,
+            "/api/v1/desired/source".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::DesiredSourceSet { remote } => (
+            reqwest::Method::PUT,
+            "/api/v1/desired/source".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({ "remote": remote })),
+        ),
+        Command::DesiredHistory => (
+            reqwest::Method::GET,
+            "/api/v1/desired/history".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::DesiredMutate {
+            action,
+            commit_sha,
+            content_digest,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/desired/{action}"),
+            Vec::new(),
+            Some(match content_digest {
+                Some(digest) => {
+                    serde_json::json!({ "commitSha": commit_sha, "contentDigest": digest })
+                }
+                None => serde_json::json!({ "commitSha": commit_sha }),
+            }),
         ),
         Command::DesiredStatus => (
             reqwest::Method::GET,

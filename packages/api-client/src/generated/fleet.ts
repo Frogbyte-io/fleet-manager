@@ -601,6 +601,14 @@ export interface CheckoutFactDto {
 }
 
 /**
+ * Sets the desired-source remote.
+ */
+export interface ConfigureSourceRequest {
+  /** The Git remote. Embedded credentials are refused. */
+  remote: string;
+}
+
+/**
  * The configure request: the OAuth client's id and secret. The secret is
  * stored encrypted and never returned by any endpoint.
  */
@@ -823,6 +831,18 @@ export interface CreateProxmoxAccountRequest {
 }
 
 /**
+ * One recorded desired revision.
+ */
+export interface DesiredHistoryEntryDto {
+  /** Whether this is the active revision. */
+  active: boolean;
+  /** The commit SHA. */
+  commitSha: string;
+  /** The content digest. */
+  contentDigest: string;
+}
+
+/**
  * One validated desired resource of the active revision.
  */
 export interface DesiredResourceDto {
@@ -858,6 +878,17 @@ export interface DesiredRevisionDto {
      * before snapshots existed has none until it is fetched again.
      */
   resourcesAvailable: boolean;
+}
+
+/**
+ * The configured desired-source remote.
+ */
+export interface DesiredSourceDto {
+  /**
+     * The remote, when one is configured. Never carries credentials.
+     * @nullable
+     */
+  remote?: string | null;
 }
 
 /**
@@ -970,6 +1001,14 @@ export interface ExtendLeaseRequest {
      * @minimum 0
      */
   bySeconds: number;
+}
+
+/**
+ * Fetches one commit of the configured source as a candidate.
+ */
+export interface FetchDesiredRequest {
+  /** The full 40-character lowercase hexadecimal commit SHA. */
+  commitSha: string;
 }
 
 /**
@@ -1793,6 +1832,31 @@ export type PageCorrelatedDeviceDtoItemsItem = {
 export interface PageCorrelatedDeviceDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageCorrelatedDeviceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One recorded desired revision.
+ */
+export type PageDesiredHistoryEntryDtoItemsItem = {
+  /** Whether this is the active revision. */
+  active: boolean;
+  /** The commit SHA. */
+  commitSha: string;
+  /** The content digest. */
+  contentDigest: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageDesiredHistoryEntryDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageDesiredHistoryEntryDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -2940,6 +3004,28 @@ export interface ResourceCatalogVersionDto {
 }
 
 /**
+ * The configured desired-source remote.
+ */
+export type ResourceDesiredSourceDtoData = {
+  /**
+     * The remote, when one is configured. Never carries credentials.
+     * @nullable
+     */
+  remote?: string | null;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDesiredSourceDto {
+  /** The configured desired-source remote. */
+  data: ResourceDesiredSourceDtoData;
+}
+
+/**
  * The desired-state status: no revision is active until one is activated.
  */
 export type ResourceDesiredStatusDtoData = {
@@ -3864,6 +3950,16 @@ export interface ReviewProxmoxOperationRequest {
 }
 
 /**
+ * Names one recorded revision to activate or return to.
+ */
+export interface RevisionRequest {
+  /** The commit SHA. */
+  commitSha: string;
+  /** The content digest the candidate was fetched with. */
+  contentDigest: string;
+}
+
+/**
  * Draft input.
  */
 export interface SaveCatalogRequest {
@@ -4598,6 +4694,208 @@ export const listAuditEvents = async (params?: ListAuditEventsParams, options?: 
 
 
 
+export type activateDesiredRevisionResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type activateDesiredRevisionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type activateDesiredRevisionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type activateDesiredRevisionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type activateDesiredRevisionResponseSuccess = (activateDesiredRevisionResponse202) & {
+  headers: Headers;
+};
+export type activateDesiredRevisionResponseError = (activateDesiredRevisionResponse400 | activateDesiredRevisionResponse403 | activateDesiredRevisionResponse503) & {
+  headers: Headers;
+};
+
+export type activateDesiredRevisionResponse = (activateDesiredRevisionResponseSuccess | activateDesiredRevisionResponseError)
+
+export const getActivateDesiredRevisionUrl = () => {
+
+
+
+
+  return `/api/v1/desired/activate`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error on authentication, authorization, validation, or storage failure.
+ * @summary Activates a fetched, valid candidate.
+ */
+export const activateDesiredRevision = async (revisionRequest: RevisionRequest, options?: RequestInit): Promise<activateDesiredRevisionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getActivateDesiredRevisionUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(revisionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: activateDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as activateDesiredRevisionResponse
+}
+
+
+
+export type fetchDesiredRevisionResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type fetchDesiredRevisionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type fetchDesiredRevisionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type fetchDesiredRevisionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type fetchDesiredRevisionResponseSuccess = (fetchDesiredRevisionResponse202) & {
+  headers: Headers;
+};
+export type fetchDesiredRevisionResponseError = (fetchDesiredRevisionResponse400 | fetchDesiredRevisionResponse403 | fetchDesiredRevisionResponse503) & {
+  headers: Headers;
+};
+
+export type fetchDesiredRevisionResponse = (fetchDesiredRevisionResponseSuccess | fetchDesiredRevisionResponseError)
+
+export const getFetchDesiredRevisionUrl = () => {
+
+
+
+
+  return `/api/v1/desired/fetch`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when no remote is configured, or on authentication,
+ * authorization, validation, or storage failure.
+ * @summary Fetches a commit of the configured source as a candidate.
+ */
+export const fetchDesiredRevision = async (fetchDesiredRequest: FetchDesiredRequest, options?: RequestInit): Promise<fetchDesiredRevisionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getFetchDesiredRevisionUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(fetchDesiredRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: fetchDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as fetchDesiredRevisionResponse
+}
+
+
+
+export type listDesiredHistoryResponse200 = {
+  data: PageDesiredHistoryEntryDto
+  status: 200
+}
+
+export type listDesiredHistoryResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listDesiredHistoryResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listDesiredHistoryResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listDesiredHistoryResponseSuccess = (listDesiredHistoryResponse200) & {
+  headers: Headers;
+};
+export type listDesiredHistoryResponseError = (listDesiredHistoryResponse403 | listDesiredHistoryResponse500 | listDesiredHistoryResponse503) & {
+  headers: Headers;
+};
+
+export type listDesiredHistoryResponse = (listDesiredHistoryResponseSuccess | listDesiredHistoryResponseError)
+
+export const getListDesiredHistoryUrl = () => {
+
+
+
+
+  return `/api/v1/desired/history`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Lists the recorded desired revisions, newest first.
+ */
+export const listDesiredHistory = async ( options?: RequestInit): Promise<listDesiredHistoryResponse> => {
+
+  const res = await fetch(getListDesiredHistoryUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listDesiredHistoryResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listDesiredHistoryResponse
+}
+
+
+
 export type listDesiredResourcesResponse200 = {
   data: PageDesiredResourceDto
   status: 200
@@ -4727,6 +5025,212 @@ export const getDesiredRevision = async ( options?: RequestInit): Promise<getDes
 
   const data: getDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getDesiredRevisionResponse
+}
+
+
+
+export type rollbackDesiredRevisionResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type rollbackDesiredRevisionResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type rollbackDesiredRevisionResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type rollbackDesiredRevisionResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type rollbackDesiredRevisionResponseSuccess = (rollbackDesiredRevisionResponse202) & {
+  headers: Headers;
+};
+export type rollbackDesiredRevisionResponseError = (rollbackDesiredRevisionResponse400 | rollbackDesiredRevisionResponse403 | rollbackDesiredRevisionResponse503) & {
+  headers: Headers;
+};
+
+export type rollbackDesiredRevisionResponse = (rollbackDesiredRevisionResponseSuccess | rollbackDesiredRevisionResponseError)
+
+export const getRollbackDesiredRevisionUrl = () => {
+
+
+
+
+  return `/api/v1/desired/rollback`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error on authentication, authorization, validation, or storage failure.
+ * @summary Returns to a prior valid revision from its stored snapshot.
+ */
+export const rollbackDesiredRevision = async (revisionRequest: RevisionRequest, options?: RequestInit): Promise<rollbackDesiredRevisionResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getRollbackDesiredRevisionUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(revisionRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: rollbackDesiredRevisionResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as rollbackDesiredRevisionResponse
+}
+
+
+
+export type getDesiredSourceResponse200 = {
+  data: ResourceDesiredSourceDto
+  status: 200
+}
+
+export type getDesiredSourceResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDesiredSourceResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDesiredSourceResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getDesiredSourceResponseSuccess = (getDesiredSourceResponse200) & {
+  headers: Headers;
+};
+export type getDesiredSourceResponseError = (getDesiredSourceResponse403 | getDesiredSourceResponse500 | getDesiredSourceResponse503) & {
+  headers: Headers;
+};
+
+export type getDesiredSourceResponse = (getDesiredSourceResponseSuccess | getDesiredSourceResponseError)
+
+export const getGetDesiredSourceUrl = () => {
+
+
+
+
+  return `/api/v1/desired/source`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, or storage fails.
+ * @summary Reads the configured desired-source remote.
+ */
+export const getDesiredSource = async ( options?: RequestInit): Promise<getDesiredSourceResponse> => {
+
+  const res = await fetch(getGetDesiredSourceUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDesiredSourceResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDesiredSourceResponse
+}
+
+
+
+export type configureDesiredSourceResponse200 = {
+  data: ResourceDesiredSourceDto
+  status: 200
+}
+
+export type configureDesiredSourceResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type configureDesiredSourceResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type configureDesiredSourceResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type configureDesiredSourceResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type configureDesiredSourceResponseSuccess = (configureDesiredSourceResponse200) & {
+  headers: Headers;
+};
+export type configureDesiredSourceResponseError = (configureDesiredSourceResponse400 | configureDesiredSourceResponse403 | configureDesiredSourceResponse500 | configureDesiredSourceResponse503) & {
+  headers: Headers;
+};
+
+export type configureDesiredSourceResponse = (configureDesiredSourceResponseSuccess | configureDesiredSourceResponseError)
+
+export const getConfigureDesiredSourceUrl = () => {
+
+
+
+
+  return `/api/v1/desired/source`
+}
+
+/**
+ * # Errors
+ *
+ * Returns an API error when authentication, authorization, validation, or storage fails.
+ * @summary Configures the desired-source remote.
+ */
+export const configureDesiredSource = async (configureSourceRequest: ConfigureSourceRequest, options?: RequestInit): Promise<configureDesiredSourceResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getConfigureDesiredSourceUrl(),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(configureSourceRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: configureDesiredSourceResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as configureDesiredSourceResponse
 }
 
 

@@ -150,6 +150,182 @@
         }
       }
     },
+    "/api/v1/desired/activate": {
+      "post": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Activates a fetched, valid candidate.",
+        "description": "# Errors\n\nReturns an API error on authentication, authorization, validation, or storage failure.",
+        "operationId": "activateDesiredRevision",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The revision is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not activate the desired source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desired/fetch": {
+      "post": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Fetches a commit of the configured source as a candidate.",
+        "description": "# Errors\n\nReturns an API error when no remote is configured, or on authentication,\nauthorization, validation, or storage failure.",
+        "operationId": "fetchDesiredRevision",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FetchDesiredRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The commit is malformed or no remote is configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not fetch the desired source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desired/history": {
+      "get": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Lists the recorded desired revisions, newest first.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "listDesiredHistory",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_DesiredHistoryEntryDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the desired state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/desired/resources": {
       "get": {
         "tags": [
@@ -263,6 +439,190 @@
           },
           "403": {
             "description": "The caller may not read the desired state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desired/rollback": {
+      "post": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Returns to a prior valid revision from its stored snapshot.",
+        "description": "# Errors\n\nReturns an API error on authentication, authorization, validation, or storage failure.",
+        "operationId": "rollbackDesiredRevision",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The revision is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not activate the desired source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desired/source": {
+      "get": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Reads the configured desired-source remote.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, or storage fails.",
+        "operationId": "getDesiredSource",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DesiredSourceDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the desired state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Configures the desired-source remote.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, validation, or storage fails.",
+        "operationId": "configureDesiredSource",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DesiredSourceDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The remote is malformed or embeds credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the desired source.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6141,6 +6501,20 @@
           }
         }
       },
+      "ConfigureSourceRequest": {
+        "type": "object",
+        "description": "Sets the desired-source remote.",
+        "required": [
+          "remote"
+        ],
+        "properties": {
+          "remote": {
+            "type": "string",
+            "description": "The Git remote. Embedded credentials are refused."
+          }
+        },
+        "additionalProperties": false
+      },
       "ConfigureTailnetRequest": {
         "type": "object",
         "description": "The configure request: the OAuth client's id and secret. The secret is\nstored encrypted and never returned by any endpoint.",
@@ -6501,6 +6875,29 @@
           }
         }
       },
+      "DesiredHistoryEntryDto": {
+        "type": "object",
+        "description": "One recorded desired revision.",
+        "required": [
+          "commitSha",
+          "contentDigest",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether this is the active revision."
+          },
+          "commitSha": {
+            "type": "string",
+            "description": "The commit SHA."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "The content digest."
+          }
+        }
+      },
       "DesiredResourceDto": {
         "type": "object",
         "description": "One validated desired resource of the active revision.",
@@ -6566,6 +6963,19 @@
           "resourcesAvailable": {
             "type": "boolean",
             "description": "Whether the revision's resources are held. A revision activated\nbefore snapshots existed has none until it is fetched again."
+          }
+        }
+      },
+      "DesiredSourceDto": {
+        "type": "object",
+        "description": "The configured desired-source remote.",
+        "properties": {
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The remote, when one is configured. Never carries credentials."
           }
         }
       },
@@ -6810,6 +7220,20 @@
             "minimum": 0
           }
         }
+      },
+      "FetchDesiredRequest": {
+        "type": "object",
+        "description": "Fetches one commit of the configured source as a candidate.",
+        "required": [
+          "commitSha"
+        ],
+        "properties": {
+          "commitSha": {
+            "type": "string",
+            "description": "The full 40-character lowercase hexadecimal commit SHA."
+          }
+        },
+        "additionalProperties": false
       },
       "FieldDifferenceDto": {
         "type": "object",
@@ -8546,6 +8970,47 @@
                 "user": {
                   "type": "string",
                   "description": "The registering user."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_DesiredHistoryEntryDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One recorded desired revision.",
+              "required": [
+                "commitSha",
+                "contentDigest",
+                "active"
+              ],
+              "properties": {
+                "active": {
+                  "type": "boolean",
+                  "description": "Whether this is the active revision."
+                },
+                "commitSha": {
+                  "type": "string",
+                  "description": "The commit SHA."
+                },
+                "contentDigest": {
+                  "type": "string",
+                  "description": "The content digest."
                 }
               }
             },
@@ -10609,6 +11074,28 @@
           }
         }
       },
+      "Resource_DesiredSourceDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The configured desired-source remote.",
+            "properties": {
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The remote, when one is configured. Never carries credentials."
+              }
+            }
+          }
+        }
+      },
       "Resource_DesiredStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -12144,6 +12631,25 @@
             "description": "The action-specific parameters (snapshot name/description, clone\ntarget id/name, and so on)."
           }
         }
+      },
+      "RevisionRequest": {
+        "type": "object",
+        "description": "Names one recorded revision to activate or return to.",
+        "required": [
+          "commitSha",
+          "contentDigest"
+        ],
+        "properties": {
+          "commitSha": {
+            "type": "string",
+            "description": "The commit SHA."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "The content digest the candidate was fetched with."
+          }
+        },
+        "additionalProperties": false
       },
       "SaveCatalogRequest": {
         "type": "object",

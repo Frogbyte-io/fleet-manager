@@ -99,7 +99,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         skills::SkillsSnapshotDto,
         desired::DesiredResourceDto,
         desired::DesiredRevisionDto,
+        desired::ConfigureSourceRequest,
+        desired::DesiredHistoryEntryDto,
+        desired::DesiredSourceDto,
         desired::DesiredStatusDto,
+        desired::FetchDesiredRequest,
+        desired::RevisionRequest,
         skill_catalog::CatalogContentDto,
         skill_catalog::CatalogDto,
         skill_catalog::CatalogFileDto,
@@ -278,6 +283,14 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(skill_catalog::start_catalog_rollout))
                 .routes(routes!(desired::get_desired_revision))
                 .routes(routes!(desired::list_desired_resources))
+                .routes(routes!(
+                    desired::get_desired_source,
+                    desired::configure_desired_source
+                ))
+                .routes(routes!(desired::list_desired_history))
+                .routes(routes!(desired::fetch_desired_revision))
+                .routes(routes!(desired::activate_desired_revision))
+                .routes(routes!(desired::rollback_desired_revision))
                 .routes(routes!(frogenv::start_frogenv_operation))
                 .routes(routes!(mise::start_mise_operation))
                 .routes(routes!(ready::start_ready_workflow))

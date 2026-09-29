@@ -1,6 +1,8 @@
-//! The read-only desired-state surface (FM-404): the active revision and
-//! the validated resources it holds. Mutations stay on the operations
-//! surface (`source.fetch`, `source.activate`).
+//! The desired-state surface: reads of the active revision and its
+//! validated resources (FM-404), and the source management endpoints
+//! (FM-405). Fetch, activate, and rollback are durable operations
+//! (`source.fetch`, `source.activate`, `source.rollback`); the fetch remote
+//! always comes from the configured source, never from the caller.
 
 use std::collections::BTreeMap;
 use std::str::FromStr as _;
@@ -9,7 +11,7 @@ use std::sync::Arc;
 use axum::{
     Extension, Json,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use fleet_core::{CorrelationId, ErrorCode, PublicError, RetryClass};
 use serde::{Deserialize, Serialize};
@@ -172,4 +174,338 @@ pub async fn list_desired_resources(
             .collect(),
         page: PageInfo { next_cursor, limit },
     }))
+}
+
+/// The configured desired-source remote.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DesiredSourceDto {
+    /// The remote, when one is configured. Never carries credentials.
+    pub remote: Option<String>,
+}
+
+/// Sets the desired-source remote.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigureSourceRequest {
+    /// The Git remote. Embedded credentials are refused.
+    pub remote: String,
+}
+
+/// One recorded desired revision.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DesiredHistoryEntryDto {
+    /// The commit SHA.
+    pub commit_sha: String,
+    /// The content digest.
+    pub content_digest: String,
+    /// Whether this is the active revision.
+    pub active: bool,
+}
+
+/// Fetches one commit of the configured source as a candidate.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FetchDesiredRequest {
+    /// The full 40-character lowercase hexadecimal commit SHA.
+    pub commit_sha: String,
+}
+
+/// Names one recorded revision to activate or return to.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevisionRequest {
+    /// The commit SHA.
+    pub commit_sha: String,
+    /// The content digest the candidate was fetched with.
+    pub content_digest: String,
+}
+
+fn is_hex(text: &str, length: usize) -> bool {
+    text.len() == length
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn check_revision(
+    commit_sha: &str,
+    content_digest: Option<&str>,
+    correlation_id: CorrelationId,
+) -> Result<(), ApiErrorResponse> {
+    if !is_hex(commit_sha, 40) {
+        return Err(crate::machines::invalid_request(
+            "commitSha must be a full 40-character lowercase hexadecimal commit id",
+            correlation_id,
+        ));
+    }
+    if content_digest.is_some_and(|digest| !is_hex(digest, 64)) {
+        return Err(crate::machines::invalid_request(
+            "contentDigest must be a 64-character lowercase hexadecimal digest",
+            correlation_id,
+        ));
+    }
+    Ok(())
+}
+
+/// Reads the configured desired-source remote.
+///
+/// # Errors
+///
+/// Returns an API error when authentication, authorization, or storage fails.
+#[utoipa::path(
+    get, path = "/desired/source", tag = "desired", operation_id = "getDesiredSource",
+    responses(
+        (status = 200, body = Resource<DesiredSourceDto>),
+        (status = 403, description = "The caller may not read the desired state.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn get_desired_source(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Resource<DesiredSourceDto>>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let remote = service(&state, correlation_id)?
+        .remote(state.authorizer.as_ref(), &acting.id)
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(DesiredSourceDto { remote })))
+}
+
+/// Configures the desired-source remote.
+///
+/// # Errors
+///
+/// Returns an API error when authentication, authorization, validation, or storage fails.
+#[utoipa::path(
+    put, path = "/desired/source", tag = "desired", operation_id = "configureDesiredSource",
+    request_body = ConfigureSourceRequest,
+    responses(
+        (status = 200, body = Resource<DesiredSourceDto>),
+        (status = 400, description = "The remote is malformed or embeds credentials.", body = ApiError),
+        (status = 403, description = "The caller may not configure the desired source.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn configure_desired_source(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Json(request): Json<ConfigureSourceRequest>,
+) -> Result<Json<Resource<DesiredSourceDto>>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let remote = service(&state, correlation_id)?
+        .configure_remote(state.authorizer.as_ref(), &acting.id, &request.remote)
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(DesiredSourceDto {
+        remote: Some(remote),
+    })))
+}
+
+/// Lists the recorded desired revisions, newest first.
+///
+/// # Errors
+///
+/// Returns an API error when authentication, authorization, or storage fails.
+#[utoipa::path(
+    get, path = "/desired/history", tag = "desired", operation_id = "listDesiredHistory",
+    responses(
+        (status = 200, body = Page<DesiredHistoryEntryDto>),
+        (status = 403, description = "The caller may not read the desired state.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn list_desired_history(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<DesiredHistoryEntryDto>>, ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let (revisions, active) = service(&state, correlation_id)?
+        .history(state.authorizer.as_ref(), &acting.id)
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
+    let items: Vec<_> = revisions
+        .into_iter()
+        .map(|revision| DesiredHistoryEntryDto {
+            active: active.as_ref() == Some(&revision),
+            commit_sha: revision.commit_sha,
+            content_digest: revision.content_digest,
+        })
+        .collect();
+    let limit = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    Ok(Json(Page {
+        items,
+        page: PageInfo {
+            next_cursor: None,
+            limit,
+        },
+    }))
+}
+
+async fn start(
+    state: &ApiState,
+    acting: &crate::ActingPrincipal,
+    headers: &HeaderMap,
+    correlation_id: CorrelationId,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:{key}", acting.id));
+    let operation = state
+        .operations
+        .create(
+            state.authorizer.as_ref(),
+            &acting.id,
+            &fleet_application::operation::NewOperation {
+                kind: kind.to_owned(),
+                idempotency_key,
+                deadline_at: None,
+                correlation_id: Some(correlation_id.to_string()),
+                payload_json: Some(payload.to_string()),
+                review_token: None,
+            },
+        )
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(Resource::new(crate::operations::OperationDto::from(
+            operation,
+        ))),
+    ))
+}
+
+/// Fetches a commit of the configured source as a candidate.
+///
+/// # Errors
+///
+/// Returns an API error when no remote is configured, or on authentication,
+/// authorization, validation, or storage failure.
+#[utoipa::path(
+    post, path = "/desired/fetch", tag = "desired", operation_id = "fetchDesiredRevision",
+    request_body = FetchDesiredRequest,
+    responses(
+        (status = 202, body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The commit is malformed or no remote is configured.", body = ApiError),
+        (status = 403, description = "The caller may not fetch the desired source.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn fetch_desired_revision(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    headers: HeaderMap,
+    Json(request): Json<FetchDesiredRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    check_revision(&request.commit_sha, None, correlation_id)?;
+    let remote = service(&state, correlation_id)?
+        .remote(state.authorizer.as_ref(), &acting.id)
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?
+        .ok_or_else(|| {
+            crate::machines::invalid_request(
+                "no desired-source remote is configured; set one first",
+                correlation_id,
+            )
+        })?;
+    start(
+        &state,
+        &acting,
+        &headers,
+        correlation_id,
+        "source.fetch",
+        serde_json::json!({ "remote": remote, "commitSha": request.commit_sha }),
+    )
+    .await
+}
+
+/// Activates a fetched, valid candidate.
+///
+/// # Errors
+///
+/// Returns an API error on authentication, authorization, validation, or storage failure.
+#[utoipa::path(
+    post, path = "/desired/activate", tag = "desired", operation_id = "activateDesiredRevision",
+    request_body = RevisionRequest,
+    responses(
+        (status = 202, body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The revision is malformed.", body = ApiError),
+        (status = 403, description = "The caller may not activate the desired source.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn activate_desired_revision(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    headers: HeaderMap,
+    Json(request): Json<RevisionRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    check_revision(
+        &request.commit_sha,
+        Some(&request.content_digest),
+        correlation_id,
+    )?;
+    start(
+        &state,
+        &acting,
+        &headers,
+        correlation_id,
+        "source.activate",
+        serde_json::json!({ "commitSha": request.commit_sha, "contentDigest": request.content_digest }),
+    )
+    .await
+}
+
+/// Returns to a prior valid revision from its stored snapshot.
+///
+/// # Errors
+///
+/// Returns an API error on authentication, authorization, validation, or storage failure.
+#[utoipa::path(
+    post, path = "/desired/rollback", tag = "desired", operation_id = "rollbackDesiredRevision",
+    request_body = RevisionRequest,
+    responses(
+        (status = 202, body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The revision is malformed.", body = ApiError),
+        (status = 403, description = "The caller may not activate the desired source.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn rollback_desired_revision(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    headers: HeaderMap,
+    Json(request): Json<RevisionRequest>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    check_revision(
+        &request.commit_sha,
+        Some(&request.content_digest),
+        correlation_id,
+    )?;
+    start(
+        &state,
+        &acting,
+        &headers,
+        correlation_id,
+        "source.rollback",
+        serde_json::json!({ "commitSha": request.commit_sha, "contentDigest": request.content_digest }),
+    )
+    .await
 }

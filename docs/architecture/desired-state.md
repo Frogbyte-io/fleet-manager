@@ -85,6 +85,10 @@ A fetch that produces a candidate without diagnostics stores that revision's val
 
 Reads go straight to SQLite, so a controller restart resumes on the same revision with the same resources. `GET /api/v1/desired/revision` reports the active revision and per-kind counts; `GET /api/v1/desired/resources` pages the resources by identity and filters by kind. Both use the `source.fetch` read permission.
 
+### Source management (FM-405)
+
+The remote is configured with `PUT /api/v1/desired/source` (permission `source.activate`, audited before the write). It must be non-secret text: a leading `-`, whitespace, and embedded credentials (`user:password@`) are refused, and git authenticates with the controller host's own configuration (ssh agent, credential helper) — Fleet stores no Git credentials. `POST /api/v1/desired/{fetch,activate,rollback}` create the `source.fetch`, `source.activate`, and `source.rollback` operations; the fetch remote always comes from the configured source. A rollback names a revision in the append-only history whose snapshot is held and activates from that snapshot, so it needs no worktree. `GET /api/v1/desired/history` lists the recorded revisions and marks the active one.
+
 ## Observed state
 
 An observation includes resource identity, source, source version, observed timestamp, expiry/staleness policy, payload schema version, and confidence/availability. Inventory snapshots may normalize frequently queried facts while retaining provider raw metadata only when needed for debugging and after redaction.

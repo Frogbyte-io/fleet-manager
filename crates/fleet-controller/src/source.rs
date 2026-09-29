@@ -4,7 +4,8 @@
 //! `source.fetch` clones the pinned commit, validates, and records the
 //! outcome through the authorized use case (valid candidates become
 //! rollback points; invalid ones are reported and forgotten).
-//! `source.activate` activates a fetched candidate through the authorized
+//! `source.rollback` re-activates a recorded revision from its stored
+//! snapshot. `source.activate` activates a fetched candidate through the authorized
 //! use case — the activation is serialized and audited there.
 
 use std::sync::Arc;
@@ -70,6 +71,7 @@ impl OperationExecutor for SourceExecutor {
         match operation.kind.as_str() {
             "source.fetch" => self.fetch(operations, operation).await,
             "source.activate" => self.activate(operations, operation).await,
+            "source.rollback" => self.rollback(operations, operation).await,
             _ => Err("not a source kind".to_owned()),
         }
     }
@@ -171,6 +173,42 @@ impl SourceExecutor {
                 return complete_failed(operations, &operation.id, &detail).await;
             }
         };
+        operations
+            .complete(&operation.id, "succeeded", Some(&result_json), None)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Returns to a prior valid revision from its stored snapshot: no
+    /// worktree is read, so a rollback works after the worktree is gone.
+    async fn rollback(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let payload: ActivatePayload = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a valid source record: {error}"))?;
+        let revision = self
+            .desired_source
+            .rollback(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::source::ActiveRevision {
+                    commit_sha: payload.commit_sha,
+                    content_digest: payload.content_digest,
+                },
+                Some(&operation.id),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let result_json = serde_json::json!({
+            "rolledBack": true,
+            "commitSha": revision.commit_sha,
+            "contentDigest": revision.content_digest,
+        })
+        .to_string();
         operations
             .complete(&operation.id, "succeeded", Some(&result_json), None)
             .await
@@ -300,7 +338,9 @@ impl SourceDispatch {
 impl OperationExecutor for SourceDispatch {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
         match operation.kind.as_str() {
-            "source.fetch" | "source.activate" => self.source.execute(operations, operation).await,
+            "source.fetch" | "source.activate" | "source.rollback" => {
+                self.source.execute(operations, operation).await
+            }
             _ => self.fallback.execute(operations, operation).await,
         }
     }
