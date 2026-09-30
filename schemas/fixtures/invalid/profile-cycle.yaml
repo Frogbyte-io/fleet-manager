@@ -1,0 +1,17 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Profile
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2c2
+  name: cycle-a
+spec:
+  extends:
+    - cycle-b
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Profile
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2c3
+  name: cycle-b
+spec:
+  extends:
+    - cycle-a

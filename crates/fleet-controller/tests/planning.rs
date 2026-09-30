@@ -556,3 +556,278 @@ async fn planning_is_authorized_and_audited() {
         "{unknown}"
     );
 }
+
+// --- Machine bindings (FM-410, ADR 0014) ---
+
+fn record(kind: &str, name: &str, spec: serde_json::Value) -> DesiredResourceRecord {
+    DesiredResourceRecord {
+        kind: kind.to_owned(),
+        id: format!("{kind}-{name}"),
+        name: name.to_owned(),
+        spec,
+    }
+}
+
+fn machine_record(name: &str, profiles: &[&str], projects: &[&str]) -> DesiredResourceRecord {
+    record(
+        "Machine",
+        name,
+        serde_json::json!({"profiles": profiles, "projects": projects}),
+    )
+}
+
+fn tool_profile(name: &str, tool: &str, version: &str) -> DesiredResourceRecord {
+    record(
+        "Profile",
+        name,
+        serde_json::json!({"requirements": [{"type": "tool", "tool": tool, "version": version}]}),
+    )
+}
+
+fn project_record(
+    name: &str,
+    remote: &str,
+    root: &str,
+    tools: &[(&str, &str)],
+) -> DesiredResourceRecord {
+    let tools: Vec<_> = tools
+        .iter()
+        .map(|(tool, version)| serde_json::json!({"tool": tool, "version": version}))
+        .collect();
+    record(
+        "Project",
+        name,
+        serde_json::json!({"remote": remote, "root": root, "tools": tools}),
+    )
+}
+
+fn action_kinds(computed: &fleet_application::planning::ComputedPlan) -> Vec<(String, String)> {
+    computed
+        .plan
+        .actions
+        .iter()
+        .filter(|a| a.kind == "mise.install" || a.kind == "projects.clone")
+        .map(|a| (a.kind.clone(), a.difference.identity.clone()))
+        .collect()
+}
+
+impl Harness {
+    /// Marks the tool inventory and checkout discovery as answered, with
+    /// only git and one unrelated checkout observed.
+    async fn observe_inventory(&self) {
+        use fleet_application::project::{NewProject, ProjectPort as _};
+        use fleet_core::{CapabilityFact, CapabilityStatus, CheckoutFact, Timestamp};
+        let fact = |namespace: &str, value: Option<&str>| CapabilityFact {
+            namespace: namespace.to_owned(),
+            name: "git".to_owned(),
+            value: value.map(str::to_owned),
+            status: CapabilityStatus::Known,
+            observed_at: Timestamp::from_unix_millis(NOW - 1000),
+            source: "mise/1".to_owned(),
+        };
+        MachineRepository::new(self.store.pool().clone())
+            .record_capabilities(
+                &self.machine_id,
+                &[fact("tool", None), fact("tool-version", Some("git 2.43.0"))],
+            )
+            .await
+            .unwrap();
+        let projects = ProjectRepository::new(self.store.pool().clone());
+        let unrelated = projects
+            .create(&NewProject {
+                remote: "github.com/acme/unrelated".to_owned(),
+                idempotency_key: None,
+                name: "unrelated".to_owned(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        projects
+            .record_checkout(&CheckoutFact {
+                project_id: unrelated.id,
+                machine_id: self.machine_id.clone(),
+                root: "/srv/unrelated".to_owned(),
+                branch: Some("main".to_owned()),
+                dirty: Some(false),
+                source: "agentless/1".to_owned(),
+                observed_at: NOW - 1000,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn plan_error(&self) -> PlanningError {
+        self.planning
+            .create_plan(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &self.machine_id,
+                NOW,
+            )
+            .await
+            .unwrap_err()
+    }
+}
+
+#[tokio::test]
+async fn a_bound_profile_and_projects_plan_installs_and_clones() {
+    let harness = harness().await;
+    harness
+        .activate(
+            "bind",
+            &[
+                machine_record("box", &["dev"], &["app", "lib"]),
+                tool_profile("dev", "node", "20.11.0"),
+                project_record(
+                    "app",
+                    "https://github.com/acme/app.git",
+                    "/srv/app",
+                    &[("go", "1.22.0")],
+                ),
+                project_record("lib", "github.com/acme/lib", "/srv/lib", &[]),
+            ],
+        )
+        .await;
+    harness.observe_skills(&[]).await;
+    harness.observe_inventory().await;
+    let computed = harness.plan().await;
+    let expected: Vec<(String, String)> = [
+        ("projects.clone", "checkout:github.com/acme/app"),
+        ("projects.clone", "checkout:github.com/acme/lib"),
+        ("mise.install", "tool:go"),
+        ("mise.install", "tool:node"),
+    ]
+    .iter()
+    .map(|(kind, identity)| ((*kind).to_owned(), (*identity).to_owned()))
+    .collect();
+    assert_eq!(action_kinds(&computed), expected, "{computed:?}");
+    // Deterministic, content-derived identity.
+    assert_eq!(harness.plan().await.plan_id, computed.plan_id);
+}
+
+#[tokio::test]
+async fn an_unbound_or_unmatched_machine_is_unchanged() {
+    let harness = harness().await;
+    harness.observe_skills(&[]).await;
+    // A Machine resource for another name binds nothing here.
+    harness
+        .activate(
+            "other",
+            &[
+                machine_record("someone-else", &["dev"], &[]),
+                tool_profile("dev", "node", "20.11.0"),
+            ],
+        )
+        .await;
+    let other = harness.plan().await;
+    harness.activate("empty", &[]).await;
+    let empty = harness.plan().await;
+    assert!(action_kinds(&other).is_empty());
+    assert_eq!(other.plan.actions, empty.plan.actions);
+}
+
+#[tokio::test]
+async fn binding_conflicts_are_refused() {
+    let harness = harness().await;
+    harness
+        .activate(
+            "conflict",
+            &[
+                machine_record("box", &["a", "b"], &[]),
+                tool_profile("a", "node", "18.0.0"),
+                tool_profile("b", "node", "20.0.0"),
+            ],
+        )
+        .await;
+    harness.observe_skills(&[]).await;
+    let error = harness.plan_error().await;
+    assert!(matches!(error, PlanningError::Composition(_)), "{error}");
+}
+
+#[tokio::test]
+async fn profile_skills_merge_with_presets_and_a_preset_deny_conflicts() {
+    let harness = harness().await;
+    let skill_profile = record(
+        "Profile",
+        "skilled",
+        serde_json::json!({"requirements": [{"type": "skill", "skillId": "db", "deployTo": ["codex"]}]}),
+    );
+    harness
+        .activate(
+            "skills",
+            &[
+                machine_record("box", &["skilled"], &[]),
+                skill_profile.clone(),
+                preset(
+                    "p-all",
+                    "lint",
+                    serde_json::json!({"type": "all"}),
+                    &["codex"],
+                ),
+            ],
+        )
+        .await;
+    harness.observe_skills(&[]).await;
+    let identities: Vec<_> = harness
+        .plan()
+        .await
+        .plan
+        .actions
+        .iter()
+        .filter(|a| a.kind == "skills.deploy")
+        .map(|a| a.difference.identity.clone())
+        .collect();
+    assert_eq!(identities, ["skill:db/codex", "skill:lint/codex"]);
+
+    let denying = record(
+        "SkillPreset",
+        "deny-db",
+        serde_json::json!({"skillId": "db", "scope": {"type": "all"}, "deployTo": [], "denyAgents": ["codex"]}),
+    );
+    harness
+        .activate(
+            "deny",
+            &[
+                machine_record("box", &["skilled"], &[]),
+                skill_profile,
+                denying,
+            ],
+        )
+        .await;
+    let error = harness.plan_error().await;
+    assert!(matches!(error, PlanningError::Composition(_)), "{error}");
+}
+
+#[tokio::test]
+async fn an_unmet_capability_requirement_is_reported_not_planned() {
+    let harness = harness().await;
+    harness
+        .activate(
+            "cap",
+            &[
+                machine_record("box", &["needs-gpu"], &[]),
+                record(
+                    "Profile",
+                    "needs-gpu",
+                    serde_json::json!({"requirements": [{"type": "capability", "namespace": "hw", "name": "gpu"}]}),
+                ),
+            ],
+        )
+        .await;
+    harness.observe_skills(&[]).await;
+    let computed = harness.plan().await;
+    let gap = computed
+        .plan
+        .unactionable
+        .iter()
+        .find(|d| d.identity == "capability:hw/gpu")
+        .expect("reported");
+    assert_eq!(gap.state, DifferenceState::Unsupported);
+    assert!(
+        computed
+            .plan
+            .actions
+            .iter()
+            .all(|a| !a.difference.identity.starts_with("capability:"))
+    );
+}

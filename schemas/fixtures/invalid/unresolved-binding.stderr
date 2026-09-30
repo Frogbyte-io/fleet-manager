@@ -1,0 +1,2 @@
+schemas/fixtures/invalid/unresolved-binding.yaml#document=1/spec/profiles/0 [FM_SCHEMA_SEMANTIC_UNRESOLVED_REFERENCE] no profile named "no-such-profile" exists in this revision
+schemas/fixtures/invalid/unresolved-binding.yaml#document=1/spec/projects/0 [FM_SCHEMA_SEMANTIC_UNRESOLVED_REFERENCE] no project named "no-such-project" exists in this revision

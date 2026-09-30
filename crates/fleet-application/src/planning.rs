@@ -2,11 +2,14 @@
 //! machine's plan from the active desired revision and the machine's
 //! observed state, and a plan's identity is a digest of its content.
 //!
-//! Composition covers what desired state binds to machines today: skill
+//! Composition covers what desired state binds to machines: skill
 //! assignments (including the built-in default, ADR 0012), selected by
-//! each assignment's scope against the machine's groups and tags. Tool
-//! versions and checkouts need a machine-to-profile/project binding the
-//! schema does not have yet, so they are not composed here.
+//! each assignment's scope against the machine's groups and tags, plus
+//! the profiles and projects a `Machine` resource binds by name (ADR
+//! 0014). The `Machine` resource matching the registered machine's name
+//! contributes its bound profiles' tools, skills, and capabilities and
+//! its bound projects' tools and checkouts. A machine with no matching
+//! resource, or one that binds nothing, gets skill assignments only.
 //!
 //! Two safety rules shape the result:
 //!
@@ -19,7 +22,7 @@
 //!   still exactly what the controller would compute.
 #![warn(missing_docs)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -27,8 +30,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::authz::{AccessRequest, Authorizer, Decision, Permission, authorize};
 use crate::composition::{
-    BuiltinSkillAssignment, DEFAULT_BUILTIN_SKILL_AGENTS, MachineSkillTarget, ProvenanceRecord,
-    SkillAssignment, SkillAssignmentScope, compose_skill_assignments, with_builtin_assignments,
+    BoundDesired, BuiltinSkillAssignment, DEFAULT_BUILTIN_SKILL_AGENTS, MachineSkillTarget,
+    ProfileResource, ProjectResource, ProvenanceRecord, RequirementValue, SkillAssignment,
+    SkillAssignmentScope, compose_binding, compose_skill_assignments, with_builtin_assignments,
 };
 use crate::machine::MachinePort;
 use crate::observed::{DesiredState, compare};
@@ -44,6 +48,9 @@ const RESOURCE_PAGE: i64 = 500;
 /// A revision with more skill presets than this is refused rather than
 /// planned from a partial read.
 const MAX_SKILL_PRESETS: usize = 5_000;
+/// A revision with more machines, profiles, or projects than this is
+/// refused rather than planned from a partial read.
+const MAX_RESOURCES: usize = 5_000;
 
 /// A plan the controller computed, with the identity that binds approvals
 /// and apply to exactly this content.
@@ -404,6 +411,7 @@ impl Planning {
         .map_err(PlanningError::Denied)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn compute(&self, machine_id: &str, now: i64) -> Result<ComputedPlan, PlanningError> {
         let backend = |context| move |detail: String| PlanningError::Backend { context, detail };
         let summary = self
@@ -425,7 +433,32 @@ impl Planning {
                 }
             }
         })?;
-        let presets = self.skill_presets().await?;
+        let bound = self.bound_desired(&machine.name).await?;
+        let mut presets = self.skill_presets().await?;
+        // Profile skill requirements join the SkillPreset assignments as
+        // machine-scoped assignments; the preset rules (deny wins, pins
+        // must agree) then apply to the union (ADR 0014).
+        for (skill_id, agents) in &bound.skills {
+            let identity = RequirementValue::Skill {
+                skill_id: skill_id.clone(),
+                deploy_to: Vec::new(),
+            }
+            .identity();
+            presets.push(SkillAssignment {
+                skill_id: skill_id.clone(),
+                deploy_to: agents.clone(),
+                deny_agents: Vec::new(),
+                catalog_version: None,
+                scope: SkillAssignmentScope::Machine(machine.id.clone()),
+                provenance: bound.provenance.get(&identity).cloned().unwrap_or_else(|| {
+                    ProvenanceRecord {
+                        resource_id: String::new(),
+                        resource_name: "profile".to_owned(),
+                        path: "/spec/requirements".to_owned(),
+                    }
+                }),
+            });
+        }
         let managed: BTreeSet<String> = presets.iter().map(|p| p.skill_id.clone()).collect();
         let builtins = self.builtins().await?;
         // Catalog entries a SkillPreset pins, plus the shipped built-in, are
@@ -446,10 +479,24 @@ impl Planning {
             &assignments,
         )
         .map_err(|error| PlanningError::Composition(format!("{error:?}")))?;
+        // A profile-required skill that a SkillPreset denies is a conflict,
+        // never a silent drop.
+        for (skill_id, agents) in &bound.skills {
+            if let Some(agent) = agents.iter().find(|agent| {
+                !composed
+                    .skills
+                    .contains(&(skill_id.clone(), (*agent).clone()))
+            }) {
+                return Err(PlanningError::Composition(format!(
+                    "the bound profile requires skill {skill_id:?} for {agent:?}, but a SkillPreset denies it"
+                )));
+            }
+        }
         let desired = DesiredState {
+            tools: bound.tools.clone(),
             skills: composed.skills,
             catalog_skills: composed.catalog_skills,
-            ..DesiredState::default()
+            checkouts: bound.checkouts.clone(),
         };
         let observed =
             self.assembler
@@ -464,6 +511,9 @@ impl Planning {
         let computed = split_unmanaged(compare(&desired, &observed), &managed, &managed_catalogs);
         let mut resolved = plan(&computed.0);
         resolved.unactionable.extend(computed.1);
+        resolved
+            .unactionable
+            .extend(capability_differences(&bound, &machine));
         let revision = summary.revision;
         Ok(ComputedPlan {
             plan_id: plan_id(machine_id, &revision, &resolved),
@@ -471,6 +521,109 @@ impl Planning {
             revision,
             plan: resolved,
         })
+    }
+
+    /// Every active resource of a kind, refusing a partial read.
+    async fn resources_of(&self, kind: &str) -> Result<Vec<DesiredResourceRecord>, PlanningError> {
+        let mut records = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .source
+                .active_resources(Some(kind), after.as_deref(), RESOURCE_PAGE)
+                .await
+                .map_err(|detail| PlanningError::Backend {
+                    context: "desired resources",
+                    detail,
+                })?;
+            let Some(last) = page.last() else {
+                return Ok(records);
+            };
+            after = Some(last.id.clone());
+            records.extend(page);
+            if records.len() > MAX_RESOURCES {
+                return Err(PlanningError::Composition(format!(
+                    "the active revision has more than {MAX_RESOURCES} {kind} resources"
+                )));
+            }
+        }
+    }
+
+    /// What the `Machine` resource named like the registered machine binds
+    /// (ADR 0014): its profiles and projects composed into desired tools,
+    /// skills, capabilities, and checkouts. No resource, or no bindings,
+    /// yields nothing.
+    async fn bound_desired(&self, machine_name: &str) -> Result<BoundDesired, PlanningError> {
+        let binding = self
+            .resources_of("Machine")
+            .await?
+            .into_iter()
+            .find(|record| record.name == machine_name);
+        let Some(binding) = binding else {
+            return Ok(BoundDesired::default());
+        };
+        let spec: MachineBindingSpec = serde_json::from_value(binding.spec).map_err(|error| {
+            PlanningError::Composition(format!(
+                "the Machine {} is not readable: {error}",
+                binding.id
+            ))
+        })?;
+        if spec.profiles.is_empty() && spec.projects.is_empty() {
+            return Ok(BoundDesired::default());
+        }
+        let mut profiles = BTreeMap::new();
+        for record in self.resources_of("Profile").await? {
+            let parsed: ProfileSpec = serde_json::from_value(record.spec).map_err(|error| {
+                PlanningError::Composition(format!(
+                    "the Profile {} is not readable: {error}",
+                    record.id
+                ))
+            })?;
+            profiles.insert(
+                record.name.clone(),
+                ProfileResource {
+                    id: record.id,
+                    name: record.name,
+                    extends: parsed.extends,
+                    requirements: parsed.requirements,
+                    deny: parsed.deny.iter().map(RequirementValue::identity).collect(),
+                },
+            );
+        }
+        let mut projects = BTreeMap::new();
+        for record in self.resources_of("Project").await? {
+            let parsed: ProjectSpec = serde_json::from_value(record.spec).map_err(|error| {
+                PlanningError::Composition(format!(
+                    "the Project {} is not readable: {error}",
+                    record.id
+                ))
+            })?;
+            let remote = fleet_core::NormalizedRemote::parse(&parsed.remote)
+                .map_err(|detail| {
+                    PlanningError::Composition(format!(
+                        "the Project {} has an unusable remote: {detail}",
+                        record.id
+                    ))
+                })?
+                .as_str()
+                .to_owned();
+            projects.insert(
+                record.name.clone(),
+                ProjectResource {
+                    id: record.id,
+                    name: record.name,
+                    remote,
+                    root: parsed.root,
+                    tools: parsed
+                        .tools
+                        .into_iter()
+                        .map(|tool| (tool.tool, tool.version))
+                        .collect(),
+                },
+            );
+        }
+        compose_binding(&spec.profiles, &spec.projects, &profiles, &projects)
+            .map_err(|error| PlanningError::Composition(error.to_string()))
     }
 
     /// The active revision's skill presets as assignments.
@@ -540,6 +693,41 @@ fn failure_detail(failure: PortFailure) -> String {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MachineBindingSpec {
+    #[serde(default)]
+    profiles: Vec<String>,
+    #[serde(default)]
+    projects: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileSpec {
+    #[serde(default)]
+    extends: Vec<String>,
+    #[serde(default)]
+    requirements: Vec<RequirementValue>,
+    #[serde(default)]
+    deny: Vec<RequirementValue>,
+}
+
+#[derive(Deserialize)]
+struct ProjectToolSpec {
+    tool: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct ProjectSpec {
+    remote: String,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default)]
+    tools: Vec<ProjectToolSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PresetSpec {
     skill_id: String,
     #[serde(default)]
@@ -577,6 +765,33 @@ fn assignment_from(record: &DesiredResourceRecord) -> Result<SkillAssignment, Pl
             path: "/spec".to_owned(),
         },
     })
+}
+
+/// Capability requirements are report-only: Fleet has no bounded way to
+/// provision one. One the machine does not currently report as known is an
+/// `unsupported` difference, never an action.
+fn capability_differences(
+    bound: &BoundDesired,
+    machine: &crate::machine::Machine,
+) -> Vec<fleet_core::FieldDifference> {
+    bound
+        .capabilities
+        .iter()
+        .filter(|(namespace, name)| {
+            !machine.capabilities.iter().any(|fact| {
+                &fact.namespace == namespace
+                    && &fact.name == name
+                    && fact.status == fleet_core::CapabilityStatus::Known
+            })
+        })
+        .map(|(namespace, name)| {
+            fleet_core::FieldDifference::unsupported(
+                &format!("capability:{namespace}/{name}"),
+                None,
+                "a profile requires this capability; Fleet reports it but cannot provision it",
+            )
+        })
+        .collect()
 }
 
 /// Separates the observed-only skills Fleet does not manage: they stay in

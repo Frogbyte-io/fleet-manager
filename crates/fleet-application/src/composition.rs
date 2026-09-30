@@ -381,6 +381,11 @@ pub enum CompositionError {
         /// come from the composition root.
         referenced_by: Option<String>,
     },
+    /// A machine binds a project that does not exist.
+    UnknownProject {
+        /// The name that does not resolve.
+        name: String,
+    },
     /// Two profiles require different values for the same identity.
     Conflict {
         /// The requirement identity in conflict.
@@ -408,6 +413,7 @@ impl std::fmt::Display for CompositionError {
                 ),
                 None => write!(formatter, "unknown profile {name:?}"),
             },
+            Self::UnknownProject { name } => write!(formatter, "unknown project {name:?}"),
             Self::Conflict {
                 identity,
                 first,
@@ -534,6 +540,173 @@ fn compose_into(
 
     visiting.pop();
     Ok(())
+}
+
+/// A project resource as binding composition sees it (ADR 0014).
+#[derive(Clone, Debug)]
+pub struct ProjectResource {
+    /// The project's metadata.id.
+    pub id: String,
+    /// The project's metadata.name.
+    pub name: String,
+    /// The project's normalized remote.
+    pub remote: String,
+    /// The checkout root; a project without one contributes no checkout.
+    pub root: Option<String>,
+    /// The tool versions the project declares.
+    pub tools: Vec<(String, String)>,
+}
+
+/// What one machine's profile and project bindings ask of it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BoundDesired {
+    /// Tool versions, sorted by tool name.
+    pub tools: Vec<(String, String)>,
+    /// Skill deployments as `(skill id, agents)`, sorted by skill id.
+    pub skills: Vec<(String, Vec<String>)>,
+    /// Checkouts as `(normalized remote, root)`, sorted by remote.
+    pub checkouts: Vec<(String, String)>,
+    /// Capability requirements as `(namespace, name)`, sorted. Report-only.
+    pub capabilities: Vec<(String, String)>,
+    /// Which resource contributed each value, by requirement identity
+    /// (`tool:<name>`, `skill:<id>`, `checkout:<remote>`, `capability:..`).
+    pub provenance: BTreeMap<String, ProvenanceRecord>,
+}
+
+/// The reserved name of the synthetic profile that roots a machine's
+/// bindings. It contains a character no slug can, so it cannot collide.
+const BINDING_ROOT: &str = "\u{0}machine-bindings";
+
+/// Composes the profiles and projects a machine binds (ADR 0014).
+///
+/// The bound profiles compose as one synthetic profile that extends them
+/// in binding order, so `extends`, deny-wins-over-include, and conflict
+/// refusal apply across the whole binding exactly as they do within one
+/// profile. Project tools and checkouts are added under the same rule:
+/// an identical requirement is shared, a different one is a conflict, and
+/// two projects may not claim one remote at different roots or one root
+/// for different remotes. Output is sorted and independent of binding
+/// order.
+///
+/// # Errors
+///
+/// Fails on an unknown profile or project, a profile cycle, or a conflict.
+#[allow(clippy::too_many_lines)]
+pub fn compose_binding(
+    profile_names: &[String],
+    project_names: &[String],
+    profiles: &BTreeMap<String, ProfileResource>,
+    projects: &BTreeMap<String, ProjectResource>,
+) -> Result<BoundDesired, CompositionError> {
+    let mut out = BoundDesired::default();
+    let mut tools: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut skills: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    if !profile_names.is_empty() {
+        let mut scoped = profiles.clone();
+        scoped.insert(
+            BINDING_ROOT.to_owned(),
+            ProfileResource {
+                id: String::new(),
+                name: BINDING_ROOT.to_owned(),
+                extends: profile_names.to_vec(),
+                requirements: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let composed = compose_profile(BINDING_ROOT, &scoped)?;
+        for (identity, entry) in composed.requirements {
+            match entry.requirement {
+                RequirementValue::Tool { tool, version } => {
+                    tools.insert(tool, (version, entry.provenance.resource_name.clone()));
+                }
+                RequirementValue::Skill {
+                    skill_id,
+                    deploy_to,
+                } => {
+                    skills.insert(skill_id, deploy_to);
+                }
+                RequirementValue::Capability { namespace, name } => {
+                    out.capabilities.push((namespace, name));
+                }
+            }
+            out.provenance.insert(identity, entry.provenance);
+        }
+    }
+
+    // Projects, in name order so the first contributor is deterministic.
+    let mut names: Vec<&String> = project_names.iter().collect();
+    names.sort();
+    names.dedup();
+    let mut roots: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut checkouts: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for name in names {
+        let project = projects
+            .get(name)
+            .ok_or_else(|| CompositionError::UnknownProject { name: name.clone() })?;
+        let provenance = |path: String| ProvenanceRecord {
+            resource_id: project.id.clone(),
+            resource_name: project.name.clone(),
+            path,
+        };
+        for (index, (tool, version)) in project.tools.iter().enumerate() {
+            match tools.get(tool) {
+                Some((existing, owner)) if existing != version => {
+                    return Err(CompositionError::Conflict {
+                        identity: format!("tool:{}", escape_identity(tool)),
+                        first: owner.clone(),
+                        second: project.name.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    tools.insert(tool.clone(), (version.clone(), project.name.clone()));
+                    out.provenance.insert(
+                        format!("tool:{}", escape_identity(tool)),
+                        provenance(format!("/spec/tools/{index}")),
+                    );
+                }
+            }
+        }
+        let Some(root) = &project.root else { continue };
+        let identity = format!("checkout:{}", project.remote);
+        match checkouts.get(&project.remote) {
+            Some((existing_root, owner)) if existing_root != root => {
+                return Err(CompositionError::Conflict {
+                    identity,
+                    first: owner.clone(),
+                    second: project.name.clone(),
+                });
+            }
+            Some(_) => continue,
+            None => {}
+        }
+        if let Some((other_remote, owner)) = roots.get(root)
+            && other_remote != &project.remote
+        {
+            return Err(CompositionError::Conflict {
+                identity: format!("checkout-root:{root}"),
+                first: owner.clone(),
+                second: project.name.clone(),
+            });
+        }
+        checkouts.insert(project.remote.clone(), (root.clone(), project.name.clone()));
+        roots.insert(root.clone(), (project.remote.clone(), project.name.clone()));
+        out.provenance
+            .insert(identity, provenance("/spec/root".to_owned()));
+    }
+
+    out.tools = tools
+        .into_iter()
+        .map(|(tool, (version, _))| (tool, version))
+        .collect();
+    out.skills = skills.into_iter().collect();
+    out.checkouts = checkouts
+        .into_iter()
+        .map(|(remote, (root, _))| (remote, root))
+        .collect();
+    out.capabilities.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1163,5 +1336,192 @@ mod tests {
         );
         let back: ComposedProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(composed, back);
+    }
+
+    fn project(
+        name: &str,
+        remote: &str,
+        root: Option<&str>,
+        tools: &[(&str, &str)],
+    ) -> super::ProjectResource {
+        super::ProjectResource {
+            id: format!("proj-{name}"),
+            name: name.to_owned(),
+            remote: remote.to_owned(),
+            root: root.map(str::to_owned),
+            tools: tools
+                .iter()
+                .map(|(tool, version)| ((*tool).to_owned(), (*version).to_owned()))
+                .collect(),
+        }
+    }
+
+    fn projects(list: Vec<super::ProjectResource>) -> BTreeMap<String, super::ProjectResource> {
+        list.into_iter().map(|p| (p.name.clone(), p)).collect()
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_binding_unions_profiles_and_projects_deterministically() {
+        let profiles = registry(vec![
+            profile(
+                "base",
+                &[],
+                vec![tool("node", "20.11.0"), capability("os", "linux")],
+                &[],
+            ),
+            profile(
+                "rust",
+                &["base"],
+                vec![tool("rust", "1.85.0"), skill("db", &["codex"])],
+                &[],
+            ),
+        ]);
+        let projects = projects(vec![
+            project(
+                "app",
+                "github.com/acme/app",
+                Some("/srv/app"),
+                &[("node", "20.11.0"), ("go", "1.22.0")],
+            ),
+            project("lib", "github.com/acme/lib", Some("/srv/lib"), &[]),
+            project(
+                "no-root",
+                "github.com/acme/none",
+                None,
+                &[("zig", "0.13.0")],
+            ),
+        ]);
+        let forward = super::compose_binding(
+            &names(&["rust"]),
+            &names(&["app", "lib", "no-root"]),
+            &profiles,
+            &projects,
+        )
+        .unwrap();
+        let reverse = super::compose_binding(
+            &names(&["rust", "base"]),
+            &names(&["no-root", "lib", "app"]),
+            &profiles,
+            &projects,
+        )
+        .unwrap();
+        assert_eq!(forward, reverse, "binding order does not change the result");
+        assert_eq!(
+            forward.tools,
+            vec![
+                ("go".to_owned(), "1.22.0".to_owned()),
+                ("node".to_owned(), "20.11.0".to_owned()),
+                ("rust".to_owned(), "1.85.0".to_owned()),
+                ("zig".to_owned(), "0.13.0".to_owned()),
+            ]
+        );
+        assert_eq!(
+            forward.checkouts,
+            vec![
+                ("github.com/acme/app".to_owned(), "/srv/app".to_owned()),
+                ("github.com/acme/lib".to_owned(), "/srv/lib".to_owned()),
+            ],
+            "a project without a root contributes tools but no checkout"
+        );
+        assert_eq!(
+            forward.skills,
+            vec![("db".to_owned(), vec!["codex".to_owned()])]
+        );
+        assert_eq!(
+            forward.capabilities,
+            vec![("os".to_owned(), "linux".to_owned())]
+        );
+        assert_eq!(forward.provenance["tool:rust"].resource_name, "rust");
+        assert_eq!(forward.provenance["tool:go"].resource_name, "app");
+    }
+
+    #[test]
+    fn a_binding_refuses_conflicts_cycles_and_unknown_names() {
+        let profiles = registry(vec![
+            profile("a", &[], vec![tool("node", "18.0.0")], &[]),
+            profile("b", &[], vec![tool("node", "20.0.0")], &[]),
+            profile("loop-x", &["loop-y"], vec![], &[]),
+            profile("loop-y", &["loop-x"], vec![], &[]),
+        ]);
+        let projects = projects(vec![
+            project(
+                "app",
+                "github.com/acme/app",
+                Some("/srv/app"),
+                &[("node", "22.0.0")],
+            ),
+            project(
+                "app-elsewhere",
+                "github.com/acme/app",
+                Some("/opt/app"),
+                &[],
+            ),
+            project("other", "github.com/acme/other", Some("/srv/app"), &[]),
+        ]);
+        let compose = |profile_names: &[&str], project_names: &[&str]| {
+            super::compose_binding(
+                &names(profile_names),
+                &names(project_names),
+                &profiles,
+                &projects,
+            )
+        };
+        assert!(matches!(
+            compose(&["a", "b"], &[]),
+            Err(CompositionError::Conflict { .. })
+        ));
+        assert!(
+            matches!(
+                compose(&["a"], &["app"]),
+                Err(CompositionError::Conflict { .. })
+            ),
+            "a project tool disagreeing with a profile"
+        );
+        assert!(
+            matches!(
+                compose(&[], &["app", "app-elsewhere"]),
+                Err(CompositionError::Conflict { .. })
+            ),
+            "one remote, two roots"
+        );
+        assert!(
+            matches!(
+                compose(&[], &["app", "other"]),
+                Err(CompositionError::Conflict { .. })
+            ),
+            "one root, two remotes"
+        );
+        assert!(matches!(
+            compose(&["loop-x"], &[]),
+            Err(CompositionError::Cycle { .. })
+        ));
+        assert!(matches!(
+            compose(&["missing"], &[]),
+            Err(CompositionError::UnknownProfile { .. })
+        ));
+        assert!(matches!(
+            compose(&[], &["missing"]),
+            Err(CompositionError::UnknownProject { .. })
+        ));
+    }
+
+    #[test]
+    fn a_deny_in_one_bound_profile_removes_the_requirement_from_the_binding() {
+        let profiles = registry(vec![
+            profile("wants-node", &[], vec![tool("node", "20.0.0")], &[]),
+            profile("no-node", &[], vec![], &["tool:node"]),
+        ]);
+        let composed = super::compose_binding(
+            &names(&["wants-node", "no-node"]),
+            &[],
+            &profiles,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(composed.tools.is_empty(), "deny wins over include");
     }
 }

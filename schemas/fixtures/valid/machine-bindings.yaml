@@ -1,0 +1,44 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Machine
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2b1
+  name: bound-host
+spec:
+  profiles:
+    - base-dev
+    - rust-dev-bound
+  projects:
+    - fleet-manager-bound
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Profile
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2b2
+  name: base-dev
+spec:
+  requirements:
+    - type: tool
+      tool: node
+      version: "20.11.0"
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Profile
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2b3
+  name: rust-dev-bound
+spec:
+  extends:
+    - base-dev
+  requirements:
+    - type: tool
+      tool: rust
+      version: "1.85.0"
+---
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Project
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2b4
+  name: fleet-manager-bound
+spec:
+  remote: github.com/Frogbyte-io/fleet-manager
+  root: /srv/fleet-manager
