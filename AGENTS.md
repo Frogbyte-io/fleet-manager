@@ -27,6 +27,14 @@ Rules:
 - Write only inside the paths your issue owns. Other agents may be working concurrently; a drive-by fix in a shared file is the most common cause of a conflicted merge.
 - Do not add Nx, Turborepo, microservices, PostgreSQL, a dynamic plugin SDK, or another package/configuration/secrets manager without an approved ADR and demonstrated need.
 
+GUI changes (anything under `apps/web`, or `DESIGN.md`):
+
+- Every GUI change ships with proof: screenshots of the running app, embedded in the PR description under `## Verification`. Passing tests alone do not count.
+- Before opening or updating the PR, follow `.agents/skills/test-fleet-console/SKILL.md`: run the change against an isolated controller, capture dark and light, desktop and narrow, and every state the change touches, and publish the images to the `pr-evidence` branch.
+- Review each screenshot for secrets, private hostnames or IPs, and real machine data before publishing; the repository is public.
+- Follow `DESIGN.md` and `bootstrap/fleet-console-labs/SKILL.md`. The web app is an adapter: show only what the public API and `fleetctl --output json` can also report.
+- Report what could not be verified, and why, in the PR.
+
 Canonical planning documents:
 
 - `docs/PLAN.md` — product direction, milestones, dependencies, and epics
