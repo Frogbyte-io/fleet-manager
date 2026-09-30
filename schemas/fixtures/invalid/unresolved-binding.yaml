@@ -1,0 +1,10 @@
+apiVersion: fleet.frogbyte.io/v1alpha1
+kind: Machine
+metadata:
+  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2c1
+  name: dangling-host
+spec:
+  profiles:
+    - no-such-profile
+  projects:
+    - no-such-project

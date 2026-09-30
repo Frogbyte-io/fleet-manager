@@ -653,7 +653,7 @@ mod tests {
             tools: vec![("node".into(), "22.1.0".into())],
             skills: vec![("fleet".into(), "codex".into())],
             catalog_skills: vec![],
-            checkout: Some(("github.com/acme/app".into(), "/srv/app".into())),
+            checkouts: vec![("github.com/acme/app".into(), "/srv/app".into())],
         };
         let differences = compare(&desired, &observed);
         assert!(!differences.fields.is_empty());

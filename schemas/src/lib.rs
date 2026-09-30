@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::{self, Write as _},
     path::{Path, PathBuf},
     str::FromStr,
@@ -343,6 +343,7 @@ pub fn validate_sources(sources: &[SourceDocument]) -> Vec<Diagnostic> {
         .expect("the generated Draft 2020-12 schema must compile");
     let mut diagnostics = Vec::new();
     let mut identities: HashMap<String, String> = HashMap::new();
+    let mut collection: Vec<(String, Value)> = Vec::new();
 
     for source in sources {
         let documents: Vec<Value> =
@@ -399,8 +400,10 @@ pub fn validate_sources(sources: &[SourceDocument]) -> Vec<Diagnostic> {
 
             validate_core_values(document, &base, &mut diagnostics);
             validate_semantics(document, &base, &mut diagnostics);
+            collection.push((base, document.clone()));
         }
     }
+    validate_references(&collection, &mut diagnostics);
 
     let mut unique = BTreeSet::new();
     unique.extend(diagnostics);
@@ -554,6 +557,137 @@ fn validate_semantics(document: &Value, base: &str, diagnostics: &mut Vec<Diagno
             message: format!("the project remote is not a normalizable remote: {detail}"),
         });
     }
+}
+
+/// Collection-level semantic validation (ADR 0014): a machine's profile and
+/// project bindings, and a profile's `extends`, must name resources in the
+/// same candidate revision, and `extends` must not cycle. Resource names
+/// are the reference key, so they must be unique within a bindable kind.
+fn validate_references(collection: &[(String, Value)], diagnostics: &mut Vec<Diagnostic>) {
+    let mut profiles: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut projects: BTreeSet<&str> = BTreeSet::new();
+    let mut seen: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    for (base, document) in collection {
+        let kind = document
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(name) = document.pointer("/metadata/name").and_then(Value::as_str) else {
+            continue;
+        };
+        if !matches!(kind, "Machine" | "Profile" | "Project") {
+            continue;
+        }
+        if let Some(first) = seen.insert((kind, name), base) {
+            diagnostics.push(Diagnostic {
+                code: "FM_SCHEMA_SEMANTIC_DUPLICATE_NAME",
+                location: format!("{base}/metadata/name"),
+                message: format!(
+                    "the {kind} name {name:?} was first declared at {first}; bindings reference resources by name"
+                ),
+            });
+            continue;
+        }
+        match kind {
+            "Profile" => {
+                let extends = string_items(document.pointer("/spec/extends"))
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect();
+                profiles.insert(name, extends);
+            }
+            "Project" => {
+                projects.insert(name);
+            }
+            _ => {}
+        }
+    }
+    for (base, document) in collection {
+        let kind = document
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match kind {
+            "Machine" => {
+                for (field, known, noun) in [
+                    ("profiles", None, "profile"),
+                    ("projects", Some(&projects), "project"),
+                ] {
+                    for (index, name) in string_items(document.pointer(&format!("/spec/{field}"))) {
+                        let resolved = known.map_or_else(
+                            || profiles.contains_key(name),
+                            |names| names.contains(name),
+                        );
+                        if !resolved {
+                            diagnostics.push(Diagnostic {
+                                code: "FM_SCHEMA_SEMANTIC_UNRESOLVED_REFERENCE",
+                                location: format!("{base}/spec/{field}/{index}"),
+                                message: format!(
+                                    "no {noun} named {name:?} exists in this revision"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+            "Profile" => {
+                let own = document
+                    .pointer("/metadata/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                for (index, parent) in string_items(document.pointer("/spec/extends")) {
+                    if !profiles.contains_key(parent) {
+                        diagnostics.push(Diagnostic {
+                            code: "FM_SCHEMA_SEMANTIC_UNRESOLVED_REFERENCE",
+                            location: format!("{base}/spec/extends/{index}"),
+                            message: format!("no profile named {parent:?} exists in this revision"),
+                        });
+                    } else if extends_reaches(&profiles, parent, own) {
+                        diagnostics.push(Diagnostic {
+                            code: "FM_SCHEMA_SEMANTIC_PROFILE_CYCLE",
+                            location: format!("{base}/spec/extends/{index}"),
+                            message: format!(
+                                "profile {own:?} extending {parent:?} forms an extends cycle"
+                            ),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The string items of an optional JSON array, with their positions.
+fn string_items(value: Option<&Value>) -> Vec<(usize, &str)> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| item.as_str().map(|text| (index, text)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `target` is reachable from `start` through `extends` edges.
+fn extends_reaches(profiles: &BTreeMap<&str, Vec<&str>>, start: &str, target: &str) -> bool {
+    let mut visited = BTreeSet::new();
+    let mut stack = vec![start];
+    while let Some(name) = stack.pop() {
+        if name == target {
+            return true;
+        }
+        if !visited.insert(name) {
+            continue;
+        }
+        if let Some(parents) = profiles.get(name) {
+            stack.extend(parents.iter().copied());
+        }
+    }
+    false
 }
 
 fn validate_core_values(document: &Value, base: &str, diagnostics: &mut Vec<Diagnostic>) {

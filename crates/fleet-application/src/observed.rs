@@ -103,9 +103,9 @@ pub struct DesiredState {
     /// Fleet catalog versions desired on the machine as
     /// (catalog id, version id, agent) tuples.
     pub catalog_skills: Vec<(String, String, String)>,
-    /// The desired checkout's normalized remote and root, when the
-    /// project declares one.
-    pub checkout: Option<(String, String)>,
+    /// The desired checkouts as (normalized remote, root) pairs, one per
+    /// bound project that declares a root (ADR 0014).
+    pub checkouts: Vec<(String, String)>,
 }
 
 /// An observed tool's availability, preserving the fact's own honesty: a
@@ -504,7 +504,7 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
     // in both directions. An unanswered discovery or a known checkout
     // with no readable remote is an honest `unknown` — cloning a
     // duplicate would be worse than reporting.
-    if let Some((desired_remote, desired_root)) = &desired.checkout {
+    for (desired_remote, desired_root) in &desired.checkouts {
         if observed.checkouts_answered.is_none_or(|answered| !answered) {
             set.push(FieldDifference::unknown(
                 &format!(
@@ -561,10 +561,12 @@ pub fn compare(desired: &DesiredState, observed: &ObservedState) -> DifferenceSe
     // checkouts can be reported — regardless of whether a checkout is
     // desired at all.
     if observed.checkouts_answered == Some(true) {
-        let desired_remote = desired.checkout.as_ref().map(|(remote, _)| remote);
         for checkout in &observed.checkouts {
             if let Some(remote) = &checkout.remote
-                && desired_remote != Some(remote)
+                && !desired
+                    .checkouts
+                    .iter()
+                    .any(|(desired, _)| desired == remote)
             {
                 set.push(FieldDifference::extra(
                     &format!(
@@ -711,10 +713,10 @@ mod tests {
             ],
             skills: vec![("db".to_owned(), "claude_code".to_owned())],
             catalog_skills: vec![],
-            checkout: Some((
+            checkouts: vec![(
                 "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 "/srv/repo".to_owned(),
-            )),
+            )],
         };
         let observed = ObservedState {
             tools: vec![ObservedTool {
@@ -924,10 +926,10 @@ mod tests {
     #[test]
     fn an_unanswered_discovery_makes_the_checkout_unknown() {
         let desired = DesiredState {
-            checkout: Some((
+            checkouts: vec![(
                 "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 "/srv/repo".to_owned(),
-            )),
+            )],
             ..DesiredState::default()
         };
         let observed = ObservedState {
@@ -946,10 +948,10 @@ mod tests {
     #[test]
     fn a_known_checkout_with_no_readable_remote_is_unknown() {
         let desired = DesiredState {
-            checkout: Some((
+            checkouts: vec![(
                 "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 "/srv/repo".to_owned(),
-            )),
+            )],
             ..DesiredState::default()
         };
         let observed = ObservedState {
@@ -972,6 +974,30 @@ mod tests {
             !checkout.actionable(),
             "cloning a duplicate would be worse than reporting"
         );
+    }
+
+    #[test]
+    fn several_desired_checkouts_compare_independently() {
+        let desired = DesiredState {
+            checkouts: vec![
+                ("github.com/acme/app".to_owned(), "/srv/app".to_owned()),
+                ("github.com/acme/lib".to_owned(), "/srv/lib".to_owned()),
+            ],
+            ..DesiredState::default()
+        };
+        let observed = ObservedState {
+            checkouts: vec![super::ObservedCheckout {
+                root: "/srv/app".to_owned(),
+                remote: Some("github.com/acme/app".to_owned()),
+                branch: None,
+            }],
+            checkouts_answered: Some(true),
+            ..ObservedState::default()
+        };
+        let set = compare(&desired, &observed);
+        assert_eq!(set.fields.len(), 1, "the present checkout is in sync");
+        assert_eq!(set.fields[0].identity, "checkout:github.com/acme/lib");
+        assert_eq!(set.fields[0].state, DifferenceState::Missing);
     }
 
     #[test]
@@ -1012,10 +1038,10 @@ mod tests {
             tools: vec![("node".to_owned(), "20.11.0".to_owned())],
             skills: vec![("db".to_owned(), "claude_code".to_owned())],
             catalog_skills: vec![],
-            checkout: Some((
+            checkouts: vec![(
                 "github.com/Frogbyte-io/fleet-manager".to_owned(),
                 "/srv/repo".to_owned(),
-            )),
+            )],
         };
         let observed = ObservedState {
             tools: vec![ObservedTool {

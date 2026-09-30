@@ -402,6 +402,24 @@
                   "null"
                 ]
               },
+              "profiles": {
+                "default": [],
+                "description": "The `Profile` resources (by `metadata.name`) bound to this machine.\nThe machine is matched to a registered Fleet machine by\n`metadata.name` (ADR 0014). An unresolved name fails validation.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
+              "projects": {
+                "default": [],
+                "description": "The `Project` resources (by `metadata.name`) bound to this machine:\ntheir tools and checkouts become desired state for it (ADR 0014).\nAn unresolved name fails validation.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
               "tags": {
                 "default": [],
                 "description": "Tags for filtering.",

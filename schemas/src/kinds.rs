@@ -146,6 +146,18 @@ pub struct MachineSpec {
     #[serde(default)]
     #[schemars(length(max = 128))]
     pub pinned_host_key: Option<String>,
+    /// The `Profile` resources (by `metadata.name`) bound to this machine.
+    /// The machine is matched to a registered Fleet machine by
+    /// `metadata.name` (ADR 0014). An unresolved name fails validation.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub profiles: Vec<String>,
+    /// The `Project` resources (by `metadata.name`) bound to this machine:
+    /// their tools and checkouts become desired state for it (ADR 0014).
+    /// An unresolved name fails validation.
+    #[serde(default)]
+    #[schemars(length(max = 16))]
+    pub projects: Vec<String>,
 }
 
 /// The `Project` spec: declared tools and skill requirements for a

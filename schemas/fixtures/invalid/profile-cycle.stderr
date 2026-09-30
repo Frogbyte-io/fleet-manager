@@ -1,0 +1,2 @@
+schemas/fixtures/invalid/profile-cycle.yaml#document=1/spec/extends/0 [FM_SCHEMA_SEMANTIC_PROFILE_CYCLE] profile "cycle-a" extending "cycle-b" forms an extends cycle
+schemas/fixtures/invalid/profile-cycle.yaml#document=2/spec/extends/0 [FM_SCHEMA_SEMANTIC_PROFILE_CYCLE] profile "cycle-b" extending "cycle-a" forms an extends cycle
