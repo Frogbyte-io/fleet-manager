@@ -1,16 +1,23 @@
-# Deploying the Fleet controller (smoke)
+# Deploying the Fleet controller
 
-The minimal controller deployment from FM-008: one unprivileged container that
-serves the public API, the web shell, and container health probes. It carries
-no database, no accounts, and no secrets yet — those are M1 work — but the
-mount locations it will use already exist so the deployment does not have to
-be rearranged later.
+One controller container serves the API, Vue web app, node gateway, and health
+probes. SQLite runtime state and encrypted secrets persist in the data volume;
+the master key is mounted separately. The dashboard has no login and must stay
+inside a trusted network. The service process runs without root privileges.
+
+For Coolify and private Tailscale ingress, use the standalone
+[Coolify deployment guide](COOLIFY.md) and `compose.coolify.yaml`.
 
 ## Run it
 
 ```sh
+export FLEET_MASTER_KEY_SOURCE=/absolute/path/to/master_key
 docker compose -f deploy/compose.yaml up --build -d
 ```
+
+Provision a real key first using the format in
+[fleet-secrets](../crates/fleet-secrets/README.md). The smoke script below
+creates its own temporary key and disposable volume instead.
 
 Or run the full end-to-end smoke, which builds, waits for healthy, probes the
 served surfaces, asserts the isolation posture, and checks the SIGTERM path:
@@ -25,10 +32,12 @@ deploy/smoke.sh
 |---|---|
 | `/` and static assets | The built Vue web shell |
 | `/api/v1/*` | The public API described by `packages/api-client/openapi.json` |
+| `/api/node/v1/*` | Node enrollment, session proof, and outbound WebSocket gateway |
+| `/downloads/fleetd/*` | Linux node installer packages |
 | `/healthz` | Process liveness |
 | `/readyz` | Readiness; reports unavailable while the web shell is missing |
 
-## Configuration placeholders
+## Configuration
 
 Precedence, documented in `crates/fleet-config`: built-in defaults < the
 configuration file selected with `--config <path>` (TOML) < environment
@@ -41,7 +50,7 @@ refuses to start on a missing or unsafe setting.
 | `FLEET_TAILSCALE_SERVE_LISTEN` | *(unset)* | Enables a dedicated loopback-only HTTP listener for Tailscale Serve identity. When set, `FLEET_LISTEN` must also be loopback and the two addresses must differ. Configure Serve to proxy to `http://127.0.0.1:<port>`. This mode is not supported by the default bridged Compose deployment; use host networking or run the controller directly on the host. |
 | `FLEET_WEB_DIST` | `./web` | Directory of the built web shell. The image sets `/opt/fleet/web`. |
 | `FLEET_DATA_DIR` | `./data` | Runtime state directory; created during startup validation. The container sets `/var/lib/fleet`. |
-| `FLEET_MASTER_KEY_FILE` | *(unset)* | Master key file for the secret store. Must exist, be a regular file, and be mode 0600; startup refuses a more exposed key. The container sets `/run/secrets/master_key`. |
+| `FLEET_MASTER_KEY_FILE` | *(unset)* | Master key file for the secret store. Must exist, be a regular file, and have owner-only permissions; startup refuses a more exposed key. Compose sets `/tmp/fleet-secrets/master_key`, the protected copy made by the entrypoint from `/run/secrets/master_key`, so service and healthcheck use the same file. |
 
 An unset master key source is reported in the startup summary as "secret store
 unavailable" rather than pointed at a file that does not exist.
@@ -82,15 +91,19 @@ operator provisions a real one.
   and no host path mounts**. `deploy/smoke.sh` asserts all four.
 - The root filesystem is **read-only**; only `/tmp` (tmpfs) and the state
   volume are writable.
-- The published port binds **host loopback only**. Publishing to `0.0.0.0`
-  would put an account-less control plane on your LAN; the plan's trusted-LAN
-  mode with its explicit warning arrives with M1, not before.
-- The image runs as a non-root system user with no shell.
+- The published port binds **host loopback only**. Use private ingress to
+  provide trusted-network access; do not publish an account-less control plane
+  to the Internet.
+- The entrypoint starts as root to prepare state and copy the mounted key to
+  owner-only tmpfs storage, then uses `setpriv` to run the controller as uid/gid
+  999. The service account has no login shell.
 
 ## Image build
 
 `deploy/controller.Dockerfile` is a three-stage build — web shell (Node
 `24.19.0`, pnpm `9.15.9`), controller binary (Rust `1.98.0`, `--locked`), and
-a `debian:bookworm-slim` runtime holding only the binary and the static
-assets. The pinned versions are the same ones CI pins in
+a `debian:bookworm-slim` runtime with the binary, static assets, Git/SSH client
+tools, CA roots, and a native-architecture Linux node installer package. The
+package is copied into the persistent artifacts directory on startup. The
+pinned versions are the same ones CI pins in
 `.github/toolchain.env` and `rust-toolchain.toml`.

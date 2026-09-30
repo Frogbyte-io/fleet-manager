@@ -2,6 +2,10 @@ node_modules/
 target/
 .agents-registry-machine
 .env
+.env.*
+!.env.example
+deploy/secrets/
+data/
 
 # tailscale serve certificates
 dev.tail5b493.ts.net.crt

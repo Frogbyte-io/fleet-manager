@@ -35,15 +35,26 @@ COPY crates/ crates/
 COPY schemas/ schemas/
 COPY xtask/ xtask/
 COPY proto/ proto/
-RUN cargo build --release --locked -p fleet-controller
+# The controller embeds the built-in Fleet skill at compile time.
+COPY skills/fleet/ skills/fleet/
+COPY deploy/fleetd/ deploy/fleetd/
+# Keep self-hosted builds from exhausting RAM on small Coolify servers.
+ARG CARGO_BUILD_JOBS=2
+RUN cargo build --release --locked -p fleet-controller \
+    && cargo run --release --locked -p xtask -- package-fleetd
 
 FROM debian:bookworm-slim AS runtime
 # The service user (uid/gid 999) owns the runtime state directory. The
 # entrypoint starts as root only to align ownership of the state directory and
 # the mounted master key with FLEET_UID/FLEET_GID, then drops privileges with
 # setpriv, so the process that serves traffic is never root.
-RUN useradd --system --home-dir /var/lib/fleet --create-home --shell /usr/sbin/nologin fleet
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 999 fleet \
+    && useradd --system --uid 999 --gid fleet --home-dir /var/lib/fleet --create-home --shell /usr/sbin/nologin fleet
 COPY --from=rust /src/target/release/fleet-controller /usr/local/bin/fleet-controller
+COPY --from=rust /src/target/dist/*.tar.gz /opt/fleet/artifacts/
 COPY --from=web /src/apps/web/dist /opt/fleet/web
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh

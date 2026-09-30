@@ -32,7 +32,7 @@ services:
       FLEET_DATA_DIR: /var/lib/fleet
       # The key source is a mounted Docker secret: a file, never an
       # environment variable or a build argument.
-      FLEET_MASTER_KEY_FILE: /run/secrets/master_key
+      FLEET_MASTER_KEY_FILE: /tmp/fleet-secrets/master_key
     volumes:
       # Runtime state (the SQLite database and friends). Named volume so a
       # `compose down -v` is the explicit destructive act.
@@ -50,6 +50,7 @@ services:
       retries: 12
       start_period: 5s
     restart: unless-stopped
+    stop_grace_period: 150s
 
 volumes:
   fleet-data:
@@ -58,7 +59,6 @@ secrets:
   master_key:
     # Overridable so deploy/smoke.sh can hand the stack an ephemeral key and
     # production can point at a real, operator-managed one. The file must be
-    # mode 0600 on the host and owned by the uid the container runs the
-    # service as (see FLEET_UID in the entrypoint); this compose file runs
-    # the service as the image's `fleet` user (999).
+    # mode 0600 on the host. The root entrypoint copies the read-only secret
+    # into owner-only tmpfs storage and drops to uid/gid 999 before serving.
     file: ${FLEET_MASTER_KEY_SOURCE:-./secrets/master_key}

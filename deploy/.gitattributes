@@ -1,0 +1,2 @@
+# Linux entrypoints and packaged installer scripts must survive Windows checkouts.
+*.sh text eol=lf

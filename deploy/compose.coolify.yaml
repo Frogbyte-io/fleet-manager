@@ -1,0 +1,48 @@
+# Standalone Coolify Compose application. Leave the service's Domains empty:
+# private ingress is provided by Tailscale Serve on the deployment host.
+# Do not combine this file with compose.tailscale.yaml (Serve identity mode).
+services:
+  controller:
+    build:
+      context: ..
+      dockerfile: deploy/controller.Dockerfile
+    ports:
+      - "127.0.0.1:${FLEET_COOLIFY_PORT:-8080}:8080"
+    labels:
+      traefik.enable: "false"
+    environment:
+      FLEET_LISTEN: 0.0.0.0:8080
+      FLEET_WEB_DIST: /opt/fleet/web
+      FLEET_DATA_DIR: /var/lib/fleet
+      # The entrypoint copies the mounted key here with owner-only permissions.
+      # Healthchecks must read the same copy as the service process.
+      FLEET_MASTER_KEY_FILE: /tmp/fleet-secrets/master_key
+    volumes:
+      - fleet-data:/var/lib/fleet
+    secrets:
+      - master_key
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "fleet-controller", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    # Worker drain is bounded at 120s; allow it to finish before Docker kills it.
+    stop_grace_period: 150s
+    restart: unless-stopped
+
+volumes:
+  fleet-data:
+    # Provision once on the host. Stable across Coolify checkout/project names;
+    # external volumes are not deleted by Compose down --volumes.
+    external: true
+    name: ${FLEET_DATA_VOLUME:-fleet-manager-data}
+
+secrets:
+  master_key:
+    # Only the path is configured in Coolify. Key material stays outside Git,
+    # image builds, container environment, and the Coolify Compose definition.
+    file: ${FLEET_MASTER_KEY_SOURCE:?Set the absolute master-key file path on the deployment host}

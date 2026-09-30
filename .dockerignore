@@ -11,3 +11,15 @@ node_modules/
 apps/web/dist/
 docs/
 legacy/
+# Operator-managed credentials and state are never image build inputs.
+.env
+.env.*
+!.env.example
+deploy/secrets/
+**/master_key
+data/
+*.db
+*.db-wal
+*.db-shm
+*.ts.net.crt
+*.ts.net.key
