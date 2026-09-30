@@ -17,6 +17,7 @@ pub mod checkout;
 pub mod exec;
 pub mod frogenv;
 pub mod gateway;
+pub mod git_credentials;
 pub mod images_exec;
 pub mod install;
 pub mod mise;
@@ -75,6 +76,9 @@ pub struct NodeServices {
     pub gateway: Arc<gateway::GatewayService>,
     /// The event hub shared by gateway transitions and the API stream.
     pub events: Arc<fleet_application::events::EventHub>,
+    /// The Git credential store for the desired source (FM-412); set by the
+    /// binary once the secret store is open, absent otherwise.
+    pub git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
 }
 
 fn event_hub_for_services(
@@ -138,6 +142,7 @@ pub fn compose_node_services_with_events(
         .with_events(events.clone()),
     );
     NodeServices {
+        git_credentials: None,
         nodes,
         gateway,
         events,
@@ -213,6 +218,7 @@ fn api_state(
     proxmox: Option<Arc<fleet_application::proxmox::ProxmoxAccounts>>,
     images: Option<Arc<fleet_application::images::Images>>,
     lab: Option<Arc<fleet_application::lab::Lab>>,
+    git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
     events: Arc<fleet_application::events::EventHub>,
 ) -> fleet_api::operations::ApiState {
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
@@ -261,12 +267,16 @@ fn api_state(
             proxmox,
             images,
             lab,
-            desired: Some(std::sync::Arc::new(
-                fleet_application::source::DesiredSource::new(
+            desired: Some(std::sync::Arc::new({
+                let desired = fleet_application::source::DesiredSource::new(
                     std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(pool.clone())),
                     std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
-                ),
-            )),
+                );
+                match git_credentials {
+                    Some(credentials) => desired.with_credentials(credentials),
+                    None => desired,
+                }
+            })),
             planning: Some(std::sync::Arc::new(compose_planning(&pool))),
         };
     }
@@ -480,6 +490,7 @@ fn build_router_for_caller(
         proxmox.cloned(),
         images.cloned(),
         lab.cloned(),
+        services.and_then(|services| services.git_credentials.clone()),
         events,
     ));
     let api_router = fleet_api::router(api_state.clone());

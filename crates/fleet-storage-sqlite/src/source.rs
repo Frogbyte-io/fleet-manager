@@ -160,13 +160,24 @@ impl fleet_application::source::SourcePort for SourceRepository {
         Ok(row.map(|(remote,)| remote))
     }
 
-    async fn set_remote(&self, remote: &str) -> Result<(), String> {
+    async fn credential_ref(&self) -> Result<Option<String>, String> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT credential_ref FROM source_remote LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| format!("the credential reference read failed: {error}"))?;
+        Ok(row.and_then(|(reference,)| reference))
+    }
+
+    async fn set_remote(&self, remote: &str, credential_ref: Option<&str>) -> Result<(), String> {
         sqlx::query(
-            "INSERT INTO source_remote (singleton, remote, updated_at) VALUES ('remote', ?1, ?2) \
+            "INSERT INTO source_remote (singleton, remote, credential_ref, updated_at) \
+             VALUES ('remote', ?1, ?2, ?3) \
              ON CONFLICT(singleton) DO UPDATE SET remote = excluded.remote, \
-             updated_at = excluded.updated_at",
+             credential_ref = excluded.credential_ref, updated_at = excluded.updated_at",
         )
         .bind(remote)
+        .bind(credential_ref)
         .bind(fleet_core::SystemClock::now_unix_millis())
         .execute(&self.pool)
         .await

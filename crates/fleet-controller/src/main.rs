@@ -117,11 +117,19 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         let services = match secrets.as_ref() {
             Some(secret_store) => {
                 match fleet_controller::node_crypto::NodeCryptoService::open(secret_store).await {
-                    Ok(crypto) => Some(fleet_controller::compose_node_services_with_events(
-                        store.pool(),
-                        std::sync::Arc::new(crypto),
-                        events.clone(),
-                    )),
+                    Ok(crypto) => {
+                        let mut node_services = fleet_controller::compose_node_services_with_events(
+                            store.pool(),
+                            std::sync::Arc::new(crypto),
+                            events.clone(),
+                        );
+                        node_services.git_credentials = Some(std::sync::Arc::new(
+                            fleet_controller::git_credentials::SecretBackedGitCredentials::new(
+                                secret_store.clone(),
+                            ),
+                        ));
+                        Some(node_services)
+                    }
                     Err(error) => {
                         eprintln!("fleet-controller: refusing to start: {error}");
                         return None;
@@ -307,17 +315,27 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             let with_source: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 std::sync::Arc::new(fleet_controller::source::SourceDispatch::new(
                     with_apply.clone(),
-                    std::sync::Arc::new(fleet_controller::source::SourceExecutor::new(
-                        config.data_dir.join("git-source"),
-                        std::sync::Arc::new(fleet_application::source::DesiredSource::new(
-                            std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
-                                store.pool().clone(),
+                    std::sync::Arc::new({
+                        let executor = fleet_controller::source::SourceExecutor::new(
+                            config.data_dir.join("git-source"),
+                            std::sync::Arc::new(fleet_application::source::DesiredSource::new(
+                                std::sync::Arc::new(fleet_storage_sqlite::SourceRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                    store.pool().clone(),
+                                )),
                             )),
-                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                                store.pool().clone(),
+                        );
+                        match &secrets {
+                            Some(secrets) => executor.with_credentials(std::sync::Arc::new(
+                                fleet_controller::git_credentials::SecretBackedGitCredentials::new(
+                                    secrets.clone(),
+                                ),
                             )),
-                        )),
-                    )),
+                            None => executor,
+                        }
+                    }),
                 ))
             };
             // The Proxmox lifecycle executor handles the FM-602 kinds over

@@ -724,6 +724,78 @@
         }
       }
     },
+    "/api/v1/desired/source/credential": {
+      "post": {
+        "tags": [
+          "desired"
+        ],
+        "summary": "Stores a Git credential (HTTPS token or SSH private key) in the\ncontroller's encrypted secret store and returns its reference. The value\nis write-only: no endpoint returns it.",
+        "description": "# Errors\n\nReturns an API error when authentication, authorization, validation, or storage fails.",
+        "operationId": "storeDesiredSourceCredential",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_StoredCredentialDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The credential is empty or oversized, or no secret store is available.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not store secrets or configure the desired source.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request could not be completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The desired-state surface is not wired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -6847,6 +6919,13 @@
           "remote"
         ],
         "properties": {
+          "credentialRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional reference returned by `POST /desired/source/credential`.\nOmitting it clears any reference: git then authenticates with the\ncontroller host's own configuration."
+          },
           "remote": {
             "type": "string",
             "description": "The Git remote. Embedded credentials are refused."
@@ -7309,6 +7388,13 @@
         "type": "object",
         "description": "The configured desired-source remote.",
         "properties": {
+          "credentialRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Git credential reference (an opaque id), when one is\nconfigured. Never the credential value."
+          },
           "remote": {
             "type": [
               "string",
@@ -11705,6 +11791,13 @@
             "type": "object",
             "description": "The configured desired-source remote.",
             "properties": {
+              "credentialRef": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The Git credential reference (an opaque id), when one is\nconfigured. Never the credential value."
+              },
               "remote": {
                 "type": [
                   "string",
@@ -13304,6 +13397,28 @@
           }
         }
       },
+      "Resource_StoredCredentialDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The reference of a stored Git credential.",
+            "required": [
+              "credentialRef"
+            ],
+            "properties": {
+              "credentialRef": {
+                "type": "string",
+                "description": "The opaque reference to pass as `credentialRef`."
+              }
+            }
+          }
+        }
+      },
       "Resource_TailnetStatusDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -14125,6 +14240,33 @@
             "format": "int64",
             "description": "The deadline, in seconds. Bounded by the executor.",
             "minimum": 0
+          }
+        }
+      },
+      "StoreCredentialRequest": {
+        "type": "object",
+        "description": "A Git credential to store: an HTTPS access token, or an SSH private key\nin PEM/OpenSSH form. Write-only.",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "The credential value."
+          }
+        },
+        "additionalProperties": false
+      },
+      "StoredCredentialDto": {
+        "type": "object",
+        "description": "The reference of a stored Git credential.",
+        "required": [
+          "credentialRef"
+        ],
+        "properties": {
+          "credentialRef": {
+            "type": "string",
+            "description": "The opaque reference to pass as `credentialRef`."
           }
         }
       },

@@ -182,6 +182,9 @@ pub async fn list_desired_resources(
 pub struct DesiredSourceDto {
     /// The remote, when one is configured. Never carries credentials.
     pub remote: Option<String>,
+    /// The Git credential reference (an opaque id), when one is
+    /// configured. Never the credential value.
+    pub credential_ref: Option<String>,
 }
 
 /// Sets the desired-source remote.
@@ -190,6 +193,36 @@ pub struct DesiredSourceDto {
 pub struct ConfigureSourceRequest {
     /// The Git remote. Embedded credentials are refused.
     pub remote: String,
+    /// An optional reference returned by `POST /desired/source/credential`.
+    /// Omitting it clears any reference: git then authenticates with the
+    /// controller host's own configuration.
+    #[serde(default)]
+    pub credential_ref: Option<String>,
+}
+
+/// A Git credential to store: an HTTPS access token, or an SSH private key
+/// in PEM/OpenSSH form. Write-only.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoreCredentialRequest {
+    /// The credential value.
+    pub value: String,
+}
+
+impl std::fmt::Debug for StoreCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreCredentialRequest")
+            .field("value", &"[redacted]")
+            .finish()
+    }
+}
+
+/// The reference of a stored Git credential.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredCredentialDto {
+    /// The opaque reference to pass as `credentialRef`.
+    pub credential_ref: String,
 }
 
 /// One recorded desired revision.
@@ -269,11 +302,14 @@ pub async fn get_desired_source(
     Extension(correlation_id): Extension<CorrelationId>,
 ) -> Result<Json<Resource<DesiredSourceDto>>, ApiErrorResponse> {
     let acting = principal(acting, correlation_id)?;
-    let remote = service(&state, correlation_id)?
-        .remote(state.authorizer.as_ref(), &acting.id)
+    let config = service(&state, correlation_id)?
+        .configuration(state.authorizer.as_ref(), &acting.id)
         .await
         .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
-    Ok(Json(Resource::new(DesiredSourceDto { remote })))
+    Ok(Json(Resource::new(DesiredSourceDto {
+        remote: config.as_ref().map(|config| config.remote.clone()),
+        credential_ref: config.and_then(|config| config.credential_ref),
+    })))
 }
 
 /// Configures the desired-source remote.
@@ -299,13 +335,54 @@ pub async fn configure_desired_source(
     Json(request): Json<ConfigureSourceRequest>,
 ) -> Result<Json<Resource<DesiredSourceDto>>, ApiErrorResponse> {
     let acting = principal(acting, correlation_id)?;
-    let remote = service(&state, correlation_id)?
-        .configure_remote(state.authorizer.as_ref(), &acting.id, &request.remote)
+    let config = service(&state, correlation_id)?
+        .configure_remote(
+            state.authorizer.as_ref(),
+            &acting.id,
+            &request.remote,
+            request.credential_ref.as_deref(),
+        )
         .await
         .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
     Ok(Json(Resource::new(DesiredSourceDto {
-        remote: Some(remote),
+        remote: Some(config.remote),
+        credential_ref: config.credential_ref,
     })))
+}
+
+/// Stores a Git credential (HTTPS token or SSH private key) in the
+/// controller's encrypted secret store and returns its reference. The value
+/// is write-only: no endpoint returns it.
+///
+/// # Errors
+///
+/// Returns an API error when authentication, authorization, validation, or storage fails.
+#[utoipa::path(
+    post, path = "/desired/source/credential", tag = "desired", operation_id = "storeDesiredSourceCredential",
+    request_body = StoreCredentialRequest,
+    responses(
+        (status = 201, body = Resource<StoredCredentialDto>),
+        (status = 400, description = "The credential is empty or oversized, or no secret store is available.", body = ApiError),
+        (status = 403, description = "The caller may not store secrets or configure the desired source.", body = ApiError),
+        (status = 500, description = "The request could not be completed.", body = ApiError),
+        (status = 503, description = "The desired-state surface is not wired.", body = ApiError),
+    )
+)]
+pub async fn store_desired_source_credential(
+    State(state): State<Arc<ApiState>>,
+    acting: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Json(request): Json<StoreCredentialRequest>,
+) -> Result<(StatusCode, Json<Resource<StoredCredentialDto>>), ApiErrorResponse> {
+    let acting = principal(acting, correlation_id)?;
+    let credential_ref = service(&state, correlation_id)?
+        .store_credential(state.authorizer.as_ref(), &acting.id, &request.value)
+        .await
+        .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(Resource::new(StoredCredentialDto { credential_ref })),
+    ))
 }
 
 /// Lists the recorded desired revisions, newest first.
@@ -411,8 +488,8 @@ pub async fn fetch_desired_revision(
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
     let acting = principal(acting, correlation_id)?;
     check_revision(&request.commit_sha, None, correlation_id)?;
-    let remote = service(&state, correlation_id)?
-        .remote(state.authorizer.as_ref(), &acting.id)
+    let config = service(&state, correlation_id)?
+        .configuration(state.authorizer.as_ref(), &acting.id)
         .await
         .map_err(|error| crate::projects::map_project_error(&error, correlation_id))?
         .ok_or_else(|| {
@@ -427,7 +504,10 @@ pub async fn fetch_desired_revision(
         &headers,
         correlation_id,
         "source.fetch",
-        serde_json::json!({ "remote": remote, "commitSha": request.commit_sha }),
+        // The payload never carries a credential reference: the executor
+        // reads the configured one itself and attaches it only to the
+        // configured remote.
+        serde_json::json!({ "remote": config.remote, "commitSha": request.commit_sha }),
     )
     .await
 }
