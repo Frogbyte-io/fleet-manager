@@ -10,7 +10,7 @@ use std::sync::Arc;
 use fleet_application::operation::{NewOperation, Operations};
 use fleet_application::source::DesiredSource;
 use fleet_controller::source::SourceExecutor;
-use fleet_storage_sqlite::{SourceRepository, Store};
+use fleet_storage_sqlite::{SourceRepository, StorageError, Store};
 
 const MACHINE: &str = "apiVersion: fleet.frogbyte.io/v1alpha1\nkind: FleetConfig\nmetadata:\n  id: 01890f3e-9b4a-7cc2-98c3-d24e8f58f2a1\n  name: local-fleet\nspec: {}\n";
 
@@ -47,8 +47,28 @@ struct Harness {
     source: Arc<DesiredSource>,
 }
 
+/// Opens the store, waiting out a lock still held by a forked child.
+///
+/// Dropping the previous `Store` releases the controller flock, but a `git`
+/// child that the other test in this binary is spawning at the same moment
+/// holds a copy of every descriptor until its `exec`, the lock file included.
+/// Under load that window is long enough for a reopen to see `LockHeld`, so
+/// only that error is retried, for a bounded time; anything else fails.
+async fn open_store(path: &Path) -> Store {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match Store::open(path).await {
+            Ok(store) => return store,
+            Err(StorageError::LockHeld { .. }) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("cannot open the store: {error}"),
+        }
+    }
+}
+
 async fn harness(dir: &Path) -> Harness {
-    let store = Store::open(&dir.join("fleet.db")).await.unwrap();
+    let store = open_store(&dir.join("fleet.db")).await;
     let source = Arc::new(DesiredSource::new(
         Arc::new(SourceRepository::new(store.pool().clone())),
         Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
