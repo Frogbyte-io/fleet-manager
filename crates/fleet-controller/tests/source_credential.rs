@@ -20,7 +20,30 @@ use tower::ServiceExt as _;
 
 const SECRET: &str = "ghp_CONTROLLER_TEST_SECRET_9x";
 
+/// Wraps the real store and counts how often a value is resolved.
+#[derive(Debug)]
+struct Recording {
+    inner: SecretBackedGitCredentials,
+    resolves: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl fleet_application::source::GitCredentialStore for Recording {
+    async fn create(&self, value: &str) -> Result<String, String> {
+        self.inner.create(value).await
+    }
+    async fn exists(&self, reference: &str) -> Result<bool, String> {
+        self.inner.exists(reference).await
+    }
+    async fn resolve(&self, reference: &str) -> Result<Option<String>, String> {
+        self.resolves
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.resolve(reference).await
+    }
+}
+
 struct Harness {
+    resolves: Arc<std::sync::atomic::AtomicUsize>,
     state: Arc<ApiState>,
     operations: Arc<Operations>,
     executor: SourceExecutor,
@@ -42,7 +65,11 @@ async fn harness(dir: &Path) -> Harness {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let secrets = Arc::new(SecretStore::open(store.pool().clone(), &key_path).unwrap());
-    let credentials = Arc::new(SecretBackedGitCredentials::new(secrets.clone()));
+    let resolves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let credentials = Arc::new(Recording {
+        inner: SecretBackedGitCredentials::new(secrets.clone()),
+        resolves: resolves.clone(),
+    });
     let audit = || Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
     let source = Arc::new(
         DesiredSource::new(
@@ -64,6 +91,7 @@ async fn harness(dir: &Path) -> Harness {
         ..ApiState::for_document()
     });
     Harness {
+        resolves,
         state,
         operations,
         executor: SourceExecutor::new(dir.join("git-source"), source).with_credentials(credentials),
@@ -162,8 +190,13 @@ async fn the_payload_carries_the_reference_and_the_secret_is_encrypted_at_rest()
         .await;
     let (_, operation) = harness.fetch().await;
     let payload = operation.payload_json.clone().unwrap();
-    assert!(payload.contains(&reference), "{payload}");
+    assert!(!payload.contains(&reference), "{payload}");
     assert!(!payload.contains(SECRET), "{payload}");
+    // The configured remote still resolves and uses the credential.
+    assert_eq!(
+        harness.resolves.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 
     // The live credential reaches git (the connection is refused), and the
     // failure names no secret.
@@ -193,6 +226,66 @@ async fn the_payload_carries_the_reference_and_the_secret_is_encrypted_at_rest()
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!all.contains(SECRET), "{all}");
+}
+
+#[tokio::test]
+async fn a_generic_operation_for_another_remote_never_resolves_the_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path()).await;
+    let reference = harness
+        .store_and_configure("https://127.0.0.1:1/fleet.git")
+        .await;
+    // A caller-chosen payload naming another remote, even smuggling the
+    // reference, must fetch without credentials.
+    for remote in [
+        "https://attacker.invalid/x.git",
+        "https://127.0.0.1:1/fleet.git/",
+    ] {
+        let operation = harness
+            .operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "source.fetch".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: Some(
+                        serde_json::json!({
+                            "remote": remote,
+                            "commitSha": "a".repeat(40),
+                            "credentialRef": reference,
+                        })
+                        .to_string(),
+                    ),
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        harness
+            .operations
+            .claim_only_execute(&harness.executor, &operation.id, "test-worker")
+            .await
+            .ok();
+        let done = harness
+            .operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &operation.id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(done.state, "failed");
+        assert!(!done.error_json.unwrap_or_default().contains(SECRET));
+    }
+    assert_eq!(
+        harness.resolves.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the credential is never read for a remote that is not the configured one"
+    );
 }
 
 #[tokio::test]

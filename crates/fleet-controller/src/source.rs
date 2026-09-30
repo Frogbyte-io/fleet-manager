@@ -28,10 +28,6 @@ struct FetchPayload {
     remote: String,
     /// The commit SHA to fetch.
     commit_sha: String,
-    /// The Git credential reference (an id, never a value), when the
-    /// configured source names one.
-    #[serde(default)]
-    credential_ref: Option<String>,
 }
 
 /// The `source.activate` payload.
@@ -122,7 +118,24 @@ impl SourceExecutor {
         // The credential is resolved here, just in time; a missing or
         // revoked reference fails the fetch with a stable reason that
         // names neither the reference nor any value.
-        let credential = match payload.credential_ref.as_deref() {
+        //
+        // The reference is never taken from the payload (the generic
+        // operations endpoint accepts caller-chosen payloads). It is read
+        // from the configured source here, and attached only when the
+        // payload's remote is exactly the configured remote: any other
+        // remote fetches without credentials.
+        let configured = self
+            .desired_source
+            .configuration(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let credential_ref = configured
+            .filter(|config| config.remote == payload.remote)
+            .and_then(|config| config.credential_ref);
+        let credential = match credential_ref.as_deref() {
             None => None,
             Some(reference) => {
                 let resolved = match &self.credentials {

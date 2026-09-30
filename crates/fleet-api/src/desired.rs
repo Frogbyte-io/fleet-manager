@@ -504,12 +504,10 @@ pub async fn fetch_desired_revision(
         &headers,
         correlation_id,
         "source.fetch",
-        // The payload carries the credential reference id and never a value.
-        serde_json::json!({
-            "remote": config.remote,
-            "commitSha": request.commit_sha,
-            "credentialRef": config.credential_ref,
-        }),
+        // The payload never carries a credential reference: the executor
+        // reads the configured one itself and attaches it only to the
+        // configured remote.
+        serde_json::json!({ "remote": config.remote, "commitSha": request.commit_sha }),
     )
     .await
 }

@@ -128,6 +128,8 @@ impl Auth {
                 auth.env.push(("GIT_ASKPASS", script.into_os_string()));
                 // No other helper may store or supply the credential.
                 auth.config.push("credential.helper=".to_owned());
+                // An HTTPS redirect must not carry the token to another host.
+                auth.config.push("http.followRedirects=false".to_owned());
                 auth.scrub = Some(token.expose().to_owned());
             }
             GitCredential::SshKey(key) => {
@@ -498,6 +500,9 @@ mod tests {
                 command.get_envs().collect::<Vec<_>>()
             );
             assert!(!dump.contains("TOPSECRET"), "{dump}");
+            if matches!(credential, GitCredential::HttpsToken(_)) {
+                assert!(dump.contains("http.followRedirects=false"), "{dump}");
+            }
             // The secret files are private to the controller user.
             let dir = auth.dir.clone().unwrap();
             assert_eq!(
