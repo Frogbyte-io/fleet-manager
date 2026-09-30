@@ -17,6 +17,18 @@ gid="${FLEET_GID:-999}"
 if [ "$(id -u)" = "0" ]; then
   chown -R "$uid:$gid" /var/lib/fleet
 
+  # The controller serves node installers from its persistent artifacts dir.
+  # Refresh packages shipped by this image; retain operator-added packages for
+  # other architectures and versions in the same directory.
+  if [ -d /opt/fleet/artifacts ]; then
+    install -d -m 750 -o "$uid" -g "$gid" \
+      /var/lib/fleet/artifacts /var/lib/fleet/artifacts/fleetd
+    for artifact in /opt/fleet/artifacts/*.tar.gz; do
+      [ -f "$artifact" ] || continue
+      install -m 644 -o "$uid" -g "$gid" "$artifact" /var/lib/fleet/artifacts/fleetd/
+    done
+  fi
+
   if [ -e /run/secrets/master_key ]; then
     install -D -m 400 -o "$uid" -g "$gid" \
       /run/secrets/master_key /tmp/fleet-secrets/master_key

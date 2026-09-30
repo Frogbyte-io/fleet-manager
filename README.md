@@ -56,6 +56,8 @@ the first failed step and prints the exact failing command.
 
 ## Repository map
 
+- Coolify deployment with private Tailscale access: [deploy/COOLIFY.md](deploy/COOLIFY.md)
+
 - Product direction and milestones: [`docs/PLAN.md`](docs/PLAN.md)
 - Architecture boundaries and invariants: [`docs/architecture/`](docs/architecture/)
 - Decisions requiring explicit review: [`docs/adr/`](docs/adr/)
