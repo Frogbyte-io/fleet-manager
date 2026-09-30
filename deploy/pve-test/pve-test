@@ -1,0 +1,767 @@
+#!/usr/bin/env bash
+# pve-test: bring up and exercise the nested Proxmox VE test fixtures for the
+# M6 real-cluster suite (FM-611). The step-by-step runbook, with the reasoning
+# and primary sources behind each step, is docs/operations/proxmox-test-cluster.md.
+#
+#   deploy/pve-test/pve-test <command> [args]
+#
+# Every value comes from environment variables, optionally loaded from a local
+# env file outside Git (FLEET_PVE_TEST_ENV_FILE, default
+# ~/.config/fleet/pve-test.env). The repository is public: no address, host
+# name, token ID, fingerprint, or secret belongs in this file. Every command is
+# idempotent: it inspects the current state first and skips what is done.
+#
+# Roles name the three nested machines:
+#   pve8    standalone nested PVE 8.x node (the 8.x compatibility target)
+#   node-a  first node of the two-node nested cluster (the cluster is created here)
+#   node-b  second node of the two-node nested cluster
+set -eu
+set -o pipefail
+shopt -s inherit_errexit
+
+readonly TAG="fleet-pve-test"
+readonly ROLES="pve8 node-a node-b"
+
+usage() {
+  cat <<'EOF'
+Usage: pve-test <command> [args]
+
+Setup (run in this order; each is safe to re-run):
+  check-host                 verify the physical host: nesting, tools, storage, free VMIDs
+  prepare-iso <role>         render the answer file and build that role's auto-install ISO
+  create-vm <role>           create and start the nested VM that installs from that ISO
+  wait <role>                wait for the installed node, then detach and delete its ISO
+  cluster-create             create the cluster on node-a
+  cluster-join               join node-b to node-a's cluster (prompts for node-a's root password)
+  tokens <role>              create the provisional test user, ACLs, and read-only + admin tokens
+
+Failure simulation (FM-611 partial-node scenario; node-a or node-b only):
+  node-down <role> [--mode stop|partition] [--keep-quorum]
+  node-up <role>
+
+Inspection:
+  status                     VM state on the physical host and cluster state from each node
+  fingerprint <role>         SHA-256 fingerprint of the node's API certificate
+  env <role> <TARGET>        print FLEET_PVE_TARGET_<TARGET>_* lines for your local env file
+  evidence                   pveversion + pvecm status with addresses redacted, for the issue
+
+Teardown:
+  teardown [--yes] [role...] destroy the tagged nested VMs (all roles by default)
+
+Roles: pve8, node-a, node-b. Configuration: see pve-test.env.example.
+EOF
+}
+
+die() {
+  printf 'pve-test: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf '==> %s\n' "$*" >&2
+}
+
+# ---------------------------------------------------------------- configuration
+
+load_env() {
+  local file="${FLEET_PVE_TEST_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/fleet/pve-test.env}"
+  if [ -f "$file" ]; then
+    # The env file is the operator's own local file, never a repository file.
+    # shellcheck disable=SC1090
+    . "$file"
+  fi
+}
+
+# need NAME: the value of the variable NAME, or a loud failure naming it.
+need() {
+  local value="${!1:-}"
+  [ -n "$value" ] || die "$1 is not set (see deploy/pve-test/pve-test.env.example)"
+  printf '%s' "$value"
+}
+
+# opt NAME DEFAULT
+opt() {
+  local value="${!1:-}"
+  printf '%s' "${value:-$2}"
+}
+
+# role_prefix ROLE: the variable prefix for a role.
+role_prefix() {
+  case "$1" in
+    pve8) printf 'FLEET_PVE_TEST_PVE8' ;;
+    node-a) printf 'FLEET_PVE_TEST_NODE_A' ;;
+    node-b) printf 'FLEET_PVE_TEST_NODE_B' ;;
+    *) die "unknown role '$1' (expected one of: $ROLES)" ;;
+  esac
+}
+
+role_var() { need "$(role_prefix "$1")_$2"; }
+role_opt() { opt "$(role_prefix "$1")_$2" "$3"; }
+
+role_vmid() { role_var "$1" VMID; }
+role_fqdn() { role_var "$1" FQDN; }
+role_cidr() { role_var "$1" CIDR; }
+role_addr() {
+  local cidr
+  cidr="$(role_cidr "$1")"
+  printf '%s' "${cidr%/*}"
+}
+role_nodename() {
+  local fqdn
+  fqdn="$(role_fqdn "$1")"
+  printf '%s' "${fqdn%%.*}"
+}
+role_iso_volid() {
+  case "$1" in
+    pve8) need FLEET_PVE_TEST_ISO_PVE8 ;;
+    node-a | node-b) need FLEET_PVE_TEST_ISO_CLUSTER ;;
+  esac
+}
+prepared_iso_volid() {
+  local storage
+  storage="$(need FLEET_PVE_TEST_ISO_STORAGE)"
+  printf '%s:iso/%s-%s.iso' "$storage" "$TAG" "$1"
+}
+
+require_cluster_role() {
+  case "$1" in
+    node-a | node-b) ;;
+    *) die "'$1' is not a cluster node (expected node-a or node-b)" ;;
+  esac
+}
+
+peer_of() {
+  case "$1" in
+    node-a) printf 'node-b' ;;
+    node-b) printf 'node-a' ;;
+  esac
+}
+
+# --------------------------------------------------------------------- remoting
+
+known_hosts_file() {
+  opt FLEET_PVE_TEST_KNOWN_HOSTS "${XDG_CONFIG_HOME:-$HOME/.config}/fleet/pve-test-known_hosts"
+}
+
+ssh_opts() {
+  local kh
+  kh="$(known_hosts_file)"
+  mkdir -p "$(dirname "$kh")"
+  # Nested nodes are reinstalled from scratch, so their host keys are pinned in
+  # a fixture-only known_hosts file on first use; teardown forgets them.
+  printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$kh"
+}
+
+# phys CMD...: run a command on the physical PVE host. With
+# FLEET_PVE_TEST_PHYS_SSH empty, this script must itself run there as root.
+phys() {
+  local target
+  target="$(opt FLEET_PVE_TEST_PHYS_SSH '')"
+  if [ -z "$target" ]; then
+    "$@"
+  else
+    local -a o
+    mapfile -t o < <(ssh_opts)
+    # shellcheck disable=SC2029 # the arguments are quoted for the remote shell on purpose
+    ssh "${o[@]}" "$target" "$(printf '%q ' "$@")"
+  fi
+}
+
+# node_target ROLE: the SSH destination of a nested node.
+node_target() {
+  local addr
+  addr="$(role_addr "$1")"
+  role_opt "$1" SSH "root@$addr"
+}
+
+# on_node ROLE CMD...: run a command as root on a nested node.
+on_node() {
+  local role="$1"
+  shift
+  local target
+  target="$(node_target "$role")"
+  local -a o
+  mapfile -t o < <(ssh_opts)
+  # shellcheck disable=SC2029
+  ssh "${o[@]}" "$target" "$(printf '%q ' "$@")"
+}
+
+# on_node_tty ROLE CMD...: as on_node, with a terminal for interactive prompts.
+on_node_tty() {
+  local role="$1"
+  shift
+  local target kh
+  target="$(node_target "$role")"
+  kh="$(known_hosts_file)"
+  # shellcheck disable=SC2029
+  ssh -t -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=$kh" "$target" "$(printf '%q ' "$@")"
+}
+
+vm_exists() { phys qm status "$1" >/dev/null 2>&1; }
+
+vm_is_ours() {
+  phys qm config "$1" 2>/dev/null | sed -n 's/^tags: *//p' | tr -s ';, ' '\n' |
+    grep -Fx "$TAG" >/dev/null
+}
+
+vm_running() {
+  phys qm status "$1" 2>/dev/null | grep -E 'status: running' >/dev/null
+}
+
+# guard_vm VMID: refuse to act on a VMID that exists but is not a fixture.
+guard_vm() {
+  if vm_exists "$1" && ! vm_is_ours "$1"; then
+    die "VMID $1 exists but is not tagged '$TAG'; refusing to touch it"
+  fi
+}
+
+# ---------------------------------------------------------------------- commands
+
+cmd_check_host() {
+  local ok=1 nested vmid role
+  log "nested virtualization on the physical host"
+  nested="$(phys sh -c 'cat /sys/module/kvm_intel/parameters/nested 2>/dev/null || cat /sys/module/kvm_amd/parameters/nested 2>/dev/null || echo missing')"
+  case "$nested" in
+    Y | 1) printf '    nested=%s (enabled)\n' "$nested" ;;
+    *)
+      printf '    nested=%s: enable it on the physical host first (runbook: Prerequisites)\n' "$nested"
+      ok=0
+      ;;
+  esac
+  log "tools on the physical host"
+  for tool in qm pvesm proxmox-auto-install-assistant; do
+    if phys sh -c "command -v $tool" >/dev/null 2>&1; then
+      printf '    %s: present\n' "$tool"
+    else
+      printf '    %s: missing\n' "$tool"
+      ok=0
+    fi
+  done
+  log "storage"
+  for var in FLEET_PVE_TEST_STORAGE FLEET_PVE_TEST_ISO_STORAGE; do
+    if phys pvesm status --storage "$(need "$var")" >/dev/null 2>&1; then
+      printf '    %s: present\n' "$var"
+    else
+      printf '    %s: storage not found\n' "$var"
+      ok=0
+    fi
+  done
+  log "source ISOs"
+  for var in FLEET_PVE_TEST_ISO_PVE8 FLEET_PVE_TEST_ISO_CLUSTER; do
+    if [ -n "${!var:-}" ] && phys pvesm path "${!var}" >/dev/null 2>&1 &&
+      phys test -f "$(phys pvesm path "${!var}")"; then
+      printf '    %s: present\n' "$var"
+    else
+      printf '    %s: unset or not downloaded\n' "$var"
+      ok=0
+    fi
+  done
+  log "VMIDs"
+  for role in $ROLES; do
+    vmid="$(role_opt "$role" VMID '')"
+    if [ -z "$vmid" ]; then
+      printf '    %s: VMID not set\n' "$role"
+      ok=0
+    elif ! vm_exists "$vmid"; then
+      printf '    %s: VMID free\n' "$role"
+    elif vm_is_ours "$vmid"; then
+      printf '    %s: VMID already holds this fixture\n' "$role"
+    else
+      printf '    %s: VMID in use by something else\n' "$role"
+      ok=0
+    fi
+  done
+  [ "$ok" = 1 ] || die "physical host is not ready"
+  log "physical host is ready"
+}
+
+render_answer() {
+  local role="$1" template keyfile hashfile hash keys line
+  template="$(dirname "$0")/answer.toml.template"
+  [ -f "$template" ] || die "missing $template"
+  hashfile="$(need FLEET_PVE_TEST_ROOT_PASSWORD_HASH_FILE)"
+  keyfile="$(need FLEET_PVE_TEST_ROOT_SSH_PUBKEY_FILE)"
+  [ -r "$hashfile" ] || die "cannot read FLEET_PVE_TEST_ROOT_PASSWORD_HASH_FILE"
+  [ -r "$keyfile" ] || die "cannot read FLEET_PVE_TEST_ROOT_SSH_PUBKEY_FILE"
+  hash="$(head -n1 "$hashfile")"
+  keys=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    keys="${keys:+$keys, }\"$line\""
+  done <"$keyfile"
+  local out keyboard country timezone mailto fqdn cidr gateway dns nic
+  keyboard="$(opt FLEET_PVE_TEST_KEYBOARD en-us)"
+  country="$(need FLEET_PVE_TEST_COUNTRY)"
+  timezone="$(need FLEET_PVE_TEST_TIMEZONE)"
+  mailto="$(need FLEET_PVE_TEST_MAILTO)"
+  fqdn="$(role_fqdn "$role")"
+  cidr="$(role_cidr "$role")"
+  gateway="$(need FLEET_PVE_TEST_GATEWAY)"
+  dns="$(need FLEET_PVE_TEST_DNS)"
+  nic="$(opt FLEET_PVE_TEST_NESTED_NIC ens18)"
+  out="$(cat "$template")"
+  out="${out//@KEYBOARD@/$keyboard}"
+  out="${out//@COUNTRY@/$country}"
+  out="${out//@TIMEZONE@/$timezone}"
+  out="${out//@MAILTO@/$mailto}"
+  out="${out//@FQDN@/$fqdn}"
+  out="${out//@CIDR@/$cidr}"
+  out="${out//@GATEWAY@/$gateway}"
+  out="${out//@DNS@/$dns}"
+  out="${out//@NIC@/$nic}"
+  out="${out//@ROOT_PASSWORD_HASH@/$hash}"
+  out="${out//@ROOT_SSH_KEYS@/$keys}"
+  printf '%s\n' "$out"
+}
+
+cmd_prepare_iso() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: prepare-iso <role>"
+  role_prefix "$role" >/dev/null
+  local vmid src_volid out_volid src out
+  vmid="$(role_vmid "$role")"
+  if vm_exists "$vmid"; then
+    guard_vm "$vmid"
+    log "$role: VM $vmid already exists; no ISO needed"
+    return 0
+  fi
+  src_volid="$(role_iso_volid "$role")"
+  out_volid="$(prepared_iso_volid "$role")"
+  src="$(phys pvesm path "$src_volid")"
+  out="$(phys pvesm path "$out_volid")"
+  if phys test -f "$out"; then
+    log "$role: prepared ISO $out_volid already present"
+    return 0
+  fi
+  log "$role: rendering the answer file"
+  local remote_answer
+  remote_answer="$(phys mktemp /tmp/fleet-pve-test-answer.XXXXXX)"
+  # The answer carries the root password hash; it exists only for the length
+  # of this command, mode 0600, and never on disk on this machine.
+  # shellcheck disable=SC2064
+  trap "phys rm -f '$remote_answer' >/dev/null 2>&1 || true" EXIT
+  render_answer "$role" | phys sh -c "umask 077 && cat > '$remote_answer'"
+  log "$role: validating the answer file"
+  phys proxmox-auto-install-assistant validate-answer "$remote_answer" >/dev/null
+  log "$role: building $out_volid"
+  phys proxmox-auto-install-assistant prepare-iso "$src" \
+    --fetch-from iso --answer-file "$remote_answer" --output "$out"
+  phys rm -f "$remote_answer"
+  trap - EXIT
+}
+
+cmd_create_vm() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: create-vm <role>"
+  role_prefix "$role" >/dev/null
+  local vmid bridge vlan net storage iso cores memory disk
+  vmid="$(role_vmid "$role")"
+  if vm_exists "$vmid"; then
+    guard_vm "$vmid"
+    log "$role: VM $vmid exists"
+  else
+    iso="$(prepared_iso_volid "$role")"
+    local iso_path
+    iso_path="$(phys pvesm path "$iso")"
+    phys test -f "$iso_path" || die "$role: run 'prepare-iso $role' first"
+    storage="$(need FLEET_PVE_TEST_STORAGE)"
+    cores="$(opt FLEET_PVE_TEST_CORES 4)"
+    memory="$(opt FLEET_PVE_TEST_MEMORY_MB 8192)"
+    disk="$(opt FLEET_PVE_TEST_DISK_GB 64)"
+    bridge="$(need FLEET_PVE_TEST_BRIDGE)"
+    vlan="$(opt FLEET_PVE_TEST_VLAN '')"
+    # firewall=0: the nested node bridges its own guests onto this NIC, and
+    # the PVE firewall's MAC filter would drop their foreign source MACs.
+    net="virtio,bridge=${bridge},firewall=0${vlan:+,tag=$vlan}"
+    log "$role: creating VM $vmid"
+    phys qm create "$vmid" \
+      --name "$TAG-$role" \
+      --tags "$TAG" \
+      --description "Fleet nested PVE test fixture ($role). Managed by deploy/pve-test/pve-test." \
+      --ostype l26 \
+      --cpu host \
+      --sockets 1 \
+      --cores "$cores" \
+      --memory "$memory" \
+      --balloon 0 \
+      --scsihw virtio-scsi-single \
+      --scsi0 "$storage:$disk,iothread=1,discard=on" \
+      --net0 "$net" \
+      --ide2 "$iso,media=cdrom" \
+      --boot "order=scsi0;ide2" \
+      --onboot 0
+  fi
+  if vm_running "$vmid"; then
+    log "$role: VM $vmid running"
+  else
+    log "$role: starting VM $vmid"
+    phys qm start "$vmid"
+  fi
+}
+
+# wait_for ROLE SECONDS: poll until the node answers pveversion over SSH.
+wait_for() {
+  local role="$1" deadline=$((SECONDS + $2))
+  until on_node "$role" pveversion >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || die "$role: node did not come up within $2s"
+    sleep 10
+  done
+}
+
+cmd_wait() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: wait <role>"
+  local vmid out
+  vmid="$(role_vmid "$role")"
+  guard_vm "$vmid"
+  local timeout iso
+  timeout="$(opt FLEET_PVE_TEST_INSTALL_TIMEOUT 1800)"
+  log "$role: waiting for the installed node (up to ${timeout}s)"
+  wait_for "$role" "$timeout"
+  on_node "$role" pveversion
+  if phys qm config "$vmid" | grep -F "$TAG-$role.iso" >/dev/null; then
+    log "$role: detaching the install ISO"
+    phys qm set "$vmid" --ide2 none,media=cdrom >/dev/null
+  fi
+  iso="$(prepared_iso_volid "$role")"
+  out="$(phys pvesm path "$iso")"
+  if phys test -f "$out"; then
+    log "$role: deleting the prepared ISO (it embeds the root password hash)"
+    phys rm -f "$out"
+  fi
+}
+
+in_cluster() { on_node "$1" test -f /etc/pve/corosync.conf; }
+
+cmd_cluster_create() {
+  local name
+  name="$(need FLEET_PVE_TEST_CLUSTER_NAME)"
+  if in_cluster node-a; then
+    log "node-a is already in a cluster"
+    on_node node-a pvecm status | grep -E '^(Name|Quorate|Nodes):' || true
+    return 0
+  fi
+  log "creating cluster on node-a"
+  local addr
+  addr="$(role_addr node-a)"
+  on_node node-a pvecm create "$name" --link0 "$addr"
+}
+
+cmd_fingerprint() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: fingerprint <role>"
+  # pveproxy serves pveproxy-ssl.pem when present, otherwise pve-ssl.pem.
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  on_node "$role" sh -c 'f=/etc/pve/local/pveproxy-ssl.pem; [ -f "$f" ] || f=/etc/pve/local/pve-ssl.pem; openssl x509 -noout -fingerprint -sha256 -in "$f"' |
+    sed 's/^[^=]*=//'
+}
+
+cmd_cluster_join() {
+  if in_cluster node-b; then
+    log "node-b is already in a cluster"
+    on_node node-b pvecm status | grep -E '^(Name|Quorate|Nodes):' || true
+    return 0
+  fi
+  in_cluster node-a || die "node-a has no cluster yet; run cluster-create first"
+  local fp addr_a addr_b
+  fp="$(cmd_fingerprint node-a)"
+  addr_a="$(role_addr node-a)"
+  addr_b="$(role_addr node-b)"
+  [ -n "$fp" ] || die "could not read node-a's certificate fingerprint"
+  log "joining node-b to node-a (enter node-a's root@pam password at the prompt)"
+  # The password is typed interactively; it is never stored or passed as an argument.
+  on_node_tty node-b pvecm add "$addr_a" --link0 "$addr_b" --fingerprint "$fp"
+}
+
+cmd_tokens() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: tokens <role>"
+  role_prefix "$role" >/dev/null
+  local user dir name role_name
+  user="$(opt FLEET_PVE_TEST_USER fleet-test@pve)"
+  dir="$(opt FLEET_PVE_TEST_SECRET_DIR "${XDG_CONFIG_HOME:-$HOME/.config}/fleet/pve-test-secrets")"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  # In the cluster the access configuration is cluster-wide, so tokens for
+  # node-b are the same as node-a's.
+  if [ "$role" = node-b ]; then role=node-a; fi
+  if on_node "$role" pveum user list --output-format json | grep -E "\"userid\" *: *\"$user\"" >/dev/null; then
+    log "$role: user $user exists"
+  else
+    log "$role: creating user $user"
+    on_node "$role" pveum user add "$user" --comment "Fleet acceptance test user (provisional, FM-612)"
+  fi
+  # PROVISIONAL until FM-605 lands its tiers: the user holds Administrator on /
+  # and each privilege-separated token narrows it (tokens are always a subset).
+  on_node "$role" pveum acl modify / --users "$user" --roles Administrator
+  for pair in ro:PVEAuditor admin:Administrator; do
+    name="${pair%%:*}"
+    role_name="${pair#*:}"
+    local file="$dir/$role-$name.token"
+    if on_node "$role" pveum user token list "$user" --output-format json | grep -E "\"tokenid\" *: *\"$name\"" >/dev/null; then
+      if [ -s "$file" ]; then
+        log "$role: token $user!$name exists"
+      else
+        die "$role: token $user!$name exists but $file is missing; remove it with 'pveum user token remove $user $name' on the node and re-run"
+      fi
+    else
+      log "$role: creating token $user!$name"
+      local json secret
+      json="$(on_node "$role" pveum user token add "$user" "$name" --privsep 1 \
+        --comment "Fleet acceptance ($role_name, provisional)" --output-format json)"
+      secret="$(printf '%s' "$json" | sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p')"
+      [ -n "$secret" ] || die "$role: could not read the new token secret"
+      (umask 077 && printf '%s' "$secret" >"$file")
+      unset secret json
+      log "$role: secret written to $file (mode 0600)"
+    fi
+    on_node "$role" pveum acl modify / --tokens "$user!$name" --roles "$role_name"
+  done
+}
+
+iptables_block() {
+  local role="$1" peer
+  peer="$(role_addr "$(peer_of "$role")")"
+  # Dedicated chains, rebuilt on each call: drop every packet to or from the
+  # peer (corosync UDP 5405-5412, the API on 8006, SSH, migration). The node
+  # stays reachable from everywhere else, including the Fleet controller.
+  # Single-line scripts keep the remote quoting POSIX (no $'...').
+  # shellcheck disable=SC2016 # $c is expanded by the remote shell
+  on_node "$role" sh -c 'set -e; for c in FLEET_TEST_IN FLEET_TEST_OUT; do iptables -N $c 2>/dev/null || iptables -F $c; done; iptables -A FLEET_TEST_IN -s "$1" -j DROP; iptables -A FLEET_TEST_OUT -d "$1" -j DROP; iptables -C INPUT -j FLEET_TEST_IN 2>/dev/null || iptables -I INPUT 1 -j FLEET_TEST_IN; iptables -C OUTPUT -j FLEET_TEST_OUT 2>/dev/null || iptables -I OUTPUT 1 -j FLEET_TEST_OUT' sh "$peer"
+}
+
+iptables_unblock() {
+  # shellcheck disable=SC2016 # $c is expanded by the remote shell
+  on_node "$1" sh -c 'iptables -D INPUT -j FLEET_TEST_IN 2>/dev/null || true; iptables -D OUTPUT -j FLEET_TEST_OUT 2>/dev/null || true; for c in FLEET_TEST_IN FLEET_TEST_OUT; do iptables -F $c 2>/dev/null || true; iptables -X $c 2>/dev/null || true; done'
+}
+
+cmd_node_down() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: node-down <role> [--mode stop|partition] [--keep-quorum]"
+  shift
+  require_cluster_role "$role"
+  local mode keep=0
+  mode="$(opt FLEET_PVE_TEST_DOWN_MODE stop)"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --mode)
+        [ $# -ge 2 ] || die "--mode needs a value (stop or partition)"
+        mode="$2"
+        shift 2
+        ;;
+      --keep-quorum)
+        keep=1
+        shift
+        ;;
+      *) die "unknown node-down option '$1'" ;;
+    esac
+  done
+  local vmid peer
+  vmid="$(role_vmid "$role")"
+  guard_vm "$vmid"
+  peer="$(peer_of "$role")"
+  case "$mode" in
+    stop)
+      if vm_running "$vmid"; then
+        log "$role: hard power-off of VM $vmid (no guest shutdown)"
+        phys qm stop "$vmid"
+      else
+        log "$role: VM $vmid already stopped"
+      fi
+      ;;
+    partition)
+      vm_running "$vmid" || die "$role: VM is stopped; 'partition' needs it running"
+      log "$role: isolating the node from $peer"
+      iptables_block "$role"
+      ;;
+    *) die "unknown mode '$mode' (expected stop or partition)" ;;
+  esac
+  if [ "$keep" = 1 ]; then
+    # Two nodes give two expected votes; the survivor alone is inquorate and
+    # /etc/pve turns read-only. This forces it quorate for the test window.
+    log "$peer: forcing quorum on the survivor (pvecm expected 1)"
+    on_node "$peer" pvecm expected 1
+  fi
+  log "$role is down ($mode); restore with: pve-test node-up $role"
+}
+
+cmd_node_up() {
+  local role="${1:-}"
+  [ -n "$role" ] || die "usage: node-up <role>"
+  require_cluster_role "$role"
+  local vmid deadline timeout
+  vmid="$(role_vmid "$role")"
+  timeout="$(opt FLEET_PVE_TEST_BOOT_TIMEOUT 600)"
+  guard_vm "$vmid"
+  if vm_running "$vmid"; then
+    log "$role: VM $vmid running"
+  else
+    log "$role: starting VM $vmid"
+    phys qm start "$vmid"
+  fi
+  wait_for "$role" "$timeout"
+  log "$role: removing any partition rules"
+  iptables_unblock "$role"
+  log "$role: waiting for the cluster to be quorate again"
+  deadline=$((SECONDS + timeout))
+  until on_node "$role" pvecm status 2>/dev/null | grep -E '^Quorate: *Yes' >/dev/null; do
+    [ "$SECONDS" -lt "$deadline" ] || die "$role: cluster not quorate within the timeout"
+    sleep 5
+  done
+  log "$role is up and the cluster is quorate"
+}
+
+cmd_status() {
+  local role vmid
+  for role in $ROLES; do
+    vmid="$(role_opt "$role" VMID '')"
+    if [ -z "$vmid" ]; then
+      printf '%-7s VMID not set\n' "$role"
+      continue
+    fi
+    printf '%-7s VM %s: %s\n' "$role" "$vmid" "$(phys qm status "$vmid" 2>/dev/null || echo 'absent')"
+  done
+  for role in node-a node-b; do
+    [ -n "$(role_opt "$role" CIDR '')" ] || continue
+    printf -- '--- %s: pvecm status\n' "$role"
+    on_node "$role" pvecm status 2>&1 | grep -E '^(Name|Quorate|Nodes|Expected votes|Total votes):' ||
+      echo "(unreachable or not clustered)"
+  done
+}
+
+cmd_env() {
+  local role="${1:-}" target="${2:-}"
+  [ -n "$role" ] && [ -n "$target" ] || die "usage: env <role> <TARGET>"
+  role_prefix "$role" >/dev/null
+  case "$target" in *[!A-Z0-9_]*) die "TARGET must be upper-case letters, digits, underscores" ;; esac
+  local user dir tokrole p
+  user="$(opt FLEET_PVE_TEST_USER fleet-test@pve)"
+  dir="$(opt FLEET_PVE_TEST_SECRET_DIR "${XDG_CONFIG_HOME:-$HOME/.config}/fleet/pve-test-secrets")"
+  tokrole="$role"
+  if [ "$role" = node-b ]; then tokrole=node-a; fi
+  p="FLEET_PVE_TARGET_${target}"
+  cat <<EOF
+# FM-611 target ${target} (${role}). Paste into your local env file, never into Git.
+${p}_HOST=$(role_addr "$role")
+${p}_PORT=8006
+${p}_TOKEN_ID=${user}!admin
+${p}_TOKEN_SECRET_FILE=${dir}/${tokrole}-admin.token
+${p}_RO_TOKEN_ID=${user}!ro
+${p}_RO_TOKEN_SECRET_FILE=${dir}/${tokrole}-ro.token
+${p}_FINGERPRINT=$(cmd_fingerprint "$role")
+${p}_NODE=$(role_nodename "$role")
+${p}_STORAGE=$(opt FLEET_PVE_TEST_GUEST_STORAGE local-lvm)
+${p}_TEMPLATE_VMID=$(role_opt "$role" TEMPLATE_VMID '<set after creating the test template>')
+${p}_VMID_RANGE=$(opt FLEET_PVE_TEST_GUEST_VMID_RANGE '<first>-<last>')
+EOF
+  case "$role" in
+    node-a | node-b)
+      printf '%s_DOWN_NODE=%s\n' "$p" "$(role_nodename "$(peer_of "$role")")"
+      printf '%s_DOWN_ROLE=%s\n' "$p" "$(peer_of "$role")"
+      ;;
+  esac
+}
+
+redact() {
+  sed -E \
+    -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/<redacted-ipv4>/g' \
+    -e 's/([0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}/<redacted-ipv6>/g' \
+    -e 's/0x[0-9A-Fa-f]{8}/<redacted-addr>/g'
+}
+
+cmd_evidence() {
+  local role
+  for role in pve8 node-a; do
+    [ -n "$(role_opt "$role" CIDR '')" ] || continue
+    printf '### %s: pveversion\n```\n' "$role"
+    on_node "$role" pveversion | redact
+    printf '```\n'
+  done
+  if [ -n "$(role_opt node-a CIDR '')" ]; then
+    printf '### cluster: pvecm status\n```\n'
+    on_node node-a pvecm status | redact
+    printf '```\n'
+  fi
+  log "review the output before posting: host names are kept, addresses are redacted"
+}
+
+cmd_teardown() {
+  local yes=0 roles=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes) yes=1 ;;
+      *)
+        role_prefix "$1" >/dev/null
+        roles="$roles $1"
+        ;;
+    esac
+    shift
+  done
+  [ -n "$roles" ] || roles="$ROLES"
+  if [ "$yes" != 1 ] && [ "$(opt FLEET_PVE_TEST_CONFIRM_TEARDOWN '')" != yes ]; then
+    die "teardown destroys the nested VMs for:$roles. Re-run with --yes (or FLEET_PVE_TEST_CONFIRM_TEARDOWN=yes)"
+  fi
+  local role vmid out dir kh addr
+  dir="$(opt FLEET_PVE_TEST_SECRET_DIR "${XDG_CONFIG_HOME:-$HOME/.config}/fleet/pve-test-secrets")"
+  kh="$(known_hosts_file)"
+  for role in $roles; do
+    vmid="$(role_opt "$role" VMID '')"
+    if [ -n "$vmid" ] && vm_exists "$vmid"; then
+      guard_vm "$vmid"
+      if vm_running "$vmid"; then
+        log "$role: stopping VM $vmid"
+        phys qm stop "$vmid"
+      fi
+      log "$role: destroying VM $vmid"
+      phys qm destroy "$vmid" --purge 1 --destroy-unreferenced-disks 1
+    else
+      log "$role: no VM"
+    fi
+    if [ -n "${FLEET_PVE_TEST_ISO_STORAGE:-}" ]; then
+      local iso
+      iso="$(prepared_iso_volid "$role")"
+      out="$(phys pvesm path "$iso")"
+      if phys test -f "$out"; then
+        log "$role: deleting the prepared ISO"
+        phys rm -f "$out"
+      fi
+    fi
+    rm -f "$dir/$role-ro.token" "$dir/$role-admin.token"
+    addr="$(role_opt "$role" CIDR '')"
+    if [ -n "$addr" ] && [ -f "$kh" ]; then
+      ssh-keygen -R "${addr%/*}" -f "$kh" >/dev/null 2>&1 || true
+    fi
+  done
+  log "teardown complete"
+}
+
+main() {
+  load_env
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    check-host) cmd_check_host ;;
+    prepare-iso) cmd_prepare_iso "$@" ;;
+    create-vm) cmd_create_vm "$@" ;;
+    wait) cmd_wait "$@" ;;
+    cluster-create) cmd_cluster_create ;;
+    cluster-join) cmd_cluster_join ;;
+    tokens) cmd_tokens "$@" ;;
+    node-down) cmd_node_down "$@" ;;
+    node-up) cmd_node_up "$@" ;;
+    status) cmd_status ;;
+    fingerprint) cmd_fingerprint "$@" ;;
+    env) cmd_env "$@" ;;
+    evidence) cmd_evidence ;;
+    teardown) cmd_teardown "$@" ;;
+    -h | --help | help | "") usage ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

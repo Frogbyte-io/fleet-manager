@@ -1,0 +1,36 @@
+# Proxmox VE automated-installer answer file template for the nested test
+# nodes. `pve-test prepare-iso <role>` fills the @PLACEHOLDERS@ from
+# environment variables and embeds the result into a copy of the ISO. Do not
+# commit a rendered copy; it carries the root password hash.
+#
+# The keys are kebab-case. The installer accepts kebab-case from 8.4.0 on, and
+# 9.x's `validate-answer` warns about the old snake_case keys. Format reference:
+# https://pve.proxmox.com/wiki/Automated_Installation and the installer's own
+# test answers in https://github.com/proxmox/pve-installer
+# (proxmox-auto-installer/tests/resources/parse_answer/).
+
+[global]
+keyboard = "@KEYBOARD@"
+country = "@COUNTRY@"
+fqdn = "@FQDN@"
+mailto = "@MAILTO@"
+timezone = "@TIMEZONE@"
+root-password-hashed = "@ROOT_PASSWORD_HASH@"
+root-ssh-keys = [@ROOT_SSH_KEYS@]
+
+[network]
+# Static addressing: a cluster node's host name and address cannot change
+# after cluster creation.
+source = "from-answer"
+cidr = "@CIDR@"
+gateway = "@GATEWAY@"
+dns = "@DNS@"
+# The nested VM's single VirtIO NIC. On PVE's default PCI layout net0 appears
+# as ens18, not eth0 (the same trap as the cloud-init NIC name).
+filter.ID_NET_NAME = "@NIC@"
+
+[disk-setup]
+# ext4 on the single VirtIO SCSI disk gives the default `local` + `local-lvm`
+# (LVM-thin) storages that the acceptance suite clones into.
+filesystem = "ext4"
+disk-list = ["sda"]
