@@ -48,6 +48,9 @@ Compose project name. Never share it between two controller instances.
 3. Leave the controller service's **Domains** field empty. Remove any generated
    public domain before deploying. The Compose file disables Traefik routing
    and publishes the controller only to host loopback.
+   Enable **Raw Compose Deployment** so Coolify retains the external volume
+   and isolation settings. The labels use list syntax because Coolify 4.3.23
+   appends management labels as list entries, including in raw mode.
 4. Configure the following variables; the example is in
    [coolify.env.example](coolify.env.example):
 
@@ -56,8 +59,13 @@ Compose project name. Never share it between two controller instances.
    | `FLEET_MASTER_KEY_SOURCE` | `/data/fleet-manager/secrets/master_key` (required absolute host path) |
    | `FLEET_DATA_VOLUME` | `fleet-manager-data` (the external volume created above) |
    | `FLEET_COOLIFY_PORT` | `8080` (an unused host loopback port) |
+   | `FLEET_BUILD_CONTEXT` | `.` (Coolify resolves build paths from the repository root) |
 
-   These are deployment settings. The key's contents must never be entered as
+   Make these variables available at **build time and runtime**: Compose
+   interpolates the settings during both stages. They contain paths, names,
+   and port numbers, not key material. For local Compose usage, leave
+   `FLEET_BUILD_CONTEXT` unset so the context remains relative to `deploy/`.
+   The key's contents must never be entered as
    a Coolify environment value, build argument, or inline Compose content.
 5. Use one replica and stop/recreate deployments. Disable overlapping rolling
    deployments and automatic previews: two controllers must never open the

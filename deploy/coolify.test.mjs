@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -11,11 +12,33 @@ function config(overrides = {}) {
   delete env.FLEET_MASTER_KEY_SOURCE;
   delete env.FLEET_COOLIFY_PORT;
   delete env.FLEET_DATA_VOLUME;
+  delete env.FLEET_BUILD_CONTEXT;
   Object.assign(env, overrides);
   return spawnSync('docker', [
     'compose', '-f', 'deploy/compose.coolify.yaml', 'config', '--format', 'json',
   ], { cwd: root, env, encoding: 'utf8' });
 }
+
+test('Coolify can append management labels and build from its repository-root project directory', () => {
+  const source = readFileSync(new URL('./compose.coolify.yaml', import.meta.url), 'utf8');
+  // Coolify 4.3.23 raw mode appends list entries to the existing labels.
+  const injected = source.replace('    environment:',
+    '      - coolify.managed=true\n      - coolify.applicationId=2\n      - coolify.type=application\n    environment:');
+  const result = spawnSync('docker', [
+    'compose', '--project-directory', root, '-f', '-', 'config', '--format', 'json',
+  ], {
+    cwd: root,
+    env: { ...process.env, FLEET_MASTER_KEY_SOURCE: '/tmp/fleet-test-key', FLEET_BUILD_CONTEXT: '.' },
+    input: injected,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const stack = JSON.parse(result.stdout);
+  assert.equal(stack.services.controller.labels['coolify.managed'], 'true');
+  assert.equal(stack.services.controller.labels['traefik.enable'], 'false');
+  assert.equal(stack.services.controller.build.context.replace(/\/$/, ''), root.replace(/\/$/, ''));
+  assert.equal(stack.volumes['fleet-data'].external, true);
+});
 
 function rendered(overrides = {}) {
   const result = config({ FLEET_MASTER_KEY_SOURCE: '/tmp/fleet-test-key', ...overrides });

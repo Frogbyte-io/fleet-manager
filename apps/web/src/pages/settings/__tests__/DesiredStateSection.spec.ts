@@ -222,7 +222,7 @@ describe('history', () => {
 
   it('says when there is no history', async () => {
     const wrapper = await mountSection()
-    expect(wrapper.get('[data-testid="history-empty"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="history-empty"]').exists()).toBe(true)
   })
 })
 
