@@ -1,6 +1,7 @@
 //! Repeatable repository verification and packaging tasks.
 
 pub mod package;
+pub mod pve_acceptance;
 
 pub use package::{archive_name, package_fleetd};
 
