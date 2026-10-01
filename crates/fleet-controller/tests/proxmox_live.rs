@@ -199,16 +199,19 @@ async fn trust(run: &TargetRun) -> Result<Outcome, String> {
     // pinned value is rewritten to a wrong one, which is the only way to
     // simulate a changed certificate without touching the host). The next
     // call is refused at the handshake and names both fingerprints.
-    let store = fleet_storage_sqlite::Store::open(&run.controller.database())
-        .await
-        .map_err(|error| format!("cannot open the controller's store: {error}"))?;
-    sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?1 WHERE id = ?2")
-        .bind(wrong_fingerprint())
-        .bind(&account)
-        .execute(store.pool())
-        .await
-        .map_err(|error| format!("cannot rewrite the pin: {error}"))?;
-    store.close().await;
+    // The store admits one controller, so the controller is stopped around
+    // the write and restarted on the same data and address.
+    run.controller
+        .with_store(async |store| {
+            sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?1 WHERE id = ?2")
+                .bind(wrong_fingerprint())
+                .bind(&account)
+                .execute(store.pool())
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("cannot rewrite the pin: {error}"))
+        })
+        .await?;
     let (status, body) = run.controller.get(&format!("{base}/discovery")).await?;
     check!(
         status == 409 && body["code"] == "proxmox_fingerprint_mismatch",
@@ -764,45 +767,49 @@ async fn association(run: &TargetRun) -> Result<Outcome, String> {
     // Seed a machine carrying that MAC (fixture data, written to the
     // controller's store the way the e2e harness seeds machines). Its name
     // and endpoint match nothing, so only MAC evidence can link it.
-    let store = fleet_storage_sqlite::Store::open(&run.controller.database())
-        .await
-        .map_err(|error| format!("cannot open the controller's store: {error}"))?;
-    let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
-    let machine = machines
-        .register(&RegisterMachine {
-            name: format!("acceptance-seeded-{vmid}"),
-            description: "FM-611 association fixture".to_owned(),
-            endpoints: vec![NewEndpoint {
-                kind: fleet_core::EndpointKind::Ssh,
-                reference: "acceptance@192.0.2.10:22".to_owned(),
-            }],
-            tags: Vec::new(),
-            groups: Vec::new(),
+    // The store admits one controller, so the controller is stopped around
+    // the write and restarted on the same data and address.
+    let machine = run
+        .controller
+        .with_store(async |store| {
+            let machines = fleet_storage_sqlite::MachineRepository::new(store.pool().clone());
+            let machine = machines
+                .register(&RegisterMachine {
+                    name: format!("acceptance-seeded-{vmid}"),
+                    description: "FM-611 association fixture".to_owned(),
+                    endpoints: vec![NewEndpoint {
+                        kind: fleet_core::EndpointKind::Ssh,
+                        reference: "acceptance@192.0.2.10:22".to_owned(),
+                    }],
+                    tags: Vec::new(),
+                    groups: Vec::new(),
+                })
+                .await
+                .map_err(|error| format!("cannot seed the machine: {error:?}"))?;
+            let now = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| error.to_string())?
+                    .as_millis(),
+            )
+            .map_err(|error| error.to_string())?;
+            machines
+                .record_capabilities(
+                    &machine.id,
+                    &[CapabilityFact {
+                        namespace: "net".to_owned(),
+                        name: "mac0".to_owned(),
+                        value: Some(mac.clone()),
+                        status: CapabilityStatus::Known,
+                        observed_at: Timestamp::from_unix_millis(now),
+                        source: "fleet-acceptance/1".to_owned(),
+                    }],
+                )
+                .await
+                .map_err(|error| format!("cannot seed the MAC: {error:?}"))?;
+            Ok(machine)
         })
-        .await
-        .map_err(|error| format!("cannot seed the machine: {error:?}"))?;
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_millis(),
-    )
-    .map_err(|error| error.to_string())?;
-    machines
-        .record_capabilities(
-            &machine.id,
-            &[CapabilityFact {
-                namespace: "net".to_owned(),
-                name: "mac0".to_owned(),
-                value: Some(mac.clone()),
-                status: CapabilityStatus::Known,
-                observed_at: Timestamp::from_unix_millis(now),
-                source: "fleet-acceptance/1".to_owned(),
-            }],
-        )
-        .await
-        .map_err(|error| format!("cannot seed the MAC: {error:?}"))?;
-    store.close().await;
+        .await?;
 
     let guest = find_guest(run, &account, vmid)
         .await?
@@ -1066,22 +1073,144 @@ fn node_capacity<'a>(body: &'a Value, node: &str) -> Option<&'a Value> {
         .find(|capacity| capacity["node"] == node)
 }
 
+/// Whether discovery's warnings say `node` is unreachable.
 fn warnings_name(body: &Value, node: &str) -> bool {
     body["data"]["warnings"].as_array().is_some_and(|warnings| {
         warnings
             .iter()
             .filter_map(Value::as_str)
-            .any(|warning| names_node(warning, node))
+            .any(|warning| is_node_down_warning(warning, node))
     })
 }
 
-/// Whether `warning` names `node` as a whole token. PVE node names are
-/// hostnames (alphanumerics and `-`), so anything else separates tokens:
-/// `pve-b` does not match `pve-b2`, `xpve-b`, or `pve-b-old`.
-fn names_node(warning: &str, node: &str) -> bool {
-    warning
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .any(|word| word == node)
+/// Whether one discovery warning is the provider's "this node could not be
+/// read" warning for exactly `node`.
+///
+/// The provider emits `node <name> status: <error>` and
+/// `node <name> storage: <error>` when the node's own endpoints fail (its
+/// `node_capacity`). The node must be the whole second token, so a longer
+/// hostname, a VM name, or an unrelated row such as PVE 9's SDN
+/// `resource #12: entry network/<node>/zone/localnetwork has an unrecognized
+/// type "network"` never counts. The same endpoints also warn about a
+/// payload that arrived but was malformed (`cpu usage is missing`, ...);
+/// that is not the node being down.
+fn is_node_down_warning(warning: &str, node: &str) -> bool {
+    let Some(rest) = warning.strip_prefix("node ") else {
+        return false;
+    };
+    let Some((name, detail)) = rest.split_once(' ') else {
+        return false;
+    };
+    if name != node {
+        return false;
+    }
+    let Some(error) = detail
+        .strip_prefix("status: ")
+        .or_else(|| detail.strip_prefix("storage: "))
+    else {
+        return false;
+    };
+    // Only what an unreachable node produces: a transport failure from
+    // Fleet's own connection, or PVE's 595 when the node it proxies to
+    // cannot be reached. An auth refusal, another HTTP status, or a bad
+    // payload comes from a node that answered.
+    error.starts_with("the connection failed: ") || error.starts_with("the API answered 595")
+}
+
+#[cfg(test)]
+mod node_down_warning_tests {
+    use super::{is_node_down_warning, warnings_name};
+    use serde_json::json;
+
+    #[test]
+    fn matches_the_endpoint_failure_warnings_for_the_node() {
+        // The shapes discovery produced for a stopped/partitioned node on
+        // the live cluster: PVE's proxy 595, and Fleet's own transport error.
+        assert!(is_node_down_warning(
+            "node pvec-b status: the API answered 595: No route to host",
+            "pvec-b"
+        ));
+        assert!(is_node_down_warning(
+            "node pvec-b storage: the API answered 595: Connection timed out",
+            "pvec-b"
+        ));
+        assert!(is_node_down_warning(
+            "node pvec-b status: the connection failed: error sending request",
+            "pvec-b"
+        ));
+    }
+
+    #[test]
+    fn ignores_errors_from_a_node_that_answered() {
+        for error in [
+            "the API token was refused (401)",
+            "the token lacks the privilege (403): Permission check failed",
+            "the API answered 500: internal error",
+            "the API answered 501: not implemented",
+            "the API's payload is not interpretable: missing data",
+        ] {
+            assert!(
+                !is_node_down_warning(&format!("node pvec-b status: {error}"), "pvec-b"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_the_sdn_row_that_mentions_the_node() {
+        assert!(!is_node_down_warning(
+            "resource #12: entry network/pvec-b/zone/localnetwork has an unrecognized type \"network\"",
+            "pvec-b"
+        ));
+    }
+
+    #[test]
+    fn requires_the_whole_node_name() {
+        assert!(!is_node_down_warning(
+            "node pvec-b2 status: the API answered 595: x",
+            "pvec-b"
+        ));
+        assert!(!is_node_down_warning(
+            "node pvec-b status: the API answered 595: x",
+            "pvec"
+        ));
+        assert!(!is_node_down_warning(
+            "guest qemu/100: node pvec-b is odd",
+            "pvec-b"
+        ));
+        assert!(!is_node_down_warning(
+            "node pvec-b storage #2: bad entry",
+            "pvec-b"
+        ));
+        assert!(!is_node_down_warning("node pvec-b", "pvec-b"));
+    }
+
+    #[test]
+    fn ignores_payload_problems_of_a_reachable_node() {
+        assert!(!is_node_down_warning(
+            "node pvec-b status: cpu usage is missing",
+            "pvec-b"
+        ));
+        assert!(!is_node_down_warning(
+            "node pvec-b status: memory used or total is missing or invalid",
+            "pvec-b"
+        ));
+        assert!(!is_node_down_warning(
+            "node pvec-b storage: the payload is not a list (it is a string)",
+            "pvec-b"
+        ));
+    }
+
+    #[test]
+    fn reads_the_discovery_body() {
+        let body = json!({"data": {"warnings": [
+            "resource #12: entry network/pvec-b/zone/localnetwork has an unrecognized type \"network\"",
+        ]}});
+        assert!(!warnings_name(&body, "pvec-b"));
+        let down = json!({"data": {"warnings": ["node pvec-b status: the API answered 595: No route to host"]}});
+        assert!(warnings_name(&down, "pvec-b"));
+        assert!(!warnings_name(&json!({"data": {}}), "pvec-b"));
+    }
 }
 
 /// The harness itself, without PVE: the real controller binary starts on
@@ -1129,6 +1258,37 @@ async fn harness_drives_the_real_controller_and_fleetctl() {
         .expect("the controller answers");
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["code"], "proxmox_unconfirmed");
+    // The store admits one controller: with_store stops it, writes, and
+    // restarts it on the same address with the data intact.
+    let url = controller.url();
+    let touched = controller
+        .with_store(async |store| {
+            sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?1 WHERE id = ?2")
+                .bind("00")
+                .bind(&account)
+                .execute(store.pool())
+                .await
+                .map(|done| done.rows_affected())
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("the store opens while the controller is stopped");
+    assert_eq!(touched, 1);
+    // restart() prefers the old port and falls back to a new one if the
+    // rebind races; either way url() follows and the controller answers.
+    if controller.url() != url {
+        eprintln!("fleet-acceptance: the restart moved to a new port (rebind race)");
+    }
+    let (status, body) = controller
+        .get("/api/v1/proxmox/accounts")
+        .await
+        .expect("the restarted controller answers");
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.to_string().contains(&account),
+        "the account survived: {body}"
+    );
+
     // The operations surface the suite polls answers through the same binary.
     let (status, _) = controller
         .get("/api/v1/operations")
@@ -1353,15 +1513,6 @@ mod unit {
         }
         assert!(config::valid_target_name("PVE_9_lab"));
         assert!(!config::valid_target_name(""));
-    }
-
-    #[test]
-    fn a_warning_names_the_node_only_as_a_whole_token() {
-        assert!(super::names_node("node pve-b is offline", "pve-b"));
-        assert!(super::names_node("pve-b: no capacity.", "pve-b"));
-        assert!(!super::names_node("node pve-b2 is offline", "pve-b"));
-        assert!(!super::names_node("node xpve-b is offline", "pve-b"));
-        assert!(!super::names_node("node pve-b-old is offline", "pve-b"));
     }
 
     #[test]
