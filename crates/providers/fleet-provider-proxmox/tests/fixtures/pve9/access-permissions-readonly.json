@@ -1,0 +1,76 @@
+{
+  "data": {
+    "/": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/access": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/access/groups": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/nodes": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/pool": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/sdn": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/storage": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/vms": {
+      "Datastore.Audit": 1,
+      "Mapping.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    }
+  }
+}
