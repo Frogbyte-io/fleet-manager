@@ -30,6 +30,7 @@ pub mod operations;
 pub mod plans;
 pub mod projects;
 pub mod proxmox;
+pub mod proxmox_tasks;
 pub mod ready;
 pub mod skill_catalog;
 pub mod skills;
@@ -343,6 +344,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(proxmox::observe_proxmox_guest))
                 .routes(routes!(proxmox::start_proxmox_lifecycle))
                 .routes(routes!(proxmox::review_proxmox_operation))
+                .routes(routes!(proxmox_tasks::list_proxmox_tasks))
                 .routes(routes!(
                     images::list_image_recipes,
                     images::create_image_recipe

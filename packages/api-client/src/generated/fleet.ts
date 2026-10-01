@@ -2941,6 +2941,89 @@ export interface ProxmoxReviewDto {
 }
 
 /**
+ * A task's status, in the provider's task-status taxonomy.
+ */
+export type ProxmoxTaskStatusDto = typeof ProxmoxTaskStatusDto[keyof typeof ProxmoxTaskStatusDto];
+
+
+export const ProxmoxTaskStatusDto = {
+  running: 'running',
+  ok: 'ok',
+  error: 'error',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * One PVE task.
+ */
+export interface ProxmoxTaskDto {
+  /**
+     * When the task ended (epoch millis), or null while it runs.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /**
+     * PVE's exit status string (`OK`, `WARNINGS: 2`, an error message),
+     * once the task has one.
+     * @nullable
+     */
+  exitStatus?: string | null;
+  /**
+     * The Fleet operation that started this task, or null when Fleet did
+     * not start it or the caller may not read operations.
+     * @nullable
+     */
+  fleetOperationId?: string | null;
+  /** The node the task runs on. */
+  node: string;
+  /** When the task started (epoch millis). */
+  startedAt: number;
+  /** The status. */
+  status: ProxmoxTaskStatusDto;
+  /**
+     * The target id (the VMID for guest tasks), or null for node-level
+     * tasks.
+     * @nullable
+     */
+  targetId?: string | null;
+  /** The task type, e.g. `qmstart`, `vzdump`. */
+  taskType: string;
+  /**
+     * The API token name when the task ran under a token (its name, never
+     * its secret).
+     * @nullable
+     */
+  tokenId?: string | null;
+  /** The raw UPID: the task's identity, and the page cursor. */
+  upid: string;
+  /** The user, exactly as PVE reports it. */
+  user: string;
+}
+
+/**
+ * One page of an account's task history, newest first. The page shape
+ * (`items`, `page`) is the standard one; the snapshot facts ride along.
+ */
+export interface ProxmoxTaskPage {
+  /** The account that produced the snapshot. */
+  accountId: string;
+  /** The tasks on this page. */
+  items: ProxmoxTaskDto[];
+  /** When the snapshot was taken (epoch millis). */
+  observedAt: number;
+  /** Where this page sits in the snapshot. */
+  page: PageInfo;
+  /** The PVE version seen. */
+  pveVersion: string;
+  /**
+     * What the snapshot is missing and why: unreadable or offline nodes,
+     * malformed entries, a per-node bound reached, a withheld operation
+     * link. These describe the whole snapshot, so every page repeats them.
+     */
+  warnings: string[];
+}
+
+/**
  * How the workflow's endpoint authenticates.
  */
 export type ReadyAuthDto = {
@@ -4879,6 +4962,31 @@ export type ListProxmoxGuestsParams = {
 limit?: number;
 /**
  * The opaque cursor: the last guest's cluster id of the previous page.
+ */
+cursor?: string;
+};
+
+export type ListProxmoxTasksParams = {
+/**
+ * Only this node's tasks.
+ */
+node?: string;
+/**
+ * Only this guest's tasks.
+ * @minimum 0
+ */
+vmid?: number;
+/**
+ * Only tasks in this status: running, ok, error, or unknown.
+ */
+status?: string;
+/**
+ * The maximum number of tasks to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last task's UPID from the previous page.
  */
 cursor?: string;
 };
@@ -10402,6 +10510,91 @@ export const observeProxmoxFingerprint = async (accountId: string, options?: Req
 
   const data: observeProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as observeProxmoxFingerprintResponse
+}
+
+
+
+export type listProxmoxTasksResponse200 = {
+  data: ProxmoxTaskPage
+  status: 200
+}
+
+export type listProxmoxTasksResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listProxmoxTasksResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listProxmoxTasksResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listProxmoxTasksResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type listProxmoxTasksResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type listProxmoxTasksResponseSuccess = (listProxmoxTasksResponse200) & {
+  headers: Headers;
+};
+export type listProxmoxTasksResponseError = (listProxmoxTasksResponse400 | listProxmoxTasksResponse403 | listProxmoxTasksResponse404 | listProxmoxTasksResponse409 | listProxmoxTasksResponse502) & {
+  headers: Headers;
+};
+
+export type listProxmoxTasksResponse = (listProxmoxTasksResponseSuccess | listProxmoxTasksResponseError)
+
+export const getListProxmoxTasksUrl = (accountId: string,
+    params?: ListProxmoxTasksParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/proxmox/accounts/${accountId}/tasks?${stringifiedParams}` : `/api/v1/proxmox/accounts/${accountId}/tasks`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed filter or
+ * stale cursor, an unconfirmed account, or a whole-read source failure.
+ * A node that cannot be read is a warning, not an error.
+ * @summary Lists the account's recent PVE tasks, newest first, each linked to the
+Fleet operation that started it.
+ */
+export const listProxmoxTasks = async (accountId: string,
+    params?: ListProxmoxTasksParams, options?: RequestInit): Promise<listProxmoxTasksResponse> => {
+
+  const res = await fetch(getListProxmoxTasksUrl(accountId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listProxmoxTasksResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listProxmoxTasksResponse
 }
 
 

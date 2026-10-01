@@ -361,6 +361,13 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         fleet_controller::proxmox_store::AbsentProxmoxCredentials,
                     ),
                 };
+                // FM-609: the executors record each UPID they start, so
+                // the task history can link it to its operation.
+                let task_links: std::sync::Arc<
+                    dyn fleet_application::proxmox::tasks::ProxmoxTaskLinkPort,
+                > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                    store.pool().clone(),
+                ));
                 std::sync::Arc::new(fleet_controller::proxmox_exec::ProxmoxDispatch::new(
                     with_source.clone(),
                     std::sync::Arc::new(
@@ -368,14 +375,16 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                             accounts.clone(),
                             credentials.clone(),
                             proxmox_client.clone(),
-                        ),
+                        )
+                        .with_task_links(task_links.clone()),
                     ),
                     std::sync::Arc::new(
                         fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
                             accounts,
                             credentials,
                             proxmox_client,
-                        ),
+                        )
+                        .with_task_links(task_links),
                     ),
                 ))
             };
