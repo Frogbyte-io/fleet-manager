@@ -2,7 +2,7 @@
 
 Status: runbook for FM-612 ([#211](https://github.com/Frogbyte-io/fleet-manager/issues/211)). First run end to end on the integration host on 2026-10-01: a PVE 8.4.0 node and a two-node PVE 9.2.2 cluster, nested on the PVE 9.2.2 host. The redacted evidence is on the issue, and the failure-mode table in step 8 records what the API returned in that run.
 
-The [supported platform baseline](../PLAN.md#supported-platform-baseline) says Fleet supports Proxmox VE 8.x and 9.x, and the M6 real-cluster suite must pass on both majors. The integration environment has one physical PVE 9.x host. It has no 8.x node, and a single node cannot show a partial-node failure; this is the [FM-S08 recorded deviation](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike). This runbook adds three nested PVE VMs on that host:
+The [supported platform baseline](../PLAN.md#supported-platform-baseline) says Fleet supports Proxmox VE 8.x and 9.x, and the M6 real-cluster suite must pass on both majors. The integration environment has one physical PVE 9.x host. It has no 8.x node, and a single node cannot show a partial-node failure. That gap was the FM-S08 recorded deviation; the suite run on these fixtures replaced it with a live result on both majors (see [FM-S08](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike)). This runbook adds three nested PVE VMs on that host:
 
 | Role | What it is | Used by FM-611 as |
 |---|---|---|
