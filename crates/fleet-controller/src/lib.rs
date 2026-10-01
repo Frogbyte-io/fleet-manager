@@ -25,6 +25,7 @@ pub mod node_crypto;
 pub mod onboard;
 pub mod proxmox_exec;
 pub mod proxmox_store;
+pub mod proxmox_tasks_store;
 pub mod ready;
 pub mod skills;
 pub mod source;

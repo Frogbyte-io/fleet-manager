@@ -57,7 +57,7 @@ pub enum ProxmoxPrivilegeStatusDto {
     Granted,
     /// The token lacks a needed privilege.
     Missing,
-    /// The permissions read was refused, so Fleet cannot tell.
+    /// Fleet could not determine the status; `unknownReason` says why.
     Unknown,
 }
 
@@ -118,6 +118,8 @@ pub struct ProxmoxPrivilegeCheckDto {
     pub path: String,
     /// The token's effective-permission paths the row is satisfied on.
     pub granted_on: Vec<String>,
+    /// Whether more paths satisfied the row than `grantedOn` lists.
+    pub granted_on_truncated: bool,
     /// The privileges still missing on the closest path in scope.
     pub missing: Vec<String>,
     /// Why the row exists.
@@ -136,6 +138,7 @@ impl From<PrivilegeCheck> for ProxmoxPrivilegeCheckDto {
             any_of: check.any_of,
             path: check.path,
             granted_on: check.granted_on,
+            granted_on_truncated: check.granted_on_truncated,
             missing: check.missing,
             note: check.note,
         }

@@ -25,14 +25,26 @@ struct PermissionsTransport {
     permissions: (u16, &'static str),
     /// Every credential-carrying request path, for the trust-gate check.
     pinned_requests: Mutex<Vec<String>>,
+    /// The VMIDs `/cluster/nextid` reports as existing.
+    in_use: &'static [u32],
 }
 
 impl PermissionsTransport {
     fn new(version: &'static str, status: u16, body: &'static str) -> Arc<Self> {
+        Self::with_in_use(version, status, body, &[101, 102])
+    }
+
+    fn with_in_use(
+        version: &'static str,
+        status: u16,
+        body: &'static str,
+        in_use: &'static [u32],
+    ) -> Arc<Self> {
         Arc::new(Self {
             version,
             permissions: (status, body),
             pinned_requests: Mutex::new(Vec::new()),
+            in_use,
         })
     }
 }
@@ -54,6 +66,25 @@ impl PveTransport for PermissionsTransport {
         let (status, body) = match request.path.as_str() {
             "/api2/json/version" => (200, self.version),
             "/api2/json/access/permissions" => self.permissions,
+            // As PVE answers (captured from 8.4 and 9.2): 200 with the
+            // VMID when free, 400 when it already exists.
+            other if other.starts_with("/api2/json/cluster/nextid?vmid=") => {
+                let vmid: u32 = other.rsplit('=').next().unwrap().parse().unwrap();
+                let (status, body) = if self.in_use.contains(&vmid) {
+                    (
+                        400,
+                        format!(
+                            r#"{{"data":null,"message":"Parameter verification failed.\n","errors":{{"vmid":"VM {vmid} already exists"}}}}"#
+                        ),
+                    )
+                } else {
+                    (200, format!(r#"{{"data":"{vmid}"}}"#))
+                };
+                return Ok(PveHttpResponse {
+                    status,
+                    body: body.into_bytes(),
+                });
+            }
             other => panic!("the privileges read called {other}"),
         };
         Ok(PveHttpResponse {
@@ -292,7 +323,13 @@ async fn the_trust_gate_holds_and_a_pool_scoped_9x_token_is_granted_every_tier()
     assert!(!body.to_string().contains(SECRET));
     assert_eq!(
         *transport.pinned_requests.lock().unwrap(),
-        ["/api2/json/version", "/api2/json/access/permissions"]
+        [
+            "/api2/json/version",
+            "/api2/json/access/permissions",
+            "/api2/json/cluster/nextid?vmid=101",
+            "/api2/json/cluster/nextid?vmid=102",
+            "/api2/json/cluster/nextid?vmid=9000",
+        ]
     );
 
     // Unknown accounts are a 404, as on every other account surface.
@@ -391,5 +428,45 @@ async fn a_refused_permissions_read_reports_every_tier_unknown() {
             .as_str()
             .unwrap()
             .contains("403")
+    );
+}
+
+#[tokio::test]
+async fn a_clone_target_grant_on_an_existing_vmid_does_not_count() {
+    // The pool-scoped token's reserved clone target, /vms/9000, has been
+    // used: the VMID exists now, so no clone can target it, and the only
+    // other VM.Allocate grants are on the existing pool members.
+    let transport = PermissionsTransport::with_in_use(
+        VERSION_9,
+        200,
+        include_str!(
+            "../../providers/fleet-provider-proxmox/tests/fixtures/pve9/access-permissions-pool-scoped.json"
+        ),
+        &[101, 102, 9000],
+    );
+    let harness = harness(transport).await;
+    let account_id = create_account(&harness).await;
+    trust(&harness, &account_id).await;
+    let (status, body) = privileges(&harness, &account_id).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(tier(&body, "discover")["status"], "granted", "{body}");
+    assert_eq!(tier(&body, "operate")["status"], "granted", "{body}");
+    for name in ["destructive", "lab"] {
+        let tier = tier(&body, name);
+        assert_eq!(tier["status"], "missing", "{name}: {body}");
+        assert!(
+            tier["missing"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|missing| missing["path"] == "/vms/{newid}"
+                    && missing["privileges"] == json!(["VM.Allocate"])),
+            "{name}: {body}"
+        );
+    }
+    let warnings = body["data"]["warnings"].to_string();
+    assert!(
+        warnings.contains("existing VMIDs (101, 102, 9000)"),
+        "{warnings}"
     );
 }

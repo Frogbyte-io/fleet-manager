@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::proxmox::ProxmoxCredentialStore;
+use fleet_application::proxmox::tasks::ProxmoxTaskLinkPort;
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_proxmox::{LifecycleAction, ProxmoxSource as _, TaskStatus, Upid};
 use serde::Deserialize;
@@ -50,6 +51,7 @@ pub struct ProxmoxLifecycleExecutor {
     accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
     credentials: Arc<dyn ProxmoxCredentialStore>,
     client: fleet_provider_proxmox::ProxmoxClient,
+    links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
 }
 
 impl ProxmoxLifecycleExecutor {
@@ -64,7 +66,16 @@ impl ProxmoxLifecycleExecutor {
             accounts,
             credentials,
             client,
+            links: None,
         }
+    }
+
+    /// Records every UPID this executor starts against its operation, so
+    /// the task history can link the task back (FM-609).
+    #[must_use]
+    pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
+        self.links = Some(links);
+        self
     }
 
     /// The trusted account and its resolved secret: the same explicit-trust
@@ -157,6 +168,7 @@ impl ProxmoxLifecycleExecutor {
     ) -> Result<TaskStatus, String> {
         let RunParams {
             operation_id,
+            account_id,
             request,
             node,
             vmid,
@@ -170,6 +182,7 @@ impl ProxmoxLifecycleExecutor {
             .guest_lifecycle(request.clone(), &node, vmid, action)
             .await
             .map_err(|error| format!("the lifecycle action failed: {error}"))?;
+        record_task_link(self.links.as_ref(), &account_id, &upid, &operation_id).await;
         loop {
             // Cancellation is honored between polls: the remote task keeps
             // running, and the operation says so.
@@ -293,6 +306,7 @@ impl ProxmoxLifecycleExecutor {
                 operations,
                 RunParams {
                     operation_id: operation.id.clone(),
+                    account_id: payload.account_id.clone(),
                     request,
                     node: payload.node,
                     vmid: payload.vmid,
@@ -328,6 +342,8 @@ impl OperationExecutor for ProxmoxLifecycleExecutor {
 struct RunParams {
     /// The operation whose cancellation is observed between polls.
     operation_id: String,
+    /// The account the action runs through, for the task link.
+    account_id: String,
     /// The provider request carrying the account and pin.
     request: fleet_provider_proxmox::PveHttpRequest,
     /// The guest's hosting node.
@@ -430,6 +446,7 @@ pub struct ProxmoxDestructiveExecutor {
     accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
     credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
     client: fleet_provider_proxmox::ProxmoxClient,
+    links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -444,7 +461,16 @@ impl ProxmoxDestructiveExecutor {
             accounts,
             credentials,
             client,
+            links: None,
         }
+    }
+
+    /// Records every UPID this executor starts against its operation, so
+    /// the task history can link the task back (FM-609).
+    #[must_use]
+    pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
+        self.links = Some(links);
+        self
     }
 }
 
@@ -508,6 +534,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 self.run_to_terminal(
                     operations,
                     &operation.id,
+                    &payload.account_id,
                     &request,
                     &payload.node,
                     payload.vmid,
@@ -546,6 +573,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 self.run_to_terminal(
                     operations,
                     &operation.id,
+                    &payload.account_id,
                     &request,
                     &payload.node,
                     payload.vmid,
@@ -576,6 +604,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 self.run_to_terminal(
                     operations,
                     &operation.id,
+                    &payload.account_id,
                     &request,
                     &payload.node,
                     payload.vmid,
@@ -638,6 +667,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 self.run_to_terminal(
                     operations,
                     &operation.id,
+                    &payload.account_id,
                     &request,
                     &payload.node,
                     payload.vmid,
@@ -679,6 +709,7 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
                 self.run_to_terminal(
                     operations,
                     &operation.id,
+                    &payload.account_id,
                     &request,
                     &payload.node,
                     payload.vmid,
@@ -894,6 +925,7 @@ impl ProxmoxDestructiveExecutor {
         &self,
         operations: &Operations,
         operation_id: &str,
+        account_id: &str,
         request: &fleet_provider_proxmox::PveHttpRequest,
         node: &str,
         vmid: u32,
@@ -923,6 +955,7 @@ impl ProxmoxDestructiveExecutor {
             // verification, not an assumption.
             return self.finish(operations, operation_id, TaskStatus::Ok).await;
         };
+        record_task_link(self.links.as_ref(), account_id, &upid, operation_id).await;
         let started = std::time::Instant::now();
         loop {
             let cancelled = operations
@@ -987,6 +1020,28 @@ fn validate_snapshot_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Records which operation started a PVE task (FM-609). Best effort on
+/// purpose: by now the remote task is already running, and failing the
+/// operation over a lost link would misreport the remote state. A lost
+/// link only means the task history shows the task without its
+/// `fleetOperationId`. The log line carries identifiers, never credentials.
+async fn record_task_link(
+    links: Option<&Arc<dyn ProxmoxTaskLinkPort>>,
+    account_id: &str,
+    upid: &Upid,
+    operation_id: &str,
+) {
+    let Some(links) = links else {
+        return;
+    };
+    if let Err(error) = links.record(account_id, &upid.raw, operation_id).await {
+        eprintln!(
+            "proxmox: could not link task {} to operation {operation_id}: {error}",
+            upid.raw
+        );
+    }
+}
+
 /// Completes an operation as a failure with a redacted detail.
 async fn complete_failure(
     operations: &Operations,
@@ -1015,6 +1070,7 @@ pub struct ProvisionExecutor {
     leases: Arc<dyn fleet_application::lab::LeasePort>,
     templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
     client: fleet_provider_proxmox::ProxmoxClient,
+    links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
 }
 
 impl ProvisionExecutor {
@@ -1035,7 +1091,16 @@ impl ProvisionExecutor {
             leases,
             templates,
             client,
+            links: None,
         }
+    }
+
+    /// Records the clone and start UPIDs this executor obtains against its
+    /// operation, so the task history can link them back (FM-609).
+    #[must_use]
+    pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
+        self.links = Some(links);
+        self
     }
 
     /// Resolves the clone source VMID from the image version's build
@@ -1217,6 +1282,7 @@ impl ProvisionExecutor {
                     )
                     .await
                     .map_err(|error| format!("the clone failed: {error}"))?;
+                record_task_link(self.links.as_ref(), &account_id, &upid, &operation.id).await;
                 // Record the clone UPID and the resolved VMID before
                 // continuing: the saga rule.
                 let mut updated = record.clone();
@@ -1249,7 +1315,7 @@ impl ProvisionExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
-        let _ = self
+        let started = self
             .client
             .guest_lifecycle(
                 request.clone(),
@@ -1258,6 +1324,11 @@ impl ProvisionExecutor {
                 fleet_provider_proxmox::LifecycleAction::Start,
             )
             .await;
+        // A refused start stays tolerated (the guest may already run); an
+        // accepted one is linked like every other task Fleet starts.
+        if let Ok(upid) = &started {
+            record_task_link(self.links.as_ref(), &account_id, upid, &operation.id).await;
+        }
 
         // Step 3: the readiness probe. The guest-agent probe polls the
         // FM-601 agent data; the deadline comes from the template.
