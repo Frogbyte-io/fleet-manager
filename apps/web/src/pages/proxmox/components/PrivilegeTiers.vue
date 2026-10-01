@@ -13,6 +13,7 @@ import {
   privilegeTone,
   tierOf,
   tierStatus,
+  TOKEN_GUIDE_URL,
 } from '../proxmox'
 
 // The account token's capability tiers (FM-604), as the API evaluated them.
@@ -25,10 +26,22 @@ const props = defineProps<{
   error?: unknown
 }>()
 
+// A report whose last read failed is kept by the cache, but it is no longer
+// the API's current answer: every tier reads as unknown, and the stale
+// report's age is named beside it.
+const current = computed(() => (props.error ? null : props.privileges ?? null))
+const stale = computed(() => (props.error ? props.privileges ?? null : null))
+
 const tiers = computed(() => PRIVILEGE_TIERS.map((tier) => {
-  const status = tierStatus(props.privileges, tier)
-  return { tier, status, tone: privilegeTone(status), missing: tierOf(props.privileges, tier)?.missing ?? [] }
+  const status = tierStatus(current.value, tier)
+  return { tier, status, tone: privilegeTone(status), missing: tierOf(current.value, tier)?.missing ?? [] }
 }))
+
+// A clone-target row (`/vms/{newid}`) counts a VMID-specific grant only while
+// that VMID is free, so the hint names the grant that always works.
+function cloneTarget(path: string): boolean {
+  return path === '/vms/{newid}'
+}
 
 const toneClass: Record<string, string> = {
   ok: 'border-fc-ok/40 text-fc-ok',
@@ -91,6 +104,11 @@ const toneClass: Record<string, string> = {
                     v-if="need.anyOf"
                     class="block text-[10px] text-fc-faint"
                   >any one of them suffices</span>
+                  <span
+                    v-if="cloneTarget(need.path)"
+                    class="block text-[10px] text-fc-faint"
+                    data-testid="clone-target-hint"
+                  >a grant on /vms/&lt;id&gt; counts only while that VMID is free; a propagating grant on /vms covers any new guest</span>
                 </li>
               </ul>
             </template>
@@ -104,11 +122,14 @@ const toneClass: Record<string, string> = {
               v-else
               class="text-fc-muted"
             >
-              <template v-if="privileges?.unknownReason">
-                Not known: {{ privileges.unknownReason }}
+              <template v-if="current?.unknownReason">
+                Not known: {{ current.unknownReason }}
               </template>
               <template v-else-if="error">
                 The privilege report could not be read: {{ errorMessage(error) }}
+                <template v-if="stale">
+                  The last report ({{ relativeTime(stale.observedAt) }}) is not shown as current.
+                </template>
               </template>
               <template v-else-if="loading">
                 Reading the token's permissions…
@@ -117,23 +138,37 @@ const toneClass: Record<string, string> = {
                 Not known. Actions stay available; the controller decides when it runs them.
               </template>
             </p>
+            <a
+              :href="TOKEN_GUIDE_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-block rounded-sm text-fc-info hover:text-fc-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="token-guide"
+            >Least-privilege token guide (docs/operations/proxmox-token.md) ↗</a>
             <CopyFleetctl :command="privilegesCommand(accountId)" />
           </PopoverContent>
         </PopoverPortal>
       </PopoverRoot>
     </div>
     <p
-      v-if="privileges?.warnings.length"
+      v-if="current?.warnings.length"
       class="text-[11px] text-fc-warn"
       data-testid="privilege-warnings"
     >
-      {{ privileges.warnings.join(' · ') }}
+      {{ current.warnings.join(' · ') }}
     </p>
     <p
-      v-if="privileges"
+      v-if="current"
       class="font-mono text-[10px] uppercase tracking-wide text-fc-faint"
     >
-      Privileges seen {{ relativeTime(privileges.observedAt) }}
+      Privileges seen {{ relativeTime(current.observedAt) }}
+    </p>
+    <p
+      v-else-if="stale"
+      class="font-mono text-[10px] uppercase tracking-wide text-fc-warn"
+      data-testid="privileges-stale"
+    >
+      Refresh failed · last report {{ relativeTime(stale.observedAt) }} is stale
     </p>
   </div>
 </template>

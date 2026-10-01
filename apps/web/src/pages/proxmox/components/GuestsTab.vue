@@ -36,7 +36,9 @@ const loadingAccounts = computed(() => props.views.filter(v => v.guestsLoading))
 const failedAccounts = computed(() => props.views.filter(v => v.guestsError))
 const truncatedAccounts = computed(() => props.views.filter(v => v.guestsTruncated))
 const accounts = computed(() => new Map(props.views.map(v => [v.account.id, v.account])))
-const reports = computed(() => new Map(props.views.map(v => [v.account.id, v.privileges ?? null])))
+// A report whose last read failed is not current: its cached `missing`
+// rows must not keep withholding actions.
+const reports = computed(() => new Map(props.views.map(v => [v.account.id, v.privilegesError ? null : v.privileges ?? null])))
 
 // Why the token cannot run a tier's actions on this guest's account, from
 // the privilege report; null (offered) unless the tier is reported missing.

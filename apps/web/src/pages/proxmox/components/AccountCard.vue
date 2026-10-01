@@ -81,9 +81,14 @@ async function confirm() {
   error.value = ''
   try {
     unwrap<ProxmoxAccountDto>(await confirmProxmoxFingerprint(account.value.id, { fingerprint }))
+    // Discovery re-verifies the new pin first; only then are the
+    // credentialed reads marked stale, so none of them goes out on the
+    // trust that was just replaced.
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ACCOUNTS_KEY }),
       queryClient.invalidateQueries({ queryKey: discoveryKey(account.value.id) }),
+    ])
+    await Promise.all([
       queryClient.invalidateQueries({ queryKey: guestsKey(account.value.id) }),
       queryClient.invalidateQueries({ queryKey: privilegesKey(account.value.id) }),
     ])
@@ -102,11 +107,12 @@ const command = computed(() => (observed.value && needsPin.value
   : proxmoxAccountCommand('observe', account.value.id)))
 
 const discovery = computed(() => props.view.discovery)
-// The privilege report's version and rules major when it exists; otherwise
-// discovery's version alone.
+// The privilege report's version and rules major when it is current;
+// otherwise (none yet, or its last read failed) discovery's version alone.
+const report = computed(() => (props.view.privilegesError ? null : props.view.privileges ?? null))
 const compat = computed(() => compatibility(
-  props.view.privileges?.pveVersion ?? discovery.value?.pveVersion,
-  props.view.privileges?.rulesMajor,
+  report.value?.pveVersion ?? discovery.value?.pveVersion,
+  report.value?.rulesMajor,
 ))
 const counts = computed(() => {
   const resources = discovery.value?.resources ?? []

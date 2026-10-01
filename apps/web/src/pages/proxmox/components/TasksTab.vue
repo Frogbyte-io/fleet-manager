@@ -30,18 +30,23 @@ const STATUSES = TASK_STATUSES
 const pinned = computed(() => props.views.filter(v => v.state === 'pinned'))
 const blocked = computed(() => props.views.filter(v => v.state === 'changed' || v.state === 'unconfirmed'))
 
-// The selection (and its filters) survives an account being briefly not
-// pinned, e.g. while discovery refetches; it moves only when the account is
-// gone from the list. Nothing is asked of it until it is pinned again.
+// The selection (and its filters) survives a moment out of `pinned`, such
+// as a discovery refetch ('checking') or a transient error ('unreachable').
+// It moves only when the account is gone, or its pin is definitively
+// refused (changed or unconfirmed).
 const accountId = ref<string | null>(null)
-watch([pinned, () => props.views], ([list, all]) => {
-  if (!all.some(v => v.account.id === accountId.value))
-    accountId.value = list[0]?.account.id ?? null
+watch(() => props.views, (list) => {
+  const selected = list.find(v => v.account.id === accountId.value)
+  if (!selected || selected.state === 'changed' || selected.state === 'unconfirmed')
+    accountId.value = pinned.value[0]?.account.id ?? null
 }, { immediate: true })
-const view = computed(() => pinned.value.find(v => v.account.id === accountId.value) ?? null)
-const selected = computed(() => props.views.find(v => v.account.id === accountId.value) ?? null)
-const queryAccountId = computed(() => view.value ? accountId.value : null)
-const selectable = computed(() => selected.value && !view.value ? [...pinned.value, selected.value] : pinned.value)
+const view = computed(() => props.views.find(v => v.account.id === accountId.value) ?? null)
+// The account picker: every pinned account, plus the selection while it is
+// momentarily not pinned.
+const choices = computed(() => props.views.filter(v => v.state === 'pinned' || v.account.id === accountId.value))
+// Tasks are read only on a verified pin with no pin discovery in flight;
+// refresh and "load more" honour the same gate.
+const ready = computed(() => view.value?.state === 'pinned' && !view.value.discoveryFetching)
 
 const filters = ref<TaskFilters>({ ...EMPTY_TASK_FILTERS })
 watch(accountId, () => (filters.value = { ...EMPTY_TASK_FILTERS }))
@@ -55,7 +60,7 @@ const guests = computed(() => (view.value?.guests ?? [])
   .filter(g => g.vmid !== null && g.vmid !== undefined)
   .sort((a, b) => (a.vmid ?? 0) - (b.vmid ?? 0)))
 
-const tasks = useProxmoxTasks(queryAccountId, filters)
+const tasks = useProxmoxTasks(accountId, filters, ready)
 const pages = computed(() => tasks.data.value?.pages ?? [])
 const rows = computed(() => pages.value.flatMap(p => p.items))
 // Warnings describe the whole snapshot, so every page repeats them.
@@ -88,7 +93,7 @@ function user(task: { user: string, tokenId?: string | null }): string {
     </div>
 
     <p
-      v-if="pinned.length === 0 && !selected"
+      v-if="choices.length === 0"
       class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
       data-testid="tasks-no-account"
     >
@@ -109,11 +114,11 @@ function user(task: { user: string, tokenId?: string | null }): string {
             data-testid="tasks-account"
           >
             <option
-              v-for="item in selectable"
+              v-for="item in choices"
               :key="item.account.id"
               :value="item.account.id"
             >
-              {{ item.account.name }}
+              {{ item.account.name }}{{ item.state === 'pinned' ? '' : ` (${item.state})` }}
             </option>
           </select>
         </label>
@@ -186,7 +191,7 @@ function user(task: { user: string, tokenId?: string | null }): string {
         <button
           type="button"
           class="h-8 rounded-sm border border-border px-3 text-xs text-fc-muted hover:text-foreground disabled:opacity-50"
-          :disabled="tasks.isFetching.value"
+          :disabled="!ready || tasks.isFetching.value"
           data-testid="tasks-refresh"
           @click="tasks.refetch()"
         >
@@ -194,8 +199,17 @@ function user(task: { user: string, tokenId?: string | null }): string {
         </button>
       </form>
 
+      <p
+        v-if="view?.state === 'pinned' && view.discoveryFetching"
+        class="text-xs text-fc-faint"
+        role="status"
+        data-testid="tasks-waiting"
+      >
+        Re-verifying the pin of {{ view.account.name }}; tasks are read again once it is confirmed.
+      </p>
+
       <div
-        v-if="warnings.length"
+        v-if="warnings.length && view?.state === 'pinned'"
         class="space-y-0.5 border-l-2 border-l-fc-warn bg-card px-3 py-2 text-xs text-fc-muted"
         role="status"
         data-testid="tasks-warnings"
@@ -212,12 +226,12 @@ function user(task: { user: string, tokenId?: string | null }): string {
       </div>
 
       <p
-        v-if="!view"
+        v-if="view && view.state !== 'pinned'"
         class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
         role="status"
         data-testid="tasks-unavailable"
       >
-        {{ selected?.account.name }} is not verified right now ({{ selected?.state }}); its tasks are not asked for until it is pinned again.
+        {{ view.account.name }} is not verified right now ({{ view.state }}); its tasks are not asked for, or shown, until it is pinned again.
       </p>
       <p
         v-else-if="tasks.isLoading.value"
@@ -237,7 +251,8 @@ function user(task: { user: string, tokenId?: string | null }): string {
         <p>Could not load tasks of {{ view?.account.name }}: {{ errorMessage(tasks.error.value) }}</p>
         <button
           type="button"
-          class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+          class="font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink disabled:opacity-50"
+          :disabled="!ready"
           @click="tasks.refetch()"
         >
           Retry
@@ -361,14 +376,14 @@ function user(task: { user: string, tokenId?: string | null }): string {
       </div>
 
       <div
-        v-if="rows.length"
+        v-if="rows.length && view?.state === 'pinned'"
         class="flex flex-wrap items-center gap-3"
       >
         <button
           v-if="tasks.hasNextPage.value"
           type="button"
           class="h-8 rounded-sm border border-border px-3 text-xs text-fc-muted hover:text-foreground disabled:opacity-50"
-          :disabled="tasks.isFetchingNextPage.value"
+          :disabled="!ready || tasks.isFetchingNextPage.value"
           data-testid="tasks-more"
           @click="tasks.fetchNextPage()"
         >

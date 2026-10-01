@@ -51,16 +51,18 @@ export async function tasksPage(accountId: string, filters: TaskFilters, cursor?
 /**
  * The Tasks tab's history for one account: the first page, then each
  * "load more" follows the last page's cursor. A filter change is a new
- * query key, so it starts at the first page again.
+ * query key, so it starts at the first page again. `ready` is the account's
+ * trust gate (pinned, and no pin discovery in flight); the query never runs
+ * without it.
  */
-export function useProxmoxTasks(accountId: Ref<string | null>, filters: Ref<TaskFilters>) {
+export function useProxmoxTasks(accountId: Ref<string | null>, filters: Ref<TaskFilters>, ready: Ref<boolean>) {
   return useInfiniteQuery({
     // Spread so each filter field is a tracked dependency of the key.
     queryKey: computed(() => tasksKey(accountId.value ?? '', { ...filters.value })),
     queryFn: ({ queryKey, pageParam }) => tasksPage(queryKey[2], queryKey[3], pageParam),
     initialPageParam: null as string | null,
     getNextPageParam: (last: ProxmoxTaskPage) => last.page.nextCursor ?? null,
-    enabled: computed(() => !!accountId.value),
+    enabled: computed(() => !!accountId.value && ready.value),
     retry: retryTransient,
   })
 }
@@ -115,9 +117,9 @@ export function useProxmox() {
     })),
   })
 
-  // The privilege report follows the same gate, and also waits out a running
-  // discovery refetch: cached data must not stand in for the current pin check,
-  // so a changed certificate is seen before the privilege request goes out.
+  // The privilege report follows the same gate, and also waits out any pin
+  // discovery in flight: a refetch (or a re-pinned certificate) must verify
+  // the pin again before a credentialed request goes out on cached trust.
   const privilegeReports = useQueries({
     queries: computed(() => confirmed.value.map((accountId, index) => {
       const discovery = discoveries.value[index]
@@ -142,13 +144,12 @@ export function useProxmox() {
       account,
       state,
       discovery: usable ? discovery?.data ?? null : null,
+      discoveryFetching: discovery?.isFetching ?? false,
       guests: usable ? guestList?.data ?? [] : [],
       guestsLoading: usable && (guestList?.isLoading ?? false),
       guestsError: usable ? guestList?.error ?? null : null,
       guestsTruncated: usable && truncatedGuests.value.has(account.id),
-      // A failed refetch keeps the previous report in the cache; it is not
-      // current, so it is neither shown nor used to withhold actions.
-      privileges: usable && !report?.error ? report?.data ?? null : null,
+      privileges: usable ? report?.data ?? null : null,
       privilegesLoading: usable && (report?.isLoading ?? false),
       privilegesError: usable ? report?.error ?? null : null,
     }
