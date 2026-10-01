@@ -63,6 +63,12 @@ Consequences:
 - FM-S08 must produce evidence against both majors before the Proxmox client choice is made. Passing on one major is not a pass.
 - Version-specific API differences belong behind the provider boundary and must not leak into `fleet-core`.
 
+Status (2026-10-01): **validated live on both majors.** The FM-611 acceptance suite passed against PVE 8.4.0 and a two-node PVE 9.2.2 cluster (FM-612 fixtures, `dev` 3a6da22): 11 pass, 0 fail, 1 skip (partial-node failure needs a cluster, so it is skipped on the single 8.x node; it passed on the 9.2.2 cluster, and no two-node 8.x cluster was tested). See [FM-S08](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike) and [#215](https://github.com/Frogbyte-io/fleet-manager/issues/215). Still open:
+
+- The suite has not run against the physical 9.x integration host itself. The 9.x leg ran on the nested 9.2.2 cluster, which is the same PVE version.
+- The compatibility matrix's Live 8.x/9.x columns wait for FM-606 (#207), which creates `docs/research/proxmox-compatibility.md`.
+- The optional Windows guest check (FM-608, #209) was not run.
+
 ### 5. Issue triage
 
 - Issues #2 and #3 are superseded by this plan. Milestones M0–M8 were created first, then the twelve replacement epics that link back to them, then both issues were closed as superseded on 2026-08-25:
