@@ -481,10 +481,13 @@ trust_peer_over_ssh() {
   local addr_a pub hostkeys
   addr_a="$(role_addr node-a)"
   on_node node-b sh -c '[ -f /root/.ssh/id_rsa ] || ssh-keygen -q -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa'
-  # pvecm's BatchMode ssh cannot unlock a passphrase-protected key.
-  on_node node-b ssh-keygen -y -P "" -f /root/.ssh/id_rsa >/dev/null 2>&1 ||
+  # Derive the public key from the private one: pvecm's BatchMode ssh cannot
+  # unlock a passphrase-protected key, and its ssh-copy-id reads the .pub
+  # sidecar, which is rewritten here in case it is stale.
+  pub="$(on_node node-b ssh-keygen -y -P "" -f /root/.ssh/id_rsa 2>/dev/null)" ||
     die "node-b's /root/.ssh/id_rsa needs a passphrase; 'cluster-join --ssh' needs a passphrase-free key"
-  pub="$(on_node node-b cat /root/.ssh/id_rsa.pub)"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  on_node node-b sh -c 'printf "%s\n" "$1" >/root/.ssh/id_rsa.pub' sh "$pub"
   [ -n "$pub" ] || die "could not read node-b's root public key"
   log "authorizing node-b's root key on node-a"
   # shellcheck disable=SC2016 # expanded by the remote shell
