@@ -86,7 +86,7 @@ const hosts = computed(() => new Map(views.value.map(v => [v.account.id, { host:
     </div>
 
     <div
-      class="mt-4 flex gap-6 border-b border-fc-line"
+      class="mt-4 flex gap-6 overflow-x-auto border-b border-fc-line"
       role="tablist"
     >
       <button
@@ -97,7 +97,7 @@ const hosts = computed(() => new Map(views.value.map(v => [v.account.id, { host:
         role="tab"
         :tabindex="tab === item.id ? 0 : -1"
         aria-controls="proxmox-tabpanel"
-        class="pb-2 text-[13px] font-semibold"
+        class="shrink-0 whitespace-nowrap pb-2 text-[13px] font-semibold"
         :class="tab === item.id ? 'text-fc-ink shadow-[inset_0_-2px_0_var(--fc-g1)]' : 'text-fc-muted hover:text-fc-ink'"
         :aria-selected="tab === item.id"
         :data-testid="`tab-${item.id}`"

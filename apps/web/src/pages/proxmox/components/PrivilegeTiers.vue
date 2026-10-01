@@ -122,7 +122,7 @@ const toneClass: Record<string, string> = {
               :href="TOKEN_GUIDE_URL"
               target="_blank"
               rel="noopener noreferrer"
-              class="inline-block text-fc-info hover:text-fc-ink"
+              class="inline-block rounded-sm text-fc-info hover:text-fc-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="token-guide"
             >Least-privilege token guide (docs/operations/proxmox-token.md) ↗</a>
             <CopyFleetctl :command="privilegesCommand(accountId)" />
