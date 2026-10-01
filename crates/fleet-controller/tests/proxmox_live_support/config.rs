@@ -262,7 +262,19 @@ pub fn load(
         }
         names.retain(|name| name == filter);
     }
-    let mut problems = Vec::new();
+    let mut problems: Vec<String> = names
+        .iter()
+        .filter(|name| !valid_target_name(name))
+        .map(|name| {
+            format!("{TARGET_PREFIX}{name:?}_HOST: a target name may hold only A-Z, a-z, 0-9 and _")
+        })
+        .collect();
+    if !problems.is_empty() {
+        return Err(format!(
+            "{LIVE_GATE}=1 but the target configuration is incomplete:\n  - {}",
+            problems.join("\n  - ")
+        ));
+    }
     let mut targets = Vec::new();
     for name in names {
         match target(env, &name, &read_secret) {
@@ -278,6 +290,30 @@ pub fn load(
             problems.join("\n  - ")
         ))
     }
+}
+
+/// Whether `name` is a usable `<NAME>`: `[A-Za-z0-9_]+`. The name is
+/// emitted as one space-separated field of every result line, so anything
+/// else (whitespace above all) would split it.
+#[must_use]
+pub fn valid_target_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `host` is a bare host or IP: no scheme, path, whitespace, or
+/// port. A colon is allowed only in an IPv6 address (bracketed or not).
+fn bare_host(host: &str) -> bool {
+    if host.contains("://") || host.contains('/') || host.contains(char::is_whitespace) {
+        return false;
+    }
+    if !host.contains(':') {
+        return true;
+    }
+    let inner = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    inner.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
 /// Parses one target, collecting every problem.
@@ -310,11 +346,12 @@ fn target(
     let range = required("VMID_RANGE");
 
     if let Some(host) = &host
-        && (host.contains("://") || host.contains('/') || host.contains(char::is_whitespace))
+        && !bare_host(host)
     {
         problems.push(format!(
-            "{} must be a bare host or IP, not a URL",
-            var("HOST")
+            "{} must be a bare host or IP, not a URL or host:port (set {} for the port)",
+            var("HOST"),
+            var("PORT")
         ));
     }
     let port = match optional("PORT") {
@@ -347,7 +384,14 @@ fn target(
         }
     });
     let template = template.and_then(|value| match value.parse::<u32>() {
-        Ok(vmid) => Some(vmid),
+        Ok(vmid) if (PVE_MIN_VMID..=PVE_MAX_VMID).contains(&vmid) => Some(vmid),
+        Ok(_) => {
+            problems.push(format!(
+                "{} must lie within PVE's VMIDs {PVE_MIN_VMID}-{PVE_MAX_VMID}",
+                var("TEMPLATE_VMID")
+            ));
+            None
+        }
         Err(_) => {
             problems.push(format!("{} is not a VMID", var("TEMPLATE_VMID")));
             None

@@ -444,7 +444,11 @@ impl TargetRun {
             data["state"].as_str(),
             Some("pending" | "running" | "cancelling")
         ) {
-            let id = data["id"].as_str().unwrap_or_default().to_owned();
+            let id = data["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| format!("the pending {action} operation carries no id: {data}"))?
+                .to_owned();
             return self.wait_operation(&id, Duration::from_secs(900)).await;
         }
         Ok(data)

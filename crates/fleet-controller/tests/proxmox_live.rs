@@ -301,36 +301,15 @@ async fn privilege_failure(run: &TargetRun) -> Result<Outcome, String> {
         "fleetctl proxmox privileges failed: {}",
         answer.stderr
     );
-    let tiers = answer.json["tiers"].as_array().cloned().unwrap_or_default();
-    let tier = |name: &str| {
-        tiers
-            .iter()
-            .find(|tier| tier["tier"] == name)
-            .and_then(|tier| tier["status"].as_str())
-            .unwrap_or("absent")
-            .to_owned()
-    };
-    check!(
-        tier("discover") == "granted",
-        "the read-only token's discover tier is {}",
-        tier("discover")
-    );
-    check!(
-        tier("operate") == "missing",
-        "the read-only token's operate tier is {}",
-        tier("operate")
-    );
-    check!(
-        answer.json["unknownReason"].is_null(),
-        "the privileges report is unknown: {}",
-        answer.json["unknownReason"]
-    );
-    // The API answers the same report.
-    let (status, body) = run.controller.get(&format!("{base}/privileges")).await?;
+    check_readonly_report(&answer.json, "fleetctl proxmox privileges")?;
+    // The API answers the same report: the privileges response (not the
+    // discovery one) says discover granted, operate missing.
+    let (status, privileges) = run.controller.get(&format!("{base}/privileges")).await?;
     check!(
         status == 200,
-        "the privileges API answered {status}: {body}"
+        "the privileges API answered {status}: {privileges}"
     );
+    check_readonly_report(&privileges["data"], "the privileges API")?;
 
     // A lifecycle start on a VMID the range reserves (nothing is created:
     // the token cannot) ends in the honest privilege failure.
@@ -353,6 +332,37 @@ async fn privilege_failure(run: &TargetRun) -> Result<Outcome, String> {
         "a guest {vmid} exists after a refused start"
     );
     Ok(Outcome::Pass)
+}
+
+/// The status of `name` in a privileges report's `tiers`, or `absent`.
+fn tier_status(report: &Value, name: &str) -> String {
+    report["tiers"]
+        .as_array()
+        .and_then(|tiers| tiers.iter().find(|tier| tier["tier"] == name))
+        .and_then(|tier| tier["status"].as_str())
+        .unwrap_or("absent")
+        .to_owned()
+}
+
+/// A read-only token's privileges report: discover granted, operate
+/// missing, and a known (not refused) evaluation.
+fn check_readonly_report(report: &Value, source: &str) -> Result<(), String> {
+    let discover = tier_status(report, "discover");
+    check!(
+        discover == "granted",
+        "{source}: the read-only token's discover tier is {discover}"
+    );
+    let operate = tier_status(report, "operate");
+    check!(
+        operate == "missing",
+        "{source}: the read-only token's operate tier is {operate}"
+    );
+    check!(
+        report["unknownReason"].is_null(),
+        "{source}: the privileges report is unknown: {}",
+        report["unknownReason"]
+    );
+    Ok(())
 }
 
 /// Scenario 3: clone through the review gate, start and shutdown with
@@ -485,7 +495,11 @@ async fn cancel_mid_poll(run: &TargetRun, account: &str) -> Result<(), String> {
         )
         .await?;
     check!(status == 202, "the clone run answered {status}: {body}");
-    let id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+    let id = body["data"]["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("the clone run answered 202 without an operation id: {body}"))?
+        .to_owned();
 
     // Wait until the worker has started the task (progress recorded and
     // the guest's clone lock visible), then cancel through the CLI.
@@ -1057,8 +1071,17 @@ fn warnings_name(body: &Value, node: &str) -> bool {
         warnings
             .iter()
             .filter_map(Value::as_str)
-            .any(|warning| warning.contains(node))
+            .any(|warning| names_node(warning, node))
     })
+}
+
+/// Whether `warning` names `node` as a whole token. PVE node names are
+/// hostnames (alphanumerics and `-`), so anything else separates tokens:
+/// `pve-b` does not match `pve-b2`, `xpve-b`, or `pve-b-old`.
+fn names_node(warning: &str, node: &str) -> bool {
+    warning
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .any(|word| word == node)
 }
 
 /// The harness itself, without PVE: the real controller binary starts on
@@ -1127,7 +1150,7 @@ mod unit {
 
     use super::proxmox_live_support::config::{self, Gate, VmidRange};
     use super::proxmox_live_support::guard::{SweepDecision, classify, first_free};
-    use super::proxmox_live_support::pve::{VmResource, split_tags};
+    use super::proxmox_live_support::pve::{VmResource, parse_resources, split_tags};
     use super::proxmox_live_support::redact::{Redactor, mask_ipv4};
     use super::proxmox_live_support::{Outcome, RESULT_MARKER, result_line};
 
@@ -1284,6 +1307,63 @@ mod unit {
         assert!(error.contains("API token id"), "{error}");
     }
 
+    fn with_value(name: &str, key: &str, value: &str) -> BTreeMap<String, String> {
+        let mut vars = complete(name);
+        vars.retain(|(existing, _)| !existing.ends_with(&format!("_{key}")));
+        vars.push((format!("FLEET_PVE_TARGET_{name}_{key}"), value.to_owned()));
+        with_gate(vars)
+    }
+
+    #[test]
+    fn a_host_with_an_embedded_port_is_refused_but_ipv6_is_not() {
+        for host in [
+            "pve.example.test:8006",
+            "192.0.2.10:8006",
+            "[2001:db8::1]:8006",
+        ] {
+            let error = config::load(&with_value("PVE9", "HOST", host), fake_secret).unwrap_err();
+            assert!(error.contains("host:port"), "{host}: {error}");
+        }
+        for host in ["2001:db8::1", "[2001:db8::1]", "192.0.2.10"] {
+            assert!(
+                config::load(&with_value("PVE9", "HOST", host), fake_secret).is_ok(),
+                "{host} is a bare address"
+            );
+        }
+    }
+
+    #[test]
+    fn the_template_vmid_must_lie_within_pves_bounds() {
+        for vmid in ["0", "99", "1000000000"] {
+            let error =
+                config::load(&with_value("PVE9", "TEMPLATE_VMID", vmid), fake_secret).unwrap_err();
+            assert!(
+                error.contains("within PVE's VMIDs 100-999999999"),
+                "{vmid}: {error}"
+            );
+        }
+        assert!(config::load(&with_value("PVE9", "TEMPLATE_VMID", "100"), fake_secret).is_ok());
+    }
+
+    #[test]
+    fn a_target_name_outside_the_identifier_alphabet_is_refused() {
+        for name in ["PVE 9", "PVE-9", "PVE\t9"] {
+            let error = config::load(&with_gate(complete(name)), fake_secret).unwrap_err();
+            assert!(error.contains("may hold only A-Z"), "{name:?}: {error}");
+        }
+        assert!(config::valid_target_name("PVE_9_lab"));
+        assert!(!config::valid_target_name(""));
+    }
+
+    #[test]
+    fn a_warning_names_the_node_only_as_a_whole_token() {
+        assert!(super::names_node("node pve-b is offline", "pve-b"));
+        assert!(super::names_node("pve-b: no capacity.", "pve-b"));
+        assert!(!super::names_node("node pve-b2 is offline", "pve-b"));
+        assert!(!super::names_node("node xpve-b is offline", "pve-b"));
+        assert!(!super::names_node("node pve-b-old is offline", "pve-b"));
+    }
+
     #[test]
     fn the_target_filter_selects_one_and_refuses_an_unknown_name() {
         let mut vars = complete("PVE9");
@@ -1430,6 +1510,24 @@ mod unit {
         assert_eq!(parsed.lock.as_deref(), Some("clone"));
         assert!(!parsed.template);
         assert!(VmResource::parse(&serde_json::json!({"id": "node/pve"})).is_none());
+    }
+
+    #[test]
+    fn the_inventory_refuses_a_non_array_or_a_partial_answer() {
+        assert_eq!(parse_resources(&serde_json::json!([])).unwrap(), vec![]);
+        let one = serde_json::json!([{"vmid": 9901, "node": "pve"}]);
+        assert_eq!(parse_resources(&one).unwrap().len(), 1);
+        for data in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!("[]"),
+        ] {
+            let error = parse_resources(&data).unwrap_err();
+            assert!(error.contains("not an array"), "{data}: {error}");
+        }
+        let partial = serde_json::json!([{"vmid": 9901, "node": "pve"}, {"vmid": "9902"}]);
+        let error = parse_resources(&partial).unwrap_err();
+        assert!(error.contains("row 1"), "{error}");
     }
 
     #[test]

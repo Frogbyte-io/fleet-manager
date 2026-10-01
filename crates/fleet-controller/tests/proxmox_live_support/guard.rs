@@ -125,14 +125,17 @@ impl ScratchGuard {
         Ok(vmid)
     }
 
-    /// The end-of-scenario sweep; after it, `Drop` does nothing.
+    /// The end-of-scenario sweep. After a successful sweep `Drop` does
+    /// nothing; after a failed one `Drop` retries it.
     ///
     /// # Errors
     ///
     /// When the sweep could not destroy every leftover.
     pub async fn finish(&self) -> Result<SweepReport, String> {
         let report = self.sweep().await;
-        if let Ok(mut finished) = self.finished.lock() {
+        if report.is_ok()
+            && let Ok(mut finished) = self.finished.lock()
+        {
             *finished = true;
         }
         report
@@ -145,7 +148,8 @@ impl Drop for ScratchGuard {
         if finished {
             return;
         }
-        // The scenario unwound (a panic) before its end sweep. Drop cannot
+        // The scenario unwound (a panic) before its end sweep, or that
+        // sweep failed and this is its retry. Drop cannot
         // await, and the test's runtime may be the one unwinding, so the
         // sweep runs on its own thread and runtime and is joined here.
         let pve = self.pve.clone();

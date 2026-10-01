@@ -67,6 +67,39 @@ impl VmResource {
     }
 }
 
+/// Parses a `/cluster/resources?type=vm` answer strictly. The sweep and
+/// the VMID allocator both trust this inventory, so a non-array `data` or
+/// a row without a VMID and node is an error, never an empty or partial
+/// cluster (which would report cleanup done or hand out an occupied VMID).
+///
+/// # Errors
+///
+/// Names the unexpected shape or the first unparseable row.
+pub fn parse_resources(data: &Value) -> Result<Vec<VmResource>, String> {
+    let entries = data.as_array().ok_or_else(|| {
+        let kind = match data {
+            Value::Null => "null",
+            Value::Bool(_) => "a boolean",
+            Value::Number(_) => "a number",
+            Value::String(_) => "a string",
+            Value::Object(_) => "an object",
+            Value::Array(_) => "an array",
+        };
+        format!("the answer's data is {kind}, not an array of guests")
+    })?;
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            VmResource::parse(entry).ok_or_else(|| {
+                format!(
+                    "row {index} is not a guest with a VMID and node; refusing a partial inventory"
+                )
+            })
+        })
+        .collect()
+}
+
 /// PVE stores tags `;`-separated but accepts `,` and spaces on input.
 #[must_use]
 pub fn split_tags(raw: &str) -> Vec<String> {
@@ -187,10 +220,7 @@ impl PveAdmin {
     /// Transport, HTTP, or payload failures.
     pub async fn resources(&self) -> Result<Vec<VmResource>, String> {
         let data = self.get("/cluster/resources?type=vm").await?;
-        Ok(data
-            .as_array()
-            .map(|entries| entries.iter().filter_map(VmResource::parse).collect())
-            .unwrap_or_default())
+        parse_resources(&data).map_err(|detail| format!("/cluster/resources?type=vm: {detail}"))
     }
 
     /// One guest, when it exists.
@@ -388,7 +418,10 @@ impl PveAdmin {
                 )
                 .await?;
             if let Some(upid) = answer.as_str() {
-                self.wait_task(upid, Duration::from_secs(180)).await?;
+                let end = self.wait_task(upid, Duration::from_secs(180)).await?;
+                if end.exitstatus != "OK" {
+                    return Err(format!("stopping VMID {vmid} ended {}", end.exitstatus));
+                }
             }
         }
         let answer = self
