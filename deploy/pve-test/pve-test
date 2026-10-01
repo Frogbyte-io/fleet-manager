@@ -32,7 +32,8 @@ Setup (run in this order; each is safe to re-run):
   create-vm <role>           create and start the nested VM that installs from that ISO
   wait <role>                wait for the installed node, then detach and delete its ISO
   cluster-create             create the cluster on node-a
-  cluster-join               join node-b to node-a's cluster (prompts for node-a's root password)
+  cluster-join [--ssh]       join node-b to node-a's cluster (prompts for node-a's root password,
+                             or with --ssh joins over root SSH keys without a prompt)
   tokens <role>              create the provisional test user, ACLs, and read-only + admin tokens
 
 Failure simulation (FM-611 partial-node scenario; node-a or node-b only):
@@ -151,6 +152,16 @@ ssh_opts() {
   # a fixture-only known_hosts file on first use; teardown forgets them.
   printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$kh"
+  identity_opts
+}
+
+# identity_opts: -i/IdentitiesOnly when FLEET_PVE_TEST_SSH_IDENTITY names a key,
+# so the fixture key need not be in ~/.ssh/config or the agent.
+identity_opts() {
+  local id
+  id="$(opt FLEET_PVE_TEST_SSH_IDENTITY '')"
+  [ -n "$id" ] || return 0
+  printf '%s\n' -i "$id" -o IdentitiesOnly=yes
 }
 
 # phys CMD...: run a command on the physical PVE host. With
@@ -194,9 +205,11 @@ on_node_tty() {
   local target kh
   target="$(node_target "$role")"
   kh="$(known_hosts_file)"
+  local -a id
+  mapfile -t id < <(identity_opts)
   # shellcheck disable=SC2029
   ssh -t -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-    -o "UserKnownHostsFile=$kh" "$target" "$(printf '%q ' "$@")"
+    -o "UserKnownHostsFile=$kh" "${id[@]}" "$target" "$(printf '%q ' "$@")"
 }
 
 vm_exists() { phys qm status "$1" >/dev/null 2>&1; }
@@ -458,7 +471,38 @@ cmd_fingerprint() {
     sed 's/^[^=]*=//'
 }
 
+# trust_peer_over_ssh: let node-b's root SSH to node-a without a prompt, which
+# 'pvecm add --use_ssh' needs. It runs ssh-copy-id with /root/.ssh/id_rsa and
+# then BatchMode ssh to node-a, so node-a must already authorize that key and
+# node-b must already know node-a's host key. Both are copied over this
+# script's own pinned connections, so nothing is trusted on first use.
+trust_peer_over_ssh() {
+  local addr_a pub hostkeys
+  addr_a="$(role_addr node-a)"
+  on_node node-b sh -c '[ -f /root/.ssh/id_rsa ] || ssh-keygen -q -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa'
+  pub="$(on_node node-b cat /root/.ssh/id_rsa.pub)"
+  [ -n "$pub" ] || die "could not read node-b's root public key"
+  log "authorizing node-b's root key on node-a"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  on_node node-a sh -c 'grep -qxF "$1" /root/.ssh/authorized_keys 2>/dev/null || printf "%s\n" "$1" >>/root/.ssh/authorized_keys' sh "$pub"
+  hostkeys="$(on_node node-a sh -c 'cat /etc/ssh/ssh_host_*_key.pub')"
+  [ -n "$hostkeys" ] || die "could not read node-a's SSH host keys"
+  log "pinning node-a's SSH host keys on node-b"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  printf '%s\n' "$hostkeys" | while read -r type key _; do
+    on_node node-b sh -c 'f=/root/.ssh/known_hosts; touch "$f"; grep -qF "$1 $2 $3" "$f" || printf "%s %s %s\n" "$1" "$2" "$3" >>"$f"' sh "$addr_a" "$type" "$key"</dev/null
+  done
+}
+
 cmd_cluster_join() {
+  local use_ssh=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ssh) use_ssh=1 ;;
+      *) die "unknown cluster-join option '$1'" ;;
+    esac
+    shift
+  done
   if in_cluster node-b; then
     log "node-b is already in a cluster"
     on_node node-b pvecm status | grep -E '^(Name|Quorate|Nodes):' || true
@@ -470,6 +514,12 @@ cmd_cluster_join() {
   addr_a="$(role_addr node-a)"
   addr_b="$(role_addr node-b)"
   [ -n "$fp" ] || die "could not read node-a's certificate fingerprint"
+  if [ "$use_ssh" = 1 ]; then
+    trust_peer_over_ssh
+    log "joining node-b to node-a over SSH"
+    on_node node-b pvecm add "$addr_a" --link0 "$addr_b" --use_ssh 1
+    return 0
+  fi
   log "joining node-b to node-a (enter node-a's root@pam password at the prompt)"
   # The password is typed interactively; it is never stored or passed as an argument.
   on_node_tty node-b pvecm add "$addr_a" --link0 "$addr_b" --fingerprint "$fp"
@@ -747,7 +797,7 @@ main() {
     create-vm) cmd_create_vm "$@" ;;
     wait) cmd_wait "$@" ;;
     cluster-create) cmd_cluster_create ;;
-    cluster-join) cmd_cluster_join ;;
+    cluster-join) cmd_cluster_join "$@" ;;
     tokens) cmd_tokens "$@" ;;
     node-down) cmd_node_down "$@" ;;
     node-up) cmd_node_up "$@" ;;

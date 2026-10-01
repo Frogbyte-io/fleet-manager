@@ -32,7 +32,7 @@ Non-goals, taken from the issue: this runbook doesn't automate the physical host
 3. **Tools on the physical host:** `qm` and `pvesm` (present on every PVE node), plus `proxmox-auto-install-assistant`, installed with `apt install proxmox-auto-install-assistant` from the host's configured Proxmox repository. Installing it is a manual host change. Source: [Automated Installation](https://pve.proxmox.com/wiki/Automated_Installation).
 4. **On your workstation:** bash 4.4 or later, `ssh`, and `ssh-keygen`. You also need root SSH access to the physical host, unless you run the script on that host as root with `FLEET_PVE_TEST_PHYS_SSH` empty.
 5. **Addresses.** Reserve three static addresses on the bridge's network, outside any DHCP pool, and a DNS name or `/etc/hosts` entry for each FQDN. A cluster node's host name and address cannot change after cluster creation ([Cluster Manager](https://pve.proxmox.com/pve-docs/chapter-pvecm.html)), so decide them now.
-6. **Local secrets.** You need a root password *hash* (for example, `openssl passwd -6 > ~/.config/fleet/pve-test-root.hash`, which prompts for the password) and an SSH public key. The plain-text password is typed only at the `cluster-join` prompt and is never stored.
+6. **Local secrets.** You need a root password *hash* (for example, `openssl passwd -6 > ~/.config/fleet/pve-test-root.hash`, which prompts for the password) and an SSH public key. The plain-text password is typed only at the `cluster-join` prompt and is never stored; `cluster-join --ssh` needs no password at all.
 
 Copy [`pve-test.env.example`](../../deploy/pve-test/pve-test.env.example) to `~/.config/fleet/pve-test.env` (the default path; `FLEET_PVE_TEST_ENV_FILE` overrides it), `chmod 600` it, and fill it in. Then:
 
@@ -151,10 +151,14 @@ Then it starts the VM. The empty disk falls through to the CD-ROM, and once the 
 ```sh
 deploy/pve-test/pve-test cluster-create   # pvecm create <name> --link0 <node-a address>, on node-a
 deploy/pve-test/pve-test cluster-join     # pvecm add <node-a> --link0 <node-b> --fingerprint <node-a API cert>, on node-b
+# or, unattended:
+deploy/pve-test/pve-test cluster-join --ssh   # pvecm add <node-a> --link0 <node-b> --use_ssh 1, on node-b
 deploy/pve-test/pve-test status
 ```
 
-`pvecm add` authenticates against node-a's API and prompts for node-a's `root@pam` password. The script runs it on a TTY, so you type the password yourself. It is never an argument, and it is never stored. The script passes node-a's API certificate fingerprint, read over SSH, so the join doesn't need to trust on first use. All nodes should run the same PVE version. Source: [Cluster Manager (9.x)](https://pve.proxmox.com/pve-docs/chapter-pvecm.html); the `pvecm` commands are the same in the [8.x documentation](https://pve.proxmox.com/pve-docs-8/chapter-pvecm.html).
+`pvecm add` authenticates against node-a's API and prompts for node-a's `root@pam` password. The script runs it on a TTY, so you type the password yourself. It is never an argument, and it is never stored. The script passes node-a's API certificate fingerprint, read over SSH, so the join doesn't need to trust on first use. All nodes should run the same PVE version.
+
+`cluster-join --ssh` joins without a password, for unattended runs. `pvecm add --use_ssh` runs `ssh-copy-id -i /root/.ssh/id_rsa` and then BatchMode `ssh` from node-b to node-a (see `PVE/CLI/pvecm.pm`), so it needs node-b's root key authorized on node-a and node-a's host key known on node-b. The script copies both over its own pinned SSH connections first, so the join trusts nothing on first use. It leaves node-b's key authorized on node-a, which a cluster does anyway. Source: [Cluster Manager (9.x)](https://pve.proxmox.com/pve-docs/chapter-pvecm.html); the `pvecm` commands are the same in the [8.x documentation](https://pve.proxmox.com/pve-docs-8/chapter-pvecm.html).
 
 `status` should show `Quorate: Yes`, `Nodes: 2`, and `Expected votes: 2`.
 
