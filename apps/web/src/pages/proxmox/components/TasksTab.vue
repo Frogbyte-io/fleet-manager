@@ -14,6 +14,8 @@ import {
   taskLabel,
   tasksCommand,
   taskTone,
+  tierBlockReason,
+  tierStatus,
   type AccountView,
   type TaskFilters,
 } from '../proxmox'
@@ -41,6 +43,11 @@ watch([pinned, () => props.views], ([list, all]) => {
 const view = computed(() => pinned.value.find(v => v.account.id === accountId.value) ?? null)
 const selected = computed(() => props.views.find(v => v.account.id === accountId.value) ?? null)
 const queryAccountId = computed(() => view.value ? accountId.value : null)
+// A token without the discover tier sees no nodes, so PVE answers no tasks:
+// say why instead of claiming the cluster has none.
+const blind = computed(() => view.value && tierStatus(view.value.privileges, 'discover') === 'missing'
+  ? tierBlockReason(view.value.privileges, 'discover')
+  : null)
 const selectable = computed(() => selected.value && !view.value ? [...pinned.value, selected.value] : pinned.value)
 
 const filters = ref<TaskFilters>({ ...EMPTY_TASK_FILTERS })
@@ -248,7 +255,7 @@ function user(task: { user: string, tokenId?: string | null }): string {
         class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
         data-testid="tasks-empty"
       >
-        {{ filtered ? 'No tasks match these filters.' : 'PVE reports no recent tasks for this account.' }}
+        {{ filtered ? 'No tasks match these filters.' : blind ? `The token cannot see this cluster's nodes, so no tasks are listed. ${blind}` : 'PVE reports no recent tasks for this account.' }}
       </p>
       <div
         v-else

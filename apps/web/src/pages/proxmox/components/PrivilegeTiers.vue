@@ -13,6 +13,7 @@ import {
   privilegeTone,
   tierOf,
   tierStatus,
+  TOKEN_GUIDE_URL,
 } from '../proxmox'
 
 // The account token's capability tiers (FM-604), as the API evaluated them.
@@ -117,6 +118,13 @@ const toneClass: Record<string, string> = {
                 Not known. Actions stay available; the controller decides when it runs them.
               </template>
             </p>
+            <a
+              :href="TOKEN_GUIDE_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-block rounded-sm text-fc-info hover:text-fc-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="token-guide"
+            >Least-privilege token guide (docs/operations/proxmox-token.md) ↗</a>
             <CopyFleetctl :command="privilegesCommand(accountId)" />
           </PopoverContent>
         </PopoverPortal>

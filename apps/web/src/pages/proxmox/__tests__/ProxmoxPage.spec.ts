@@ -38,6 +38,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
 }))
 
 import ProxmoxPage from '../ProxmoxPage.vue'
+import { TOKEN_GUIDE_URL } from '../proxmox'
 import { routes } from '@/router'
 
 function ok<T>(data: T, status = 200) {
@@ -286,7 +287,7 @@ describe('privileges and compatibility', () => {
     expect(document.body.querySelector('[data-testid="tier-popover-operate"]')?.textContent).toContain('may not read its own permissions')
   })
 
-  it('lists missing privileges and paths in a popover with fleetctl, and no link to a guide that does not exist yet', async () => {
+  it('lists missing privileges and paths in a popover with fleetctl and the token guide', async () => {
     getProxmoxPrivileges.mockResolvedValue(ok({ data: OPERATE_MISSING }))
     const { wrapper } = await mountAt('/proxmox')
     const trigger = wrapper.get('[data-testid="tier-operate"]')
@@ -297,8 +298,9 @@ describe('privileges and compatibility', () => {
     const popover = document.body.querySelector('[data-testid="tier-popover-operate"]')!
     expect(popover.querySelector('[data-testid="missing-privilege"]')?.textContent).toContain('VM.PowerMgmt')
     expect(popover.querySelector('[data-testid="missing-privilege"]')?.textContent).toContain('/vms/{vmid}')
-    expect(popover.querySelector('[data-testid="token-guide"]')).toBeNull()
-    expect(popover.querySelector('a')).toBeNull()
+    const guide = popover.querySelector<HTMLAnchorElement>('[data-testid="token-guide"]')!
+    expect(guide.getAttribute('href')).toBe(TOKEN_GUIDE_URL)
+    expect(guide.getAttribute('rel')).toBe('noopener noreferrer')
     expect(popover.querySelector('[data-testid="fleetctl-command"]')?.textContent).toBe('fleetctl proxmox privileges acc1')
   })
 
@@ -461,6 +463,23 @@ describe('tasks', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid="fleetctl-command"]').text()).toBe('fleetctl proxmox tasks acc1')
     expect(wrapper.get('[data-testid="tasks-empty"]').text()).toContain('no recent tasks')
+  })
+
+  it('says the token cannot see the cluster when discover is missing, not that PVE has no tasks', async () => {
+    getProxmoxPrivileges.mockResolvedValue(ok({ data: privileges({
+      tiers: [
+        { tier: 'discover', status: 'missing', missing: [{ path: '/nodes/{node}', privileges: ['Sys.Audit'], anyOf: false, capabilities: ['read.node-status'] }], checks: [] },
+        { tier: 'operate', status: 'missing', missing: [], checks: [] },
+        { tier: 'destructive', status: 'missing', missing: [], checks: [] },
+        { tier: 'lab', status: 'missing', missing: [], checks: [] },
+      ],
+    }) }))
+    listProxmoxTasks.mockResolvedValue(ok(taskPage([])))
+    const { wrapper } = await mountAt('/proxmox?tab=tasks')
+    const empty = wrapper.get('[data-testid="tasks-empty"]').text()
+    expect(empty).toContain('cannot see this cluster')
+    expect(empty).toContain('Sys.Audit on /nodes/{node}')
+    expect(empty).not.toContain('no recent tasks')
   })
 
   it('loads more pages by cursor until the last page', async () => {

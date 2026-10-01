@@ -426,3 +426,6 @@ export function taskDuration(startedAt: number, endedAt: number | null | undefin
   const minutes = Math.floor(seconds / 60)
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
+
+/** The least-privilege token guide (FM-605), linked from the tier popover. */
+export const TOKEN_GUIDE_URL = 'https://github.com/Frogbyte-io/fleet-manager/blob/dev/docs/operations/proxmox-token.md'
