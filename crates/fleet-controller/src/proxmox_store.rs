@@ -370,6 +370,46 @@ impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery 
     }
 }
 
+#[async_trait]
+impl fleet_application::proxmox::privileges::ProxmoxPermissionsPort for ProviderDiscovery {
+    async fn token_permissions(
+        &self,
+        account: &fleet_application::proxmox::ProxmoxAccount,
+        secret: &SensitiveString,
+    ) -> Result<fleet_application::proxmox::privileges::RawTokenPermissions, ProxmoxSourceError>
+    {
+        let Some(pinned) = account.fingerprint.clone() else {
+            return Err(ProxmoxSourceError::Connect {
+                detail: "the account has no confirmed fingerprint; refusing to send credentials"
+                    .to_owned(),
+            });
+        };
+        let request = PveHttpRequest {
+            host: account.host.clone(),
+            port: account.port,
+            path: "/api2/json/access/permissions".to_owned(),
+            pinned_fingerprint: Some(pinned),
+            credentials: Arc::new(PveCredentials {
+                token_id: account.token_id.clone(),
+                token: SensitiveString::new(secret.expose().to_owned()),
+            }),
+            method: fleet_provider_proxmox::PveHttpMethod::Get,
+        };
+        self.client
+            .token_permissions(request)
+            .await
+            .map(
+                |permissions| fleet_application::proxmox::privileges::RawTokenPermissions {
+                    version: permissions.version,
+                    paths: permissions.paths,
+                    warnings: permissions.warnings,
+                    truncated: permissions.truncated,
+                },
+            )
+            .map_err(map_api_error)
+    }
+}
+
 /// Maps one provider API error onto the application taxonomy.
 fn map_api_error(error: fleet_provider_proxmox::PveApiError) -> ProxmoxSourceError {
     match error {
@@ -435,11 +475,12 @@ pub fn compose_proxmox_with_events(
         )),
         Arc::new(SecretBackedProxmoxCredentials::new(secrets)),
         discovery.clone(),
-        discovery,
+        discovery.clone(),
         Arc::new(ProviderTrustProbe::new(transport)),
         machines_for(pool, audit.clone()),
         audit,
-    );
+    )
+    .with_permissions(discovery);
     match events {
         Some(hub) => accounts.with_events(hub),
         None => accounts,
