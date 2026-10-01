@@ -48,6 +48,12 @@ impl PveTransport for PermissionsTransport {
             ("pve8", "/api2/json/version") => (200, include_str!("fixtures/pve8/version.json")),
             ("pve9", "/api2/json/version") => (200, include_str!("fixtures/pve9/version.json")),
             (_, "/api2/json/access/permissions") => (self.status, self.body),
+            ("pve9-nextid-fails", "/api2/json/version") => {
+                (200, include_str!("fixtures/pve9/version.json"))
+            }
+            ("pve9-nextid-fails", path) if path.starts_with("/api2/json/cluster/nextid?vmid=") => {
+                (500, r#"{"data":null,"message":"cluster not ready\n"}"#)
+            }
             (_, path) if path.starts_with("/api2/json/cluster/nextid?vmid=") => {
                 return Ok(nextid(path, &[101, 102]));
             }
@@ -264,6 +270,22 @@ async fn pool_scoped_tokens_keep_pool_member_propagation_flags() {
             "{family}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_failed_vmid_check_fails_the_read() {
+    // Only a 400 means "in use"; anything else is a source failure, not a
+    // silently unusable clone target.
+    let client = ProxmoxClient::new(PermissionsTransport::new(
+        "pve9-nextid-fails",
+        200,
+        include_str!("fixtures/pve9/access-permissions-pool-scoped.json"),
+    ));
+    let error = client.token_permissions(request()).await.unwrap_err();
+    assert!(
+        matches!(error, PveApiError::Http { status: 500, .. }),
+        "{error}"
+    );
 }
 
 #[tokio::test]

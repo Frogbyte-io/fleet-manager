@@ -1402,7 +1402,9 @@ impl ProxmoxSource for ProxmoxClient {
         // A grant on one concrete /vms/{id} is a usable clone target only
         // while that VMID is free. `/cluster/nextid?vmid=` answers that for
         // any caller (`user => 'all'` on 8.x and 9.x): 200 when free, 400
-        // when the VMID exists or is invalid.
+        // when the VMID exists or is invalid. Any other outcome fails the
+        // read like every other source error. The checks run concurrently,
+        // bounded like discovery's per-node reads.
         let vmids = concrete_vmids(&permissions.paths);
         if vmids.len() > MAX_VMID_CHECKS {
             permissions.warnings.push(format!(
@@ -1410,23 +1412,27 @@ impl ProxmoxSource for ProxmoxClient {
                 vmids.len() - MAX_VMID_CHECKS
             ));
         }
-        for vmid in vmids.into_iter().take(MAX_VMID_CHECKS) {
-            let nextid_request = PveHttpRequest {
-                path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
-                method: PveHttpMethod::Get,
-                ..request.clone()
-            };
-            match self.call(nextid_request).await {
-                Ok(_) => {
-                    permissions.vmids_in_use.insert(vmid, false);
+        let checks =
+            futures_util::stream::iter(vmids.into_iter().take(MAX_VMID_CHECKS).map(|vmid| {
+                let nextid_request = PveHttpRequest {
+                    path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+                    method: PveHttpMethod::Get,
+                    ..request.clone()
+                };
+                async move {
+                    match self.call(nextid_request).await {
+                        Ok(_) => Ok((vmid, false)),
+                        Err(PveApiError::Http { status: 400, .. }) => Ok((vmid, true)),
+                        Err(error) => Err(error),
+                    }
                 }
-                Err(PveApiError::Http { status: 400, .. }) => {
-                    permissions.vmids_in_use.insert(vmid, true);
-                }
-                Err(error) => permissions.warnings.push(format!(
-                    "could not check whether VMID {vmid} is free, so it doesn't count as a clone target: {error}"
-                )),
-            }
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        for check in checks {
+            let (vmid, in_use) = check?;
+            permissions.vmids_in_use.insert(vmid, in_use);
         }
         Ok(permissions)
     }
