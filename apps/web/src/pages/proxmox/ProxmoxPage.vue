@@ -9,6 +9,7 @@ import AccountCard from './components/AccountCard.vue'
 import GuestsTab from './components/GuestsTab.vue'
 import NodesTab from './components/NodesTab.vue'
 import StorageTab from './components/StorageTab.vue'
+import TasksTab from './components/TasksTab.vue'
 import { guestRows, nodeRows, storageRows, templateRows } from './proxmox'
 import { useProxmox } from './useProxmox'
 
@@ -32,7 +33,7 @@ const TABS: { id: Tab, label: string, count: () => number | null }[] = [
   { id: 'nodes', label: 'Nodes', count: () => nodes.value.length },
   { id: 'storage', label: 'Storage & templates', count: () => storage.value.length + templates.value.length },
   { id: 'guests', label: 'Guests', count: () => guests.value.length },
-  { id: 'tasks', label: 'Recent tasks', count: () => null },
+  { id: 'tasks', label: 'Tasks', count: () => null },
 ]
 
 const tab = computed<Tab>({
@@ -85,7 +86,7 @@ const hosts = computed(() => new Map(views.value.map(v => [v.account.id, { host:
     </div>
 
     <div
-      class="mt-4 flex gap-6 border-b border-fc-line"
+      class="mt-4 flex gap-6 overflow-x-auto border-b border-fc-line"
       role="tablist"
     >
       <button
@@ -96,7 +97,7 @@ const hosts = computed(() => new Map(views.value.map(v => [v.account.id, { host:
         role="tab"
         :tabindex="tab === item.id ? 0 : -1"
         aria-controls="proxmox-tabpanel"
-        class="pb-2 text-[13px] font-semibold"
+        class="shrink-0 whitespace-nowrap pb-2 text-[13px] font-semibold"
         :class="tab === item.id ? 'text-fc-ink shadow-[inset_0_-2px_0_var(--fc-g1)]' : 'text-fc-muted hover:text-fc-ink'"
         :aria-selected="tab === item.id"
         :data-testid="`tab-${item.id}`"
@@ -176,25 +177,10 @@ const hosts = computed(() => new Map(views.value.map(v => [v.account.id, { host:
           :rows="guests"
           :views="views"
         />
-        <div
+        <TasksTab
           v-else
-          class="mt-4 max-w-2xl space-y-2 text-xs text-fc-muted"
-          data-testid="tasks-gap"
-        >
-          <div class="border-l-2 border-l-fc-warn bg-card px-3 py-2">
-            The controller has no endpoint for PVE's task list yet, so recent Proxmox tasks cannot be shown here.
-          </div>
-          <p>
-            Tasks Fleet itself started (lifecycle and reviewed operations) are durable Fleet operations: follow them on the
-            <RouterLink
-              to="/operations"
-              class="text-fc-info hover:text-fc-ink"
-            >
-              Operations
-            </RouterLink>
-            page. For every task on the cluster, open the account in PVE (Tasks panel).
-          </p>
-        </div>
+          :views="views"
+        />
       </template>
     </div>
   </div>
