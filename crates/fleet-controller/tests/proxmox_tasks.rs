@@ -407,12 +407,14 @@ async fn the_task_history_links_fleet_tasks_and_paginates_with_cursor_refusal() 
     bodies.push(page.to_string());
     assert_eq!(page["items"].as_array().unwrap().len(), 4, "{page}");
     assert_eq!(page["page"]["nextCursor"], Value::Null, "{page}");
-    let (_, page) = harness
+    let (status, page) = harness
         .get(&format!(
             "/api/v1/proxmox/accounts/{account_id}/tasks?limit=3"
         ))
         .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{page}");
     bodies.push(page.to_string());
+    assert_eq!(page["items"].as_array().unwrap().len(), 3, "{page}");
     assert!(page["page"]["nextCursor"].is_string(), "{page}");
 
     // A stale cursor is refused, never a silent restart.

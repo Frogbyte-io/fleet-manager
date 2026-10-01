@@ -300,16 +300,21 @@ fn cluster_nodes(
     for entry in entries {
         match normalize_resource(entry) {
             Ok(Some(resource)) if resource.kind == "node" => {
-                match resource
+                if let Some(name) = resource
                     .node
                     .clone()
                     .or_else(|| resource.id.strip_prefix("node/").map(str::to_owned))
                 {
-                    Some(name) => nodes.push((name, resource.status)),
-                    None => warnings.push(format!(
-                        "cluster resource {:?} names no node; its tasks were not read",
-                        resource.id
-                    )),
+                    nodes.push((name, resource.status));
+                } else {
+                    skipped_rows += 1;
+                    if skipped_rows <= MAX_RESOURCE_WARNINGS {
+                        let id: String =
+                            resource.id.chars().take(MAX_RESOURCE_NAME_CHARS).collect();
+                        warnings.push(format!(
+                            "cluster resource {id:?} names no node; its tasks were not read"
+                        ));
+                    }
                 }
             }
             Ok(_) => {}
@@ -338,6 +343,7 @@ fn cluster_nodes(
                             || "(no id)".to_owned(),
                             |id| id.chars().take(MAX_RESOURCE_NAME_CHARS).collect(),
                         );
+                    let detail: String = detail.chars().take(MAX_RESOURCE_NAME_CHARS).collect();
                     warnings.push(format!(
                         "cluster resource {name:?} could not be read ({detail}); if it is a node, its tasks are missing"
                     ));

@@ -325,6 +325,44 @@ async fn the_outcome_filter_reaches_the_node_request_as_statusfilter() {
 }
 
 #[tokio::test]
+async fn resource_warnings_stay_bounded_however_many_rows_are_unreadable() {
+    // Eight node rows that name no node, and one whose oversized type
+    // makes it unreadable: one bounded warning each up to the cap, then a
+    // single summary, and no warning carries the oversized value.
+    let mut rows: Vec<String> = (0..8)
+        .map(|i| format!(r#"{{"id": "odd-{i}", "type": "node"}}"#))
+        .collect();
+    rows.push(format!(
+        r#"{{"id": "node/huge", "type": "{}"}}"#,
+        "x".repeat(5000)
+    ));
+    rows.push(
+        r#"{"id": "node/pve9", "type": "node", "node": "pve9", "status": "online"}"#.to_owned(),
+    );
+    let resources: &'static str =
+        Box::leak(format!(r#"{{"data": [{}]}}"#, rows.join(", ")).into_boxed_str());
+    let client = ProxmoxClient::new(FixtureTransport::with_resources("pve9", resources));
+
+    let history = client.task_history(request(), &query()).await.unwrap();
+
+    let resource_warnings: Vec<&String> = history
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("cluster resource"))
+        .collect();
+    assert_eq!(resource_warnings.len(), 6, "{resource_warnings:?}");
+    assert!(
+        resource_warnings[5].starts_with("4 more cluster resources"),
+        "{resource_warnings:?}"
+    );
+    assert!(
+        history.warnings.iter().all(|warning| warning.len() < 400),
+        "{:?}",
+        history.warnings
+    );
+}
+
+#[tokio::test]
 async fn a_malformed_cluster_resource_row_warns_instead_of_vanishing() {
     // The first row is a node that lost its type; the second is a node
     // with an over-long name; the third is an unknown type that is not a
