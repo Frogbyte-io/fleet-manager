@@ -4,12 +4,13 @@
 services:
   controller:
     build:
-      context: ..
+      # Coolify sets --project-directory to the repository root.
+      context: ${FLEET_BUILD_CONTEXT:-..}
       dockerfile: deploy/controller.Dockerfile
     ports:
       - "127.0.0.1:${FLEET_COOLIFY_PORT:-8080}:8080"
     labels:
-      traefik.enable: "false"
+      - traefik.enable=false
     environment:
       FLEET_LISTEN: 0.0.0.0:8080
       FLEET_WEB_DIST: /opt/fleet/web
