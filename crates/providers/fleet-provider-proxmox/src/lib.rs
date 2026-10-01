@@ -22,6 +22,12 @@
 //! bounds is a payload error, not silent truncation.
 #![warn(missing_docs)]
 
+mod tasks;
+
+pub use tasks::{
+    MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
+};
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -37,7 +43,8 @@ use sha2::Digest;
 mod permissions;
 
 pub use permissions::{
-    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, PveTokenPermissions, normalize_token_permissions,
+    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, MAX_VMID_CHECKS, PveTokenPermissions,
+    concrete_vmids, normalize_token_permissions,
 };
 
 /// The default PVE API port.
@@ -694,7 +701,8 @@ pub struct Upid {
     pub node: String,
     /// The task type, e.g. `qmstart`.
     pub task_type: String,
-    /// The task's target id (the VMID for guest tasks).
+    /// The task's target id (the VMID for guest tasks); empty for
+    /// node-level tasks that carry no id.
     pub target: String,
     /// The user the task runs as.
     pub user: String,
@@ -733,13 +741,15 @@ impl Upid {
         else {
             return Err("the UPID fields did not destructure".to_owned());
         };
+        // The `id` field is legitimately empty for node-level tasks
+        // (`aptupdate`, `srvreload`, an all-guest `vzdump`): PVE encodes
+        // them as `...:<type>::<user>:`. Every other field is required.
         for (label, part) in [
             ("node", node),
             ("pid", pid),
             ("pstart", pstart),
             ("starttime", starttime),
             ("type", task_type),
-            ("id", target),
             ("user", user),
         ] {
             if part.is_empty() {
@@ -1394,10 +1404,46 @@ impl ProxmoxSource for ProxmoxClient {
         let permissions_request = PveHttpRequest {
             path: "/api2/json/access/permissions".to_owned(),
             method: PveHttpMethod::Get,
-            ..request
+            ..request.clone()
         };
         let data = self.call(permissions_request).await?;
-        normalize_token_permissions(version, &data)
+        let mut permissions = normalize_token_permissions(version, &data)?;
+        // A grant on one concrete /vms/{id} is a usable clone target only
+        // while that VMID is free. `/cluster/nextid?vmid=` answers that for
+        // any caller (`user => 'all'` on 8.x and 9.x): 200 when free, 400
+        // when the VMID exists or is invalid. Any other outcome fails the
+        // read like every other source error. The checks run concurrently,
+        // bounded like discovery's per-node reads.
+        let vmids = concrete_vmids(&permissions.paths);
+        if vmids.len() > MAX_VMID_CHECKS {
+            permissions.warnings.push(format!(
+                "{} VMID paths were not checked for being free (the first {MAX_VMID_CHECKS} were); they don't count as clone targets",
+                vmids.len() - MAX_VMID_CHECKS
+            ));
+        }
+        let checks =
+            futures_util::stream::iter(vmids.into_iter().take(MAX_VMID_CHECKS).map(|vmid| {
+                let nextid_request = PveHttpRequest {
+                    path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+                    method: PveHttpMethod::Get,
+                    ..request.clone()
+                };
+                async move {
+                    match self.call(nextid_request).await {
+                        Ok(_) => Ok((vmid, false)),
+                        Err(PveApiError::Http { status: 400, .. }) => Ok((vmid, true)),
+                        Err(error) => Err(error),
+                    }
+                }
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        for check in checks {
+            let (vmid, in_use) = check?;
+            permissions.vmids_in_use.insert(vmid, in_use);
+        }
+        Ok(permissions)
     }
 
     async fn guest_lifecycle(
@@ -2162,6 +2208,12 @@ mod tests {
         assert!(Upid::parse("UPID:pve:0015:0C6D:6AAF:qmreboot:101:").is_err());
         // A field is empty: refused.
         assert!(Upid::parse("UPID:pve::0C6DF532:6AAFE1EC:qmreboot:101:user:").is_err());
+        assert!(Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101::").is_err());
+        // Except the id: node-level tasks carry none.
+        let node_task =
+            Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:aptupdate::root@pam:").unwrap();
+        assert_eq!(node_task.target, "");
+        assert_eq!(node_task.task_type, "aptupdate");
         // Trailing material: refused.
         assert!(
             Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101:user:extra").is_err()
