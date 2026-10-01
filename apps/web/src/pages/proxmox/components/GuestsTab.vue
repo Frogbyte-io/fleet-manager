@@ -11,7 +11,7 @@ import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
 import { lifecycleCommand, type LifecycleAction } from '../../machine/fleetctl'
-import { actionsAllowed, pveUrl, type AccountView, type GuestRow } from '../proxmox'
+import { actionsAllowed, pveUrl, tierBlockReason, type AccountView, type GuestRow } from '../proxmox'
 import { discoveryKey, guestsKey } from '../useProxmox'
 
 // Guests across pinned accounts. Lifecycle actions are authorized at the
@@ -36,6 +36,13 @@ const loadingAccounts = computed(() => props.views.filter(v => v.guestsLoading))
 const failedAccounts = computed(() => props.views.filter(v => v.guestsError))
 const truncatedAccounts = computed(() => props.views.filter(v => v.guestsTruncated))
 const accounts = computed(() => new Map(props.views.map(v => [v.account.id, v.account])))
+const reports = computed(() => new Map(props.views.map(v => [v.account.id, v.privileges ?? null])))
+
+// Why the token cannot run a tier's actions on this guest's account, from
+// the privilege report; null (offered) unless the tier is reported missing.
+function blockedBy(row: GuestRow, tier: 'operate' | 'destructive'): string | null {
+  return tierBlockReason(reports.value.get(row.accountId), tier)
+}
 
 function key(row: GuestRow) {
   return `${row.accountId}/${row.guest.vmid ?? row.guest.id}`
@@ -62,7 +69,7 @@ async function run(row: GuestRow) {
   const { vmid, node } = row.guest
   // The page never offers actions on an unverified account; the controller
   // would refuse them anyway.
-  if (!chosen || vmid === null || vmid === undefined || !node || !actionsAllowed(row.state))
+  if (!chosen || vmid === null || vmid === undefined || !node || !actionsAllowed(row.state) || blockedBy(row, 'operate'))
     return
   busy.value = true
   error.value = ''
@@ -247,15 +254,26 @@ function settled(row: GuestRow) {
                   v-for="item in LIFECYCLE"
                   :key="item"
                   type="button"
-                  class="h-7 rounded-sm border px-2.5 capitalize"
+                  class="h-7 rounded-sm border px-2.5 capitalize disabled:cursor-not-allowed disabled:opacity-50"
                   :class="action === item ? 'border-ring text-fc-ink' : 'border-fc-line2 text-fc-muted hover:text-fc-ink'"
                   :aria-pressed="action === item"
+                  :disabled="!!blockedBy(row, 'operate')"
+                  :title="blockedBy(row, 'operate') ?? undefined"
+                  :aria-describedby="blockedBy(row, 'operate') ? `operate-blocked-${key(row)}` : undefined"
                   :data-testid="`lifecycle-${item}`"
                   @click="action = item"
                 >
                   {{ item }}
                 </button>
               </div>
+              <p
+                v-if="blockedBy(row, 'operate')"
+                :id="`operate-blocked-${key(row)}`"
+                class="border-l-2 border-l-fc-err pl-2 text-fc-muted"
+                data-testid="operate-blocked"
+              >
+                {{ blockedBy(row, 'operate') }}
+              </p>
               <div
                 v-if="action"
                 class="flex flex-wrap items-center gap-2 rounded-sm border p-2"
@@ -304,6 +322,13 @@ function settled(row: GuestRow) {
                 :command="action && row.guest.vmid != null && row.guest.node ? lifecycleCommand(action, { accountId: row.accountId, node: row.guest.node, vmid: row.guest.vmid }) : null"
                 missing="Pick an action to see the command."
               />
+              <p
+                v-if="blockedBy(row, 'destructive')"
+                class="border-l-2 border-l-fc-err pl-2 text-fc-muted"
+                data-testid="destructive-blocked"
+              >
+                {{ blockedBy(row, 'destructive') }}
+              </p>
               <p class="text-fc-faint">
                 Snapshots, clones, and template conversion go through review first: use the
                 <template v-if="row.guest.candidates.length">

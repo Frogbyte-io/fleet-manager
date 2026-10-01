@@ -7,11 +7,16 @@ import type {
   ProxmoxAccountDto,
   ProxmoxDiscoveryDto,
   ProxmoxNodeCapacityDto,
+  ProxmoxPrivilegeStatusDto,
+  ProxmoxPrivilegeTierDto,
+  ProxmoxPrivilegesDto,
   ProxmoxResourceDto,
+  ProxmoxTaskStatusDto,
 } from '@frogbyte-io/fleet-api-client'
 
 import type { Tone } from '../fleet/inventory'
 import { ApiRequestError } from '../machine/api'
+import { shellQuote } from '../machine/fleetctl'
 
 /**
  * What Fleet can do with an account right now.
@@ -106,6 +111,10 @@ export interface AccountView {
   guestsError?: unknown
   /** The guest list hit the paging safety cap. */
   guestsTruncated?: boolean
+  /** The token's privilege report (FM-604), once read. */
+  privileges?: ProxmoxPrivilegesDto | null
+  privilegesLoading?: boolean
+  privilegesError?: unknown
 }
 
 export interface NodeRow {
@@ -256,4 +265,167 @@ function hostPart(host: string): string {
 export function pveUrl(account: Pick<ProxmoxAccountDto, 'host' | 'port'>, resource?: { type: 'qemu' | 'lxc' | 'node', id: string | number }): string {
   const base = `https://${hostPart(account.host)}:${account.port}/`
   return resource ? `${base}#v1:0:=${encodeURIComponent(`${resource.type}/${resource.id}`)}` : base
+}
+
+function command(words: string[]): string {
+  return words.map(shellQuote).join(' ')
+}
+
+// ---------------------------------------------------------------------------
+// Privileges (FM-604)
+
+/** The tiers in the order the API reports them and the card shows them. */
+export const PRIVILEGE_TIERS: readonly ProxmoxPrivilegeTierDto[] = ['discover', 'operate', 'destructive', 'lab']
+
+/** The least-privilege token guide (FM-605), linked from the tier popover. */
+export const TOKEN_GUIDE_URL = 'https://github.com/Frogbyte-io/fleet-manager/blob/dev/docs/operations/proxmox-token.md'
+
+export function tierOf(privileges: ProxmoxPrivilegesDto | null | undefined, tier: ProxmoxPrivilegeTierDto) {
+  return privileges?.tiers.find(t => t.tier === tier) ?? null
+}
+
+/** A tier's reported status; `unknown` until a report exists. */
+export function tierStatus(privileges: ProxmoxPrivilegesDto | null | undefined, tier: ProxmoxPrivilegeTierDto): ProxmoxPrivilegeStatusDto {
+  return tierOf(privileges, tier)?.status ?? 'unknown'
+}
+
+export function privilegeTone(status: ProxmoxPrivilegeStatusDto): Tone {
+  switch (status) {
+    case 'granted': return 'ok'
+    case 'missing': return 'err'
+    default: return 'faint'
+  }
+}
+
+/**
+ * Why actions of `tier` are withheld, or null when they are offered. Only a
+ * reported `missing` withholds them: `unknown`, or no report yet, leaves
+ * them enabled, and the controller stays authoritative either way.
+ */
+export function tierBlockReason(privileges: ProxmoxPrivilegesDto | null | undefined, tier: ProxmoxPrivilegeTierDto): string | null {
+  const report = tierOf(privileges, tier)
+  if (report?.status !== 'missing')
+    return null
+  const needs = report.missing.map(m => `${m.privileges.join(m.anyOf ? ' or ' : ', ')} on ${m.path}`).join('; ')
+  return `This account's API token lacks the ${tier} privileges${needs ? ` (${needs})` : ''}. Grant them in PVE; the ${tier} chip on the Accounts tab lists them.`
+}
+
+export function privilegesCommand(accountId: string): string {
+  return command(['fleetctl', 'proxmox', 'privileges', accountId])
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility
+
+/**
+ * The PVE majors Fleet verifies against, named once for the whole console.
+ * The API reports the version and the major whose privilege rules it applied
+ * (`rulesMajor`), but clamps an unsupported major to the nearest table, so
+ * "verified" cannot be read from `rulesMajor` alone. Mirrors
+ * `fleet_application::proxmox::privileges::SUPPORTED_PVE_MAJORS`.
+ */
+export const VERIFIED_PVE_MAJORS: readonly number[] = [8, 9]
+
+export function pveMajor(version: string | null | undefined): number | null {
+  const match = /^(\d+)(?:[.-]|$)/.exec(version ?? '')
+  return match ? Number(match[1]) : null
+}
+
+export interface Compatibility {
+  label: string
+  tone: Tone
+  verified: boolean
+  title: string
+}
+
+/**
+ * The compatibility badge, from the reported PVE version and, once the
+ * privilege report exists, the rules major it applied. A major outside the
+ * verified list, or one the API evaluated with another major's rules, is an
+ * "unverified major".
+ */
+export function compatibility(version: string | null | undefined, rulesMajor?: number | null): Compatibility | null {
+  if (!version)
+    return null
+  const major = pveMajor(version)
+  const verified = major !== null && VERIFIED_PVE_MAJORS.includes(major)
+    && (rulesMajor === null || rulesMajor === undefined || rulesMajor === major)
+  if (verified)
+    return { label: `PVE ${major} · verified`, tone: 'ok', verified, title: `PVE ${version} is a verified Fleet target.` }
+  const rules = rulesMajor ? `; privileges were evaluated with the ${rulesMajor}.x rules` : ''
+  return {
+    label: 'unverified major',
+    tone: 'warn',
+    verified,
+    title: `PVE ${version} is not a verified Fleet target (verified: ${VERIFIED_PVE_MAJORS.map(m => `${m}.x`).join(', ')})${rules}.`,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (FM-609)
+
+export const TASK_STATUSES: readonly ProxmoxTaskStatusDto[] = ['running', 'ok', 'error', 'unknown']
+
+export function taskTone(status: ProxmoxTaskStatusDto): Tone {
+  switch (status) {
+    case 'ok': return 'ok'
+    case 'error': return 'err'
+    case 'running': return 'info'
+    default: return 'faint'
+  }
+}
+
+/** Fleet's status taxonomy: outcomes in capitals, live or unknown states lower-case. */
+export function taskLabel(status: ProxmoxTaskStatusDto): string {
+  return status === 'ok' ? 'OK' : status === 'error' ? 'ERROR' : status
+}
+
+export interface TaskFilters {
+  node: string
+  /** A VMID as typed or picked; anything but digits is ignored. */
+  vmid: string
+  status: '' | ProxmoxTaskStatusDto
+}
+
+export const EMPTY_TASK_FILTERS: TaskFilters = { node: '', vmid: '', status: '' }
+
+export const TASK_PAGE = 50
+
+function vmidOf(filters: TaskFilters): number | undefined {
+  return /^\d+$/.test(filters.vmid) ? Number(filters.vmid) : undefined
+}
+
+/** The API parameters for a filter set; empty filters are omitted. */
+export function taskParams(filters: TaskFilters, cursor?: string | null, limit = TASK_PAGE): { node?: string, vmid?: number, status?: string, cursor?: string, limit: number } {
+  const vmid = vmidOf(filters)
+  return {
+    ...(filters.node ? { node: filters.node } : {}),
+    ...(vmid !== undefined ? { vmid } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+    ...(cursor ? { cursor } : {}),
+    limit,
+  }
+}
+
+export function tasksCommand(accountId: string, filters: TaskFilters): string {
+  const words = ['fleetctl', 'proxmox', 'tasks', accountId]
+  const vmid = vmidOf(filters)
+  if (filters.node)
+    words.push('--node', filters.node)
+  if (vmid !== undefined)
+    words.push('--vmid', String(vmid))
+  if (filters.status)
+    words.push('--status', filters.status)
+  return command(words)
+}
+
+/** A finished task's duration in a compact form, or null while it runs. */
+export function taskDuration(startedAt: number, endedAt: number | null | undefined): string | null {
+  if (endedAt === null || endedAt === undefined)
+    return null
+  const seconds = Math.max(0, Math.round((endedAt - startedAt) / 1000))
+  if (seconds < 60)
+    return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
