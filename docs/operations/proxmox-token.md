@@ -1,8 +1,8 @@
 # Least-privilege Proxmox API token
 
-Status: draft (FM-605). The privilege evidence below is researched from upstream source. Two parts wait for FM-604 (#206): the `fleetctl proxmox privileges` check and the doc/table consistency check. Both are marked **Pending FM-604** where they appear.
+Fleet's own privilege table, `PROXMOX_PRIVILEGE_TABLE` in `crates/fleet-application/src/proxmox/privileges.rs` (FM-604), is the source of truth for what each tier needs. The [per-major tier tables](#required-privileges-per-tier) and the [role commands](#2-roles--pve-9x) below are checked against it by a test, so this guide and `fleetctl proxmox privileges` cannot drift apart. See [Consistency with Fleet's privilege table](#consistency-with-fleets-privilege-table).
 
-This guide sets up a dedicated Proxmox VE (PVE) user and a privilege-separated API token for Fleet. Each Fleet capability tier gets exactly the privileges it needs. Do not give Fleet `Administrator` on `/`. [Security architecture](../architecture/security.md) requires dedicated users/tokens with the minimum roles and path ACLs.
+This guide sets up a dedicated Proxmox VE (PVE) user and a privilege-separated API token for Fleet. Each Fleet capability tier gets the privileges it needs, and the few extras a role carries are labelled. Do not give Fleet `Administrator` on `/`. [Security architecture](../architecture/security.md) requires dedicated users/tokens with the minimum roles and path ACLs.
 
 The guide covers PVE 8.x and 9.x. The two majors differ in one important way: the guest-agent privileges. [8.x vs 9.x differences](#8x-vs-9x-differences) explains it; read that section before you create roles.
 
@@ -19,18 +19,55 @@ From the PVE admin guide, chapter *User Management* ([9.x](https://pve.proxmox.c
 
 ## Tier table
 
-Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and operation kinds (`crates/fleet-application/src/operation.rs`) group into four capability tiers. Every tier assumes **FleetDiscover is granted on the same paths**: each executor reads the cluster resources, the guest config, and the snapshot list before it acts.
+Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and operation kinds (`crates/fleet-application/src/operation.rs`) group into four capability tiers. Each tier has one role. Each role holds every privilege its tier requires, so granting a role on the recommended paths is enough for that tier.
 
-| Tier | Fleet permission → operations | PVE privileges (9.x) | PVE privileges (8.x) | Recommended ACL path |
+| Tier | Fleet permission → operations | Role | Recommended ACL path |
+|---|---|---|---|
+| **discover** | `proxmox.read` → discovery, nodes, guests, guest observe (config MACs, agent info, network, OS), snapshot list, task status | `FleetDiscover` (8.x: plus the opt-in `FleetAgent8`) | `/nodes`, `/pool/<pool>` (storage in the pool, or `/storage/<id>`) — or `/` for whole-cluster inventory |
+| **operate** | `proxmox.operate` → `proxmox.guest.start`, `.stop`, `.shutdown`, `.reboot` | `FleetOperate` | `/pool/<pool>` |
+| **destructive** | `proxmox.destructive` → `proxmox.guest.snapshot`, `.snapshot-revert`, `.snapshot-delete`, `.clone`, `.template`, `proxmox.task-cancel` | `FleetDestructive` | `/pool/<pool>` for existing guests and storage; clone targets also need `/vms/<newid>` (see [clone targets](#why-clone-and-lab-need-more-than-the-pool)); `/sdn/zones/<zone>/<bridge>` |
+| **lab** | `lab.provision` → clone the pinned image, start it, probe readiness | `FleetLab` | source template and storage in `/pool/<pool>`; the new guests' `/vms/<newid>`; `/sdn/zones/<zone>/<bridge>` |
+
+### Required privileges per tier
+
+The two tables below are the PVE privileges per tier, keyed by major. Each entry reads "privilege on the path PVE checks it on". `A` or `B` means either one is enough (PVE's `any => 1`); grant the first. The columns mean:
+
+- **Required**: what `fleetctl proxmox privileges` needs before it reports the tier `granted`.
+- **Opt-in**: what Fleet reports on the tier's checks without gating the tier. Without it, a sub-capability degrades honestly.
+- **Also in the role**: what the role grants beyond Fleet's required rows ("`privilege`: why").
+
+`{newid}` is a clone target that does not exist yet; a pool ACL never covers it. Rows that need no privilege (`GET /version`, and task status and cancel for the token's own tasks) are not listed. A test parses the tables between the `privilege-table` markers, so keep their format.
+
+#### PVE 9.x
+
+<!-- privilege-table:begin major=9 -->
+| Tier | Role | Required | Opt-in | Also in the role |
 |---|---|---|---|---|
-| **discover** | `proxmox.read` → discovery, nodes, guests, guest observe (config MACs, agent info, network, OS), snapshot list, task status | `Sys.Audit`, `VM.Audit`, `Datastore.Audit`, `Pool.Audit`, `VM.GuestAgent.Audit` | `Sys.Audit`, `VM.Audit`, `Datastore.Audit`, `Pool.Audit`; agent reads need `VM.Monitor` (opt-in, see [warning](#8x-vs-9x-differences)) | `/nodes`, `/storage` (or storage in the pool), `/pool/<pool>` — or `/` for whole-cluster inventory |
-| **operate** | `proxmox.operate` → `proxmox.guest.start`, `.stop`, `.shutdown`, `.reboot` | `VM.PowerMgmt` | `VM.PowerMgmt` | `/pool/<pool>` |
-| **destructive** | `proxmox.destructive` → `proxmox.guest.snapshot`, `.snapshot-revert`, `.snapshot-delete`, `.clone`, `.template`, `proxmox.task-cancel` | `VM.Snapshot`, `VM.Snapshot.Rollback`, `VM.Clone`, `VM.Allocate`, `Datastore.AllocateSpace`, `SDN.Use` | same as 9.x | `/pool/<pool>` for existing guests; clone targets also need `/vms/<newid>` (see [clone targets](#why-clone-and-lab-need-more-than-the-pool)); `SDN.Use` on `/sdn/zones/<zone>/<bridge>` |
-| **lab** | `lab.provision` → clone the pinned image, start it, probe readiness | `VM.Clone`, `VM.Allocate`, `Datastore.AllocateSpace`, `SDN.Use`, `VM.PowerMgmt`, `VM.Audit`, `VM.GuestAgent.Audit` | `VM.Clone`, `VM.Allocate`, `Datastore.AllocateSpace`, `SDN.Use`, `VM.PowerMgmt`, `VM.Audit`; the `guest_agent` readiness probe needs `VM.Monitor` | source template in `/pool/<pool>`; new guests on `/vms/<newid>` (or `/vms` today); storage and bridge as above |
+| discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{vmid}` | `Pool.Audit` on `/pool/{pool}` | `Pool.Audit`: the opt-in row. Fleet's discovery does not use pool rows today; drop it from the role if you prefer |
+| operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
+| destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | — | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
+| lab | `FleetLab` | `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | — | `VM.Audit`: the Lab executor finds the pinned image's template through `/cluster/resources`, which hides guests without it |
+<!-- privilege-table:end -->
+
+Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted also permits agent `exec`.
+
+#### PVE 8.x
+
+<!-- privilege-table:begin major=8 -->
+| Tier | Role | Required | Opt-in | Also in the role |
+|---|---|---|---|---|
+| discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}` | `Pool.Audit` on `/pool/{pool}`, `VM.Monitor` on `/vms/{vmid}` | `Pool.Audit`: the opt-in row, as on 9.x. The agent privilege is a separate opt-in role, not part of this one |
+| operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
+| destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | — | `VM.Snapshot.Rollback`: as on 9.x |
+| lab | `FleetLab` | `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}` | `VM.Monitor` on `/vms/{newid}` | `VM.Audit`: as on 9.x |
+<!-- privilege-table:end -->
+
+On 8.x, `VM.Monitor` is opt-in for both discover (agent facts) and lab (the `guest_agent` readiness probe), because it also permits agent `exec`. See [8.x vs 9.x differences](#8x-vs-9x-differences).
 
 Notes:
 
-- `proxmox.guest.snapshot-revert` passes if the token has **either** `VM.Snapshot` or `VM.Snapshot.Rollback` (`any => 1`). FleetDestructive already includes `VM.Snapshot`, so `VM.Snapshot.Rollback` is redundant there. It is listed because it lets you build a rollback-only role if you ever need one.
+- `proxmox.guest.snapshot-revert` passes if the token has **either** `VM.Snapshot` or `VM.Snapshot.Rollback` (`any => 1`). FleetDestructive already includes `VM.Snapshot`, so `VM.Snapshot.Rollback` is redundant there. It is in the role because it lets you build a rollback-only role if you ever need one.
+- The destructive executors read the snapshot list and the cluster resources before they act (idempotency checks), so `FleetDestructive` carries `VM.Audit` itself.
 - `proxmox.guest.template` requires `VM.Allocate` on `/vms/{vmid}`. **`VM.Allocate` also lets the token delete that VM.** It also counts as a substitute for `Permissions.Modify` on `/vms/...`, so the token can delegate subsets of its own privileges on that path. This is why the privilege is scoped to a pool and never granted on `/`.
 - `proxmox.task-cancel` needs no privilege for tasks the token started, and `Sys.Modify` on `/nodes/{node}` for any other task. Fleet can therefore cancel only its own tasks, and that is intended.
 - Fleet does not delete VMs today. `DELETE /nodes/{node}/qemu/{vmid}` would need `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. When Lab `destroy` cleanup lands, it will need no new privilege, only the path.
@@ -74,25 +111,29 @@ In both majors, `pveum pool modify` calls `PUT /pools` with `vms` and `storage`.
 
 ### 2. Roles — PVE 9.x
 
+<!-- privilege-roles:begin major=9 -->
 ```sh
 pveum role add FleetDiscover    --privs "Sys.Audit,VM.Audit,Datastore.Audit,Pool.Audit,VM.GuestAgent.Audit"
 pveum role add FleetOperate     --privs "VM.PowerMgmt"
-pveum role add FleetDestructive --privs "VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
+pveum role add FleetDestructive --privs "VM.Audit,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit"
 ```
+<!-- privilege-roles:end -->
 
 ### 2. Roles — PVE 8.x
 
+<!-- privilege-roles:begin major=8 -->
 ```sh
 pveum role add FleetDiscover    --privs "Sys.Audit,VM.Audit,Datastore.Audit,Pool.Audit"
 pveum role add FleetOperate     --privs "VM.PowerMgmt"
-pveum role add FleetDestructive --privs "VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
+pveum role add FleetDestructive --privs "VM.Audit,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit"
 # Opt-in only. VM.Monitor also permits guest-agent exec/file-write/set-user-password
 # (root inside the guest). Grant it only where agent observations or the
 # guest_agent readiness probe are worth that authority.
 pveum role add FleetAgent8      --privs "VM.Monitor"
 ```
+<!-- privilege-roles:end -->
 
 The role names must not start with `PVE`, because that prefix is reserved for built-in roles.
 
@@ -193,14 +234,132 @@ The Lab tier then starts the new guest (`VM.PowerMgmt`) and polls `agent/info` f
 
 ## Verify
 
-**Now (PVE side).** Show the token's effective permissions, which are the intersection of the user's and the token's ACLs:
+### PVE side
+
+Show the token's effective permissions, which are the intersection of the user's and the token's ACLs:
 
 ```sh
 pveum user token permissions fleet@pve fleet
 pveum user token permissions fleet@pve fleet --path /pool/fleet
 ```
 
-**Pending FM-604 (#206): Fleet side.** `fleetctl proxmox privileges <account-id> --output json` will report, for each tier, one of `granted`, `missing` (with the missing privilege and path), or `unknown` (when the permissions read itself is refused). It reads `GET /access/permissions`, which any token may call for itself without extra privileges. This section will show the expected output for each role combination once FM-604 lands. The manual walkthrough on the FM-612 test host will be recorded on #212.
+### Verify with `fleetctl proxmox privileges`
+
+After you register and confirm the account, ask Fleet which tiers the token can perform:
+
+```sh
+fleetctl proxmox privileges <account-id>                 # text (the default)
+fleetctl proxmox privileges <account-id> --output json   # the controller's report
+```
+
+The command calls `GET /api/v1/proxmox/accounts/{accountId}/privileges`. It needs only `proxmox.read` in Fleet, changes nothing on either side, and writes no audit event. The controller reads `GET /access/permissions` with the token itself, which any token may do without extra privileges. It then evaluates each tier against Fleet's privilege table for the PVE major it reads from `/version` (`rulesMajor`). A major newer than 9 is evaluated with the 9.x rules and a warning. Each tier is one of:
+
+- `granted`: every required check holds somewhere in its scope.
+- `missing`: the tier lists what to grant, merged per path (`missing[]` with `privileges`, `anyOf`, `path`, and `capabilities`).
+- `unknown`: the permissions read itself was refused (403), or the version has no major number. `unknownReason` says which. Fleet never reports `missing` when it could not read.
+
+Opt-in checks (`required: false`) never gate a tier. The text output lists them as `opt-in … not granted`.
+
+**The full setup on 9.x** (every role from [step 4](#4-acls), plus FleetLab on a reserved clone VMID):
+
+```text
+account <account-id>  PVE 9.0.10  rules 9.x
+TIER         STATUS
+discover     granted
+operate      granted
+destructive  granted
+lab          granted
+```
+
+**The same setup on 8.x without the opt-in `FleetAgent8`.** Every tier is granted, and the agent reads are reported as opt-ins:
+
+```text
+account <account-id>  PVE 8.4.1  rules 8.x
+TIER         STATUS
+discover     granted
+  opt-in read.guest-agent not granted: VM.Monitor on /vms/{vmid}
+operate      granted
+destructive  granted
+lab          granted
+  opt-in lab.provision not granted: VM.Monitor on /vms/{newid}
+```
+
+**A privilege-separated token whose own ACLs were never granted.** This is the most common mistake: the user has the roles, but the token does not. PVE answers `{}`, and every tier is missing. Excerpt:
+
+```text
+account <account-id>  PVE 9.0.10  rules 9.x
+TIER         STATUS
+discover     missing
+  missing VM.Audit on /vms/{vmid}  (needed by read.cluster-resources, read.guest-config)
+  missing Datastore.Audit on /storage/{storage}  (needed by read.cluster-resources)
+  missing Sys.Audit on /nodes/{node}  (needed by read.node-status)
+  missing Datastore.Audit or Datastore.AllocateSpace on /storage/{storage}  (needed by read.node-storage)
+  missing VM.GuestAgent.Audit or VM.GuestAgent.Unrestricted on /vms/{vmid}  (needed by read.guest-agent)
+  opt-in read.cluster-resources not granted: Pool.Audit on /pool/{pool}
+operate      missing
+  missing VM.PowerMgmt on /vms/{vmid}  (needed by proxmox.guest.start, proxmox.guest.stop, proxmox.guest.shutdown, proxmox.guest.reboot)
+destructive  missing
+  …
+lab          missing
+  missing VM.Clone on /vms/{vmid}  (needed by lab.provision)
+  missing VM.Allocate on /vms/{newid}  (needed by lab.provision)
+  …
+```
+
+If an otherwise granted setup shows `missing … on /vms/{newid}`, the clone-target ACL is absent. A pool ACL cannot cover it; see [clone targets](#why-clone-and-lab-need-more-than-the-pool).
+
+**JSON shape.** `--output json` prints the report object; the API wraps the same object in `data`. This example is trimmed to the 8.x discover tier, with one required check and one opt-in check:
+
+```json
+{
+  "accountId": "<account-id>",
+  "pveVersion": "8.4.1",
+  "rulesMajor": 8,
+  "tiers": [
+    {
+      "tier": "discover",
+      "status": "granted",
+      "missing": [],
+      "checks": [
+        {
+          "requirement": "read.node-status",
+          "capability": "read.node-status",
+          "endpoint": "GET /nodes/{node}/status",
+          "required": true,
+          "status": "granted",
+          "privileges": ["Sys.Audit"],
+          "anyOf": false,
+          "path": "/nodes/{node}",
+          "grantedOn": ["/nodes"],
+          "missing": [],
+          "note": "Node capacity; without it /cluster/resources also strips node statistics."
+        },
+        {
+          "requirement": "read.guest-agent",
+          "capability": "read.guest-agent",
+          "endpoint": "GET /nodes/{node}/qemu/{vmid}/agent/{info|network-get-interfaces|get-osinfo}",
+          "required": false,
+          "status": "missing",
+          "privileges": ["VM.Monitor"],
+          "anyOf": false,
+          "path": "/vms/{vmid}",
+          "grantedOn": [],
+          "missing": ["VM.Monitor"],
+          "note": "Opt-in on 8.x: VM.Monitor also permits agent exec and file-write (root inside the guest); without it agent facts are unavailable."
+        }
+      ]
+    }
+  ],
+  "unknownReason": null,
+  "effectivePermissions": { "/nodes": { "Sys.Audit": true, "VM.Audit": true } },
+  "warnings": [],
+  "observedAt": 1790000000000
+}
+```
+
+`grantedOn` names up to 16 effective-permission paths a check held on. `effectivePermissions` is the token's map as PVE reported it: path → privilege → propagate flag. A tier granted "somewhere in scope" can still be refused for one guest that has an explicit `NoAccess`, because PVE omits such paths from the map. `grantedOn` shows the scope Fleet saw.
+
+The manual walkthrough of this guide on the FM-612 test host, with this command's output for each token, is recorded on [#212](https://github.com/Frogbyte-io/fleet-manager/issues/212).
 
 ## Rotate the token
 
@@ -215,11 +374,18 @@ If a token may have leaked, revoke it on PVE first (`pveum user token remove …
 
 ## Consistency with Fleet's privilege table
 
-**Pending FM-604 (#206).** FM-604 introduces the single Fleet-owned table that maps each Proxmox executor kind or read to its required privileges and path scope, keyed by PVE major. Once it lands, a check in this repository (an xtask step or doc test, owned by FM-605) will fail if a privilege in this guide's [tier table](#tier-table) or role commands is missing from that table or differs from it. Until then, the [appendix](#appendix-endpoint--privilege-evidence) is the researched input for that table.
+`PROXMOX_PRIVILEGE_TABLE` (FM-604) is the single Fleet-owned map from each Proxmox executor kind or read to its required privileges and ACL path, keyed by PVE major. `fleetctl proxmox privileges` evaluates it, and this guide restates it for operators. A test keeps the two in step: `crates/fleet-application/tests/proxmox_token_guide.rs` runs with `cargo test` (and so with `cargo xtask verify`). It fails when:
+
+- a tier's **Required** or **Opt-in** cell in the [per-major tables](#required-privileges-per-tier) differs from the table's rows for that tier and major (the failure prints the expected cell);
+- a [role command](#2-roles--pve-9x) lacks a required privilege of its tier, or grants something not named in **Also in the role**;
+- a role names a privilege the table does not know for that major, for example `VM.Monitor` in a 9.x role;
+- a role that belongs to no tier (8.x `FleetAgent8`) grants anything but opt-in privileges.
+
+When the privilege table changes, paste the cells the test prints, then update the role commands. The [appendix](#appendix-endpoint--privilege-evidence) is the upstream evidence the table was built from.
 
 ## Appendix: endpoint → privilege evidence
 
-These are all the PVE endpoints `crates/providers/fleet-provider-proxmox/src/lib.rs` calls, as of this draft. The *requirement* column quotes the `permissions` block from the method's schema. The API viewer ([9.x](https://pve.proxmox.com/pve-docs/api-viewer/), [8.x](https://pve.proxmox.com/pve-docs-8/api-viewer/)) is generated from those same schemas. Where the method checks more in its code, the column lists those checks too. **Unless marked, 8.x and 9.x are identical.**
+These are all the PVE endpoints `crates/providers/fleet-provider-proxmox/src/lib.rs` calls, as of FM-604. The *requirement* column quotes the `permissions` block from the method's schema. The API viewer ([9.x](https://pve.proxmox.com/pve-docs/api-viewer/), [8.x](https://pve.proxmox.com/pve-docs-8/api-viewer/)) is generated from those same schemas. Where the method checks more in its code, the column lists those checks too. **Unless marked, 8.x and 9.x are identical.**
 
 | # | Method and path | Fleet caller | Requirement | Source |
 |---|---|---|---|---|
@@ -244,12 +410,12 @@ These are all the PVE endpoints `crates/providers/fleet-provider-proxmox/src/lib
 | 19 | `POST /nodes/{node}/qemu/{vmid}/template` | destructive | `perm /vms/{vmid} [VM.Allocate]` | `template` |
 | 20 | `GET /nodes/{node}/tasks/{upid}/status` | all executors | `user => 'all'`; `Sys.Audit` on `/nodes/{node}` only for a task the caller does not own (a token owns its own tasks) | pve-manager `PVE/API2/Tasks.pm` (`read_task_status`, `$check_task_user`) |
 | 21 | `DELETE /nodes/{node}/tasks/{upid}` | destructive (`task-cancel`) | `user => 'all'`; `Sys.Modify` on `/nodes/{node}` only for a task the caller does not own | `Tasks.pm` (`stop_task`) |
-| — | `GET /access/permissions` (FM-604, not yet called) | privilege diagnostics | `user => 'all'`: every user or token may read its own permissions; reading another's needs `Sys.Audit` on `/access` | pve-access-control `PVE/API2/AccessControl.pm` (`permissions`) |
+| 22 | `GET /access/permissions` | privilege diagnostics (`fleetctl proxmox privileges`) | `user => 'all'`: every user or token may read its own permissions; reading another's needs `Sys.Audit` on `/access` | pve-access-control `PVE/API2/AccessControl.pm` (`permissions`) |
 | — | `DELETE /nodes/{node}/qemu/{vmid}` (not called today) | future Lab `destroy` cleanup | `perm /vms/{vmid} [VM.Allocate]` | `destroy_vm` |
 
 ### Sources and versions read
 
-pve.proxmox.com was not reachable from the environment this draft was written in. All requirements above were read on 2026-09-30 from Proxmox's official source mirrors on GitHub. These are the same schemas the API viewer renders. The versions are the head of each branch at that time:
+pve.proxmox.com was not reachable from the environment this guide was written in. All requirements above were read on 2026-09-30 from Proxmox's official source mirrors on GitHub. These are the same schemas the API viewer renders. The versions are the head of each branch at that time:
 
 | Component | 9.x (branch → version) | 8.x (branch → version) |
 |---|---|---|
