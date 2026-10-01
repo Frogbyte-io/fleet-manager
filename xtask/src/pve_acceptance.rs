@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 /// The marker the suite prints before every result.
 pub const RESULT_MARKER: &str = "FLEET_PVE_ACCEPTANCE_RESULT";
@@ -319,13 +319,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<String>, String> {
                 let name = rest
                     .next()
                     .ok_or_else(|| "--target requires a name".to_owned())?;
-                if name.is_empty()
-                    || !name
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                {
+                if !valid_target_name(name) {
                     return Err(format!(
-                        "--target takes the <NAME> of FLEET_PVE_TARGET_<NAME>_* (upper case), not {name:?}"
+                        "--target takes the <NAME> of FLEET_PVE_TARGET_<NAME>_* ([A-Za-z0-9_]), not {name:?}"
                     ));
                 }
                 target = Some(name.clone());
@@ -336,9 +332,122 @@ pub fn parse_args(args: &[String]) -> Result<Option<String>, String> {
     Ok(target)
 }
 
-/// The cargo target directory.
-fn target_dir(repo_root: &Path) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| repo_root.join("target"), PathBuf::from)
+/// Whether `name` is a usable `<NAME>`: `[A-Za-z0-9_]+`, as the suite
+/// requires (the name is one space-separated field of every result line).
+#[must_use]
+pub fn valid_target_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The target filter in force: `--target`, else an inherited
+/// `FLEET_PVE_ACCEPTANCE_TARGET` (the suite honours either, so the expected
+/// matrix must too).
+#[must_use]
+pub fn effective_filter(cli: Option<&str>, env: &BTreeMap<String, String>) -> Option<String> {
+    cli.map(str::to_owned).or_else(|| {
+        env.get(TARGET_FILTER)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// The cargo target directory: `CARGO_TARGET_DIR` (cargo resolves a
+/// relative one against the invocation directory, which is `repo_root`
+/// here), else `repo_root/target`.
+#[must_use]
+pub fn resolve_target_dir(repo_root: &Path, configured: Option<std::ffi::OsString>) -> PathBuf {
+    match configured.map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => repo_root.join(path),
+        None => repo_root.join("target"),
+    }
+}
+
+/// The parent PID in one `/proc/<pid>/stat` line. The command name may hold
+/// spaces and parentheses, so the fields are read after its last `)`.
+#[must_use]
+pub fn parent_of_stat(stat: &str) -> Option<u32> {
+    let after = &stat[stat.rfind(')')? + 1..];
+    let mut fields = after.split_whitespace();
+    let _state = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+/// Every descendant of `root` in a `(pid, parent)` table.
+#[must_use]
+pub fn descendants_in(root: u32, table: &[(u32, u32)]) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for &(pid, ppid) in table {
+            if ppid == parent && pid != root && !found.contains(&pid) {
+                found.push(pid);
+                frontier.push(pid);
+            }
+        }
+    }
+    found
+}
+
+/// The live descendants of `root`, from `/proc` (empty where there is none).
+fn descendants(root: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let table: Vec<(u32, u32)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            Some((pid, parent_of_stat(&stat)?))
+        })
+        .collect();
+    descendants_in(root, &table)
+}
+
+/// The running suite (`cargo test`, the test binary under it, and the
+/// `fleet-controller` that binary starts). Unless it is reaped through
+/// [`SuiteProcess::wait`], dropping it — on any early return or a panic —
+/// kills the whole process tree and reaps the child, so a live run is never
+/// left creating and destroying guests unattended. Killing only `cargo`
+/// would leave the test binary and its controller running.
+struct SuiteProcess {
+    child: Option<Child>,
+}
+
+impl SuiteProcess {
+    fn wait(mut self) -> std::io::Result<ExitStatus> {
+        match self.child.take() {
+            Some(mut child) => child.wait(),
+            None => Err(std::io::Error::other("the suite was already reaped")),
+        }
+    }
+}
+
+impl Drop for SuiteProcess {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        // Collect the tree before anything dies (an orphan is re-parented
+        // and would no longer be found), then kill it all at once.
+        let tree = descendants(child.id());
+        if !tree.is_empty() {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .args(tree.iter().map(u32::to_string))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!(
+            "==> the runner stopped early: killed the suite and its {} descendant process(es)",
+            tree.len()
+        );
+    }
 }
 
 /// Runs the suite and answers its summary. Progress and the suite's own
@@ -347,18 +456,24 @@ fn target_dir(repo_root: &Path) -> PathBuf {
 /// # Errors
 ///
 /// When cargo cannot run or the target filter names no configured target.
-pub fn run(repo_root: &Path, target: Option<String>) -> Result<Summary, String> {
+pub fn run(repo_root: &Path, target: Option<&str>) -> Result<Summary, String> {
     let env: BTreeMap<String, String> = std::env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
         .collect();
     let live = env.get(LIVE_GATE).map(|value| value.trim()) == Some("1");
+    let filter = effective_filter(target, &env);
     let expected = if live {
-        let names = configured_targets(&env, target.as_deref());
-        if let Some(name) = &target
+        let names = configured_targets(&env, filter.as_deref());
+        if let Some(name) = &filter
             && names.is_empty()
         {
+            let source = if target.is_some() {
+                "--target".to_owned()
+            } else {
+                format!("the inherited {TARGET_FILTER}")
+            };
             return Err(format!(
-                "--target {name}: no {TARGET_PREFIX}{name}_HOST is set"
+                "{source} {name}: no {TARGET_PREFIX}{name}_HOST is set"
             ));
         }
         names
@@ -379,12 +494,12 @@ pub fn run(repo_root: &Path, target: Option<String>) -> Result<Summary, String> 
         if !status.success() {
             return Err("building fleetctl failed".to_owned());
         }
-        let fleetctl = target_dir(repo_root)
+        let fleetctl = resolve_target_dir(repo_root, std::env::var_os("CARGO_TARGET_DIR"))
             .join("debug")
             .join(format!("fleetctl{}", std::env::consts::EXE_SUFFIX));
         command.env(FLEETCTL_VAR, fleetctl);
     }
-    if let Some(name) = &target {
+    if let Some(name) = target {
         command.env(TARGET_FILTER, name);
     }
     command
@@ -408,23 +523,38 @@ pub fn run(repo_root: &Path, target: Option<String>) -> Result<Summary, String> 
     let mut child = command
         .spawn()
         .map_err(|error| format!("cargo test could not run: {error}"))?;
+    let stdout = child.stdout.take();
+    // From here every early return drops `suite`, which kills and reaps it.
+    let suite = SuiteProcess { child: Some(child) };
     let mut reported = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
+    if let Some(stdout) = stdout {
         let mut stderr = std::io::stderr();
-        for read in BufReader::new(stdout).lines() {
-            let text = read.map_err(|error| format!("reading the suite's output: {error}"))?;
-            let _ = writeln!(stderr, "{text}");
-            if let Some(row) = parse_result_line(&text) {
-                reported.push(row);
+        let mut reader = BufReader::new(stdout);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    // Lossy: one invalid UTF-8 byte must not end the read.
+                    let text = String::from_utf8_lossy(&buffer);
+                    let text = text.trim_end_matches(['\n', '\r']);
+                    let _ = writeln!(stderr, "{text}");
+                    if let Some(row) = parse_result_line(text) {
+                        reported.push(row);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(format!("reading the suite's output: {error}")),
             }
         }
     }
-    let status = child
+    let status = suite
         .wait()
         .map_err(|error| format!("cargo test did not finish: {error}"))?;
     Ok(Summary::build(
         live,
-        target,
+        filter,
         &expected,
         &reported,
         status.success(),
@@ -569,7 +699,104 @@ mod tests {
             Ok(Some("PVE9".to_owned()))
         );
         assert!(parse_args(&["--target".to_owned()]).is_err());
-        assert!(parse_args(&["--target".to_owned(), "pve9".to_owned()]).is_err());
+        // The suite's own name alphabet: [A-Za-z0-9_].
+        assert_eq!(
+            parse_args(&["--target".to_owned(), "lab_9".to_owned()]),
+            Ok(Some("lab_9".to_owned()))
+        );
+        assert!(parse_args(&["--target".to_owned(), "PVE 9".to_owned()]).is_err());
+        assert!(parse_args(&["--target".to_owned(), "PVE-9".to_owned()]).is_err());
         assert!(parse_args(&["--all".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn an_inherited_target_filter_narrows_the_expected_matrix() {
+        let mut env: BTreeMap<String, String> = [
+            ("FLEET_PVE_TARGET_PVE9_HOST", "h"),
+            ("FLEET_PVE_TARGET_PVE8_HOST", "h"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        assert_eq!(effective_filter(None, &env), None);
+        env.insert(TARGET_FILTER.to_owned(), " PVE9 ".to_owned());
+        let filter = effective_filter(None, &env);
+        assert_eq!(filter.as_deref(), Some("PVE9"));
+        assert_eq!(configured_targets(&env, filter.as_deref()), vec!["PVE9"]);
+        // --target wins over the inherited value.
+        assert_eq!(
+            effective_filter(Some("PVE8"), &env).as_deref(),
+            Some("PVE8")
+        );
+        env.insert(TARGET_FILTER.to_owned(), "  ".to_owned());
+        assert_eq!(effective_filter(None, &env), None);
+    }
+
+    #[test]
+    fn a_relative_target_dir_resolves_against_the_repo_root() {
+        let root = Path::new("/repo");
+        assert_eq!(resolve_target_dir(root, None), Path::new("/repo/target"));
+        assert_eq!(
+            resolve_target_dir(root, Some("build/out".into())),
+            Path::new("/repo/build/out")
+        );
+        assert_eq!(
+            resolve_target_dir(root, Some("/cache/target".into())),
+            Path::new("/cache/target")
+        );
+    }
+
+    #[test]
+    fn the_process_tree_is_read_from_proc_stat() {
+        assert_eq!(
+            parent_of_stat("4242 (cargo) S 4000 4242 4000 0 -1"),
+            Some(4000)
+        );
+        // A command name with spaces and parentheses.
+        assert_eq!(
+            parent_of_stat("4243 (proxmox_live (x) y) R 4242 4242 4000"),
+            Some(4242)
+        );
+        assert_eq!(parent_of_stat("garbage"), None);
+        let table = [(10, 1), (11, 10), (12, 11), (13, 11), (20, 1), (14, 13)];
+        let mut tree = descendants_in(10, &table);
+        tree.sort_unstable();
+        assert_eq!(tree, vec![11, 12, 13, 14]);
+        assert!(descendants_in(20, &table).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_the_suite_kills_and_reaps_the_whole_tree() {
+        // A child that starts a grandchild, as cargo starts the test binary.
+        let child = Command::new("sh")
+            .args(["-c", "sleep 300 & wait"])
+            .spawn()
+            .unwrap();
+        let root = child.id();
+        let started = std::time::Instant::now();
+        while descendants(root).is_empty() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the grandchild never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let grandchildren = descendants(root);
+        drop(SuiteProcess { child: Some(child) });
+        let started = std::time::Instant::now();
+        // The grandchild is gone (or a zombie awaiting its new parent).
+        while grandchildren.iter().any(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| !stat.contains(") Z"))
+        }) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the grandchild outlived the suite"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The child itself was reaped.
+        assert!(!Path::new(&format!("/proc/{root}")).exists());
     }
 }

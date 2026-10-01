@@ -57,7 +57,7 @@ fn pve_acceptance(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match xtask::pve_acceptance::run(&find_repo_root(), target) {
+    match xtask::pve_acceptance::run(&find_repo_root(), target.as_deref()) {
         Ok(summary) => {
             println!("{}", summary.to_json());
             if summary.ok() {
