@@ -27,7 +27,7 @@ Rules:
 - Write only inside the paths your issue owns. Other agents may be working concurrently; a drive-by fix in a shared file is the most common cause of a conflicted merge.
 - Do not add Nx, Turborepo, microservices, PostgreSQL, a dynamic plugin SDK, or another package/configuration/secrets manager without an approved ADR and demonstrated need.
 
-GUI changes (anything under `apps/web`, or `DESIGN.md`):
+GUI changes are changes under `apps/web` that affect the rendered UI (components, pages, styles, copy, theme) or design-system changes in `DESIGN.md`. Config, test, and docs-only edits under `apps/web` are not GUI changes and need no screenshots. For GUI changes:
 
 - Every GUI change ships with proof: screenshots of the running app, embedded in the PR description under `## Verification`. Passing tests alone do not count.
 - Before opening or updating the PR, follow `.agents/skills/test-fleet-console/SKILL.md`: run the change against an isolated controller, capture dark and light, desktop and narrow, and every state the change touches, and publish the images to the `pr-evidence` branch.

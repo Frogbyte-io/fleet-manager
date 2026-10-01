@@ -3,6 +3,8 @@ name: test-fleet-console
 description: Verify a Fleet Console (apps/web) change in a real browser against an isolated controller, capture screenshots, and publish them as PR evidence. Use for every GUI change — pages, components, styles, layout, copy, or theme — before opening or updating a PR.
 ---
 
+> This skill is kept in two identical copies: `.agents/skills/test-fleet-console/SKILL.md` (read by agents that follow `AGENTS.md`) and `.claude/skills/test-fleet-console/SKILL.md` (read by Claude Code). Edit both together. The repository has no symlinks, because a Windows checkout without symlink support would turn one into a text file.
+
 # Test Fleet Console
 
 A GUI change is done when a screenshot shows it working, not when the tests pass. Run the change against an isolated controller, drive it in a browser, capture evidence, and attach that evidence to the PR.
@@ -67,18 +69,39 @@ GitHub has no API for attaching images to a PR, so push them to the orphan branc
 ```bash
 REPO=Frogbyte-io/fleet-manager
 KEY="pr-<number-or-branch-slug>"        # one folder per PR
+# A worktree left by an earlier failed attempt still holds the branch; remove it
+# (the screenshots are copied again below from <your-pngs>).
+OLD=$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} /^branch refs\/heads\/pr-evidence$/{print w}')
+[ -n "$OLD" ] && git worktree remove --force "$OLD"
+git branch -D pr-evidence 2>/dev/null || true   # drop a stale local branch
 git fetch origin pr-evidence 2>/dev/null || true
 WT=$(mktemp -d)
 if git rev-parse --verify origin/pr-evidence >/dev/null 2>&1; then
-  git worktree add "$WT" origin/pr-evidence --detach
+  git worktree add -b pr-evidence "$WT" origin/pr-evidence
 else
-  git worktree add --detach "$WT" && (cd "$WT" && git checkout --orphan pr-evidence && git rm -rf . >/dev/null)
+  git worktree add --detach "$WT" && (cd "$WT" && git checkout --orphan pr-evidence && git rm -rfq --ignore-unmatch .)
 fi
 mkdir -p "$WT/$KEY" && cp <your-pngs> "$WT/$KEY/"
-(cd "$WT" && git add "$KEY" && git commit -m "evidence: $KEY" && git push origin HEAD:pr-evidence)
-SHA=$(git -C "$WT" rev-parse HEAD)
-git worktree remove --force "$WT"
-# embed: ![caption](https://github.com/$REPO/blob/$SHA/$KEY/<file>.png?raw=true)
+PUSHED=
+if (cd "$WT" && git add "$KEY" && git commit -m "evidence: $KEY"); then
+  # Push; if another agent pushed first, rebase onto the new tip and retry.
+  # Before the branch exists remotely there is nothing to rebase onto: just retry.
+  for attempt in 1 2 3 4 5; do
+    if (cd "$WT" && git push origin pr-evidence:pr-evidence); then PUSHED=1; break; fi
+    [ "$attempt" = 5 ] && break                   # five pushes in total; no rebase after the last
+    if (cd "$WT" && git fetch origin pr-evidence 2>/dev/null); then
+      (cd "$WT" && git rebase origin/pr-evidence) || break
+    fi
+    sleep 2
+  done
+fi
+if [ -n "$PUSHED" ]; then
+  SHA=$(git -C "$WT" rev-parse HEAD)
+  git worktree remove --force "$WT" && git branch -D pr-evidence
+  # embed: ![caption](https://github.com/$REPO/blob/$SHA/$KEY/<file>.png?raw=true)
+else
+  echo "publish failed; the attempt is kept in $WT. Fix the error and rerun this whole block" >&2
+fi
 ```
 
 Never push to `refs/t3/checkpoints`, and never `git push --mirror`.

@@ -24,11 +24,16 @@ test('Coolify can append management labels and build from its repository-root pr
   // Coolify 4.3.23 raw mode appends list entries to the existing labels.
   const injected = source.replace('    environment:',
     '      - coolify.managed=true\n      - coolify.applicationId=2\n      - coolify.type=application\n    environment:');
+  const env = { ...process.env };
+  // Exercise the defaults, not a developer's deployment settings.
+  delete env.FLEET_COOLIFY_PORT;
+  delete env.FLEET_DATA_VOLUME;
+  Object.assign(env, { FLEET_MASTER_KEY_SOURCE: '/tmp/fleet-test-key', FLEET_BUILD_CONTEXT: '.' });
   const result = spawnSync('docker', [
     'compose', '--project-directory', root, '-f', '-', 'config', '--format', 'json',
   ], {
     cwd: root,
-    env: { ...process.env, FLEET_MASTER_KEY_SOURCE: '/tmp/fleet-test-key', FLEET_BUILD_CONTEXT: '.' },
+    env,
     input: injected,
     encoding: 'utf8',
   });
