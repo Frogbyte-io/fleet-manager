@@ -536,7 +536,19 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         privileges: &[],
         matching: PrivilegeMatch::All,
         required: true,
-        note: "No privilege for tasks the token started; another principal's task needs Sys.Modify, which Fleet does not request.",
+        note: "No privilege for tasks the token started; the review binds the UPID's node and guest, not its user.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.task-cancel.other-principal",
+        capability: "proxmox.task-cancel",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "DELETE /nodes/{node}/tasks/{upid}",
+        majors: BOTH,
+        scope: PrivilegeScope::Node,
+        privileges: &["Sys.Modify"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "Opt-in: a reviewed UPID may name another principal's task on the guest, which PVE stops only with Sys.Modify; without it that cancel is refused (403).",
     },
     // ── lab ─────────────────────────────────────────────────────────────
     PrivilegeRequirement {
@@ -632,8 +644,8 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         scope: PrivilegeScope::NewGuest,
         privileges: &["VM.Monitor"],
         matching: PrivilegeMatch::All,
-        required: false,
-        note: "Opt-in on 8.x (VM.Monitor also permits agent exec); templates can use ssh_exec readiness instead.",
+        required: true,
+        note: "The provision executor always polls agent/info for readiness, whatever the template's probe; on 8.x that needs VM.Monitor (which also permits agent exec) on the new guest.",
     },
 ];
 
@@ -1269,6 +1281,40 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    #[test]
+    fn cancelling_another_principals_task_is_an_opt_in_destructive_check() {
+        let permissions = map(&[("/", &[("Sys.Audit", true)])]);
+        for major in SUPPORTED_PVE_MAJORS {
+            let tiers = evaluate_tiers(major, &permissions);
+            let destructive = tier(&tiers, PrivilegeTier::Destructive);
+            assert_eq!(
+                check(destructive, "proxmox.task-cancel").status,
+                PrivilegeStatus::Granted
+            );
+            let other = check(destructive, "proxmox.task-cancel.other-principal");
+            assert!(!other.required);
+            assert_eq!(other.status, PrivilegeStatus::Missing);
+            assert_eq!(other.missing, ["Sys.Modify"]);
+            assert!(
+                destructive
+                    .missing
+                    .iter()
+                    .all(|m| !m.privileges.iter().any(|p| p == "Sys.Modify"))
+            );
+        }
+    }
+
+    #[test]
+    fn lab_readiness_requires_vm_monitor_on_8x() {
+        // The provision executor polls agent/info whatever the template's
+        // readiness probe, so on 8.x VM.Monitor gates the lab tier.
+        let lab8 = requirements_for_major(8)
+            .find(|r| r.id == "lab.provision.readiness-agent")
+            .unwrap();
+        assert!(lab8.required);
+        assert_eq!(lab8.privileges, ["VM.Monitor"]);
     }
 
     #[test]

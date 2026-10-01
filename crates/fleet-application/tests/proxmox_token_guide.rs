@@ -14,10 +14,13 @@
 //!   satisfies it (rollback is implied by `VM.Snapshot`, node storage by
 //!   `Datastore.Audit`).
 //! - **Opt-in**: exactly the tier's `required: false` rows.
-//! - **Role**: the `pveum role add` line for the named role holds one
-//!   privilege of every required entry, and every other privilege it grants is
-//!   named in the "Also in the role" column ("`A`, `B`: why"). Any further role in a block may
-//!   only grant opt-in privileges (8.x `FleetAgent8`).
+//! - **Role**: the `pveum role add` lines for the tier's roles (one or more;
+//!   8.x Lab adds `FleetAgent8` on its clone targets) together hold one
+//!   privilege of every required entry, and every other privilege they grant
+//!   is named in the "Also in the role" column ("`A`, `B`: why"). Any further
+//!   role in a block may only grant opt-in privileges (`FleetCancelAnyTask`).
+//! - **Pool ACLs**: no `pveum acl modify /pool/…` line grants a Lab role that
+//!   holds `VM.Allocate`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,7 +37,7 @@ type Entry = (BTreeSet<String>, String);
 
 #[derive(Debug)]
 struct GuideRow {
-    role: String,
+    roles: Vec<String>,
     required: BTreeSet<Entry>,
     opt_in: BTreeSet<Entry>,
     also: BTreeSet<String>,
@@ -103,12 +106,12 @@ fn guide_rows(major: u8) -> BTreeMap<String, GuideRow> {
         }
         let cells: Vec<&str> = line.trim_matches('|').split(" | ").map(str::trim).collect();
         assert_eq!(cells.len(), 5, "{major}.x row {line:?} needs five cells");
-        let role = code_spans(cells[1]);
-        assert_eq!(role.len(), 1, "{major}.x row {line:?}: one role");
+        let roles = code_spans(cells[1]);
+        assert!(!roles.is_empty(), "{major}.x row {line:?}: name a role");
         let previous = rows.insert(
             cells[0].to_owned(),
             GuideRow {
-                role: role[0].clone(),
+                roles,
                 required: entries(cells[2]),
                 opt_in: entries(cells[3]),
                 // "`A`, `B`: why" — only the privileges before the reason.
@@ -243,19 +246,19 @@ fn the_guide_roles_grant_each_tier_and_label_every_extra() {
         let mut opt_in_privileges = BTreeSet::new();
         for tier in PrivilegeTier::ALL {
             let row = &rows[tier.id()];
-            let granted = roles.get(&row.role).unwrap_or_else(|| {
-                panic!(
-                    "{major}.x {}: the role block has no `{}`",
-                    tier.id(),
-                    row.role
-                )
-            });
-            tier_roles.insert(row.role.clone());
+            let mut granted = BTreeSet::new();
+            for role in &row.roles {
+                granted.extend(roles.get(role).unwrap_or_else(|| {
+                    panic!("{major}.x {}: the role block has no `{role}`", tier.id())
+                }));
+                tier_roles.insert(role.clone());
+            }
+            let granted: BTreeSet<String> = granted.into_iter().cloned().collect();
             for (alternatives, path) in &row.required {
                 assert!(
-                    !alternatives.is_disjoint(granted),
-                    "{major}.x {} does not grant {alternatives:?} (on {path})",
-                    row.role
+                    !alternatives.is_disjoint(&granted),
+                    "{major}.x {:?} do not grant {alternatives:?} (on {path})",
+                    row.roles
                 );
             }
             let required: BTreeSet<String> = row
@@ -266,8 +269,8 @@ fn the_guide_roles_grant_each_tier_and_label_every_extra() {
             let extras: BTreeSet<String> = granted.difference(&required).cloned().collect();
             assert_eq!(
                 extras, row.also,
-                "{major}.x {}: the \"Also in the role\" cell must name exactly what the role grants beyond the required privileges",
-                row.role
+                "{major}.x {:?}: the \"Also in the role\" cell must name exactly what the roles grant beyond the required privileges",
+                row.roles
             );
             opt_in_privileges.extend(
                 row.opt_in
@@ -290,6 +293,35 @@ fn the_guide_roles_grant_each_tier_and_label_every_extra() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn no_pool_acl_in_the_guide_grants_a_lab_role_holding_vm_allocate() {
+    // VM.Allocate on a pool reaches every member VM and also permits deleting
+    // it. Lab needs it only on the reserved clone-target VMIDs, so the Lab
+    // role granted on a pool must not carry it.
+    for major in SUPPORTED_PVE_MAJORS {
+        let roles = guide_roles(major);
+        let lab = &guide_rows(major)[PrivilegeTier::Lab.id()];
+        let mut pool_acls = 0;
+        for line in GUIDE.lines() {
+            let Some(rest) = line.trim().strip_prefix("pveum acl modify /pool/") else {
+                continue;
+            };
+            pool_acls += 1;
+            let Some((_, role)) = rest.split_once("--roles ") else {
+                panic!("{line:?} has no --roles");
+            };
+            let role = role.split_whitespace().next().expect("a role name");
+            if lab.roles.iter().any(|name| name == role) {
+                assert!(
+                    !roles[role].contains("VM.Allocate"),
+                    "{major}.x: {role} is granted on a pool but holds VM.Allocate"
+                );
+            }
+        }
+        assert!(pool_acls > 0, "the guide grants no pool ACLs");
     }
 }
 
