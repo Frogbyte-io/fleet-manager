@@ -62,6 +62,10 @@ async fn open_store(path: &Path) -> Store {
             Err(StorageError::LockHeld { .. }) if std::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            Err(StorageError::LockHeld { path }) => panic!(
+                "cannot open the store: lock {} was still held after the 10 s retry deadline",
+                path.display()
+            ),
             Err(error) => panic!("cannot open the store: {error}"),
         }
     }
