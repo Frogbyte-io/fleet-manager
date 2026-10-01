@@ -30,12 +30,18 @@ const STATUSES = TASK_STATUSES
 const pinned = computed(() => props.views.filter(v => v.state === 'pinned'))
 const blocked = computed(() => props.views.filter(v => v.state === 'changed' || v.state === 'unconfirmed'))
 
+// The selection (and its filters) survives an account being briefly not
+// pinned, e.g. while discovery refetches; it moves only when the account is
+// gone from the list. Nothing is asked of it until it is pinned again.
 const accountId = ref<string | null>(null)
-watch(pinned, (list) => {
-  if (!list.some(v => v.account.id === accountId.value))
+watch([pinned, () => props.views], ([list, all]) => {
+  if (!all.some(v => v.account.id === accountId.value))
     accountId.value = list[0]?.account.id ?? null
 }, { immediate: true })
 const view = computed(() => pinned.value.find(v => v.account.id === accountId.value) ?? null)
+const selected = computed(() => props.views.find(v => v.account.id === accountId.value) ?? null)
+const queryAccountId = computed(() => view.value ? accountId.value : null)
+const selectable = computed(() => selected.value && !view.value ? [...pinned.value, selected.value] : pinned.value)
 
 const filters = ref<TaskFilters>({ ...EMPTY_TASK_FILTERS })
 watch(accountId, () => (filters.value = { ...EMPTY_TASK_FILTERS }))
@@ -49,7 +55,7 @@ const guests = computed(() => (view.value?.guests ?? [])
   .filter(g => g.vmid !== null && g.vmid !== undefined)
   .sort((a, b) => (a.vmid ?? 0) - (b.vmid ?? 0)))
 
-const tasks = useProxmoxTasks(accountId, filters)
+const tasks = useProxmoxTasks(queryAccountId, filters)
 const pages = computed(() => tasks.data.value?.pages ?? [])
 const rows = computed(() => pages.value.flatMap(p => p.items))
 // Warnings describe the whole snapshot, so every page repeats them.
@@ -82,7 +88,7 @@ function user(task: { user: string, tokenId?: string | null }): string {
     </div>
 
     <p
-      v-if="pinned.length === 0"
+      v-if="pinned.length === 0 && !selected"
       class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
       data-testid="tasks-no-account"
     >
@@ -103,7 +109,7 @@ function user(task: { user: string, tokenId?: string | null }): string {
             data-testid="tasks-account"
           >
             <option
-              v-for="item in pinned"
+              v-for="item in selectable"
               :key="item.account.id"
               :value="item.account.id"
             >
@@ -206,7 +212,15 @@ function user(task: { user: string, tokenId?: string | null }): string {
       </div>
 
       <p
-        v-if="tasks.isLoading.value"
+        v-if="!view"
+        class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
+        role="status"
+        data-testid="tasks-unavailable"
+      >
+        {{ selected?.account.name }} is not verified right now ({{ selected?.state }}); its tasks are not asked for until it is pinned again.
+      </p>
+      <p
+        v-else-if="tasks.isLoading.value"
         class="text-xs text-fc-faint"
         role="status"
         aria-busy="true"

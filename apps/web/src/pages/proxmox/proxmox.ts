@@ -277,9 +277,6 @@ function command(words: string[]): string {
 /** The tiers in the order the API reports them and the card shows them. */
 export const PRIVILEGE_TIERS: readonly ProxmoxPrivilegeTierDto[] = ['discover', 'operate', 'destructive', 'lab']
 
-/** The least-privilege token guide (FM-605), linked from the tier popover. */
-export const TOKEN_GUIDE_URL = 'https://github.com/Frogbyte-io/fleet-manager/blob/dev/docs/operations/proxmox-token.md'
-
 export function tierOf(privileges: ProxmoxPrivilegesDto | null | undefined, tier: ProxmoxPrivilegeTierDto) {
   return privileges?.tiers.find(t => t.tier === tier) ?? null
 }

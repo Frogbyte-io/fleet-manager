@@ -115,7 +115,7 @@ async function mountAt(path: string) {
   const wrapper = mount(ProxmoxPage, { global: { plugins: [[VueQueryPlugin, { queryClient }], router] } })
   await flushPromises()
   await flushPromises()
-  return { wrapper, router }
+  return { wrapper, router, queryClient }
 }
 
 enableAutoUnmount(afterEach)
@@ -286,7 +286,7 @@ describe('privileges and compatibility', () => {
     expect(document.body.querySelector('[data-testid="tier-popover-operate"]')?.textContent).toContain('may not read its own permissions')
   })
 
-  it('lists missing privileges and paths in a popover with the guide and fleetctl', async () => {
+  it('lists missing privileges and paths in a popover with fleetctl, and no link to a guide that does not exist yet', async () => {
     getProxmoxPrivileges.mockResolvedValue(ok({ data: OPERATE_MISSING }))
     const { wrapper } = await mountAt('/proxmox')
     const trigger = wrapper.get('[data-testid="tier-operate"]')
@@ -297,7 +297,8 @@ describe('privileges and compatibility', () => {
     const popover = document.body.querySelector('[data-testid="tier-popover-operate"]')!
     expect(popover.querySelector('[data-testid="missing-privilege"]')?.textContent).toContain('VM.PowerMgmt')
     expect(popover.querySelector('[data-testid="missing-privilege"]')?.textContent).toContain('/vms/{vmid}')
-    expect(popover.querySelector('[data-testid="token-guide"]')?.getAttribute('href')).toContain('docs/operations/proxmox-token.md')
+    expect(popover.querySelector('[data-testid="token-guide"]')).toBeNull()
+    expect(popover.querySelector('a')).toBeNull()
     expect(popover.querySelector('[data-testid="fleetctl-command"]')?.textContent).toBe('fleetctl proxmox privileges acc1')
   })
 
@@ -360,7 +361,68 @@ describe('guest actions and privileges', () => {
   })
 })
 
+describe('stale privilege reports and refetches', () => {
+  it('does not present a cached report as current after a failed refetch', async () => {
+    getProxmoxPrivileges.mockResolvedValue(ok({ data: OPERATE_MISSING }))
+    const { wrapper, queryClient } = await mountAt('/proxmox?tab=guests')
+    await wrapper.get('[data-testid="guest-actions-101"]').trigger('click')
+    expect(wrapper.get('[data-testid="lifecycle-start"]').attributes('disabled')).toBeDefined()
+
+    getProxmoxPrivileges.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
+    await queryClient.refetchQueries({ queryKey: ['proxmox', 'privileges', 'acc1'] })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="lifecycle-start"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="operate-blocked"]').exists()).toBe(false)
+  })
+
+  it('shows tier chips as unknown, not as the cached result, after a failed refetch', async () => {
+    getProxmoxPrivileges.mockResolvedValue(ok({ data: OPERATE_MISSING }))
+    const { wrapper, queryClient } = await mountAt('/proxmox')
+    expect(wrapper.get('[data-testid="tier-operate"]').attributes('data-status')).toBe('missing')
+    getProxmoxPrivileges.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
+    await queryClient.refetchQueries({ queryKey: ['proxmox', 'privileges', 'acc1'] })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="tier-operate"]').attributes('data-status')).toBe('unknown')
+  })
+
+  it('waits for a running discovery refetch before asking for privileges', async () => {
+    const { queryClient } = await mountAt('/proxmox')
+    expect(getProxmoxPrivileges).toHaveBeenCalledTimes(1)
+    let finish!: (value: unknown) => void
+    discoverProxmoxCluster.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    const refetching = queryClient.refetchQueries({ queryKey: ['fleet', 'proxmox-discovery', 'acc1'] })
+    await flushPromises()
+    await queryClient.invalidateQueries({ queryKey: ['proxmox', 'privileges', 'acc1'] })
+    await flushPromises()
+    expect(getProxmoxPrivileges).toHaveBeenCalledTimes(1)
+    finish(ok({ data: discovery }))
+    await refetching
+    await flushPromises()
+    expect(getProxmoxPrivileges).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('tasks', () => {
+  it('keeps the account and filters while the account is briefly not pinned', async () => {
+    const { wrapper, queryClient } = await mountAt('/proxmox?tab=tasks')
+    await wrapper.get('[data-testid="tasks-status"]').setValue('error')
+    await flushPromises()
+    const calls = listProxmoxTasks.mock.calls.length
+
+    discoverProxmoxCluster.mockResolvedValue(ok({ code: 'forbidden', message: 'denied' }, 403))
+    await queryClient.refetchQueries({ queryKey: ['fleet', 'proxmox-discovery', 'acc1'] })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tasks-unavailable"]').exists()).toBe(true)
+    expect(listProxmoxTasks).toHaveBeenCalledTimes(calls)
+
+    discoverProxmoxCluster.mockResolvedValue(ok({ data: discovery }))
+    await queryClient.refetchQueries({ queryKey: ['fleet', 'proxmox-discovery', 'acc1'] })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tasks-unavailable"]').exists()).toBe(false)
+    expect((wrapper.get('[data-testid="tasks-status"]').element as HTMLSelectElement).value).toBe('error')
+    expect(listProxmoxTasks).toHaveBeenLastCalledWith('acc1', { status: 'error', limit: 50 })
+  })
+
   it('lists tasks with status chips and links Fleet operations', async () => {
     listProxmoxTasks.mockResolvedValue(ok(taskPage([
       task({ upid: 'UPID:a', status: 'running', endedAt: null, exitStatus: null, fleetOperationId: 'op-42' }),

@@ -115,8 +115,9 @@ export function useProxmox() {
     })),
   })
 
-  // The privilege report follows the same gate: only after discovery verified
-  // the pin.
+  // The privilege report follows the same gate, and also waits out a running
+  // discovery refetch: cached data must not stand in for the current pin check,
+  // so a changed certificate is seen before the privilege request goes out.
   const privilegeReports = useQueries({
     queries: computed(() => confirmed.value.map((accountId, index) => {
       const discovery = discoveries.value[index]
@@ -124,7 +125,7 @@ export function useProxmox() {
         queryKey: privilegesKey(accountId),
         queryFn: () => privileges(accountId),
         retry: retryTransient,
-        enabled: !!discovery?.data && !discovery.error,
+        enabled: !!discovery?.data && !discovery.error && !discovery.isFetching,
       }
     })),
   })
@@ -145,7 +146,9 @@ export function useProxmox() {
       guestsLoading: usable && (guestList?.isLoading ?? false),
       guestsError: usable ? guestList?.error ?? null : null,
       guestsTruncated: usable && truncatedGuests.value.has(account.id),
-      privileges: usable ? report?.data ?? null : null,
+      // A failed refetch keeps the previous report in the cache; it is not
+      // current, so it is neither shown nor used to withhold actions.
+      privileges: usable && !report?.error ? report?.data ?? null : null,
       privilegesLoading: usable && (report?.isLoading ?? false),
       privilegesError: usable ? report?.error ?? null : null,
     }
