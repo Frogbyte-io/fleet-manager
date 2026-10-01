@@ -540,6 +540,18 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
     },
     // ── lab ─────────────────────────────────────────────────────────────
     PrivilegeRequirement {
+        id: "lab.provision.template-lookup",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "GET /cluster/resources",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "The provision executor finds the template by name in /cluster/resources, which hides guests without VM.Audit.",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.clone-source",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,
@@ -1195,6 +1207,46 @@ mod tests {
             check(operate, "proxmox.guest.start").granted_on,
             ["/vms/100"]
         );
+    }
+
+    #[test]
+    fn lab_provision_needs_vm_audit_to_find_its_template() {
+        // Every lab privilege except VM.Audit, propagated from the root:
+        // /cluster/resources would hide the template, so lab is missing.
+        let without_audit: Vec<(&str, bool)> = PROXMOX_PRIVILEGE_TABLE
+            .iter()
+            .filter(|r| r.tier == PrivilegeTier::Lab)
+            .flat_map(|r| r.privileges.iter().copied())
+            .filter(|p| *p != "VM.Audit")
+            .map(|p| (p, true))
+            .collect();
+        for major in SUPPORTED_PVE_MAJORS {
+            let tiers = evaluate_tiers(major, &map(&[("/", &without_audit)]));
+            let lab = tier(&tiers, PrivilegeTier::Lab);
+            assert_eq!(lab.status, PrivilegeStatus::Missing, "{major}.x");
+            assert_eq!(
+                lab.missing,
+                vec![MissingPrivileges {
+                    privileges: vec!["VM.Audit".to_owned()],
+                    any_of: false,
+                    path: "/vms/{vmid}".to_owned(),
+                    capabilities: vec!["lab.provision".to_owned()],
+                }],
+                "{major}.x"
+            );
+
+            // VM.Audit on the template itself makes it visible.
+            let tiers = evaluate_tiers(
+                major,
+                &map(&[("/", &without_audit), ("/vms/9000", &[("VM.Audit", false)])]),
+            );
+            let lab = tier(&tiers, PrivilegeTier::Lab);
+            assert_eq!(lab.status, PrivilegeStatus::Granted, "{major}.x");
+            assert_eq!(
+                check(lab, "lab.provision.template-lookup").granted_on,
+                ["/vms/9000"]
+            );
+        }
     }
 
     #[test]
