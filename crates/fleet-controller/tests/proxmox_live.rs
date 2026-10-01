@@ -1110,13 +1110,11 @@ fn is_node_down_warning(warning: &str, node: &str) -> bool {
     else {
         return false;
     };
-    ![
-        "cpu usage is missing",
-        "memory used or total is missing",
-        "the payload is not a list",
-    ]
-    .iter()
-    .any(|payload_problem| error.starts_with(payload_problem))
+    // Only what an unreachable node produces: a transport failure from
+    // Fleet's own connection, or PVE's 595 when the node it proxies to
+    // cannot be reached. An auth refusal, another HTTP status, or a bad
+    // payload comes from a node that answered.
+    error.starts_with("the connection failed: ") || error.starts_with("the API answered 595")
 }
 
 #[cfg(test)]
@@ -1126,14 +1124,36 @@ mod node_down_warning_tests {
 
     #[test]
     fn matches_the_endpoint_failure_warnings_for_the_node() {
+        // The shapes discovery produced for a stopped/partitioned node on
+        // the live cluster: PVE's proxy 595, and Fleet's own transport error.
         assert!(is_node_down_warning(
-            "node pvec-b status: the PVE request timed out",
+            "node pvec-b status: the API answered 595: No route to host",
             "pvec-b"
         ));
         assert!(is_node_down_warning(
-            "node pvec-b storage: connection refused",
+            "node pvec-b storage: the API answered 595: Connection timed out",
             "pvec-b"
         ));
+        assert!(is_node_down_warning(
+            "node pvec-b status: the connection failed: error sending request",
+            "pvec-b"
+        ));
+    }
+
+    #[test]
+    fn ignores_errors_from_a_node_that_answered() {
+        for error in [
+            "the API token was refused (401)",
+            "the token lacks the privilege (403): Permission check failed",
+            "the API answered 500: internal error",
+            "the API answered 501: not implemented",
+            "the API's payload is not interpretable: missing data",
+        ] {
+            assert!(
+                !is_node_down_warning(&format!("node pvec-b status: {error}"), "pvec-b"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -1147,11 +1167,11 @@ mod node_down_warning_tests {
     #[test]
     fn requires_the_whole_node_name() {
         assert!(!is_node_down_warning(
-            "node pvec-b2 status: timed out",
+            "node pvec-b2 status: the API answered 595: x",
             "pvec-b"
         ));
         assert!(!is_node_down_warning(
-            "node pvec-b status: timed out",
+            "node pvec-b status: the API answered 595: x",
             "pvec"
         ));
         assert!(!is_node_down_warning(
@@ -1187,7 +1207,7 @@ mod node_down_warning_tests {
             "resource #12: entry network/pvec-b/zone/localnetwork has an unrecognized type \"network\"",
         ]}});
         assert!(!warnings_name(&body, "pvec-b"));
-        let down = json!({"data": {"warnings": ["node pvec-b status: timed out"]}});
+        let down = json!({"data": {"warnings": ["node pvec-b status: the API answered 595: No route to host"]}});
         assert!(warnings_name(&down, "pvec-b"));
         assert!(!warnings_name(&json!({"data": {}}), "pvec-b"));
     }
@@ -1254,7 +1274,11 @@ async fn harness_drives_the_real_controller_and_fleetctl() {
         .await
         .expect("the store opens while the controller is stopped");
     assert_eq!(touched, 1);
-    assert_eq!(controller.url(), url, "the restart reuses the port");
+    // restart() prefers the old port and falls back to a new one if the
+    // rebind races; either way url() follows and the controller answers.
+    if controller.url() != url {
+        eprintln!("fleet-acceptance: the restart moved to a new port (rebind race)");
+    }
     let (status, body) = controller
         .get("/api/v1/proxmox/accounts")
         .await

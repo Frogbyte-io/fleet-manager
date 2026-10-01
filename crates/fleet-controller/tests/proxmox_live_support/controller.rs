@@ -14,6 +14,11 @@ use serde_json::Value;
 use super::config::FLEETCTL_VAR;
 use super::redact::Redactor;
 
+/// How long `stop` waits for a clean exit: the worker's drain grace
+/// (`fleet_controller::worker::DRAIN_GRACE`, 120 s) plus margin, so an
+/// in-flight operation is never cut off by the harness.
+const STOP_GRACE: Duration = Duration::from_secs(130);
+
 /// One running controller.
 #[derive(Debug)]
 pub struct Controller {
@@ -206,28 +211,38 @@ impl Controller {
         }
     }
 
-    /// SIGTERM, wait up to 10 s for a clean exit, then kill.
+    /// SIGTERM, then wait out the worker's graceful drain before killing.
+    /// The wait returns as soon as the process exits, so an idle controller
+    /// stops at once; it runs only when the signal was actually delivered.
     async fn stop(&self) -> Result<(), String> {
-        {
+        let signalled = {
             let process = self
                 .process
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             #[cfg(unix)]
-            let _ = Command::new("kill")
+            let signalled = Command::new("kill")
                 .arg("-TERM")
                 .arg(process.0.id().to_string())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
+                .status()
+                .is_ok_and(|status| status.success());
             #[cfg(not(unix))]
-            drop(process);
-        }
-        for _ in 0..100 {
-            if self.exited().is_some() {
-                return Ok(());
+            let signalled = {
+                drop(process);
+                false
+            };
+            signalled
+        };
+        if signalled {
+            let deadline = tokio::time::Instant::now() + STOP_GRACE;
+            while tokio::time::Instant::now() < deadline {
+                if self.exited().is_some() {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let mut process = self
             .process
