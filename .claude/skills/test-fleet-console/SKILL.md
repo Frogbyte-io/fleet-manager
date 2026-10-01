@@ -69,28 +69,37 @@ GitHub has no API for attaching images to a PR, so push them to the orphan branc
 ```bash
 REPO=Frogbyte-io/fleet-manager
 KEY="pr-<number-or-branch-slug>"        # one folder per PR
-WT=$(mktemp -d)
+# A worktree left by an earlier failed attempt still holds the branch; remove it
+# (the screenshots are copied again below from <your-pngs>).
+OLD=$(git worktree list --porcelain | awk '/^worktree /{w=substr($0,10)} /^branch refs\/heads\/pr-evidence$/{print w}')
+[ -n "$OLD" ] && git worktree remove --force "$OLD"
+git branch -D pr-evidence 2>/dev/null || true   # drop a stale local branch
 git fetch origin pr-evidence 2>/dev/null || true
-git branch -D pr-evidence 2>/dev/null || true   # drop a stale local branch from an earlier attempt
+WT=$(mktemp -d)
 if git rev-parse --verify origin/pr-evidence >/dev/null 2>&1; then
   git worktree add -b pr-evidence "$WT" origin/pr-evidence
 else
-  git worktree add --detach "$WT" && (cd "$WT" && git checkout --orphan pr-evidence && git rm -rf . >/dev/null)
+  git worktree add --detach "$WT" && (cd "$WT" && git checkout --orphan pr-evidence && git rm -rfq --ignore-unmatch .)
 fi
 mkdir -p "$WT/$KEY" && cp <your-pngs> "$WT/$KEY/"
-(cd "$WT" && git add "$KEY" && git commit -m "evidence: $KEY")
-# Push; if another agent pushed first, rebase onto the new tip and retry. The worktree stays until the push lands.
 PUSHED=
-for attempt in 1 2 3 4 5; do
-  if (cd "$WT" && git push origin pr-evidence:pr-evidence); then PUSHED=1; break; fi
-  (cd "$WT" && git fetch origin pr-evidence && git rebase origin/pr-evidence) || break
-done
+if (cd "$WT" && git add "$KEY" && git commit -m "evidence: $KEY"); then
+  # Push; if another agent pushed first, rebase onto the new tip and retry.
+  # Before the branch exists remotely there is nothing to rebase onto: just retry.
+  for attempt in 1 2 3 4 5; do
+    if (cd "$WT" && git push origin pr-evidence:pr-evidence); then PUSHED=1; break; fi
+    if (cd "$WT" && git fetch origin pr-evidence 2>/dev/null); then
+      (cd "$WT" && git rebase origin/pr-evidence) || break
+    fi
+    sleep 2
+  done
+fi
 if [ -n "$PUSHED" ]; then
   SHA=$(git -C "$WT" rev-parse HEAD)
   git worktree remove --force "$WT" && git branch -D pr-evidence
   # embed: ![caption](https://github.com/$REPO/blob/$SHA/$KEY/<file>.png?raw=true)
 else
-  echo "push failed; screenshots are kept in $WT (branch pr-evidence), fix the error and rerun the push loop" >&2
+  echo "publish failed; the attempt is kept in $WT. Fix the error and rerun this whole block" >&2
 fi
 ```
 
