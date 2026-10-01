@@ -46,7 +46,7 @@ The two tables below are the PVE privileges per tier, keyed by major. Each entry
 | discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{vmid}` | `Pool.Audit` on `/pool/{pool}` | `Pool.Audit`: the opt-in row. Fleet's discovery does not use pool rows today; drop it from the role if you prefer |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | — | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
-| lab | `FleetLab` | `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | — | `VM.Audit`: the Lab executor finds the pinned image's template through `/cluster/resources`, which hides guests without it |
+| lab | `FleetLab` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | — | — |
 <!-- privilege-table:end -->
 
 Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted also permits agent `exec`.
@@ -59,7 +59,7 @@ Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted al
 | discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}` | `Pool.Audit` on `/pool/{pool}`, `VM.Monitor` on `/vms/{vmid}` | `Pool.Audit`: the opt-in row, as on 9.x. The agent privilege is a separate opt-in role, not part of this one |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | — | `VM.Snapshot.Rollback`: as on 9.x |
-| lab | `FleetLab` | `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}` | `VM.Monitor` on `/vms/{newid}` | `VM.Audit`: as on 9.x |
+| lab | `FleetLab` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}` | `VM.Monitor` on `/vms/{newid}` | — |
 <!-- privilege-table:end -->
 
 On 8.x, `VM.Monitor` is opt-in for both discover (agent facts) and lab (the `guest_agent` readiness probe), because it also permits agent `exec`. See [8.x vs 9.x differences](#8x-vs-9x-differences).
@@ -68,6 +68,7 @@ Notes:
 
 - `proxmox.guest.snapshot-revert` passes if the token has **either** `VM.Snapshot` or `VM.Snapshot.Rollback` (`any => 1`). FleetDestructive already includes `VM.Snapshot`, so `VM.Snapshot.Rollback` is redundant there. It is in the role because it lets you build a rollback-only role if you ever need one.
 - The destructive executors read the snapshot list and the cluster resources before they act (idempotency checks), so `FleetDestructive` carries `VM.Audit` itself.
+- The Lab executor finds the pinned image's template in `/cluster/resources`, which leaves out guests without `VM.Audit`. `FleetLab` therefore carries `VM.Audit` for the template's path (`lab.provision.template-lookup`).
 - `proxmox.guest.template` requires `VM.Allocate` on `/vms/{vmid}`. **`VM.Allocate` also lets the token delete that VM.** It also counts as a substitute for `Permissions.Modify` on `/vms/...`, so the token can delegate subsets of its own privileges on that path. This is why the privilege is scoped to a pool and never granted on `/`.
 - `proxmox.task-cancel` needs no privilege for tasks the token started, and `Sys.Modify` on `/nodes/{node}` for any other task. Fleet can therefore cancel only its own tasks, and that is intended.
 - Fleet does not delete VMs today. `DELETE /nodes/{node}/qemu/{vmid}` would need `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. When Lab `destroy` cleanup lands, it will need no new privilege, only the path.
@@ -301,6 +302,7 @@ operate      missing
 destructive  missing
   …
 lab          missing
+  missing VM.Audit on /vms/{vmid}  (needed by lab.provision)
   missing VM.Clone on /vms/{vmid}  (needed by lab.provision)
   missing VM.Allocate on /vms/{newid}  (needed by lab.provision)
   …
