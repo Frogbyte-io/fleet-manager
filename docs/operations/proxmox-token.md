@@ -307,13 +307,12 @@ destructive  granted
 lab          granted
 ```
 
-**The same setup on 8.x, with `FleetAgent8` on the clone targets but not on the pool.** Every tier is granted, and the agent reads are reported as an opt-in:
+**The same setup on 8.x, with `FleetAgent8` on the clone targets but not on the pool.** Every tier is granted. The `VM.Monitor` grant on the clone-target VMIDs also satisfies the opt-in agent-read check, because Fleet counts a grant on any guest in scope, so no `read.guest-agent` line appears:
 
 ```text
 account <account-id>  PVE 8.4.1  rules 8.x
 TIER         STATUS
 discover     granted
-  opt-in read.guest-agent not granted: VM.Monitor on /vms/{vmid}
 operate      granted
 destructive  granted
   opt-in proxmox.task-cancel not granted: Sys.Modify on /nodes/{node}

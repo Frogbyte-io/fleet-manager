@@ -313,12 +313,15 @@ fn no_pool_acl_in_the_guide_grants_a_lab_role_holding_vm_allocate() {
             let Some((_, role)) = rest.split_once("--roles ") else {
                 panic!("{line:?} has no --roles");
             };
-            let role = role.split_whitespace().next().expect("a role name");
-            if lab.roles.iter().any(|name| name == role) {
-                assert!(
-                    !roles[role].contains("VM.Allocate"),
-                    "{major}.x: {role} is granted on a pool but holds VM.Allocate"
-                );
+            // `--roles` takes a comma-separated list: check every role in it.
+            let list = role.split_whitespace().next().expect("a role name");
+            for role in list.split(',') {
+                if lab.roles.iter().any(|name| name == role) {
+                    assert!(
+                        !roles[role].contains("VM.Allocate"),
+                        "{major}.x: {role} is granted on a pool but holds VM.Allocate"
+                    );
+                }
             }
         }
         assert!(pool_acls > 0, "the guide grants no pool ACLs");
