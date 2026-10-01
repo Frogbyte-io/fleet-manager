@@ -15,18 +15,18 @@ From the PVE admin guide, chapter *User Management* ([9.x](https://pve.proxmox.c
 - **Pools.** A permission on `/pool/{poolid}` is inherited by every VM and storage that is a member of the pool. Nodes and SDN zones cannot be pool members, so they always need their own ACL entry.
 - **Privilege-separated tokens.** With `privsep=1`, a token's effective permissions are the **intersection** of the user's ACLs and the token's own ACLs. A token can never exceed its user. Grant the same roles on the same paths to both `fleet@pve` and the token. Token ACLs are per token ID, so a new token starts with no permissions, even when the user has some.
 - **Default.** In both majors, `pveum user token add` defaults to `privsep=1` (`generate_token` in `PVE/API2/User.pm`). This guide passes `--privsep 1` explicitly anyway.
-- **Task ownership.** A token owns the tasks it starts. Reading or stopping its own task (UPID) needs no privilege. Reading another principal's task needs `Sys.Audit` on `/nodes/{node}`, and stopping one needs `Sys.Modify` there. Fleet does not need `Sys.Modify`; do not grant it.
+- **Task ownership.** A token owns the tasks it starts. Reading or stopping its own task (UPID) needs no privilege. Reading another principal's task needs `Sys.Audit` on `/nodes/{node}`, and stopping one needs `Sys.Modify` there. Fleet's own tasks never need `Sys.Modify`; cancelling another principal's task is an opt-in this guide does not grant (see the [notes](#required-privileges-per-tier)).
 
 ## Tier table
 
-Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and operation kinds (`crates/fleet-application/src/operation.rs`) group into four capability tiers. Each tier has one role. Each role holds every privilege its tier requires, so granting a role on the recommended paths is enough for that tier.
+Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and operation kinds (`crates/fleet-application/src/operation.rs`) group into four capability tiers. Each tier has one role (8.x Lab adds `FleetAgent8` on its clone targets). A tier's roles hold every privilege it requires, so granting them on the recommended paths is enough for that tier.
 
 | Tier | Fleet permission → operations | Role | Recommended ACL path |
 |---|---|---|---|
 | **discover** | `proxmox.read` → discovery, nodes, guests, guest observe (config MACs, agent info, network, OS), snapshot list, task status | `FleetDiscover` (8.x: plus the opt-in `FleetAgent8`) | `/nodes`, `/pool/<pool>` (storage in the pool, or `/storage/<id>`) — or `/` for whole-cluster inventory |
 | **operate** | `proxmox.operate` → `proxmox.guest.start`, `.stop`, `.shutdown`, `.reboot` | `FleetOperate` | `/pool/<pool>` |
 | **destructive** | `proxmox.destructive` → `proxmox.guest.snapshot`, `.snapshot-revert`, `.snapshot-delete`, `.clone`, `.template`, `proxmox.task-cancel` | `FleetDestructive` | `/pool/<pool>` for existing guests and storage; clone targets also need `/vms/<newid>` (see [clone targets](#why-clone-and-lab-need-more-than-the-pool)); `/sdn/zones/<zone>/<bridge>` |
-| **lab** | `lab.provision` → clone the pinned image, start it, probe readiness | `FleetLab` | the template's `/vms/<id>` (protected), `/storage/<id>`, the new guests' `/vms/<newid>`, `/sdn/zones/<zone>/<bridge>`; never `/pool/<pool>` |
+| **lab** | `lab.provision` → clone the pinned image, start it, probe readiness | `FleetLab` (8.x: plus `FleetAgent8` on the new guests' `/vms/<newid>`) | the template's `/vms/<id>` (protected), `/storage/<id>`, the new guests' `/vms/<newid>`, `/sdn/zones/<zone>/<bridge>`; never `/pool/<pool>` |
 
 ### Required privileges per tier
 
@@ -45,7 +45,7 @@ The two tables below are the PVE privileges per tier, keyed by major. Each entry
 |---|---|---|---|---|
 | discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{vmid}` | `Pool.Audit` on `/pool/{pool}` | `Pool.Audit`: the opt-in row. Fleet's discovery does not use pool rows today; drop it from the role if you prefer |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
-| destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | — | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
+| destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
 | lab | `FleetLab` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | — | — |
 <!-- privilege-table:end -->
 
@@ -58,11 +58,11 @@ Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted al
 |---|---|---|---|---|
 | discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}` | `Pool.Audit` on `/pool/{pool}`, `VM.Monitor` on `/vms/{vmid}` | `Pool.Audit`: the opt-in row, as on 9.x. The agent privilege is a separate opt-in role, not part of this one |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
-| destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | — | `VM.Snapshot.Rollback`: as on 9.x |
-| lab | `FleetLab` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}` | `VM.Monitor` on `/vms/{newid}` | — |
+| destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: as on 9.x |
+| lab | `FleetLab`, `FleetAgent8` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.Monitor` on `/vms/{newid}` | — | — |
 <!-- privilege-table:end -->
 
-On 8.x, `VM.Monitor` is opt-in for both discover (agent facts) and lab (the `guest_agent` readiness probe), because it also permits agent `exec`. See [8.x vs 9.x differences](#8x-vs-9x-differences).
+On 8.x, `VM.Monitor` is opt-in for discover (agent facts), because it also permits agent `exec`. For lab it is **required**: the provision executor polls `agent/info` for readiness on every template today, whatever its readiness probe setting, so a token without it reaches `never_ready`. Grant `FleetAgent8` on the reserved clone-target VMIDs only ([clone targets](#why-clone-and-lab-need-more-than-the-pool)), not on the template or the pool. See [8.x vs 9.x differences](#8x-vs-9x-differences).
 
 Notes:
 
@@ -70,8 +70,8 @@ Notes:
 - The destructive executors read the snapshot list and the cluster resources before they act (idempotency checks), so `FleetDestructive` carries `VM.Audit` itself.
 - The Lab executor finds the pinned image's template in `/cluster/resources`, which leaves out guests without `VM.Audit`. `FleetLab` therefore carries `VM.Audit` for the template's path (`lab.provision.template-lookup`).
 - `proxmox.guest.template` requires `VM.Allocate` on `/vms/{vmid}`. **`VM.Allocate` also lets the token delete that VM.** It also counts as a substitute for `Permissions.Modify` on `/vms/...`, so the token can delegate subsets of its own privileges on that path. This is why the privilege is scoped to a pool and never granted on `/`.
-- `proxmox.task-cancel` needs no privilege for tasks the token started, and `Sys.Modify` on `/nodes/{node}` for any other task. Fleet can therefore cancel only its own tasks, and that is intended.
-- Fleet does not delete VMs today. `DELETE /nodes/{node}/qemu/{vmid}` would need `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. When Lab `destroy` cleanup lands, it will need no new privilege, only the path.
+- `proxmox.task-cancel` needs no privilege for tasks the token started. The cancel review binds the task's UPID to the reviewed guest's node and VMID, but not to the user that started it, so a reviewed UPID can name another principal's task on that guest. PVE stops such a task only with `Sys.Modify` on `/nodes/{node}`; that is the opt-in `proxmox.task-cancel.other-principal` row. This guide does not grant it: `Sys.Modify` on a node also allows changing its network, DNS, time, and services. Without it, cancelling a task Fleet did not start is refused with 403. If you need it anyway, the role blocks define `FleetCancelAnyTask`; grant it on `/nodes/<node>`.
+- Fleet does not delete VMs today. `DELETE /nodes/{node}/qemu/{vmid}` would need `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. Lab clones inherit the template's protection flag, so Lab `destroy` cleanup will also need `VM.Config.Options` on `/vms/{newid}` to clear it (see [step 5](#5-acls)).
 - Image builds (`image.build`) run Packer, which uses its own credentials. This guide does not cover Packer's token.
 
 ## 8.x vs 9.x differences
@@ -89,7 +89,7 @@ Notes:
 
 What this means for Fleet:
 
-1. **On 8.x, `VM.Monitor` is not a read privilege.** Fleet needs it only for the agent reads: `agent/info`, `agent/network-get-interfaces`, `agent/get-osinfo`, and the Lab `guest_agent` readiness probe. The same privilege also authorizes agent `exec`, `file-write`, and `set-user-password`, which means **arbitrary command execution as root inside every guest in scope**. For that reason this guide leaves `VM.Monitor` out of `FleetDiscover` on 8.x and puts it in a separate, opt-in `FleetAgent8` role. Without it, discovery still works: Fleet reports "the agent is unreachable" per guest, and machine association falls back to config MACs. Lab templates that use the `guest_agent` readiness probe need `FleetAgent8` on the new guests' path. Otherwise, choose `ssh_exec` readiness.
+1. **On 8.x, `VM.Monitor` is not a read privilege.** Fleet needs it only for the agent reads: `agent/info`, `agent/network-get-interfaces`, `agent/get-osinfo`, and the Lab `guest_agent` readiness probe. The same privilege also authorizes agent `exec`, `file-write`, and `set-user-password`, which means **arbitrary command execution as root inside every guest in scope**. For that reason this guide leaves `VM.Monitor` out of `FleetDiscover` on 8.x and puts it in a separate, opt-in `FleetAgent8` role. Without it, discovery still works: Fleet reports "the agent is unreachable" per guest, and machine association falls back to config MACs. Lab is different: the provision executor polls `agent/info` for readiness on every template today, even one whose readiness probe is `ssh_exec`, so on 8.x Lab requires `FleetAgent8` on the new guests' `/vms/<newid>` paths.
 2. **Role definitions are not portable between majors.** `pveum role add` rejects unknown privilege names with "invalid privilege '…'". Creating a role with `VM.GuestAgent.Audit` fails on 8.x, and creating one with `VM.Monitor` fails on 9.x. Use the commands for your major below.
 3. **Upgrading 8 → 9.** `pve8to9` fails its custom-role check while a custom role still holds `VM.Monitor`. After the upgrade, the config parser ignores unknown privileges with a warning ("user config - ignore invalid privilege 'VM.Monitor'"). After upgrading, delete `FleetAgent8` and add `VM.GuestAgent.Audit` to `FleetDiscover` (and to `FleetLab`) using the 9.x commands. Do **not** replace it with `VM.GuestAgent.Unrestricted`.
 4. **Token defaults.** The 9.x guide states that privilege separation is the default and documents `--expire`. On 8.x the code defaults are the same (`privsep=1`, optional `expire`), even though the 8.x guide text does not say so.
@@ -122,6 +122,10 @@ pveum role add FleetDiscover    --privs "Sys.Audit,VM.Audit,Datastore.Audit,Pool
 pveum role add FleetOperate     --privs "VM.PowerMgmt"
 pveum role add FleetDestructive --privs "VM.Audit,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit"
+# Opt-in only, not granted below. Sys.Modify on a node also allows changing its
+# network, DNS, time, and services. It lets proxmox.task-cancel stop tasks
+# Fleet did not start.
+pveum role add FleetCancelAnyTask --privs "Sys.Modify"
 ```
 <!-- privilege-roles:end -->
 
@@ -133,10 +137,12 @@ pveum role add FleetDiscover    --privs "Sys.Audit,VM.Audit,Datastore.Audit,Pool
 pveum role add FleetOperate     --privs "VM.PowerMgmt"
 pveum role add FleetDestructive --privs "VM.Audit,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit"
-# Opt-in only. VM.Monitor also permits guest-agent exec/file-write/set-user-password
-# (root inside the guest). Grant it only where agent observations or the
-# guest_agent readiness probe are worth that authority.
+# VM.Monitor also permits guest-agent exec/file-write/set-user-password (root
+# inside the guest). Lab readiness requires it on the clone targets; on the
+# pool it is an opt-in for agent observations.
 pveum role add FleetAgent8      --privs "VM.Monitor"
+# Opt-in only, not granted below (see FleetCancelAnyTask in the 9.x block).
+pveum role add FleetCancelAnyTask --privs "Sys.Modify"
 ```
 <!-- privilege-roles:end -->
 
@@ -195,7 +201,7 @@ for who in "--users fleet@pve" "--tokens $TOKEN"; do
 done
 ```
 
-The `$who` expansion is left unquoted on purpose, so that it splits into a flag and its value.
+The `$who` expansion is left unquoted on purpose, so that it splits into a flag and its value. For whole-cluster read-only inventory, replace the two FleetDiscover lines with `pveum acl modify / --roles FleetDiscover $who`. On 9.x this grants informational agent reads for every VM. On 8.x, FleetDiscover contains no agent privilege.
 
 FleetLab's `VM.Allocate` on the template's path would also let the token delete the template. Protect it; PVE then refuses to remove the VM or its disks while the flag is set ("can't remove VM … - protection mode enabled"), and cloning is unaffected:
 
@@ -203,7 +209,7 @@ FleetLab's `VM.Allocate` on the template's path would also let the token delete 
 qm set $TEMPLATE --protection 1
 ```
 
-Clones inherit the flag: PVE copies `protection` into the new guest's config. Clearing it needs `VM.Config.Options` on the guest, which no Fleet role grants, so the token can neither unprotect the template nor delete a clone. Fleet does not delete VMs today; to remove a Lab clone by hand, run `qm set <vmid> --protection 0` first. Lab `destroy` cleanup, when it lands, has to clear the flag on its own clones (and so needs `VM.Config.Options` on `/vms/{newid}`). For whole-cluster read-only inventory, replace the two FleetDiscover lines with `pveum acl modify / --roles FleetDiscover $who`. On 9.x this grants informational agent reads for every VM. On 8.x, FleetDiscover contains no agent privilege.
+Clones inherit the flag: PVE copies `protection` into the new guest's config. Clearing it needs `VM.Config.Options` on the guest, which no Fleet role grants, so the token can neither unprotect the template nor delete a clone. Fleet does not delete VMs today; to remove a Lab clone by hand, run `qm set <vmid> --protection 0` first. Lab `destroy` cleanup, when it lands, has to clear the flag on its own clones (and so needs `VM.Config.Options` on `/vms/{newid}`).
 
 On 8.x, if you opt into agent reads for the pool:
 
@@ -241,9 +247,16 @@ fleetctl proxmox confirm <account-id> --fingerprint <SHA256:...>   # after check
    for id in 9000 9001 9002; do                 # the VMIDs reserved for Fleet clones
      for who in "--users fleet@pve" "--tokens $TOKEN"; do
        pveum acl modify /vms/$id --roles FleetLab $who
-       # 8.x, templates with guest_agent readiness: the probe needs VM.Monitor
-       # on the new guest too (the opt-in FleetAgent8)
-       # pveum acl modify /vms/$id --roles FleetAgent8 $who
+     done
+   done
+   ```
+
+   On 8.x, Lab's readiness probe also needs `VM.Monitor` on each new guest, so grant `FleetAgent8` on the same VMIDs (and only there):
+
+   ```sh
+   for id in 9000 9001 9002; do
+     for who in "--users fleet@pve" "--tokens $TOKEN"; do
+       pveum acl modify /vms/$id --roles FleetAgent8 $who
      done
    done
    ```
@@ -252,7 +265,7 @@ fleetctl proxmox confirm <account-id> --fingerprint <SHA256:...>   # after check
 3. `Datastore.AllocateSpace` on `/storage/{storeid}` for **every non-CD-ROM disk** of the source, full or linked clone. When `storage` is passed, the check uses that target storage instead of the source disk's storage. The same privilege is also required on the `vmstatestorage`, if the source defines one. Adding the storage to the pool covers this through the pool ACL. A physical `cdrom` passthrough drive would also need `Sys.Console` on `/`, so keep templates free of host CD-ROM passthrough.
 4. `SDN.Use` on `/sdn/zones/<zone>/<bridge>` for every `netN` of the source. A plain Linux bridge is in the zone `localnetwork`. VLAN-tagged NICs are checked on `/sdn/zones/<zone>/<bridge>/<tag>`, which the bridge ACL covers through propagation.
 
-The Lab tier then starts the new guest (`VM.PowerMgmt`) and polls `agent/info` for `guest_agent` readiness (`VM.GuestAgent.Audit` on 9.x, `VM.Monitor` on 8.x) on the new VMID. That is why `FleetLab` carries those privileges and is granted on the clone-target paths, not only on the pool.
+The Lab tier then starts the new guest (`VM.PowerMgmt`) and polls `agent/info` for `guest_agent` readiness (`VM.GuestAgent.Audit` on 9.x, `VM.Monitor` on 8.x) on the new VMID. It does so for every template, whatever its readiness probe setting. That is why `FleetLab` (and, on 8.x, `FleetAgent8`) is granted on the clone-target paths.
 
 ## Verify
 
@@ -282,7 +295,7 @@ The command calls `GET /api/v1/proxmox/accounts/{accountId}/privileges`. It need
 
 Opt-in checks (`required: false`) never gate a tier. The text output lists them as `opt-in … not granted`.
 
-**The full setup on 9.x** (every role from [step 5](#5-acls), plus FleetLab on a reserved clone VMID):
+**The full setup on 9.x** (every role from [step 5](#5-acls), plus FleetLab on a free reserved clone VMID). Cancelling other principals' tasks stays an opt-in that is not granted:
 
 ```text
 account <account-id>  PVE 9.0.10  rules 9.x
@@ -290,21 +303,23 @@ TIER         STATUS
 discover     granted
 operate      granted
 destructive  granted
+  opt-in proxmox.task-cancel not granted: Sys.Modify on /nodes/{node}
 lab          granted
 ```
 
-**The same setup on 8.x without the opt-in `FleetAgent8`.** Every tier is granted, and the agent reads are reported as opt-ins:
+**The same setup on 8.x, with `FleetAgent8` on the clone targets but not on the pool.** Every tier is granted. The `VM.Monitor` grant on the clone-target VMIDs also satisfies the opt-in agent-read check, because Fleet counts a grant on any guest in scope, so no `read.guest-agent` line appears:
 
 ```text
 account <account-id>  PVE 8.4.1  rules 8.x
 TIER         STATUS
 discover     granted
-  opt-in read.guest-agent not granted: VM.Monitor on /vms/{vmid}
 operate      granted
 destructive  granted
+  opt-in proxmox.task-cancel not granted: Sys.Modify on /nodes/{node}
 lab          granted
-  opt-in lab.provision not granted: VM.Monitor on /vms/{newid}
 ```
+
+Without `FleetAgent8` on the clone targets, 8.x lab is `missing VM.Monitor on /vms/{newid}`.
 
 **A privilege-separated token whose own ACLs were never granted.** This is the most common mistake: the user has the roles, but the token does not. PVE answers `{}`, and every tier is missing. Excerpt:
 
@@ -402,7 +417,8 @@ If a token may have leaked, revoke it on PVE first (`pveum user token remove …
 - a tier's **Required** or **Opt-in** cell in the [per-major tables](#required-privileges-per-tier) differs from the table's rows for that tier and major (the failure prints the expected cell);
 - a [role command](#2-roles) lacks a required privilege of its tier, or grants something not named in **Also in the role**;
 - a role names a privilege the table does not know for that major, for example `VM.Monitor` in a 9.x role;
-- a role that belongs to no tier (8.x `FleetAgent8`) grants anything but opt-in privileges.
+- a role that belongs to no tier (`FleetCancelAnyTask`) grants anything but opt-in privileges;
+- a `pveum acl modify /pool/…` line grants a Lab role that holds `VM.Allocate`.
 
 When the privilege table changes, paste the cells the test prints, then update the role commands. The [appendix](#appendix-endpoint--privilege-evidence) is the upstream evidence the table was built from.
 
