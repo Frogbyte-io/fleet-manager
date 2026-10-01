@@ -6,6 +6,7 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -16,17 +17,23 @@ use super::redact::Redactor;
 /// One running controller.
 #[derive(Debug)]
 pub struct Controller {
-    child: Child,
+    /// The running process and the address it listens on; both change when
+    /// [`Controller::with_store`] restarts it (the address only if the port
+    /// could not be reused).
+    process: Mutex<(Child, std::net::SocketAddr)>,
     dir: tempfile::TempDir,
-    address: std::net::SocketAddr,
     fleetctl: PathBuf,
     redactor: Redactor,
 }
 
 impl Drop for Controller {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let process = self
+            .process
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = process.0.kill();
+        let _ = process.0.wait();
     }
 }
 
@@ -113,58 +120,174 @@ impl Controller {
         write_private(&key_path, &format!("1 {hex}\n"))?;
         let port = free_port()?;
         let address: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-        let log = std::fs::File::create(dir.path().join("controller.log"))
-            .map_err(|error| error.to_string())?;
-        let log_err = log.try_clone().map_err(|error| error.to_string())?;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fleet-controller"));
-        // The child sees none of the suite's own FLEET_* variables.
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("FLEET_") {
-                command.env_remove(key);
-            }
-        }
-        let child = command
-            .arg("serve")
-            .env("FLEET_LISTEN", address.to_string())
-            .env("FLEET_WEB_DIST", &web)
-            .env("FLEET_DATA_DIR", &data)
-            .env("FLEET_MASTER_KEY_FILE", &key_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .map_err(|error| format!("the controller binary must start: {error}"))?;
+        let child = spawn_child(dir.path(), address)?;
         // Owned by the controller from here on, so Drop kills it on every
         // path, including a failed readiness wait.
-        let mut controller = Self {
-            child,
+        let controller = Self {
+            process: Mutex::new((child, address)),
             dir,
-            address,
             fleetctl: fleetctl.to_path_buf(),
             redactor,
         };
+        controller.wait_ready().await?;
+        Ok(controller)
+    }
+
+    fn address(&self) -> std::net::SocketAddr {
+        self.process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
+    }
+
+    /// The exit status when the controller process has already exited.
+    fn exited(&self) -> Option<std::process::ExitStatus> {
+        let mut process = self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        process.0.try_wait().ok().flatten()
+    }
+
+    /// Waits until the Proxmox surface answers, or the process exits.
+    async fn wait_ready(&self) -> Result<(), String> {
         for _ in 0..150 {
-            if let Ok(Some(status)) = controller.child.try_wait() {
+            if let Some(status) = self.exited() {
                 return Err(format!(
                     "the controller exited during startup ({status}): {}",
-                    controller.log_tail()
+                    self.log_tail()
                 ));
             }
-            if let Ok((200, _)) = controller.try_get("/api/v1/proxmox/accounts").await {
-                return Ok(controller);
+            if let Ok((200, _)) = self.try_get("/api/v1/proxmox/accounts").await {
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Err(format!(
             "the controller never became ready: {}",
-            controller.log_tail()
+            self.log_tail()
         ))
     }
 
-    /// The controller's base URL.
+    /// Stops the controller, runs `work` against its store, then restarts
+    /// the controller on the same data directory and master key.
+    ///
+    /// The store admits one active controller (an OS lock on `fleet.lock`),
+    /// so fixture writes cannot happen while the controller runs. The
+    /// controller is asked to stop (SIGTERM, then a kill after a grace
+    /// period), the store is opened, `work` runs, and the store is closed
+    /// before the restart so the lock is free again. The restart reuses the
+    /// listen address, so URLs held by the caller stay valid; only if the
+    /// port cannot be rebound does the controller move to a new one, which
+    /// [`Controller::url`] and every request method then follow.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot be opened, `work` fails, or the controller does
+    /// not come back. The controller is restarted even if `work` fails.
+    pub async fn with_store<T>(
+        &self,
+        work: impl AsyncFnOnce(&fleet_storage_sqlite::Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.stop().await?;
+        let outcome = async {
+            let store = fleet_storage_sqlite::Store::open(&self.database())
+                .await
+                .map_err(|error| format!("cannot open the controller's store: {error}"))?;
+            let result = work(&store).await;
+            store.close().await;
+            result
+        }
+        .await;
+        let restarted = self.restart().await;
+        match (outcome, restarted) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(detail), _) | (Ok(_), Err(detail)) => Err(detail),
+        }
+    }
+
+    /// SIGTERM, wait up to 10 s for a clean exit, then kill.
+    async fn stop(&self) -> Result<(), String> {
+        {
+            let process = self
+                .process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            #[cfg(unix)]
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(process.0.id().to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            #[cfg(not(unix))]
+            drop(process);
+        }
+        for _ in 0..100 {
+            if self.exited().is_some() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let mut process = self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        process
+            .0
+            .kill()
+            .map_err(|error| format!("cannot stop the controller: {error}"))?;
+        process
+            .0
+            .wait()
+            .map_err(|error| format!("cannot reap the controller: {error}"))?;
+        Ok(())
+    }
+
+    /// Starts a new process on the same directory, preferring the old port.
+    async fn restart(&self) -> Result<(), String> {
+        let old = self.address();
+        let mut last = String::new();
+        // Rebinding the same port can race the kernel releasing it; retry
+        // briefly, then fall back to a fresh port.
+        for attempt in 0..8 {
+            let address = if attempt < 5 {
+                old
+            } else {
+                ([127, 0, 0, 1], free_port()?).into()
+            };
+            let child = spawn_child(self.dir.path(), address)?;
+            {
+                let mut process = self
+                    .process
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *process = (child, address);
+            }
+            match self.wait_ready().await {
+                Ok(()) => return Ok(()),
+                Err(detail) => {
+                    last = detail;
+                    // A still-running but unready process must not linger.
+                    {
+                        let mut process = self
+                            .process
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let _ = process.0.kill();
+                        let _ = process.0.wait();
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+        Err(format!("the controller did not restart: {last}"))
+    }
+
+    /// The controller's base URL (it follows a restart onto a new port).
     #[must_use]
     pub fn url(&self) -> String {
-        format!("http://{}", self.address)
+        format!("http://{}", self.address())
     }
 
     /// The controller's SQLite database (for fixture seeding only).
@@ -184,7 +307,7 @@ impl Controller {
     }
 
     async fn try_get(&self, path: &str) -> Result<(u16, Value), String> {
-        raw(self.address, "GET", path, None).await
+        raw(self.address(), "GET", path, None).await
     }
 
     /// GET; transport failures become an error.
@@ -193,7 +316,7 @@ impl Controller {
     ///
     /// When the controller is unreachable.
     pub async fn get(&self, path: &str) -> Result<(u16, Value), String> {
-        raw(self.address, "GET", path, None).await
+        raw(self.address(), "GET", path, None).await
     }
 
     /// POST with a JSON body.
@@ -202,7 +325,7 @@ impl Controller {
     ///
     /// When the controller is unreachable.
     pub async fn post(&self, path: &str, body: &Value) -> Result<(u16, Value), String> {
-        raw(self.address, "POST", path, Some(body)).await
+        raw(self.address(), "POST", path, Some(body)).await
     }
 
     /// Runs `fleetctl --url <controller> --output json <args>` with optional
@@ -261,6 +384,35 @@ impl Controller {
         .await
         .map_err(|error| format!("fleetctl task: {error}"))?
     }
+}
+
+/// Spawns `fleet-controller serve` over `dir`'s `web`, `data`, and
+/// `master.key`, logging (appending) to `dir/controller.log`.
+fn spawn_child(dir: &Path, address: std::net::SocketAddr) -> Result<Child, String> {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("controller.log"))
+        .map_err(|error| error.to_string())?;
+    let log_err = log.try_clone().map_err(|error| error.to_string())?;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fleet-controller"));
+    // The child sees none of the suite's own FLEET_* variables.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("FLEET_") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .arg("serve")
+        .env("FLEET_LISTEN", address.to_string())
+        .env("FLEET_WEB_DIST", dir.join("web"))
+        .env("FLEET_DATA_DIR", dir.join("data"))
+        .env("FLEET_MASTER_KEY_FILE", dir.join("master.key"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .map_err(|error| format!("the controller binary must start: {error}"))
 }
 
 /// Writes a file created 0600.
