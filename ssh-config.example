@@ -13,7 +13,8 @@ Host linux-dev
     # accept-new pins the host key on first connect, so a later changed/spoofed
     # key fails loudly. The first connect is trust-on-first-use: compare the
     # fingerprint it records (ssh-keygen -lF <host>) with the one printed on
-    # the target (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) before use.
+    # the target for the same key type (ssh-keygen -lf on its host key .pub:
+    # /etc/ssh/ssh_host_*_key.pub, or %ProgramData%\ssh\ on Windows).
     StrictHostKeyChecking accept-new
 
 Host linux-dev-ts
