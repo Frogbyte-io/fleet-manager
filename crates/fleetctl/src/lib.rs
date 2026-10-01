@@ -1089,8 +1089,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
             parse_install_node(machine_id, rest, &url)?
         }
         ["tailnet", verb, rest @ ..] => parse_tailnet_command(verb, rest)?,
-        ["proxmox", "privileges", rest @ ..] => proxmox_privileges::parse(rest, &mut output)?,
         ["proxmox", "tasks", rest @ ..] => proxmox_tasks::parse(rest, &mut output)?,
+        ["proxmox", "privileges", rest @ ..] => proxmox_privileges::parse(rest, &mut output)?,
         ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
         ["images", verb, rest @ ..] => parse_images_command(verb, rest)?,
         ["lab", verb, rest @ ..] => parse_lab_command(verb, rest)?,
@@ -3762,8 +3762,8 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             | Command::ProxmoxGuests { .. }
             | Command::ProxmoxObserveGuest { .. } => render_proxmox(Some(payload)),
             Command::ProxmoxNodes { .. } => render_proxmox_nodes(Some(payload)),
-            Command::ProxmoxPrivileges { .. } => proxmox_privileges::render(payload),
             Command::ProxmoxTasks { .. } => proxmox_tasks::render(payload),
+            Command::ProxmoxPrivileges { .. } => proxmox_privileges::render(payload),
             _ => render_text(Some(payload)),
         },
     }
@@ -5860,18 +5860,18 @@ pub fn render_proxmox_for_test(value: &Value) -> String {
     render_proxmox(Some(value))
 }
 
-/// Renders the Proxmox privilege report as human text; exposed for tests.
-#[doc(hidden)]
-#[must_use]
-pub fn render_proxmox_privileges_for_test(value: &Value) -> String {
-    proxmox_privileges::render(value)
-}
-
 /// Renders the Proxmox task-history page as human text; exposed for tests.
 #[doc(hidden)]
 #[must_use]
 pub fn render_proxmox_tasks_for_test(value: &Value) -> String {
     proxmox_tasks::render(value)
+}
+
+/// Renders the Proxmox privilege report as human text; exposed for tests.
+#[doc(hidden)]
+#[must_use]
+pub fn render_proxmox_privileges_for_test(value: &Value) -> String {
+    proxmox_privileges::render(value)
 }
 
 /// Renders the Proxmox node-capacity surface as human text; exposed for tests.

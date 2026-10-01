@@ -29,6 +29,7 @@ const NOW: i64 = 1_800_000_000_000;
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
 const UPID_FLEET: &str = "UPID:pve:001A2B3C:05F5E100:68D83818:qmstart:101:fleet@pve!fleet-ops:";
 const UPID_OUTSIDE: &str = "UPID:pve:001A2B00:05F5E000:68D836EC:qmshutdown:101:root@pam:";
+const UPID_OTHER_NODE: &str = "UPID:pve2:001A2C00:05F5E200:68D83900:qmstart:202:root@pam:";
 const UPID_FAILED: &str = "UPID:pve:001A2900:05F5DE00:68D83624:qmclone:900:root@pam:";
 
 fn principal() -> ActingPrincipal {
@@ -297,6 +298,13 @@ impl FakeTasks {
                         ProxmoxTaskState::Error,
                         Some("clone failed"),
                     ),
+                    // Another node and guest, also running: only the
+                    // node/vmid filters can keep it out of a narrowed read.
+                    RawTask {
+                        node: "pve2".to_owned(),
+                        target_id: Some("202".to_owned()),
+                        ..task(UPID_OTHER_NODE, "qmstart", ProxmoxTaskState::Running, None)
+                    },
                 ],
                 warnings: vec!["node pve2 tasks are unavailable: the connection failed".to_owned()],
             },
@@ -322,7 +330,15 @@ impl ProxmoxTaskHistoryPort for FakeTasks {
             .lock()
             .unwrap()
             .push((account.id.clone(), query.clone()));
-        Ok(self.history.clone())
+        // Like PVE, the node and guest filters apply on the provider side.
+        let mut history = self.history.clone();
+        history.tasks.retain(|task| {
+            query.node.as_ref().is_none_or(|node| &task.node == node)
+                && query
+                    .vmid
+                    .is_none_or(|vmid| task.target_id.as_deref() == Some(&vmid.to_string()))
+        });
+        Ok(history)
     }
 }
 
@@ -424,7 +440,7 @@ async fn each_task_carries_the_operation_that_started_it() {
     assert_eq!(snapshot.account_id, "acc-1");
     assert_eq!(snapshot.pve_version, "9.2.2");
     assert_eq!(snapshot.observed_at, NOW);
-    assert_eq!(snapshot.tasks.len(), 3);
+    assert_eq!(snapshot.tasks.len(), 4);
     let fleet = &snapshot.tasks[0];
     assert_eq!(fleet.upid, UPID_FLEET);
     assert_eq!(
@@ -446,6 +462,7 @@ async fn each_task_carries_the_operation_that_started_it() {
         snapshot.tasks[2].exit_status.as_deref(),
         Some("clone failed")
     );
+    assert_eq!(snapshot.tasks[3].upid, UPID_OTHER_NODE);
     // The per-node warning passes through untouched.
     assert_eq!(snapshot.warnings.len(), 1);
     assert!(snapshot.warnings[0].contains("node pve2"));
@@ -459,6 +476,7 @@ async fn each_task_carries_the_operation_that_started_it() {
                 node: None,
                 vmid: None,
                 running_only: false,
+                finished_status: None,
                 limit_per_node: TASKS_PER_NODE,
             }
         )]
@@ -484,7 +502,7 @@ async fn without_operation_read_the_link_is_withheld_with_a_warning() {
         .await
         .unwrap();
 
-    assert_eq!(snapshot.tasks.len(), 3);
+    assert_eq!(snapshot.tasks.len(), 4);
     assert!(
         snapshot
             .tasks
@@ -521,6 +539,31 @@ async fn the_filters_reach_the_provider_and_narrow_the_snapshot() {
         .unwrap();
     assert_eq!(running.tasks.len(), 1);
     assert_eq!(running.tasks[0].upid, UPID_FLEET);
+    // The other node's and guest's running task is not in the narrowed read.
+    assert!(
+        running
+            .tasks
+            .iter()
+            .all(|task| task.upid != UPID_OTHER_NODE)
+    );
+
+    let other_guest = fixture
+        .proxmox
+        .task_history(
+            &AllowExcept::default(),
+            &principal(),
+            "acc-1",
+            &TaskHistoryQuery {
+                node: Some("pve2".to_owned()),
+                vmid: Some(202),
+                status: None,
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(other_guest.tasks.len(), 1);
+    assert_eq!(other_guest.tasks[0].upid, UPID_OTHER_NODE);
 
     let errors = fixture
         .proxmox
@@ -540,16 +583,20 @@ async fn the_filters_reach_the_provider_and_narrow_the_snapshot() {
     assert_eq!(errors.tasks[0].upid, UPID_FAILED);
 
     let queries = fixture.tasks.queries();
+    assert_eq!(queries.len(), 3);
     assert_eq!(
         queries[0].1,
         RawTaskQuery {
             node: Some("pve".to_owned()),
             vmid: Some(101),
             running_only: true,
+            finished_status: None,
             limit_per_node: TASKS_PER_NODE,
         }
     );
-    assert!(!queries[1].1.running_only);
+    // A finished status is pushed down to PVE, ahead of its per-node limit.
+    assert!(!queries[2].1.running_only);
+    assert_eq!(queries[2].1.finished_status, Some(ProxmoxTaskState::Error));
 }
 
 #[tokio::test]

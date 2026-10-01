@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use fleet_core::SensitiveString;
 use fleet_provider_proxmox::{
     MAX_TASKS_PER_NODE, ProxmoxClient, PveCredentials, PveHttpMethod, PveHttpRequest,
-    PveHttpResponse, PveTaskQuery, PveTaskSource, PveTransport, PveTransportError, TaskStatus,
+    PveHttpResponse, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTransport, PveTransportError,
+    TaskStatus,
 };
 
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
@@ -16,6 +17,7 @@ const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A764
 #[derive(Debug)]
 struct FixtureTransport {
     family: &'static str,
+    resources: Option<&'static str>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -23,6 +25,15 @@ impl FixtureTransport {
     fn new(family: &'static str) -> Arc<Self> {
         Arc::new(Self {
             family,
+            resources: None,
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn with_resources(family: &'static str, resources: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            family,
+            resources: Some(resources),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -42,6 +53,9 @@ impl FixtureTransport {
                 "pve8" => (200, include_str!("fixtures/pve8/version.json")),
                 _ => (200, include_str!("fixtures/pve9/version.json")),
             },
+            "/api2/json/cluster/resources" if self.resources.is_some() => {
+                (200, self.resources.unwrap())
+            }
             "/api2/json/cluster/resources" => match self.family {
                 "pve8" => (
                     200,
@@ -214,6 +228,7 @@ async fn node_vmid_and_source_filters_reach_the_node_request() {
                 node: Some("pve9".to_owned()),
                 vmid: Some(101),
                 source: PveTaskSource::Active,
+                outcome: None,
                 limit_per_node: 10_000,
             },
         )
@@ -276,4 +291,110 @@ async fn a_full_node_page_warns_that_older_tasks_are_not_listed() {
     assert_eq!(history.tasks.len(), 5);
     assert_eq!(history.warnings.len(), 1, "{:?}", history.warnings);
     assert!(history.warnings[0].contains("the per-node bound"));
+}
+
+#[tokio::test]
+async fn the_outcome_filter_reaches_the_node_request_as_statusfilter() {
+    for (outcome, wire) in [
+        (PveTaskOutcome::Ok, "ok"),
+        (PveTaskOutcome::Error, "warning,error"),
+        (PveTaskOutcome::Unknown, "unknown"),
+    ] {
+        let transport = FixtureTransport::new("pve9");
+        let client = ProxmoxClient::new(transport.clone());
+        client
+            .task_history(
+                request(),
+                &PveTaskQuery {
+                    node: Some("pve9".to_owned()),
+                    outcome: Some(outcome),
+                    limit_per_node: 50,
+                    ..PveTaskQuery::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            transport.requests().contains(&format!(
+                "/api2/json/nodes/pve9/tasks?source=all&limit=50&statusfilter={wire}"
+            )),
+            "{:?}",
+            transport.requests()
+        );
+    }
+}
+
+#[tokio::test]
+async fn resource_warnings_stay_bounded_however_many_rows_are_unreadable() {
+    // Eight node rows that name no node, and one whose oversized type
+    // makes it unreadable: one bounded warning each up to the cap, then a
+    // single summary, and no warning carries the oversized value.
+    let mut rows: Vec<String> = (0..8)
+        .map(|i| format!(r#"{{"id": "odd-{i}", "type": "node"}}"#))
+        .collect();
+    rows.push(format!(
+        r#"{{"id": "node/huge", "type": "{}"}}"#,
+        "x".repeat(5000)
+    ));
+    rows.push(
+        r#"{"id": "node/pve9", "type": "node", "node": "pve9", "status": "online"}"#.to_owned(),
+    );
+    let resources: &'static str =
+        Box::leak(format!(r#"{{"data": [{}]}}"#, rows.join(", ")).into_boxed_str());
+    let client = ProxmoxClient::new(FixtureTransport::with_resources("pve9", resources));
+
+    let history = client.task_history(request(), &query()).await.unwrap();
+
+    let resource_warnings: Vec<&String> = history
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("cluster resource"))
+        .collect();
+    assert_eq!(resource_warnings.len(), 6, "{resource_warnings:?}");
+    assert!(
+        resource_warnings[5].starts_with("4 more cluster resources"),
+        "{resource_warnings:?}"
+    );
+    assert!(
+        history.warnings.iter().all(|warning| warning.len() < 400),
+        "{:?}",
+        history.warnings
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_cluster_resource_row_warns_instead_of_vanishing() {
+    // The first row is a node that lost its type; the second is a node
+    // with an over-long name; the third is an unknown type that is not a
+    // node and stays silent.
+    let long = "n".repeat(300);
+    let resources: &'static str = Box::leak(
+        format!(
+            r#"{{"data": [{{"id": "node/pve9"}}, {{"id": "node/pve9x", "type": "node", "node": "{long}"}}, {{"id": "future/1", "type": "future-kind"}}, {{"id": "node/pve9", "type": "node", "node": "pve9", "status": "online"}}]}}"#
+        )
+        .into_boxed_str(),
+    );
+    let transport = FixtureTransport::with_resources("pve9", resources);
+    let client = ProxmoxClient::new(transport);
+
+    let history = client.task_history(request(), &query()).await.unwrap();
+
+    assert_eq!(history.tasks.len(), 5, "the readable node is still read");
+    let rows: Vec<&String> = history
+        .warnings
+        .iter()
+        .filter(|warning| warning.starts_with("cluster resource"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{:?}", history.warnings);
+    assert!(rows[0].contains("node/pve9"), "{rows:?}");
+    assert!(rows[1].contains("node/pve9x"), "{rows:?}");
+    assert!(
+        rows.iter().all(|warning| warning.len() < 400),
+        "the warning is bounded: {rows:?}"
+    );
+    assert!(
+        !history.warnings.iter().any(|w| w.contains("future")),
+        "{:?}",
+        history.warnings
+    );
 }

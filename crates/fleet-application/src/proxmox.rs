@@ -634,12 +634,12 @@ pub struct ProxmoxAccounts {
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
     events: Option<Arc<crate::events::EventHub>>,
-    /// The token-permissions read (FM-604), attached with
-    /// [`ProxmoxAccounts::with_permissions`].
-    permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
     /// The task-history ports (FM-609), attached by
     /// [`ProxmoxAccounts::with_task_history`].
     task_history: Option<tasks::TaskHistoryPorts>,
+    /// The token-permissions read (FM-604), attached with
+    /// [`ProxmoxAccounts::with_permissions`].
+    permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
 }
 
 impl ProxmoxAccounts {
@@ -663,8 +663,8 @@ impl ProxmoxAccounts {
             machines,
             audit,
             events: None,
-            permissions: None,
             task_history: None,
+            permissions: None,
         }
     }
 

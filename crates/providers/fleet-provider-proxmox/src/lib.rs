@@ -24,7 +24,9 @@
 
 mod tasks;
 
-pub use tasks::{MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskQuery, PveTaskSource, PveTaskSummary};
+pub use tasks::{
+    MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
+};
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -41,7 +43,8 @@ use sha2::Digest;
 mod permissions;
 
 pub use permissions::{
-    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, PveTokenPermissions, normalize_token_permissions,
+    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, MAX_VMID_CHECKS, PveTokenPermissions,
+    concrete_vmids, normalize_token_permissions,
 };
 
 /// The default PVE API port.
@@ -1401,10 +1404,46 @@ impl ProxmoxSource for ProxmoxClient {
         let permissions_request = PveHttpRequest {
             path: "/api2/json/access/permissions".to_owned(),
             method: PveHttpMethod::Get,
-            ..request
+            ..request.clone()
         };
         let data = self.call(permissions_request).await?;
-        normalize_token_permissions(version, &data)
+        let mut permissions = normalize_token_permissions(version, &data)?;
+        // A grant on one concrete /vms/{id} is a usable clone target only
+        // while that VMID is free. `/cluster/nextid?vmid=` answers that for
+        // any caller (`user => 'all'` on 8.x and 9.x): 200 when free, 400
+        // when the VMID exists or is invalid. Any other outcome fails the
+        // read like every other source error. The checks run concurrently,
+        // bounded like discovery's per-node reads.
+        let vmids = concrete_vmids(&permissions.paths);
+        if vmids.len() > MAX_VMID_CHECKS {
+            permissions.warnings.push(format!(
+                "{} VMID paths were not checked for being free (the first {MAX_VMID_CHECKS} were); they don't count as clone targets",
+                vmids.len() - MAX_VMID_CHECKS
+            ));
+        }
+        let checks =
+            futures_util::stream::iter(vmids.into_iter().take(MAX_VMID_CHECKS).map(|vmid| {
+                let nextid_request = PveHttpRequest {
+                    path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+                    method: PveHttpMethod::Get,
+                    ..request.clone()
+                };
+                async move {
+                    match self.call(nextid_request).await {
+                        Ok(_) => Ok((vmid, false)),
+                        Err(PveApiError::Http { status: 400, .. }) => Ok((vmid, true)),
+                        Err(error) => Err(error),
+                    }
+                }
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        for check in checks {
+            let (vmid, in_use) = check?;
+            permissions.vmids_in_use.insert(vmid, in_use);
+        }
+        Ok(permissions)
     }
 
     async fn guest_lifecycle(

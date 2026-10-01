@@ -48,6 +48,15 @@ impl PveTransport for PermissionsTransport {
             ("pve8", "/api2/json/version") => (200, include_str!("fixtures/pve8/version.json")),
             ("pve9", "/api2/json/version") => (200, include_str!("fixtures/pve9/version.json")),
             (_, "/api2/json/access/permissions") => (self.status, self.body),
+            ("pve9-nextid-fails", "/api2/json/version") => {
+                (200, include_str!("fixtures/pve9/version.json"))
+            }
+            ("pve9-nextid-fails", path) if path.starts_with("/api2/json/cluster/nextid?vmid=") => {
+                (500, r#"{"data":null,"message":"cluster not ready\n"}"#)
+            }
+            (_, path) if path.starts_with("/api2/json/cluster/nextid?vmid=") => {
+                return Ok(nextid(path, &[101, 102]));
+            }
             (_, path) => panic!("unexpected PVE request path: {path}"),
         };
         Ok(PveHttpResponse {
@@ -62,6 +71,30 @@ impl PveTransport for PermissionsTransport {
         _body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError> {
         panic!("the permissions read sends no body");
+    }
+}
+
+/// `/cluster/nextid?vmid=` as PVE answers it (captured from 8.4 and 9.2):
+/// 200 with the VMID when it is free, 400 when it already exists.
+fn nextid(path: &str, in_use: &[u32]) -> PveHttpResponse {
+    let vmid: u32 = path
+        .rsplit('=')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .expect("a numeric vmid");
+    if in_use.contains(&vmid) {
+        PveHttpResponse {
+            status: 400,
+            body: format!(
+                r#"{{"data":null,"message":"Parameter verification failed.\n","errors":{{"vmid":"VM {vmid} already exists"}}}}"#
+            )
+            .into_bytes(),
+        }
+    } else {
+        PveHttpResponse {
+            status: 200,
+            body: format!(r#"{{"data":"{vmid}"}}"#).into_bytes(),
+        }
     }
 }
 
@@ -229,7 +262,30 @@ async fn pool_scoped_tokens_keep_pool_member_propagation_flags() {
             Some(&true)
         );
         assert!(!permissions.paths.contains_key("/"), "{family}");
+        // Every concrete VMID path is checked for being free: the pool
+        // members exist, the reserved clone target does not.
+        assert_eq!(
+            permissions.vmids_in_use,
+            [(101, true), (102, true), (9000, false)].into(),
+            "{family}"
+        );
     }
+}
+
+#[tokio::test]
+async fn a_failed_vmid_check_fails_the_read() {
+    // Only a 400 means "in use"; anything else is a source failure, not a
+    // silently unusable clone target.
+    let client = ProxmoxClient::new(PermissionsTransport::new(
+        "pve9-nextid-fails",
+        200,
+        include_str!("fixtures/pve9/access-permissions-pool-scoped.json"),
+    ));
+    let error = client.token_permissions(request()).await.unwrap_err();
+    assert!(
+        matches!(error, PveApiError::Http { status: 500, .. }),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -247,4 +303,24 @@ async fn a_refused_permissions_read_is_a_forbidden_error_with_bounded_detail() {
         assert!(detail.contains("Permission check failed"), "{detail}");
         assert!(!detail.contains("fixture-secret"));
     }
+}
+
+#[tokio::test]
+async fn an_oversized_refusal_body_is_capped_at_256_characters() {
+    let body = format!(
+        r#"{{"data":null,"message":"Permission check failed {}"}}"#,
+        "x".repeat(1024)
+    );
+    let client = ProxmoxClient::new(PermissionsTransport::new(
+        "pve9",
+        403,
+        Box::leak(body.clone().into_boxed_str()),
+    ));
+    let error = client.token_permissions(request()).await.unwrap_err();
+    let PveApiError::Forbidden { detail } = error else {
+        panic!("expected Forbidden, got {error:?}");
+    };
+    assert!(body.chars().count() > 256);
+    assert_eq!(detail.chars().count(), 256, "{detail}");
+    assert!(detail.contains("Permission check failed"));
 }

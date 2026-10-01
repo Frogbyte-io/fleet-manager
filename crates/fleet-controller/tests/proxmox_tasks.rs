@@ -331,6 +331,8 @@ async fn the_task_history_links_fleet_tasks_and_paginates_with_cursor_refusal() 
     let harness = harness().await;
     let account_id = harness.account("pve-main", true).await;
     let operation_id = run_start(&harness, &account_id).await;
+    // Every response body, scanned for the token secret at the end.
+    let mut bodies: Vec<String> = Vec::new();
 
     // Page 1: the newest two, the Fleet-started task linked to its
     // operation, and the per-node warnings for the down and offline nodes.
@@ -340,6 +342,7 @@ async fn the_task_history_links_fleet_tasks_and_paginates_with_cursor_refusal() 
         ))
         .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{page}");
+    bodies.push(page.to_string());
     assert_eq!(page["accountId"], account_id.as_str());
     assert_eq!(page["pveVersion"], "9.2.2");
     assert_eq!(page["page"]["limit"], 2);
@@ -383,6 +386,7 @@ async fn the_task_history_links_fleet_tasks_and_paginates_with_cursor_refusal() 
         ))
         .await;
     assert_eq!(status, axum::http::StatusCode::OK, "{page}");
+    bodies.push(page.to_string());
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 2, "{page}");
     assert_eq!(items[0]["taskType"], "vzdump");
@@ -391,6 +395,27 @@ async fn the_task_history_links_fleet_tasks_and_paginates_with_cursor_refusal() 
     assert_eq!(items[0]["exitStatus"], "WARNINGS: 1");
     assert_eq!(items[1]["taskType"], "qmclone");
     assert_eq!(page["page"]["nextCursor"], Value::Null);
+
+    // A page that exactly consumes the snapshot (four tasks) advertises no
+    // cursor; one short of it does.
+    let (status, page) = harness
+        .get(&format!(
+            "/api/v1/proxmox/accounts/{account_id}/tasks?limit=4"
+        ))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{page}");
+    bodies.push(page.to_string());
+    assert_eq!(page["items"].as_array().unwrap().len(), 4, "{page}");
+    assert_eq!(page["page"]["nextCursor"], Value::Null, "{page}");
+    let (status, page) = harness
+        .get(&format!(
+            "/api/v1/proxmox/accounts/{account_id}/tasks?limit=3"
+        ))
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{page}");
+    bodies.push(page.to_string());
+    assert_eq!(page["items"].as_array().unwrap().len(), 3, "{page}");
+    assert!(page["page"]["nextCursor"].is_string(), "{page}");
 
     // A stale cursor is refused, never a silent restart.
     let (status, body) = harness
@@ -401,9 +426,14 @@ async fn the_task_history_links_fleet_tasks_and_paginates_with_cursor_refusal() 
         .await;
     assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_request");
+    bodies.push(body.to_string());
 
-    // The offline node was never called, and no response carries the
-    // token secret.
+    // No response carries the token secret.
+    for body in &bodies {
+        assert!(!body.contains("the-token-secret-material"), "{body}");
+    }
+
+    // The offline node was never called.
     let paths = harness.transport.paths.lock().unwrap().clone();
     assert!(
         !paths.iter().any(|path| path.contains("/nodes/pve3/")),
@@ -436,13 +466,17 @@ async fn the_task_history_filters_and_refuses_malformed_filters() {
         .map(|item| item["status"].as_str().unwrap())
         .collect();
     assert_eq!(statuses, vec!["error", "error"], "{page}");
+    assert!(
+        !page.to_string().contains("the-token-secret-material"),
+        "{page}"
+    );
     // Only the requested node was read, so no node warnings.
     assert_eq!(page["warnings"], json!([]), "{page}");
     let paths = harness.transport.paths.lock().unwrap().clone();
     assert!(
         paths
             .iter()
-            .any(|path| path == "/api2/json/nodes/pve/tasks?source=all&limit=200&vmid=900"),
+            .any(|path| path == "/api2/json/nodes/pve/tasks?source=all&limit=200&vmid=900&statusfilter=warning,error"),
         "{paths:?}"
     );
 

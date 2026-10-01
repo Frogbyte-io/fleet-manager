@@ -241,13 +241,12 @@ pub async fn list_proxmox_tasks(
         }
         None => 0,
     };
-    let page: Vec<ProxmoxTask> = snapshot
-        .tasks
-        .into_iter()
-        .skip(start)
-        .take(usize::try_from(limit).unwrap_or(usize::MAX))
-        .collect();
-    let next_cursor = (page.len() == usize::try_from(limit).unwrap_or(0))
+    let take = usize::try_from(limit).unwrap_or(usize::MAX);
+    // A cursor only when tasks remain after this page, so a page that
+    // exactly consumed the snapshot does not advertise an empty one.
+    let has_more = snapshot.tasks.len() > start.saturating_add(take);
+    let page: Vec<ProxmoxTask> = snapshot.tasks.into_iter().skip(start).take(take).collect();
+    let next_cursor = has_more
         .then(|| page.last().map(|task| task.upid.clone()))
         .flatten();
     Ok(Json(ProxmoxTaskPage {

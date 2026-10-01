@@ -16,7 +16,8 @@ use fleet_application::proxmox::tasks::{
 };
 use fleet_core::SensitiveString;
 use fleet_provider_proxmox::{
-    PveCredentials, PveHttpRequest, PveTaskQuery, PveTaskSource, PveTaskSummary, TaskStatus,
+    PveCredentials, PveHttpRequest, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
+    TaskStatus,
 };
 
 /// The task-history source over the provider client.
@@ -69,6 +70,12 @@ impl ProxmoxTaskHistoryPort for ProviderTaskHistory {
                         PveTaskSource::Active
                     } else {
                         PveTaskSource::All
+                    },
+                    outcome: match query.finished_status {
+                        Some(ProxmoxTaskState::Ok) => Some(PveTaskOutcome::Ok),
+                        Some(ProxmoxTaskState::Error) => Some(PveTaskOutcome::Error),
+                        Some(ProxmoxTaskState::Unknown) => Some(PveTaskOutcome::Unknown),
+                        Some(ProxmoxTaskState::Running) | None => None,
                     },
                     limit_per_node: query.limit_per_node,
                 },

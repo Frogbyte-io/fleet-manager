@@ -36,6 +36,10 @@ const MAX_PRIVILEGE_CHARS: usize = 64;
 /// The most warnings kept; one summarizing warning follows when exceeded.
 const MAX_WARNINGS: usize = 32;
 
+/// The most concrete `/vms/{id}` paths checked for being free; one
+/// `/cluster/nextid` request each.
+pub const MAX_VMID_CHECKS: usize = 32;
+
 /// The token's effective permissions with the PVE version they were read
 /// from. Provider-owned shape; the composition translates it into the
 /// application's types.
@@ -50,6 +54,24 @@ pub struct PveTokenPermissions {
     pub warnings: Vec<String>,
     /// Whether paths or privileges were dropped by the bounds.
     pub truncated: bool,
+    /// For concrete `/vms/{id}` paths in the map: whether that VMID is in
+    /// use (`true`) or free (`false`), from `/cluster/nextid`. A grant on
+    /// one VMID can only be a clone target while the VMID is free. VMIDs
+    /// that were not checked are absent.
+    #[serde(default)]
+    pub vmids_in_use: BTreeMap<u32, bool>,
+}
+
+/// The VMIDs named by concrete `/vms/{id}` paths, ascending.
+#[must_use]
+pub fn concrete_vmids(paths: &BTreeMap<String, BTreeMap<String, bool>>) -> Vec<u32> {
+    let mut vmids: Vec<u32> = paths
+        .keys()
+        .filter_map(|path| path.strip_prefix("/vms/"))
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    vmids.sort_unstable();
+    vmids
 }
 
 /// Normalizes one `/access/permissions` `data` value.
@@ -58,6 +80,7 @@ pub struct PveTokenPermissions {
 ///
 /// Fails with [`PveApiError::InvalidPayload`] when `data` is neither an
 /// object nor `null`.
+#[allow(clippy::too_many_lines)]
 pub fn normalize_token_permissions(
     version: String,
     data: &serde_json::Value,
@@ -81,26 +104,35 @@ pub fn normalize_token_permissions(
         }
     };
     let mut warnings = Vec::new();
+    let mut dropped_warnings = 0_usize;
     for (path, privileges) in entries {
         if result.paths.len() >= MAX_PERMISSION_PATHS {
             result.truncated = true;
             break;
         }
         if !valid_acl_path(path) {
-            warnings.push(format!(
-                "permissions path {:?}: not an ACL path; skipped",
-                bounded(path)
-            ));
+            warn(
+                &mut warnings,
+                &mut dropped_warnings,
+                format!(
+                    "permissions path {:?}: not an ACL path; skipped",
+                    bounded(path)
+                ),
+            );
             continue;
         }
         let privileges = match privileges {
             serde_json::Value::Object(privileges) => privileges,
             serde_json::Value::Null => continue,
             other => {
-                warnings.push(format!(
-                    "permissions path {path}: the privileges are not an object (it is a {}); skipped",
-                    crate::type_name_of(other)
-                ));
+                warn(
+                    &mut warnings,
+                    &mut dropped_warnings,
+                    format!(
+                        "permissions path {path}: the privileges are not an object (it is a {}); skipped",
+                        crate::type_name_of(other)
+                    ),
+                );
                 continue;
             }
         };
@@ -111,23 +143,44 @@ pub fn normalize_token_permissions(
                 break;
             }
             if !valid_privilege(privilege) {
-                warnings.push(format!(
-                    "permissions path {path}: privilege {:?} is not a privilege name; skipped",
-                    bounded(privilege)
-                ));
+                warn(
+                    &mut warnings,
+                    &mut dropped_warnings,
+                    format!(
+                        "permissions path {path}: privilege {:?} is not a privilege name; skipped",
+                        bounded(privilege)
+                    ),
+                );
                 continue;
             }
             let propagate = match propagate {
                 serde_json::Value::Bool(flag) => *flag,
-                serde_json::Value::Number(number) => number.as_u64().is_some_and(|n| n != 0),
+                serde_json::Value::Number(number) => match number.as_u64() {
+                    Some(0) => false,
+                    Some(1) => true,
+                    _ => {
+                        warn(
+                            &mut warnings,
+                            &mut dropped_warnings,
+                            format!(
+                                "permissions path {path}: privilege {privilege} carries an unrecognized propagate flag {number}; treated as not propagating"
+                            ),
+                        );
+                        false
+                    }
+                },
                 serde_json::Value::String(text) => text == "1" || text == "true",
                 // A privilege PVE reports with an odd flag is still held at
                 // that path; only its propagation is uncertain, so the
                 // conservative reading is "does not propagate".
                 _ => {
-                    warnings.push(format!(
-                        "permissions path {path}: privilege {privilege} carries no propagate flag; treated as not propagating"
-                    ));
+                    warn(
+                        &mut warnings,
+                        &mut dropped_warnings,
+                        format!(
+                            "permissions path {path}: privilege {privilege} carries no propagate flag; treated as not propagating"
+                        ),
+                    );
                     false
                 }
             };
@@ -138,17 +191,31 @@ pub fn normalize_token_permissions(
         }
     }
     if result.truncated {
-        warnings.push(format!(
-            "the permissions answer exceeded the bounds ({MAX_PERMISSION_PATHS} paths, {MAX_PRIVILEGES_PER_PATH} privileges per path); the rest was dropped"
-        ));
+        warn(
+            &mut warnings,
+            &mut dropped_warnings,
+            format!(
+                "the permissions answer exceeded the bounds ({MAX_PERMISSION_PATHS} paths, {MAX_PRIVILEGES_PER_PATH} privileges per path); the rest was dropped"
+            ),
+        );
     }
-    if warnings.len() > MAX_WARNINGS {
-        let dropped = warnings.len() - MAX_WARNINGS;
-        warnings.truncate(MAX_WARNINGS);
-        warnings.push(format!("{dropped} more permission warnings were dropped"));
+    if dropped_warnings > 0 {
+        warnings.push(format!(
+            "{dropped_warnings} more permission warnings were dropped"
+        ));
     }
     result.warnings = warnings;
     Ok(result)
+}
+
+/// Keeps a warning while under the bound and counts the ones dropped, so a
+/// hostile answer cannot grow the list while it is being processed.
+fn warn(warnings: &mut Vec<String>, dropped: &mut usize, message: String) {
+    if warnings.len() < MAX_WARNINGS {
+        warnings.push(message);
+    } else {
+        *dropped += 1;
+    }
 }
 
 /// An ACL path: absolute, bounded, printable, no empty or dot segments.
@@ -242,5 +309,28 @@ mod tests {
         assert_eq!(result.paths.len(), MAX_PERMISSION_PATHS);
         assert!(result.truncated);
         assert!(result.warnings.iter().any(|w| w.contains("exceeded")));
+    }
+
+    #[test]
+    fn propagate_numbers_other_than_zero_and_one_do_not_propagate() {
+        let data = json!({"/": {"VM.Audit": 2, "Sys.Audit": 1, "VM.Console": 0}});
+        let result = normalize_token_permissions("9.0.0".to_owned(), &data).unwrap();
+        assert!(!result.paths["/"]["VM.Audit"]);
+        assert!(result.paths["/"]["Sys.Audit"]);
+        assert!(!result.paths["/"]["VM.Console"]);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn warnings_are_bounded_while_processing() {
+        let mut entries = serde_json::Map::new();
+        for index in 0..(MAX_WARNINGS * 4) {
+            entries.insert(format!("relative{index}"), json!({"VM.Audit": 1}));
+        }
+        let result =
+            normalize_token_permissions("9.0.0".to_owned(), &serde_json::Value::Object(entries))
+                .unwrap();
+        assert_eq!(result.warnings.len(), MAX_WARNINGS + 1);
+        assert!(result.warnings[MAX_WARNINGS].contains("96 more"));
     }
 }

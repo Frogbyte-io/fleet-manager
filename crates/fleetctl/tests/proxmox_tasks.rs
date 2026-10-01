@@ -5,6 +5,7 @@
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::net::TcpListener;
 use std::thread;
+use std::time::{Duration, Instant};
 
 const SNAPSHOT: &str = include_str!("snapshots/proxmox_tasks.json");
 
@@ -18,7 +19,30 @@ fn controller(body: &'static str) -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        // Bounded, so a client that never connects fails the test instead
+        // of leaving this thread blocked until the process exits.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        listener.set_nonblocking(true).unwrap();
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "no request reached the one-shot controller"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
         let mut head = String::new();
         let mut content_length = 0_usize;
@@ -89,6 +113,9 @@ fn parsing_refuses_the_undocumented_task_history_forms() {
         vec!["proxmox", "tasks", "--node", "pve"],
         vec!["proxmox", "tasks", "acc-1", "--vmid", "abc"],
         vec!["proxmox", "tasks", "acc-1", "--limit"],
+        // Another option is not a value.
+        vec!["proxmox", "tasks", "acc-1", "--node", "--output", "json"],
+        vec!["proxmox", "tasks", "acc-1", "--cursor", "--limit", "5"],
         vec!["proxmox", "tasks", "acc-1", "--output", "yaml"],
         vec!["proxmox", "tasks", "acc-1", "--since", "1"],
     ] {
@@ -138,7 +165,9 @@ fn text_output_renders_tasks_links_cursor_and_warnings() {
     assert!(backup_row.ends_with('-'), "{backup_row}");
     assert!(text.contains("  exit: WARNINGS: 1"), "{text}");
     assert!(
-        text.contains("next page: --cursor UPID:pve:00154000:0C6DE000:6AAFDE04:vzdump::root@pam:"),
+        text.contains(
+            "next page: --cursor 'UPID:pve:00154000:0C6DE000:6AAFDE04:vzdump::root@pam:'"
+        ),
         "{text}"
     );
     assert!(
@@ -155,4 +184,18 @@ fn text_output_renders_tasks_links_cursor_and_warnings() {
     let text = fleetctl::render_proxmox_tasks_for_test(&empty);
     assert!(text.contains("(no tasks reported)"), "{text}");
     assert!(!text.contains("next page"), "{text}");
+}
+
+#[test]
+fn the_next_page_cursor_is_shell_quoted() {
+    let page = serde_json::json!({
+        "items": [],
+        "page": { "nextCursor": "UPID:pve:1:2:3:qmstart:101:fleet@pve!it's:", "limit": 1 },
+        "warnings": []
+    });
+    let text = fleetctl::render_proxmox_tasks_for_test(&page);
+    assert!(
+        text.contains(r"next page: --cursor 'UPID:pve:1:2:3:qmstart:101:fleet@pve!it'\''s:'"),
+        "{text}"
+    );
 }

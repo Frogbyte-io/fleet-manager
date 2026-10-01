@@ -2956,6 +2956,8 @@ export interface ProxmoxPrivilegeCheckDto {
   endpoint: string;
   /** The token's effective-permission paths the row is satisfied on. */
   grantedOn: string[];
+  /** Whether more paths satisfied the row than `grantedOn` lists. */
+  grantedOnTruncated: boolean;
   /** The privileges still missing on the closest path in scope. */
   missing: string[];
   /** Why the row exists. */
