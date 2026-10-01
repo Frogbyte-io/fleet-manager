@@ -88,6 +88,7 @@ if (cd "$WT" && git add "$KEY" && git commit -m "evidence: $KEY"); then
   # Before the branch exists remotely there is nothing to rebase onto: just retry.
   for attempt in 1 2 3 4 5; do
     if (cd "$WT" && git push origin pr-evidence:pr-evidence); then PUSHED=1; break; fi
+    [ "$attempt" = 5 ] && break                   # five pushes in total; no rebase after the last
     if (cd "$WT" && git fetch origin pr-evidence 2>/dev/null); then
       (cd "$WT" && git rebase origin/pr-evidence) || break
     fi
