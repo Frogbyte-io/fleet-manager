@@ -38,7 +38,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
 }))
 
 import ProxmoxPage from '../ProxmoxPage.vue'
-import { discoveryKey, privilegesKey } from '../useProxmox'
+import { discoveryKey, guestsKey, privilegesKey } from '../useProxmox'
 import { ACCOUNTS_KEY } from '../../fleet/add/queries'
 import { TOKEN_GUIDE_URL } from '../proxmox'
 import { routes } from '@/router'
@@ -359,6 +359,22 @@ describe('stale trust and stale reports', () => {
     expect(getProxmoxPrivileges).toHaveBeenCalledTimes(2)
   })
 
+  it('holds the guest list while pin discovery is refetching', async () => {
+    const { queryClient } = await mountAt('/proxmox')
+    expect(listProxmoxGuests).toHaveBeenCalledTimes(1)
+    const pending = deferred<ReturnType<typeof ok>>()
+    discoverProxmoxCluster.mockReturnValueOnce(pending.promise)
+    void queryClient.invalidateQueries({ queryKey: discoveryKey('acc1') })
+    await flushPromises()
+    await queryClient.invalidateQueries({ queryKey: guestsKey('acc1') })
+    await flushPromises()
+    expect(listProxmoxGuests).toHaveBeenCalledTimes(1)
+    pending.resolve(ok({ data: discovery }))
+    await flushPromises()
+    await flushPromises()
+    expect(listProxmoxGuests).toHaveBeenCalledTimes(2)
+  })
+
   it('does not ask a changed certificate for privileges after a refetch', async () => {
     const { queryClient } = await mountAt('/proxmox')
     discoverProxmoxCluster.mockResolvedValue(MISMATCH)
@@ -576,6 +592,13 @@ describe('tasks', () => {
     expect(empty).toContain('cannot see this cluster')
     expect(empty).toContain('Sys.Audit on /nodes/{node}')
     expect(empty).not.toContain('no recent tasks')
+
+    // A filter cannot explain the empty list either: the token sees nothing.
+    await wrapper.get('[data-testid="tasks-status"]').setValue('error')
+    await flushPromises()
+    const filtered = wrapper.get('[data-testid="tasks-empty"]').text()
+    expect(filtered).toContain('cannot see this cluster')
+    expect(filtered).not.toContain('No tasks match')
   })
 
   it('loads more pages by cursor until the last page', async () => {

@@ -103,8 +103,9 @@ export function useProxmox() {
       retry: retryTransient,
     }))),
   })
-  // Guests are asked for only after discovery verified the pin, so a changed
-  // certificate is caught before any guest request goes out.
+  // Guests are asked for only after discovery verified the pin, and not while
+  // a discovery (re)fetch is in flight, so a changed certificate is caught
+  // before any guest request goes out.
   const guests = useQueries({
     queries: computed(() => confirmed.value.map((accountId, index) => {
       const discovery = discoveries.value[index]
@@ -112,7 +113,7 @@ export function useProxmox() {
         queryKey: guestsKey(accountId),
         queryFn: () => allGuests(accountId),
         retry: retryTransient,
-        enabled: !!discovery?.data && !discovery.error,
+        enabled: !!discovery?.data && !discovery.error && !discovery.isFetching,
       }
     })),
   })

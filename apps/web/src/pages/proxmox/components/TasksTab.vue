@@ -50,8 +50,8 @@ const choices = computed(() => props.views.filter(v => v.state === 'pinned' || v
 // refresh and "load more" honour the same gate.
 const ready = computed(() => view.value?.state === 'pinned' && !view.value.discoveryFetching)
 // A token without the discover tier sees no nodes, so PVE answers no tasks:
-// say why instead of claiming the cluster has none. Only a current report
-// counts (not one whose refresh failed).
+// say why instead of claiming the cluster (or a filter) has none. Only a
+// current report counts (not one whose refresh failed).
 const blind = computed(() => {
   const report = view.value?.state === 'pinned' && !view.value.privilegesError ? view.value.privileges : null
   return tierStatus(report, 'discover') === 'missing' ? tierBlockReason(report, 'discover') : null
@@ -272,7 +272,7 @@ function user(task: { user: string, tokenId?: string | null }): string {
         class="rounded-sm border border-fc-line p-6 text-sm text-fc-muted"
         data-testid="tasks-empty"
       >
-        {{ filtered ? 'No tasks match these filters.' : blind ? `The token cannot see this cluster's nodes, so no tasks are listed. ${blind}` : 'PVE reports no recent tasks for this account.' }}
+        {{ blind ? `The token cannot see this cluster's nodes, so no tasks are listed. ${blind}` : filtered ? 'No tasks match these filters.' : 'PVE reports no recent tasks for this account.' }}
       </p>
       <div
         v-else
