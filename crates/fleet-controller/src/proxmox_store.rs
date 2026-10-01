@@ -404,6 +404,7 @@ impl fleet_application::proxmox::privileges::ProxmoxPermissionsPort for Provider
                     paths: permissions.paths,
                     warnings: permissions.warnings,
                     truncated: permissions.truncated,
+                    vmids_in_use: permissions.vmids_in_use,
                 },
             )
             .map_err(map_api_error)

@@ -767,11 +767,26 @@ pub struct PrivilegeReport {
     pub observed_at: i64,
 }
 
-/// Evaluates one requirement against the effective map.
+/// Evaluates one requirement against the effective map, treating every
+/// concrete `/vms/{id}` as a free clone target. A live report goes through
+/// [`evaluate_requirement_with_vmids`] instead.
 #[must_use]
 pub fn evaluate_requirement(
     requirement: &PrivilegeRequirement,
     permissions: &EffectivePermissions,
+) -> PrivilegeCheck {
+    evaluate_requirement_with_vmids(requirement, permissions, None)
+}
+
+/// Evaluates one requirement. With `vmids_in_use`, a concrete `/vms/{id}`
+/// counts toward a [`PrivilegeScope::NewGuest`] row only when that VMID was
+/// checked and is free: a clone cannot target an existing VMID, so a grant
+/// there is not a usable clone target.
+#[must_use]
+pub fn evaluate_requirement_with_vmids(
+    requirement: &PrivilegeRequirement,
+    permissions: &EffectivePermissions,
+    vmids_in_use: Option<&BTreeMap<u32, bool>>,
 ) -> PrivilegeCheck {
     let mut check = PrivilegeCheck {
         requirement: requirement.id.to_owned(),
@@ -801,6 +816,16 @@ pub fn evaluate_requirement(
         let Some(relation) = requirement.scope.relation(path) else {
             continue;
         };
+        if requirement.scope == PrivilegeScope::NewGuest
+            && relation == Relation::Exact
+            && let Some(vmids_in_use) = vmids_in_use
+            && path
+                .strip_prefix("/vms/")
+                .and_then(|id| id.parse::<u32>().ok())
+                .is_none_or(|vmid| vmids_in_use.get(&vmid) != Some(&false))
+        {
+            continue;
+        }
         let held: Vec<&str> = requirement
             .privileges
             .iter()
@@ -841,15 +866,29 @@ pub fn evaluate_requirement(
     check
 }
 
-/// Evaluates every tier for one table major.
+/// Evaluates every tier for one table major, treating every concrete
+/// `/vms/{id}` as a free clone target (see [`evaluate_tiers_with_vmids`]).
 #[must_use]
 pub fn evaluate_tiers(major: u8, permissions: &EffectivePermissions) -> Vec<TierPrivileges> {
+    evaluate_tiers_with_vmids(major, permissions, None)
+}
+
+/// Evaluates every tier for one table major; `vmids_in_use` as for
+/// [`evaluate_requirement_with_vmids`].
+#[must_use]
+pub fn evaluate_tiers_with_vmids(
+    major: u8,
+    permissions: &EffectivePermissions,
+    vmids_in_use: Option<&BTreeMap<u32, bool>>,
+) -> Vec<TierPrivileges> {
     PrivilegeTier::ALL
         .iter()
         .map(|tier| {
             let checks: Vec<PrivilegeCheck> = requirements_for_major(major)
                 .filter(|requirement| requirement.tier == *tier)
-                .map(|requirement| evaluate_requirement(requirement, permissions))
+                .map(|requirement| {
+                    evaluate_requirement_with_vmids(requirement, permissions, vmids_in_use)
+                })
                 .collect();
             let mut missing: Vec<MissingPrivileges> = Vec::new();
             for check in checks
@@ -945,6 +984,9 @@ pub struct RawTokenPermissions {
     pub warnings: Vec<String>,
     /// Whether the provider's bounds dropped entries.
     pub truncated: bool,
+    /// Concrete `/vms/{id}` VMIDs checked for being free: `true` when in
+    /// use. Unchecked VMIDs are absent.
+    pub vmids_in_use: BTreeMap<u32, bool>,
 }
 
 impl ProxmoxAccounts {
@@ -1041,11 +1083,38 @@ pub fn evaluate_report(account_id: String, raw: RawTokenPermissions, now: i64) -
         };
     };
     warnings.extend(version_warning);
+    let tiers = evaluate_tiers_with_vmids(major, &raw.paths, Some(&raw.vmids_in_use));
+    // Say why a clone-target row is missing when the only VM.Allocate
+    // grants sit on VMIDs that already exist.
+    let new_guest_missing = tiers.iter().flat_map(|tier| &tier.checks).any(|check| {
+        check.required
+            && check.status == PrivilegeStatus::Missing
+            && check.path == PrivilegeScope::NewGuest.template()
+    });
+    let taken: Vec<String> = raw
+        .vmids_in_use
+        .iter()
+        .filter(|(vmid, in_use)| {
+            **in_use
+                && raw
+                    .paths
+                    .get(&format!("/vms/{vmid}"))
+                    .is_some_and(|privileges| privileges.contains_key("VM.Allocate"))
+        })
+        .map(|(vmid, _)| vmid.to_string())
+        .take(8)
+        .collect();
+    if new_guest_missing && !taken.is_empty() {
+        warnings.push(format!(
+            "VM.Allocate is granted on existing VMIDs ({}), which can't be clone targets; grant it on a free, reserved VMID",
+            taken.join(", ")
+        ));
+    }
     PrivilegeReport {
         account_id,
         pve_version: Some(raw.version),
         rules_major: Some(major),
-        tiers: evaluate_tiers(major, &raw.paths),
+        tiers,
         unknown_reason: None,
         effective_permissions: raw.paths,
         warnings,
@@ -1199,6 +1268,45 @@ mod tests {
                     "proxmox.guest.reboot".to_owned(),
                 ],
             }]
+        );
+    }
+
+    #[test]
+    fn a_concrete_clone_target_counts_only_while_its_vmid_is_free() {
+        let permissions = map(&[("/vms/9000", &[("VM.Allocate", false)])]);
+        let clone_target = |vmids_in_use: Option<&BTreeMap<u32, bool>>| {
+            let tiers = evaluate_tiers_with_vmids(9, &permissions, vmids_in_use);
+            check(
+                tier(&tiers, PrivilegeTier::Lab),
+                "lab.provision.clone-target",
+            )
+            .status
+        };
+        // Pure evaluation (no live check) keeps treating it as free.
+        assert_eq!(clone_target(None), PrivilegeStatus::Granted);
+        assert_eq!(
+            clone_target(Some(&[(9000, false)].into())),
+            PrivilegeStatus::Granted
+        );
+        // In use, or never checked: not a usable target.
+        assert_eq!(
+            clone_target(Some(&[(9000, true)].into())),
+            PrivilegeStatus::Missing
+        );
+        assert_eq!(
+            clone_target(Some(&BTreeMap::new())),
+            PrivilegeStatus::Missing
+        );
+        // A propagating grant on /vms reaches any new VMID regardless.
+        let parent = map(&[("/vms", &[("VM.Allocate", true)])]);
+        let tiers = evaluate_tiers_with_vmids(9, &parent, Some(&BTreeMap::new()));
+        assert_eq!(
+            check(
+                tier(&tiers, PrivilegeTier::Lab),
+                "lab.provision.clone-target"
+            )
+            .status,
+            PrivilegeStatus::Granted
         );
     }
 

@@ -48,6 +48,9 @@ impl PveTransport for PermissionsTransport {
             ("pve8", "/api2/json/version") => (200, include_str!("fixtures/pve8/version.json")),
             ("pve9", "/api2/json/version") => (200, include_str!("fixtures/pve9/version.json")),
             (_, "/api2/json/access/permissions") => (self.status, self.body),
+            (_, path) if path.starts_with("/api2/json/cluster/nextid?vmid=") => {
+                return Ok(nextid(path, &[101, 102]));
+            }
             (_, path) => panic!("unexpected PVE request path: {path}"),
         };
         Ok(PveHttpResponse {
@@ -62,6 +65,30 @@ impl PveTransport for PermissionsTransport {
         _body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError> {
         panic!("the permissions read sends no body");
+    }
+}
+
+/// `/cluster/nextid?vmid=` as PVE answers it (captured from 8.4 and 9.2):
+/// 200 with the VMID when it is free, 400 when it already exists.
+fn nextid(path: &str, in_use: &[u32]) -> PveHttpResponse {
+    let vmid: u32 = path
+        .rsplit('=')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .expect("a numeric vmid");
+    if in_use.contains(&vmid) {
+        PveHttpResponse {
+            status: 400,
+            body: format!(
+                r#"{{"data":null,"message":"Parameter verification failed.\n","errors":{{"vmid":"VM {vmid} already exists"}}}}"#
+            )
+            .into_bytes(),
+        }
+    } else {
+        PveHttpResponse {
+            status: 200,
+            body: format!(r#"{{"data":"{vmid}"}}"#).into_bytes(),
+        }
     }
 }
 
@@ -229,6 +256,13 @@ async fn pool_scoped_tokens_keep_pool_member_propagation_flags() {
             Some(&true)
         );
         assert!(!permissions.paths.contains_key("/"), "{family}");
+        // Every concrete VMID path is checked for being free: the pool
+        // members exist, the reserved clone target does not.
+        assert_eq!(
+            permissions.vmids_in_use,
+            [(101, true), (102, true), (9000, false)].into(),
+            "{family}"
+        );
     }
 }
 

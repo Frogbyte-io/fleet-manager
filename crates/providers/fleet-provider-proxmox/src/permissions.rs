@@ -36,6 +36,10 @@ const MAX_PRIVILEGE_CHARS: usize = 64;
 /// The most warnings kept; one summarizing warning follows when exceeded.
 const MAX_WARNINGS: usize = 32;
 
+/// The most concrete `/vms/{id}` paths checked for being free; one
+/// `/cluster/nextid` request each.
+pub const MAX_VMID_CHECKS: usize = 32;
+
 /// The token's effective permissions with the PVE version they were read
 /// from. Provider-owned shape; the composition translates it into the
 /// application's types.
@@ -50,6 +54,24 @@ pub struct PveTokenPermissions {
     pub warnings: Vec<String>,
     /// Whether paths or privileges were dropped by the bounds.
     pub truncated: bool,
+    /// For concrete `/vms/{id}` paths in the map: whether that VMID is in
+    /// use (`true`) or free (`false`), from `/cluster/nextid`. A grant on
+    /// one VMID can only be a clone target while the VMID is free. VMIDs
+    /// that were not checked are absent.
+    #[serde(default)]
+    pub vmids_in_use: BTreeMap<u32, bool>,
+}
+
+/// The VMIDs named by concrete `/vms/{id}` paths, ascending.
+#[must_use]
+pub fn concrete_vmids(paths: &BTreeMap<String, BTreeMap<String, bool>>) -> Vec<u32> {
+    let mut vmids: Vec<u32> = paths
+        .keys()
+        .filter_map(|path| path.strip_prefix("/vms/"))
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    vmids.sort_unstable();
+    vmids
 }
 
 /// Normalizes one `/access/permissions` `data` value.

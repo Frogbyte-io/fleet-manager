@@ -37,7 +37,8 @@ use sha2::Digest;
 mod permissions;
 
 pub use permissions::{
-    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, PveTokenPermissions, normalize_token_permissions,
+    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, MAX_VMID_CHECKS, PveTokenPermissions,
+    concrete_vmids, normalize_token_permissions,
 };
 
 /// The default PVE API port.
@@ -1394,10 +1395,40 @@ impl ProxmoxSource for ProxmoxClient {
         let permissions_request = PveHttpRequest {
             path: "/api2/json/access/permissions".to_owned(),
             method: PveHttpMethod::Get,
-            ..request
+            ..request.clone()
         };
         let data = self.call(permissions_request).await?;
-        normalize_token_permissions(version, &data)
+        let mut permissions = normalize_token_permissions(version, &data)?;
+        // A grant on one concrete /vms/{id} is a usable clone target only
+        // while that VMID is free. `/cluster/nextid?vmid=` answers that for
+        // any caller (`user => 'all'` on 8.x and 9.x): 200 when free, 400
+        // when the VMID exists or is invalid.
+        let vmids = concrete_vmids(&permissions.paths);
+        if vmids.len() > MAX_VMID_CHECKS {
+            permissions.warnings.push(format!(
+                "{} VMID paths were not checked for being free (the first {MAX_VMID_CHECKS} were); they don't count as clone targets",
+                vmids.len() - MAX_VMID_CHECKS
+            ));
+        }
+        for vmid in vmids.into_iter().take(MAX_VMID_CHECKS) {
+            let nextid_request = PveHttpRequest {
+                path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+                method: PveHttpMethod::Get,
+                ..request.clone()
+            };
+            match self.call(nextid_request).await {
+                Ok(_) => {
+                    permissions.vmids_in_use.insert(vmid, false);
+                }
+                Err(PveApiError::Http { status: 400, .. }) => {
+                    permissions.vmids_in_use.insert(vmid, true);
+                }
+                Err(error) => permissions.warnings.push(format!(
+                    "could not check whether VMID {vmid} is free, so it doesn't count as a clone target: {error}"
+                )),
+            }
+        }
+        Ok(permissions)
     }
 
     async fn guest_lifecycle(
