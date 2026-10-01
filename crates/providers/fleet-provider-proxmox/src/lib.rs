@@ -38,6 +38,13 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::Digest;
 
+mod permissions;
+
+pub use permissions::{
+    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, MAX_VMID_CHECKS, PveTokenPermissions,
+    concrete_vmids, normalize_token_permissions,
+};
+
 /// The default PVE API port.
 pub const DEFAULT_PORT: u16 = 8006;
 /// The request timeout applied to every call.
@@ -810,6 +817,21 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
         request: PveHttpRequest,
     ) -> Result<PveGuestDiscovery, PveApiError>;
 
+    /// Reads the calling token's own effective permissions
+    /// (`GET /access/permissions`, FM-604) with the PVE version they apply
+    /// to. Every principal may read its own permissions, so a refusal here
+    /// is itself evidence. Read-only and bounded; unknown privilege names
+    /// are kept, not rejected.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] on auth, privilege, HTTP, payload, or
+    /// transport failures.
+    async fn token_permissions(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveTokenPermissions, PveApiError>;
+
     /// Runs one lifecycle action on one QEMU guest, returning the parsed
     /// UPID of the task PVE started. Read-only until this point; this is
     /// the first mutating surface in the provider.
@@ -1023,23 +1045,7 @@ impl ProxmoxClient {
         request: &PveHttpRequest,
     ) -> Result<(String, Vec<serde_json::Value>), PveApiError> {
         // The version first: it anchors provenance and proves the trust.
-        let version_request = PveHttpRequest {
-            path: "/api2/json/version".to_owned(),
-            ..request.clone()
-        };
-        let version_data = self.call(version_request).await?;
-        let version = version_data
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .chars()
-            .take(32)
-            .collect::<String>();
-        if version.is_empty() {
-            return Err(PveApiError::InvalidPayload {
-                detail: "the version payload carries no version string".to_owned(),
-            });
-        }
+        let version = self.read_version(request).await?;
         let resources_request = PveHttpRequest {
             path: "/api2/json/cluster/resources".to_owned(),
             ..request.clone()
@@ -1059,6 +1065,30 @@ impl ProxmoxClient {
             }
         };
         Ok((version, entries))
+    }
+
+    /// The bounded PVE version string (`GET /version`, which every
+    /// authenticated principal may read).
+    async fn read_version(&self, request: &PveHttpRequest) -> Result<String, PveApiError> {
+        let version_request = PveHttpRequest {
+            path: "/api2/json/version".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request.clone()
+        };
+        let version_data = self.call(version_request).await?;
+        let version = version_data
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(32)
+            .collect::<String>();
+        if version.is_empty() {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the version payload carries no version string".to_owned(),
+            });
+        }
+        Ok(version)
     }
 
     async fn call(&self, request: PveHttpRequest) -> Result<serde_json::Value, PveApiError> {
@@ -1359,6 +1389,59 @@ impl ProxmoxSource for ProxmoxClient {
             guests,
             warnings,
         })
+    }
+
+    async fn token_permissions(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveTokenPermissions, PveApiError> {
+        // The version keys the privilege table (PVE 9 split VM.Monitor),
+        // so it is read first; both reads go through the same pinned
+        // request, never an unpinned one.
+        let version = self.read_version(&request).await?;
+        let permissions_request = PveHttpRequest {
+            path: "/api2/json/access/permissions".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request.clone()
+        };
+        let data = self.call(permissions_request).await?;
+        let mut permissions = normalize_token_permissions(version, &data)?;
+        // A grant on one concrete /vms/{id} is a usable clone target only
+        // while that VMID is free. `/cluster/nextid?vmid=` answers that for
+        // any caller (`user => 'all'` on 8.x and 9.x): 200 when free, 400
+        // when the VMID exists or is invalid. Any other outcome fails the
+        // read like every other source error. The checks run concurrently,
+        // bounded like discovery's per-node reads.
+        let vmids = concrete_vmids(&permissions.paths);
+        if vmids.len() > MAX_VMID_CHECKS {
+            permissions.warnings.push(format!(
+                "{} VMID paths were not checked for being free (the first {MAX_VMID_CHECKS} were); they don't count as clone targets",
+                vmids.len() - MAX_VMID_CHECKS
+            ));
+        }
+        let checks =
+            futures_util::stream::iter(vmids.into_iter().take(MAX_VMID_CHECKS).map(|vmid| {
+                let nextid_request = PveHttpRequest {
+                    path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+                    method: PveHttpMethod::Get,
+                    ..request.clone()
+                };
+                async move {
+                    match self.call(nextid_request).await {
+                        Ok(_) => Ok((vmid, false)),
+                        Err(PveApiError::Http { status: 400, .. }) => Ok((vmid, true)),
+                        Err(error) => Err(error),
+                    }
+                }
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        for check in checks {
+            let (vmid, in_use) = check?;
+            permissions.vmids_in_use.insert(vmid, in_use);
+        }
+        Ok(permissions)
     }
 
     async fn guest_lifecycle(

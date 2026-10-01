@@ -34,6 +34,8 @@ use crate::machine::{GuestIdentity, MachineFilter, MachineUseCaseError, MachineV
 use crate::operation::AuditPort;
 use fleet_core::{CapabilityFact, CapabilityStatus, SensitiveString, Timestamp};
 
+pub mod privileges;
+
 /// Binds one credential-carrying call to one account, resolving the secret
 /// just in time.
 pub struct BoundRequest {
@@ -635,6 +637,9 @@ pub struct ProxmoxAccounts {
     /// The task-history ports (FM-609), attached by
     /// [`ProxmoxAccounts::with_task_history`].
     task_history: Option<tasks::TaskHistoryPorts>,
+    /// The token-permissions read (FM-604), attached with
+    /// [`ProxmoxAccounts::with_permissions`].
+    permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
 }
 
 impl ProxmoxAccounts {
@@ -659,6 +664,7 @@ impl ProxmoxAccounts {
             audit,
             events: None,
             task_history: None,
+            permissions: None,
         }
     }
 

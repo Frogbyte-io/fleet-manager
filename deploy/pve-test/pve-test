@@ -32,7 +32,8 @@ Setup (run in this order; each is safe to re-run):
   create-vm <role>           create and start the nested VM that installs from that ISO
   wait <role>                wait for the installed node, then detach and delete its ISO
   cluster-create             create the cluster on node-a
-  cluster-join               join node-b to node-a's cluster (prompts for node-a's root password)
+  cluster-join [--ssh]       join node-b to node-a's cluster (prompts for node-a's root password,
+                             or with --ssh joins over root SSH keys without a prompt)
   tokens <role>              create the provisional test user, ACLs, and read-only + admin tokens
 
 Failure simulation (FM-611 partial-node scenario; node-a or node-b only):
@@ -151,6 +152,16 @@ ssh_opts() {
   # a fixture-only known_hosts file on first use; teardown forgets them.
   printf '%s\n' -o BatchMode=yes -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$kh"
+  identity_opts
+}
+
+# identity_opts: -i/IdentitiesOnly when FLEET_PVE_TEST_SSH_IDENTITY names a key,
+# so the fixture key need not be in ~/.ssh/config or the agent.
+identity_opts() {
+  local id
+  id="$(opt FLEET_PVE_TEST_SSH_IDENTITY '')"
+  [ -n "$id" ] || return 0
+  printf '%s\n' -i "$id" -o IdentitiesOnly=yes
 }
 
 # phys CMD...: run a command on the physical PVE host. With
@@ -194,9 +205,11 @@ on_node_tty() {
   local target kh
   target="$(node_target "$role")"
   kh="$(known_hosts_file)"
+  local -a id
+  mapfile -t id < <(identity_opts)
   # shellcheck disable=SC2029
   ssh -t -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-    -o "UserKnownHostsFile=$kh" "$target" "$(printf '%q ' "$@")"
+    -o "UserKnownHostsFile=$kh" "${id[@]}" "$target" "$(printf '%q ' "$@")"
 }
 
 vm_exists() { phys qm status "$1" >/dev/null 2>&1; }
@@ -433,7 +446,21 @@ cmd_wait() {
   fi
 }
 
-in_cluster() { on_node "$1" test -f /etc/pve/corosync.conf; }
+# Corosync's local copy, not /etc/pve's: pmxcfs restarts during 'pvecm create'
+# and /etc/pve is briefly unavailable.
+in_cluster() { on_node "$1" test -f /etc/corosync/corosync.conf; }
+
+# wait_writable ROLE SECONDS: wait until the node's cluster is quorate and
+# /etc/pve takes writes. 'pvecm create' restarts pmxcfs, and writes into
+# /etc/pve (such as root's authorized_keys) fail with EIO until it is back.
+wait_writable() {
+  local role="$1" deadline=$((SECONDS + $2))
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  until on_node "$role" sh -c 'pvecm status 2>/dev/null | grep -Eq "^Quorate: *Yes" && f=/etc/pve/priv/.fleet-pve-test-probe && : >"$f" && rm -f "$f"' >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || die "$role: cluster not quorate or /etc/pve not writable within $2s"
+    sleep 2
+  done
+}
 
 cmd_cluster_create() {
   local name
@@ -458,18 +485,64 @@ cmd_fingerprint() {
     sed 's/^[^=]*=//'
 }
 
+# trust_peer_over_ssh: let node-b's root SSH to node-a without a prompt, which
+# 'pvecm add --use_ssh' needs. It runs ssh-copy-id with /root/.ssh/id_rsa and
+# then BatchMode ssh to node-a, so node-a must already authorize that key and
+# node-b must already know node-a's host key. Both are copied over this
+# script's own connections, whose host keys were pinned when 'wait' first
+# reached each node, so the join adds no trust decision of its own.
+trust_peer_over_ssh() {
+  local addr_a pub hostkeys
+  addr_a="$(role_addr node-a)"
+  on_node node-b sh -c '[ -f /root/.ssh/id_rsa ] || ssh-keygen -q -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa'
+  # Derive the public key from the private one: pvecm's BatchMode ssh cannot
+  # unlock a passphrase-protected key, and its ssh-copy-id reads the .pub
+  # sidecar, which is rewritten here in case it is stale.
+  pub="$(on_node node-b ssh-keygen -y -P "" -f /root/.ssh/id_rsa 2>/dev/null)" ||
+    die "node-b's /root/.ssh/id_rsa needs a passphrase; 'cluster-join --ssh' needs a passphrase-free key"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  on_node node-b sh -c 'printf "%s\n" "$1" >/root/.ssh/id_rsa.pub' sh "$pub"
+  [ -n "$pub" ] || die "could not read node-b's root public key"
+  log "authorizing node-b's root key on node-a"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  on_node node-a sh -c 'grep -qxF "$1" /root/.ssh/authorized_keys 2>/dev/null || printf "%s\n" "$1" >>/root/.ssh/authorized_keys' sh "$pub"
+  hostkeys="$(on_node node-a sh -c 'cat /etc/ssh/ssh_host_*_key.pub')"
+  [ -n "$hostkeys" ] || die "could not read node-a's SSH host keys"
+  log "pinning node-a's SSH host keys on node-b"
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  printf '%s\n' "$hostkeys" | while read -r type key _; do
+    on_node node-b sh -c 'f=/root/.ssh/known_hosts; touch "$f"; grep -qF "$1 $2 $3" "$f" || printf "%s %s %s\n" "$1" "$2" "$3" >>"$f"' sh "$addr_a" "$type" "$key"</dev/null
+  done
+}
+
 cmd_cluster_join() {
+  local use_ssh=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ssh) use_ssh=1 ;;
+      *) die "unknown cluster-join option '$1'" ;;
+    esac
+    shift
+  done
   if in_cluster node-b; then
     log "node-b is already in a cluster"
     on_node node-b pvecm status | grep -E '^(Name|Quorate|Nodes):' || true
     return 0
   fi
   in_cluster node-a || die "node-a has no cluster yet; run cluster-create first"
+  log "waiting for node-a's cluster filesystem"
+  wait_writable node-a "$(opt FLEET_PVE_TEST_BOOT_TIMEOUT 600)"
   local fp addr_a addr_b
   fp="$(cmd_fingerprint node-a)"
   addr_a="$(role_addr node-a)"
   addr_b="$(role_addr node-b)"
   [ -n "$fp" ] || die "could not read node-a's certificate fingerprint"
+  if [ "$use_ssh" = 1 ]; then
+    trust_peer_over_ssh
+    log "joining node-b to node-a over SSH"
+    on_node node-b pvecm add "$addr_a" --link0 "$addr_b" --use_ssh 1
+    return 0
+  fi
   log "joining node-b to node-a (enter node-a's root@pam password at the prompt)"
   # The password is typed interactively; it is never stored or passed as an argument.
   on_node_tty node-b pvecm add "$addr_a" --link0 "$addr_b" --fingerprint "$fp"
@@ -581,6 +654,18 @@ cmd_node_down() {
   if [ "$keep" = 1 ]; then
     # Two nodes give two expected votes; the survivor alone is inquorate and
     # /etc/pve turns read-only. This forces it quorate for the test window.
+    # votequorum rejects expected votes below the votes it still counts
+    # (CS_ERR_INVALID_PARAM), so wait until the survivor has dropped the peer.
+    # pvecm status exits non-zero while inquorate, so test it on the node,
+    # outside this script's pipefail.
+    log "$peer: waiting for the survivor to drop $role from membership"
+    local timeout deadline
+    timeout="$(opt FLEET_PVE_TEST_BOOT_TIMEOUT 600)"
+    deadline=$((SECONDS + timeout))
+    until on_node "$peer" sh -c 'pvecm status 2>/dev/null | grep -Eq "^Total votes: *1$"'; do
+      [ "$SECONDS" -lt "$deadline" ] || die "$peer: still counts $role's vote after ${timeout}s"
+      sleep 2
+    done
     log "$peer: forcing quorum on the survivor (pvecm expected 1)"
     on_node "$peer" pvecm expected 1
   fi
@@ -667,7 +752,7 @@ EOF
 redact() {
   sed -E \
     -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/<redacted-ipv4>/g' \
-    -e 's/([0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}/<redacted-ipv6>/g' \
+    -e '/^Date:/!s/([0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}/<redacted-ipv6>/g' \
     -e 's/0x[0-9A-Fa-f]{8}/<redacted-addr>/g'
 }
 
@@ -747,7 +832,7 @@ main() {
     create-vm) cmd_create_vm "$@" ;;
     wait) cmd_wait "$@" ;;
     cluster-create) cmd_cluster_create ;;
-    cluster-join) cmd_cluster_join ;;
+    cluster-join) cmd_cluster_join "$@" ;;
     tokens) cmd_tokens "$@" ;;
     node-down) cmd_node_down "$@" ;;
     node-up) cmd_node_up "$@" ;;
