@@ -683,7 +683,7 @@ pub enum PrivilegeStatus {
     Granted,
     /// The token lacks a needed privilege.
     Missing,
-    /// The permissions read itself was refused, so Fleet cannot tell.
+    /// Fleet could not determine the status; the report's reason says why.
     Unknown,
 }
 
@@ -709,6 +709,8 @@ pub struct PrivilegeCheck {
     pub path: String,
     /// The effective-map paths the requirement is satisfied on (bounded).
     pub granted_on: Vec<String>,
+    /// Whether more paths satisfied the requirement than `granted_on` keeps.
+    pub granted_on_truncated: bool,
     /// The privileges still missing on the closest path in scope.
     pub missing: Vec<String>,
     /// Why the row exists.
@@ -785,6 +787,7 @@ pub fn evaluate_requirement(
         any_of: requirement.matching == PrivilegeMatch::Any,
         path: requirement.scope.template().to_owned(),
         granted_on: Vec::new(),
+        granted_on_truncated: false,
         missing: Vec::new(),
         note: requirement.note.to_owned(),
     };
@@ -815,6 +818,8 @@ pub fn evaluate_requirement(
         if satisfied {
             if check.granted_on.len() < MAX_GRANTED_PATHS {
                 check.granted_on.push(path.clone());
+            } else {
+                check.granted_on_truncated = true;
             }
         } else if best.as_ref().is_none_or(|best| held.len() > best.len()) {
             best = Some(held);
@@ -1195,6 +1200,26 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    #[test]
+    fn granted_on_reports_when_paths_were_dropped() {
+        let vms: Vec<String> = (0..MAX_GRANTED_PATHS + 4)
+            .map(|vmid| format!("/vms/{}", 100 + vmid))
+            .collect();
+        let rows: Vec<(&str, &[(&str, bool)])> = vms
+            .iter()
+            .map(|path| (path.as_str(), &[("VM.PowerMgmt", false)][..]))
+            .collect();
+        let tiers = evaluate_tiers(9, &map(&rows));
+        let start = check(tier(&tiers, PrivilegeTier::Operate), "proxmox.guest.start");
+        assert_eq!(start.granted_on.len(), MAX_GRANTED_PATHS);
+        assert!(start.granted_on_truncated);
+
+        let one = map(&[("/vms/100", &[("VM.PowerMgmt", false)])]);
+        let tiers = evaluate_tiers(9, &one);
+        let start = check(tier(&tiers, PrivilegeTier::Operate), "proxmox.guest.start");
+        assert!(!start.granted_on_truncated);
     }
 
     #[test]

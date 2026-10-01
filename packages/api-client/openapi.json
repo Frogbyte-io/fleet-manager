@@ -11296,6 +11296,7 @@
           "anyOf",
           "path",
           "grantedOn",
+          "grantedOnTruncated",
           "missing",
           "note"
         ],
@@ -11318,6 +11319,10 @@
               "type": "string"
             },
             "description": "The token's effective-permission paths the row is satisfied on."
+          },
+          "grantedOnTruncated": {
+            "type": "boolean",
+            "description": "Whether more paths satisfied the row than `grantedOn` lists."
           },
           "missing": {
             "type": "array",

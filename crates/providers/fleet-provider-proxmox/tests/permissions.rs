@@ -248,3 +248,23 @@ async fn a_refused_permissions_read_is_a_forbidden_error_with_bounded_detail() {
         assert!(!detail.contains("fixture-secret"));
     }
 }
+
+#[tokio::test]
+async fn an_oversized_refusal_body_is_capped_at_256_characters() {
+    let body = format!(
+        r#"{{"data":null,"message":"Permission check failed {}"}}"#,
+        "x".repeat(1024)
+    );
+    let client = ProxmoxClient::new(PermissionsTransport::new(
+        "pve9",
+        403,
+        Box::leak(body.clone().into_boxed_str()),
+    ));
+    let error = client.token_permissions(request()).await.unwrap_err();
+    let PveApiError::Forbidden { detail } = error else {
+        panic!("expected Forbidden, got {error:?}");
+    };
+    assert!(body.chars().count() > 256);
+    assert_eq!(detail.chars().count(), 256, "{detail}");
+    assert!(detail.contains("Permission check failed"));
+}
