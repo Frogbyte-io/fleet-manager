@@ -79,6 +79,7 @@ Authentication, authorization, human approval, and provider privilege are separa
 - `sudo`/Administrator helpers expose an allowlisted protocol. Avoid a root `fleetd` general shell.
 - Docker access is labeled root-equivalent on typical hosts; container exec/lifecycle permissions are separate.
 - Proxmox tokens use dedicated users/tokens and the minimum roles/path ACLs. TLS verification/pinning cannot be disabled silently.
+- Operator guide for the per-tier Proxmox roles, ACL paths, and token rotation: [operations/proxmox-token.md](../operations/proxmox-token.md).
 - Git hooks are disabled for controller-managed desired clones. Project setup does not execute repository scripts until an authorized plan names them.
 - Downloads and binaries use TLS, pinned version, checksum/signature where upstream supplies one, and atomic install/rollback.
 
