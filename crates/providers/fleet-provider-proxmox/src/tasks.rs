@@ -43,6 +43,11 @@ pub const MAX_TASKS_PER_NODE: u32 = 500;
 const MAX_USER_CHARS: usize = 128;
 /// The bound on a task's exit-status detail.
 const MAX_EXIT_STATUS_CHARS: usize = 256;
+/// How many malformed cluster-resource rows are named before the rest are
+/// only counted.
+const MAX_RESOURCE_WARNINGS: usize = 5;
+/// The bound on a resource id quoted in a warning.
+const MAX_RESOURCE_NAME_CHARS: usize = 64;
 /// How many nodes are read at once.
 const NODE_CONCURRENCY: usize = 8;
 
@@ -65,6 +70,31 @@ impl PveTaskSource {
     }
 }
 
+/// A finished-task outcome PVE can filter on (`statusfilter`). Fleet maps
+/// PVE's `OK` to ok, `WARNINGS: n` and every other exit status to error,
+/// and a task without a status to unknown, so each Fleet outcome names the
+/// PVE categories that normalize into it (`normalize_status_type` in
+/// `pve-common`, identical on 8.x and 9.x).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PveTaskOutcome {
+    /// Finished with `OK`.
+    Ok,
+    /// Finished with a warning or an error.
+    Error,
+    /// No usable status.
+    Unknown,
+}
+
+impl PveTaskOutcome {
+    const fn query_value(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "warning,error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The task-history query. Every filter is optional. The per-node limit
 /// is clamped to [`MAX_TASKS_PER_NODE`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -75,6 +105,9 @@ pub struct PveTaskQuery {
     pub vmid: Option<u32>,
     /// Running tasks only, or everything.
     pub source: PveTaskSource,
+    /// Finished tasks with this outcome only, filtered by PVE before its
+    /// per-node limit so older matches are not crowded out.
+    pub outcome: Option<PveTaskOutcome>,
     /// The most tasks one node returns.
     pub limit_per_node: u32,
 }
@@ -128,19 +161,7 @@ impl ProxmoxClient {
     ) -> Result<PveTaskHistory, PveApiError> {
         let (version, entries) = self.version_and_resources(&request).await?;
         let mut warnings = Vec::new();
-        let mut nodes: Vec<(String, Option<String>)> = entries
-            .iter()
-            .filter_map(|entry| match normalize_resource(entry) {
-                Ok(Some(resource)) if resource.kind == "node" => {
-                    let name = resource
-                        .node
-                        .clone()
-                        .or_else(|| resource.id.strip_prefix("node/").map(str::to_owned))?;
-                    Some((name, resource.status))
-                }
-                _ => None,
-            })
-            .collect();
+        let mut nodes = cluster_nodes(&entries, &mut warnings);
         nodes.sort();
         nodes.dedup_by(|left, right| left.0 == right.0);
         if let Some(wanted) = &query.node {
@@ -213,8 +234,12 @@ impl ProxmoxClient {
             .vmid
             .map(|vmid| format!("&vmid={vmid}"))
             .unwrap_or_default();
+        let statusfilter = query
+            .outcome
+            .map(|outcome| format!("&statusfilter={}", outcome.query_value()))
+            .unwrap_or_default();
         let path = format!(
-            "/api2/json/nodes/{}/tasks?source={}&limit={limit}{vmid}",
+            "/api2/json/nodes/{}/tasks?source={}&limit={limit}{vmid}{statusfilter}",
             urlencode(&node),
             query.source.query_value()
         );
@@ -261,6 +286,72 @@ impl ProxmoxClient {
         }
         (node, tasks, warnings)
     }
+}
+
+/// The cluster's nodes (name and status) from `/cluster/resources`. A row
+/// that cannot be read is named in a bounded warning, never dropped
+/// silently.
+fn cluster_nodes(
+    entries: &[serde_json::Value],
+    warnings: &mut Vec<String>,
+) -> Vec<(String, Option<String>)> {
+    let mut nodes: Vec<(String, Option<String>)> = Vec::new();
+    let mut skipped_rows = 0_usize;
+    for entry in entries {
+        match normalize_resource(entry) {
+            Ok(Some(resource)) if resource.kind == "node" => {
+                match resource
+                    .node
+                    .clone()
+                    .or_else(|| resource.id.strip_prefix("node/").map(str::to_owned))
+                {
+                    Some(name) => nodes.push((name, resource.status)),
+                    None => warnings.push(format!(
+                        "cluster resource {:?} names no node; its tasks were not read",
+                        resource.id
+                    )),
+                }
+            }
+            Ok(_) => {}
+            Err(detail) => {
+                // A malformed row may have been a node, so its tasks
+                // would vanish without a trace. Say so, bounded. A row
+                // that plainly is another resource type (say, a type
+                // this version does not know yet) is not a node.
+                let plainly_not_a_node = entry
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| kind != "node")
+                    && !entry
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| id.starts_with("node/"));
+                if plainly_not_a_node {
+                    continue;
+                }
+                skipped_rows += 1;
+                if skipped_rows <= MAX_RESOURCE_WARNINGS {
+                    let name = entry
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(
+                            || "(no id)".to_owned(),
+                            |id| id.chars().take(MAX_RESOURCE_NAME_CHARS).collect(),
+                        );
+                    warnings.push(format!(
+                        "cluster resource {name:?} could not be read ({detail}); if it is a node, its tasks are missing"
+                    ));
+                }
+            }
+        }
+    }
+    if skipped_rows > MAX_RESOURCE_WARNINGS {
+        warnings.push(format!(
+            "{} more cluster resources could not be read",
+            skipped_rows - MAX_RESOURCE_WARNINGS
+        ));
+    }
+    nodes
 }
 
 /// Normalizes one `/nodes/{node}/tasks` entry. The UPID is required and

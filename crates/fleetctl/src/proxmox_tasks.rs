@@ -24,9 +24,14 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     let mut flags = flags.iter().copied();
     while let Some(flag) = flags.next() {
         let mut value = |name: &str| {
-            flags.next().ok_or_else(|| CliError {
-                message: format!("--{name} requires a value"),
-            })
+            // Another option is not a value: `--node --output` means the
+            // node's value is missing.
+            flags
+                .next()
+                .filter(|candidate| !candidate.starts_with("--"))
+                .ok_or_else(|| CliError {
+                    message: format!("--{name} requires a value"),
+                })
         };
         match flag {
             "--node" => node = Some(value("node")?.to_owned()),
@@ -152,7 +157,11 @@ pub(crate) fn render(value: &Value) -> String {
     }
     lines.push("times are epoch milliseconds".to_owned());
     if let Some(cursor) = value["page"]["nextCursor"].as_str() {
-        lines.push(format!("next page: --cursor {cursor}"));
+        // Token UPIDs contain `!`, which shells expand in history.
+        lines.push(format!(
+            "next page: --cursor '{}'",
+            cursor.replace('\'', "'\\''")
+        ));
     }
     if let Some(warnings) = value.get("warnings").and_then(Value::as_array)
         && !warnings.is_empty()

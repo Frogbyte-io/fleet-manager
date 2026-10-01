@@ -1070,6 +1070,7 @@ pub struct ProvisionExecutor {
     leases: Arc<dyn fleet_application::lab::LeasePort>,
     templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
     client: fleet_provider_proxmox::ProxmoxClient,
+    links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
 }
 
 impl ProvisionExecutor {
@@ -1090,7 +1091,16 @@ impl ProvisionExecutor {
             leases,
             templates,
             client,
+            links: None,
         }
+    }
+
+    /// Records the clone and start UPIDs this executor obtains against its
+    /// operation, so the task history can link them back (FM-609).
+    #[must_use]
+    pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
+        self.links = Some(links);
+        self
     }
 
     /// Resolves the clone source VMID from the image version's build
@@ -1272,6 +1282,7 @@ impl ProvisionExecutor {
                     )
                     .await
                     .map_err(|error| format!("the clone failed: {error}"))?;
+                record_task_link(self.links.as_ref(), &account_id, &upid, &operation.id).await;
                 // Record the clone UPID and the resolved VMID before
                 // continuing: the saga rule.
                 let mut updated = record.clone();
@@ -1304,7 +1315,7 @@ impl ProvisionExecutor {
             )
             .await
             .map_err(|error| error.to_string())?;
-        let _ = self
+        let started = self
             .client
             .guest_lifecycle(
                 request.clone(),
@@ -1313,6 +1324,11 @@ impl ProvisionExecutor {
                 fleet_provider_proxmox::LifecycleAction::Start,
             )
             .await;
+        // A refused start stays tolerated (the guest may already run); an
+        // accepted one is linked like every other task Fleet starts.
+        if let Ok(upid) = &started {
+            record_task_link(self.links.as_ref(), &account_id, upid, &operation.id).await;
+        }
 
         // Step 3: the readiness probe. The guest-agent probe polls the
         // FM-601 agent data; the deadline comes from the template.

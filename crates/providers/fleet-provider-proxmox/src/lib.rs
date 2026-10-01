@@ -24,7 +24,9 @@
 
 mod tasks;
 
-pub use tasks::{MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskQuery, PveTaskSource, PveTaskSummary};
+pub use tasks::{
+    MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
+};
 
 use std::fmt;
 use std::sync::{Arc, Mutex};

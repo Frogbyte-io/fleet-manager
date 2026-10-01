@@ -441,14 +441,21 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 };
                 std::sync::Arc::new(fleet_controller::proxmox_exec::LabDispatch::new(
                     with_images.clone(),
-                    std::sync::Arc::new(fleet_controller::proxmox_exec::ProvisionExecutor::new(
-                        lab_accounts,
-                        lab_credentials,
-                        lab_provisions,
-                        lab_leases,
-                        lab_versions,
-                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
-                    )),
+                    std::sync::Arc::new(
+                        fleet_controller::proxmox_exec::ProvisionExecutor::new(
+                            lab_accounts,
+                            lab_credentials,
+                            lab_provisions,
+                            lab_leases,
+                            lab_versions,
+                            fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                        )
+                        .with_task_links(std::sync::Arc::new(
+                            fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                                store.pool().clone(),
+                            ),
+                        )),
+                    ),
                 ))
             };
             match &services {

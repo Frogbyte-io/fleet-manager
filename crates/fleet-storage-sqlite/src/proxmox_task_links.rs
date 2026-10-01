@@ -30,6 +30,13 @@ impl ProxmoxTaskLinkPort for ProxmoxTaskLinkRepository {
         operation_id: &str,
     ) -> Result<(), PortFailure> {
         // The first record wins: a UPID is started once, by one operation.
+        // Like every write in this crate, it takes the write lock up front
+        // so the busy timeout applies under contention.
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(backend)?;
         sqlx::query(
             "INSERT INTO proxmox_task_links (account_id, upid, operation_id, recorded_at) \
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT (account_id, upid) DO NOTHING",
@@ -38,9 +45,10 @@ impl ProxmoxTaskLinkPort for ProxmoxTaskLinkRepository {
         .bind(upid)
         .bind(operation_id)
         .bind(fleet_core::SystemClock::now_unix_millis())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(backend)?;
+        transaction.commit().await.map_err(backend)?;
         Ok(())
     }
 

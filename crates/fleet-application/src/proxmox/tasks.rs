@@ -86,6 +86,10 @@ pub struct RawTaskQuery {
     pub vmid: Option<u32>,
     /// Read only running tasks (PVE's `source=active`).
     pub running_only: bool,
+    /// Read only finished tasks in this status (`ok`, `error`, or
+    /// `unknown`), filtered by PVE before its per-node limit. Unset for
+    /// `running`, which `running_only` covers.
+    pub finished_status: Option<ProxmoxTaskState>,
     /// The most tasks one node returns.
     pub limit_per_node: u32,
 }
@@ -297,6 +301,7 @@ impl ProxmoxAccounts {
                     node: query.node.clone(),
                     vmid: query.vmid,
                     running_only: status == Some(ProxmoxTaskState::Running),
+                    finished_status: status.filter(|wanted| *wanted != ProxmoxTaskState::Running),
                     limit_per_node: TASKS_PER_NODE,
                 },
             )
@@ -306,6 +311,8 @@ impl ProxmoxAccounts {
         let tasks: Vec<RawTask> = raw
             .tasks
             .into_iter()
+            // A safety net: PVE already filtered, but its status vocabulary
+            // is not Fleet's, so the exact Fleet status is enforced here.
             .filter(|task| status.is_none_or(|wanted| task.state == wanted))
             .collect();
         // The join: one lookup for the whole snapshot. The operation link
