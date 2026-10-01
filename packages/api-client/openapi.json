@@ -5490,6 +5490,138 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/tasks": {
+      "get": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Lists the account's recent PVE tasks, newest first, each linked to the\nFleet operation that started it.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a malformed filter or\nstale cursor, an unconfirmed account, or a whole-read source failure.\nA node that cannot be read is a warning, not an error.",
+        "operationId": "listProxmoxTasks",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "description": "Only this node's tasks.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "query",
+            "description": "Only this guest's tasks.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only tasks in this status: running, ok, error, or unknown.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of tasks to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor: the last task's UPID from the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the task history, with per-node warnings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxTaskPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter is malformed, or the cursor names no task in the snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed or the host fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API refused the token or failed before any node was read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -11583,6 +11715,136 @@
             "minimum": 0
           }
         }
+      },
+      "ProxmoxTaskDto": {
+        "type": "object",
+        "description": "One PVE task.",
+        "required": [
+          "upid",
+          "node",
+          "taskType",
+          "user",
+          "startedAt",
+          "status"
+        ],
+        "properties": {
+          "endedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the task ended (epoch millis), or null while it runs."
+          },
+          "exitStatus": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PVE's exit status string (`OK`, `WARNINGS: 2`, an error message),\nonce the task has one."
+          },
+          "fleetOperationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Fleet operation that started this task, or null when Fleet did\nnot start it or the caller may not read operations."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node the task runs on."
+          },
+          "startedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the task started (epoch millis)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProxmoxTaskStatusDto",
+            "description": "The status."
+          },
+          "targetId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The target id (the VMID for guest tasks), or null for node-level\ntasks."
+          },
+          "taskType": {
+            "type": "string",
+            "description": "The task type, e.g. `qmstart`, `vzdump`."
+          },
+          "tokenId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The API token name when the task ran under a token (its name, never\nits secret)."
+          },
+          "upid": {
+            "type": "string",
+            "description": "The raw UPID: the task's identity, and the page cursor."
+          },
+          "user": {
+            "type": "string",
+            "description": "The user, exactly as PVE reports it."
+          }
+        }
+      },
+      "ProxmoxTaskPage": {
+        "type": "object",
+        "description": "One page of an account's task history, newest first. The page shape\n(`items`, `page`) is the standard one; the snapshot facts ride along.",
+        "required": [
+          "items",
+          "page",
+          "accountId",
+          "pveVersion",
+          "warnings",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that produced the snapshot."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxTaskDto"
+            },
+            "description": "The tasks on this page."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot was taken (epoch millis)."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the snapshot."
+          },
+          "pveVersion": {
+            "type": "string",
+            "description": "The PVE version seen."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the snapshot is missing and why: unreadable or offline nodes,\nmalformed entries, a per-node bound reached, a withheld operation\nlink. These describe the whole snapshot, so every page repeats them."
+          }
+        }
+      },
+      "ProxmoxTaskStatusDto": {
+        "type": "string",
+        "description": "A task's status, in the provider's task-status taxonomy.",
+        "enum": [
+          "running",
+          "ok",
+          "error",
+          "unknown"
+        ]
       },
       "ProxmoxTierPrivilegesDto": {
         "type": "object",

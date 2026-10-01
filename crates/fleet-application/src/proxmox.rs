@@ -21,6 +21,8 @@
 //! nothing here mutates a PVE host.
 #![warn(missing_docs)]
 
+pub mod tasks;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -632,6 +634,9 @@ pub struct ProxmoxAccounts {
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
     events: Option<Arc<crate::events::EventHub>>,
+    /// The task-history ports (FM-609), attached by
+    /// [`ProxmoxAccounts::with_task_history`].
+    task_history: Option<tasks::TaskHistoryPorts>,
     /// The token-permissions read (FM-604), attached with
     /// [`ProxmoxAccounts::with_permissions`].
     permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
@@ -658,6 +663,7 @@ impl ProxmoxAccounts {
             machines,
             audit,
             events: None,
+            task_history: None,
             permissions: None,
         }
     }

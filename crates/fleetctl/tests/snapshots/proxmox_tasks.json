@@ -1,0 +1,40 @@
+{
+  "accountId": "acc-1",
+  "items": [
+    {
+      "endedAt": 1789911534000,
+      "exitStatus": "OK",
+      "fleetOperationId": "op-1",
+      "node": "pve",
+      "startedAt": 1789911532000,
+      "status": "ok",
+      "targetId": "101",
+      "taskType": "qmstart",
+      "tokenId": "GLM-AGENT",
+      "upid": "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmstart:101:root@pam!GLM-AGENT:",
+      "user": "root@pam"
+    },
+    {
+      "endedAt": 1789910600000,
+      "exitStatus": "WARNINGS: 1",
+      "fleetOperationId": null,
+      "node": "pve",
+      "startedAt": 1789910532000,
+      "status": "error",
+      "targetId": null,
+      "taskType": "vzdump",
+      "tokenId": null,
+      "upid": "UPID:pve:00154000:0C6DE000:6AAFDE04:vzdump::root@pam:",
+      "user": "root@pam"
+    }
+  ],
+  "observedAt": 1800000000000,
+  "page": {
+    "limit": 2,
+    "nextCursor": "UPID:pve:00154000:0C6DE000:6AAFDE04:vzdump::root@pam:"
+  },
+  "pveVersion": "9.2.2",
+  "warnings": [
+    "node pve2 tasks are unavailable: the API answered 595: No route to host"
+  ]
+}

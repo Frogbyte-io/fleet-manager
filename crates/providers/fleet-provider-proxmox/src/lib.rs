@@ -22,6 +22,12 @@
 //! bounds is a payload error, not silent truncation.
 #![warn(missing_docs)]
 
+mod tasks;
+
+pub use tasks::{
+    MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
+};
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -695,7 +701,8 @@ pub struct Upid {
     pub node: String,
     /// The task type, e.g. `qmstart`.
     pub task_type: String,
-    /// The task's target id (the VMID for guest tasks).
+    /// The task's target id (the VMID for guest tasks); empty for
+    /// node-level tasks that carry no id.
     pub target: String,
     /// The user the task runs as.
     pub user: String,
@@ -734,13 +741,15 @@ impl Upid {
         else {
             return Err("the UPID fields did not destructure".to_owned());
         };
+        // The `id` field is legitimately empty for node-level tasks
+        // (`aptupdate`, `srvreload`, an all-guest `vzdump`): PVE encodes
+        // them as `...:<type>::<user>:`. Every other field is required.
         for (label, part) in [
             ("node", node),
             ("pid", pid),
             ("pstart", pstart),
             ("starttime", starttime),
             ("type", task_type),
-            ("id", target),
             ("user", user),
         ] {
             if part.is_empty() {
@@ -2199,6 +2208,12 @@ mod tests {
         assert!(Upid::parse("UPID:pve:0015:0C6D:6AAF:qmreboot:101:").is_err());
         // A field is empty: refused.
         assert!(Upid::parse("UPID:pve::0C6DF532:6AAFE1EC:qmreboot:101:user:").is_err());
+        assert!(Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101::").is_err());
+        // Except the id: node-level tasks carry none.
+        let node_task =
+            Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:aptupdate::root@pam:").unwrap();
+        assert_eq!(node_task.target, "");
+        assert_eq!(node_task.task_type, "aptupdate");
         // Trailing material: refused.
         assert!(
             Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101:user:extra").is_err()

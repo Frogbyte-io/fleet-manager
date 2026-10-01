@@ -412,7 +412,7 @@ impl fleet_application::proxmox::privileges::ProxmoxPermissionsPort for Provider
 }
 
 /// Maps one provider API error onto the application taxonomy.
-fn map_api_error(error: fleet_provider_proxmox::PveApiError) -> ProxmoxSourceError {
+pub(crate) fn map_api_error(error: fleet_provider_proxmox::PveApiError) -> ProxmoxSourceError {
     match error {
         fleet_provider_proxmox::PveApiError::Auth => ProxmoxSourceError::Auth,
         fleet_provider_proxmox::PveApiError::Forbidden { detail } => {
@@ -478,10 +478,14 @@ pub fn compose_proxmox_with_events(
         discovery.clone(),
         discovery.clone(),
         Arc::new(ProviderTrustProbe::new(transport)),
-        machines_for(pool, audit.clone()),
+        machines_for(pool.clone(), audit.clone()),
         audit,
     )
-    .with_permissions(discovery);
+    .with_permissions(discovery)
+    .with_task_history(
+        Arc::new(crate::proxmox_tasks_store::ProviderTaskHistory::new(client)),
+        Arc::new(fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(pool)),
+    );
     match events {
         Some(hub) => accounts.with_events(hub),
         None => accounts,
