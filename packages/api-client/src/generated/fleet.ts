@@ -2919,6 +2919,130 @@ export interface ProxmoxFingerprintDto {
 }
 
 /**
+ * Privileges to grant, and where.
+ */
+export interface ProxmoxMissingPrivilegesDto {
+  /** Whether any one of them suffices. */
+  anyOf: boolean;
+  /** The executor kinds or reads that need them. */
+  capabilities: string[];
+  /** The ACL path template to grant them on, e.g. `/vms/{vmid}`. */
+  path: string;
+  /** The PVE privileges to grant. */
+  privileges: string[];
+}
+
+/**
+ * A tier's or check's outcome.
+ */
+export type ProxmoxPrivilegeStatusDto = typeof ProxmoxPrivilegeStatusDto[keyof typeof ProxmoxPrivilegeStatusDto];
+
+
+export const ProxmoxPrivilegeStatusDto = {
+  granted: 'granted',
+  missing: 'missing',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * One row of Fleet's privilege table, evaluated.
+ */
+export interface ProxmoxPrivilegeCheckDto {
+  /** Whether any one of them suffices. */
+  anyOf: boolean;
+  /** The executor kind or read. */
+  capability: string;
+  /** The PVE method and path. */
+  endpoint: string;
+  /** The token's effective-permission paths the row is satisfied on. */
+  grantedOn: string[];
+  /** Whether more paths satisfied the row than `grantedOn` lists. */
+  grantedOnTruncated: boolean;
+  /** The privileges still missing on the closest path in scope. */
+  missing: string[];
+  /** Why the row exists. */
+  note: string;
+  /** The ACL path template they are checked on. */
+  path: string;
+  /** The PVE privileges the row names. */
+  privileges: string[];
+  /** Whether the tier needs it; `false` marks an opt-in sub-capability. */
+  required: boolean;
+  /** The table row's id (unique per PVE major). */
+  requirement: string;
+  /** The outcome. */
+  status: ProxmoxPrivilegeStatusDto;
+}
+
+/**
+ * A Fleet capability tier.
+ */
+export type ProxmoxPrivilegeTierDto = typeof ProxmoxPrivilegeTierDto[keyof typeof ProxmoxPrivilegeTierDto];
+
+
+export const ProxmoxPrivilegeTierDto = {
+  discover: 'discover',
+  operate: 'operate',
+  destructive: 'destructive',
+  lab: 'lab',
+} as const;
+
+/**
+ * The token's effective permissions as PVE reported them: ACL path →
+ * privilege → propagate flag.
+ */
+export type ProxmoxPrivilegesDtoEffectivePermissions = {[key: string]: {[key: string]: boolean}};
+
+/**
+ * One tier's outcome.
+ */
+export interface ProxmoxTierPrivilegesDto {
+  /** Every check of the tier, required and opt-in. */
+  checks: ProxmoxPrivilegeCheckDto[];
+  /** The required privileges the token lacks, merged per path. */
+  missing: ProxmoxMissingPrivilegesDto[];
+  /** `granted` when every required check is granted. */
+  status: ProxmoxPrivilegeStatusDto;
+  /** The tier. */
+  tier: ProxmoxPrivilegeTierDto;
+}
+
+/**
+ * Which Fleet capability tiers the account's API token can perform.
+ */
+export interface ProxmoxPrivilegesDto {
+  /** The account evaluated. */
+  accountId: string;
+  /**
+     * The token's effective permissions as PVE reported them: ACL path →
+     * privilege → propagate flag.
+     */
+  effectivePermissions: ProxmoxPrivilegesDtoEffectivePermissions;
+  /** When the report was taken (epoch millis). */
+  observedAt: number;
+  /**
+     * The PVE version read, when the read succeeded.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /**
+     * The PVE major whose rules were applied (8 or 9).
+     * @minimum 0
+     * @nullable
+     */
+  rulesMajor?: number | null;
+  /** The four tiers: discover, operate, destructive, lab. */
+  tiers: ProxmoxTierPrivilegesDto[];
+  /**
+     * Why every tier is unknown, when the permissions read was refused.
+     * @nullable
+     */
+  unknownReason?: string | null;
+  /** Normalization and evaluation warnings. */
+  warnings: string[];
+}
+
+/**
  * The review record: exactly what the destructive operation will run,
  * bound to a token the create call must present.
  */
@@ -3981,6 +4105,58 @@ export type ResourceProxmoxFingerprintDtoData = {
 export interface ResourceProxmoxFingerprintDto {
   /** The observed fingerprint report. */
   data: ResourceProxmoxFingerprintDtoData;
+}
+
+/**
+ * The token's effective permissions as PVE reported them: ACL path →
+ * privilege → propagate flag.
+ */
+export type ResourceProxmoxPrivilegesDtoDataEffectivePermissions = {[key: string]: {[key: string]: boolean}};
+
+/**
+ * Which Fleet capability tiers the account's API token can perform.
+ */
+export type ResourceProxmoxPrivilegesDtoData = {
+  /** The account evaluated. */
+  accountId: string;
+  /**
+     * The token's effective permissions as PVE reported them: ACL path →
+     * privilege → propagate flag.
+     */
+  effectivePermissions: ResourceProxmoxPrivilegesDtoDataEffectivePermissions;
+  /** When the report was taken (epoch millis). */
+  observedAt: number;
+  /**
+     * The PVE version read, when the read succeeded.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /**
+     * The PVE major whose rules were applied (8 or 9).
+     * @minimum 0
+     * @nullable
+     */
+  rulesMajor?: number | null;
+  /** The four tiers: discover, operate, destructive, lab. */
+  tiers: ProxmoxTierPrivilegesDto[];
+  /**
+     * Why every tier is unknown, when the permissions read was refused.
+     * @nullable
+     */
+  unknownReason?: string | null;
+  /** Normalization and evaluation warnings. */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProxmoxPrivilegesDto {
+  /** Which Fleet capability tiers the account's API token can perform. */
+  data: ResourceProxmoxPrivilegesDtoData;
 }
 
 /**
@@ -10402,6 +10578,76 @@ export const observeProxmoxFingerprint = async (accountId: string, options?: Req
 
   const data: observeProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as observeProxmoxFingerprintResponse
+}
+
+
+
+export type getProxmoxPrivilegesResponse200 = {
+  data: ResourceProxmoxPrivilegesDto
+  status: 200
+}
+
+export type getProxmoxPrivilegesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getProxmoxPrivilegesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getProxmoxPrivilegesResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type getProxmoxPrivilegesResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type getProxmoxPrivilegesResponseSuccess = (getProxmoxPrivilegesResponse200) & {
+  headers: Headers;
+};
+export type getProxmoxPrivilegesResponseError = (getProxmoxPrivilegesResponse403 | getProxmoxPrivilegesResponse404 | getProxmoxPrivilegesResponse409 | getProxmoxPrivilegesResponse502) & {
+  headers: Headers;
+};
+
+export type getProxmoxPrivilegesResponse = (getProxmoxPrivilegesResponseSuccess | getProxmoxPrivilegesResponseError)
+
+export const getGetProxmoxPrivilegesUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/privileges`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or unconfirmed
+ * account, or a source failure. A refused permissions read is not an
+ * error: every tier reports `unknown`.
+ * @summary Reports which capability tiers the account's API token can perform.
+ */
+export const getProxmoxPrivileges = async (accountId: string, options?: RequestInit): Promise<getProxmoxPrivilegesResponse> => {
+
+  const res = await fetch(getGetProxmoxPrivilegesUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getProxmoxPrivilegesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getProxmoxPrivilegesResponse
 }
 
 

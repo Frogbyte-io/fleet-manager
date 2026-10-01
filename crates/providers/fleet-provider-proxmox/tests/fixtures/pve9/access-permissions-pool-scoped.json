@@ -1,0 +1,87 @@
+{
+  "data": {
+    "/nodes": {
+      "Datastore.Audit": 1,
+      "Pool.Audit": 1,
+      "Sys.Audit": 1,
+      "VM.Audit": 1,
+      "VM.GuestAgent.Audit": 1
+    },
+    "/pool/fleet": {
+      "Datastore.AllocateSpace": 1,
+      "Datastore.Audit": 1,
+      "Pool.Audit": 1,
+      "SDN.Use": 1,
+      "Sys.Audit": 1,
+      "VM.Allocate": 1,
+      "VM.Audit": 1,
+      "VM.Clone": 1,
+      "VM.GuestAgent.Audit": 1,
+      "VM.PowerMgmt": 1,
+      "VM.Snapshot": 1,
+      "VM.Snapshot.Rollback": 1
+    },
+    "/sdn/zones/localnetwork/vmbr0": {
+      "Datastore.AllocateSpace": 1,
+      "SDN.Use": 1,
+      "VM.Allocate": 1,
+      "VM.Audit": 1,
+      "VM.Clone": 1,
+      "VM.GuestAgent.Audit": 1,
+      "VM.PowerMgmt": 1,
+      "VM.Snapshot": 1,
+      "VM.Snapshot.Rollback": 1
+    },
+    "/storage/local-lvm": {
+      "Datastore.AllocateSpace": 0,
+      "Datastore.Audit": 0,
+      "Pool.Audit": 0,
+      "SDN.Use": 0,
+      "Sys.Audit": 0,
+      "VM.Allocate": 0,
+      "VM.Audit": 0,
+      "VM.Clone": 0,
+      "VM.GuestAgent.Audit": 0,
+      "VM.PowerMgmt": 0,
+      "VM.Snapshot": 0,
+      "VM.Snapshot.Rollback": 0
+    },
+    "/vms/101": {
+      "Datastore.AllocateSpace": 0,
+      "Datastore.Audit": 0,
+      "Pool.Audit": 0,
+      "SDN.Use": 0,
+      "Sys.Audit": 0,
+      "VM.Allocate": 0,
+      "VM.Audit": 0,
+      "VM.Clone": 0,
+      "VM.GuestAgent.Audit": 0,
+      "VM.PowerMgmt": 0,
+      "VM.Snapshot": 0,
+      "VM.Snapshot.Rollback": 0
+    },
+    "/vms/102": {
+      "Datastore.AllocateSpace": 0,
+      "Datastore.Audit": 0,
+      "Pool.Audit": 0,
+      "SDN.Use": 0,
+      "Sys.Audit": 0,
+      "VM.Allocate": 0,
+      "VM.Audit": 0,
+      "VM.Clone": 0,
+      "VM.GuestAgent.Audit": 0,
+      "VM.PowerMgmt": 0,
+      "VM.Snapshot": 0,
+      "VM.Snapshot.Rollback": 0
+    },
+    "/vms/9000": {
+      "Datastore.AllocateSpace": 1,
+      "SDN.Use": 1,
+      "VM.Allocate": 1,
+      "VM.Audit": 1,
+      "VM.Clone": 1,
+      "VM.GuestAgent.Audit": 1,
+      "VM.PowerMgmt": 1
+    }
+  }
+}

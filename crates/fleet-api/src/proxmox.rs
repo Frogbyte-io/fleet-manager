@@ -44,7 +44,7 @@ pub(crate) fn proxmox_or_error(
 }
 
 /// Maps a Proxmox use-case outcome onto the public error envelope, once.
-fn map_proxmox_error(
+pub(crate) fn map_proxmox_error(
     error: &ProxmoxUseCaseError,
     correlation_id: CorrelationId,
 ) -> ApiErrorResponse {
