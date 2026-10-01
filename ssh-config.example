@@ -10,8 +10,10 @@ Host linux-dev
     HostName <lan-ip>
     User <user>
     IdentityFile ~/.ssh/<key>
-    # Pin the host key so a changed/spoofed key fails loudly instead of silently
-    # prompting "yes/no".
+    # accept-new pins the host key on first connect, so a later changed/spoofed
+    # key fails loudly. The first connect is trust-on-first-use: compare the
+    # fingerprint it records (ssh-keygen -lF <host>) with the one printed on
+    # the target (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) before use.
     StrictHostKeyChecking accept-new
 
 Host linux-dev-ts
