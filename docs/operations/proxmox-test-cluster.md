@@ -1,6 +1,6 @@
 # Proxmox VE test hosts: a nested 8.x node and a two-node cluster
 
-Status: runbook for FM-612 ([#211](https://github.com/Frogbyte-io/fleet-manager/issues/211)). Its first end-to-end run on the integration host is still pending. That run's evidence (`pveversion` from the 8.x node and `pvecm status` from the cluster, with addresses redacted) is posted on the issue, and each "expected" statement below is corrected wherever the live run disagrees.
+Status: runbook for FM-612 ([#211](https://github.com/Frogbyte-io/fleet-manager/issues/211)). First run end to end on the integration host on 2026-10-01: a PVE 8.4.0 node and a two-node PVE 9.2.2 cluster, nested on the PVE 9.2.2 host. The redacted evidence is on the issue, and the failure-mode table in step 8 records what the API returned in that run.
 
 The [supported platform baseline](../PLAN.md#supported-platform-baseline) says Fleet supports Proxmox VE 8.x and 9.x, and the M6 real-cluster suite must pass on both majors. The integration environment has one physical PVE 9.x host. It has no 8.x node, and a single node cannot show a partial-node failure; this is the [FM-S08 recorded deviation](../research/ecosystem.md#fm-s08-proxmox-client-compatibility-spike). This runbook adds three nested PVE VMs on that host:
 
@@ -122,7 +122,9 @@ For each role, `prepare-iso` does the following:
 
 The prepared ISO still embeds the password hash, so `wait` deletes it as soon as the node is installed.
 
-**Unverified risk:** the assistant on a 9.x physical host prepares an 8.4 ISO here. If the 8.4 installer doesn't pick up the answer (for example, if the boot menu shows no "Automated Installation" entry), prepare the 8.x ISO with an 8.x `proxmox-auto-install-assistant` instead, and record the finding on #211.
+**Verified:** the 9.x assistant (9.2.8) prepares an 8.4 ISO that the 8.4 installer accepts. The boot menu shows "Install Proxmox VE (Automated)" and selects it automatically.
+
+**Installing the assistant on a host without a subscription.** `apt install proxmox-auto-install-assistant` only works if the host has a Proxmox repository it can read. A host with only the enterprise repository and no subscription has none. To avoid changing the host's repositories, download the `.deb` from the no-subscription pool (`http://download.proxmox.com/debian/pve/dists/<suite>/pve-no-subscription/binary-amd64/`), check its SHA-256 against that directory's `Packages` index, unpack it with `dpkg -x`, and put the binary on `PATH`. `prepare-iso` also needs `xorriso`, which is in Debian's own repository.
 
 ## Step 3: create and install the nested nodes
 
@@ -233,19 +235,24 @@ deploy/pve-test/pve-test node-down node-b --keep-quorum        # either mode
 deploy/pve-test/pve-test node-up node-b
 ```
 
-Both modes are deterministic and idempotent. `node-up` undoes either one: it starts the VM if it is stopped, removes any partition rules, and waits until `pvecm status` reports `Quorate: Yes`. `FLEET_PVE_TEST_DOWN_MODE` sets the default mode.
+Both modes are deterministic and idempotent. `node-up` undoes either one: it starts the VM if it is stopped, removes any partition rules, and waits until `pvecm status` reports `Quorate: Yes`. When the node rejoins, expected votes return to 2 on their own, so `--keep-quorum` leaves nothing to undo. `FLEET_PVE_TEST_DOWN_MODE` sets the default mode.
+
+Observed on 2026-10-01 (PVE 9.2.2 cluster, privilege-separated admin token, survivor `node-a`):
 
 | | `--mode stop` | `--mode partition` |
 |---|---|---|
 | **What it does** | `qm stop` on the physical host: an immediate power-off with no guest shutdown, like pulling the plug | Dedicated iptables chains (`FLEET_TEST_IN`/`FLEET_TEST_OUT`) on the node **drop every packet to and from its peer**: corosync, the API, SSH, and migration. The node stays up and reachable from everywhere else, including the Fleet controller |
-| **Cluster view from the survivor** (`/cluster/status`, `/cluster/resources`, `/nodes`) | Expected: the down node reports `online: 0` / `status: offline`, its guests `status: unknown`, and the cluster entry `quorate: 0` | Same as stop, and symmetric: the isolated node also reports its peer offline and itself inquorate |
-| **Requests the survivor proxies to the down node** (`/nodes/<down>/…`) | Expected: fail fast with an HTTP 595 transport error (for example, no route to host) once ARP for the address fails | Expected: **hang until pveproxy's connect timeout**, then return 595 (connection timed out). This exercises Fleet's operation deadline |
-| **Fleet talking directly to the down node** | TCP connect fails at the client (timeout or unreachable). This is a transport error, not an API response | The API answers normally, but reports its peer offline and itself inquorate: a split view |
-| **Writes on the survivor** | Refused while inquorate: `/etc/pve` is read-only ("The cluster switches to read-only mode if it loses quorum"), so guest lifecycle calls are expected to fail with a "no quorum" error | Same, on both sides |
+| **Detection** | The survivor's `/cluster/status` showed the node `online: 0` about 10 s after `node-down` | About 9 s |
+| **Cluster view from the survivor** (`/cluster/status`, `/nodes`) | The down node is `online: 0` / `status: offline`, and the cluster entry is `quorate: 0` | The same. The isolated node's own `/cluster/status` is the mirror image: itself `online: 1`, its peer `online: 0`, `quorate: 0` |
+| **Requests the survivor proxies to the down node** (`/nodes/<down>/…`) | `595 No route to host` in 1.7–3.1 s. **The first request after the power-off took 30 s**, presumably while the survivor's ARP entry for the node was still valid. Don't assume the stop case fails fast | Every request hangs **30 s**, then `595 Connection timed out`. The 595 responses carry no JSON body; the reason is only in the HTTP status line |
+| **Fleet talking directly to the down node** | TCP connect fails at the client (curl exit 7), after anywhere from 3 s to 14 s. A transport error, not an API response | The API answers normally (`/version` 200 in a few ms), with the split view above |
+| **Writes on the survivor** | Refused while inquorate: a pool create or delete returned `500 … cfs-lock 'file-user_cfg' error: no quorum!` after about 10 s (the cfs-lock wait) | Same |
+| **With `--keep-quorum`** | The survivor is `quorate: 1`, and the same writes return 200 at once | Same |
+| **Recovery** (`node-up` until quorate) | 27–28 s, mostly boot | 8–9 s |
 
-A two-node cluster has two expected votes, so losing either node leaves the survivor **inquorate**. This is how two-node clusters fail, and Proxmox recommends a QDevice to supply the third vote ([Cluster Manager](https://pve.proxmox.com/pve-docs/chapter-pvecm.html)). For a scenario that needs the survivor writable, pass `--keep-quorum`, which runs `pvecm expected 1` on the survivor. The docs reserve that command for when "you understand what you are doing", and it only suits a disposable fixture. Membership changes take a few seconds, and the status daemon refreshes every few seconds, so wait until `/cluster/status` reports the change before you assert on it.
+A two-node cluster has two expected votes, so losing either node leaves the survivor **inquorate**. This is how two-node clusters fail, and Proxmox recommends a QDevice to supply the third vote ([Cluster Manager](https://pve.proxmox.com/pve-docs/chapter-pvecm.html)). For a scenario that needs the survivor writable, pass `--keep-quorum`, which runs `pvecm expected 1` on the survivor. It first waits until the survivor has dropped the node from membership (`Total votes: 1`): votequorum rejects expected votes below the votes it still counts, with `CS_ERR_INVALID_PARAM`. The docs reserve that command for when "you understand what you are doing", and it only suits a disposable fixture. Membership changes take a few seconds, and the status daemon refreshes every few seconds, so wait until `/cluster/status` reports the change before you assert on it.
 
-Rows marked "expected" come from the PVE documentation and haven't been observed on this fixture yet. The first live run (FM-612 evidence, then FM-613) replaces them with what the API actually returns, including exact status codes and messages.
+These figures come from one run on one host. FM-613 should re-check them on 8.x and record anything that differs. In particular, the survivor took 30 s to give up on an unreachable node in every slow case. That figure is measured, not taken from PVE's documentation or source. An operation deadline in Fleet shorter than that turns an unreachable node into a Fleet timeout before PVE answers with 595.
 
 ## Evidence for #211
 
