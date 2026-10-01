@@ -448,6 +448,18 @@ cmd_wait() {
 
 in_cluster() { on_node "$1" test -f /etc/pve/corosync.conf; }
 
+# wait_writable ROLE SECONDS: wait until the node's cluster is quorate and
+# /etc/pve takes writes. 'pvecm create' restarts pmxcfs, and writes into
+# /etc/pve (such as root's authorized_keys) fail with EIO until it is back.
+wait_writable() {
+  local role="$1" deadline=$((SECONDS + $2))
+  # shellcheck disable=SC2016 # expanded by the remote shell
+  until on_node "$role" sh -c 'pvecm status 2>/dev/null | grep -Eq "^Quorate: *Yes" && f=/etc/pve/priv/.fleet-pve-test-probe && : >"$f" && rm -f "$f"' >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || die "$role: cluster not quorate or /etc/pve not writable within $2s"
+    sleep 2
+  done
+}
+
 cmd_cluster_create() {
   local name
   name="$(need FLEET_PVE_TEST_CLUSTER_NAME)"
@@ -516,6 +528,8 @@ cmd_cluster_join() {
     return 0
   fi
   in_cluster node-a || die "node-a has no cluster yet; run cluster-create first"
+  log "waiting for node-a's cluster filesystem"
+  wait_writable node-a "$(opt FLEET_PVE_TEST_BOOT_TIMEOUT 600)"
   local fp addr_a addr_b
   fp="$(cmd_fingerprint node-a)"
   addr_a="$(role_addr node-a)"
