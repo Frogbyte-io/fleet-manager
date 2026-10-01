@@ -475,11 +475,15 @@ cmd_fingerprint() {
 # 'pvecm add --use_ssh' needs. It runs ssh-copy-id with /root/.ssh/id_rsa and
 # then BatchMode ssh to node-a, so node-a must already authorize that key and
 # node-b must already know node-a's host key. Both are copied over this
-# script's own pinned connections, so nothing is trusted on first use.
+# script's own connections, whose host keys were pinned when 'wait' first
+# reached each node, so the join adds no trust decision of its own.
 trust_peer_over_ssh() {
   local addr_a pub hostkeys
   addr_a="$(role_addr node-a)"
   on_node node-b sh -c '[ -f /root/.ssh/id_rsa ] || ssh-keygen -q -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa'
+  # pvecm's BatchMode ssh cannot unlock a passphrase-protected key.
+  on_node node-b ssh-keygen -y -P "" -f /root/.ssh/id_rsa >/dev/null 2>&1 ||
+    die "node-b's /root/.ssh/id_rsa needs a passphrase; 'cluster-join --ssh' needs a passphrase-free key"
   pub="$(on_node node-b cat /root/.ssh/id_rsa.pub)"
   [ -n "$pub" ] || die "could not read node-b's root public key"
   log "authorizing node-b's root key on node-a"
