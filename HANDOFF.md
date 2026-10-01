@@ -35,7 +35,7 @@
 
 - Self-hosted GitHub Actions runner "dev-box" runs all Linux CI (installed at ~/actions-runner, run via nohup; svc.sh needs sudo). Windows job is informational/out-of-gate.
 - GitHub Actions billing is broken for hosted runners (account payment issue) — maintainer action needed.
-- Integration VM fleet-test-01 (192.168.68.223 PVE host) — credentials in ~/.config/fleet/proxmox.env. FM-305's live e2e run is still pending on the maintainer.
+- Integration VM `<integration-vm>` (PVE host `<pve-host>`) — credentials in ~/.config/fleet/proxmox.env. FM-305's live e2e run is still pending on the maintainer.
 - cubic free plan: ~13 reviews/month; if a review is stuck pending, comment @cubic-dev-ai; if it reviews a stale commit, push an empty commit to retrigger.
 
 ## Next up
