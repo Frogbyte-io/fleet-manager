@@ -446,7 +446,9 @@ cmd_wait() {
   fi
 }
 
-in_cluster() { on_node "$1" test -f /etc/pve/corosync.conf; }
+# Corosync's local copy, not /etc/pve's: pmxcfs restarts during 'pvecm create'
+# and /etc/pve is briefly unavailable.
+in_cluster() { on_node "$1" test -f /etc/corosync/corosync.conf; }
 
 # wait_writable ROLE SECONDS: wait until the node's cluster is quorate and
 # /etc/pve takes writes. 'pvecm create' restarts pmxcfs, and writes into
@@ -657,9 +659,11 @@ cmd_node_down() {
     # pvecm status exits non-zero while inquorate, so test it on the node,
     # outside this script's pipefail.
     log "$peer: waiting for the survivor to drop $role from membership"
-    local deadline=$((SECONDS + 120))
+    local timeout deadline
+    timeout="$(opt FLEET_PVE_TEST_BOOT_TIMEOUT 600)"
+    deadline=$((SECONDS + timeout))
     until on_node "$peer" sh -c 'pvecm status 2>/dev/null | grep -Eq "^Total votes: *1$"'; do
-      [ "$SECONDS" -lt "$deadline" ] || die "$peer: still counts $role's vote after 120s"
+      [ "$SECONDS" -lt "$deadline" ] || die "$peer: still counts $role's vote after ${timeout}s"
       sleep 2
     done
     log "$peer: forcing quorum on the survivor (pvecm expected 1)"
