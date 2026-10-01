@@ -161,7 +161,7 @@ Decision: M6 begins with a compatibility spike against required endpoints and PV
 
 #### FM-S08: Proxmox client compatibility spike
 
-Decision (2026-09-20): **fallback chosen — a small `reqwest` transport plus typed provider DTOs with a custom rustls fingerprint-pinning verifier.** The spike tested the leading typed crate against the live PVE 9.2 integration host (`fleet-test-01`'s PVE node, `pve.localdomain`, PVE 9.2.2/repo `b9984c6d90a4bd80`) and inspected its source; the decisive failure is TLS, which is a security gate, not a feature gap.
+Decision (2026-09-20): **fallback chosen — a small `reqwest` transport plus typed provider DTOs with a custom rustls fingerprint-pinning verifier.** The spike tested the leading typed crate against the live PVE 9.2 integration host (the integration PVE node, PVE 9.2.2/repo `b9984c6d90a4bd80`) and inspected its source; the decisive failure is TLS, which is a security gate, not a feature gap.
 
 Evidence from a disposable probe project (outside this repository), Rust 1.98 toolchain:
 
