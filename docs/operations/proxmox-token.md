@@ -1,6 +1,6 @@
 # Least-privilege Proxmox API token
 
-Fleet's own privilege table, `PROXMOX_PRIVILEGE_TABLE` in `crates/fleet-application/src/proxmox/privileges.rs` (FM-604), is the source of truth for what each tier needs. The [per-major tier tables](#required-privileges-per-tier) and the [role commands](#2-roles--pve-9x) below are checked against it by a test, so this guide and `fleetctl proxmox privileges` cannot drift apart. See [Consistency with Fleet's privilege table](#consistency-with-fleets-privilege-table).
+Fleet's own privilege table, `PROXMOX_PRIVILEGE_TABLE` in `crates/fleet-application/src/proxmox/privileges.rs` (FM-604), is the source of truth for what each tier needs. The [per-major tier tables](#required-privileges-per-tier) and the [role commands](#2-roles) below are checked against it by a test, so this guide and `fleetctl proxmox privileges` cannot drift apart. See [Consistency with Fleet's privilege table](#consistency-with-fleets-privilege-table).
 
 This guide sets up a dedicated Proxmox VE (PVE) user and a privilege-separated API token for Fleet. Each Fleet capability tier gets the privileges it needs, and the few extras a role carries are labelled. Do not give Fleet `Administrator` on `/`. [Security architecture](../architecture/security.md) requires dedicated users/tokens with the minimum roles and path ACLs.
 
@@ -26,7 +26,7 @@ Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and oper
 | **discover** | `proxmox.read` → discovery, nodes, guests, guest observe (config MACs, agent info, network, OS), snapshot list, task status | `FleetDiscover` (8.x: plus the opt-in `FleetAgent8`) | `/nodes`, `/pool/<pool>` (storage in the pool, or `/storage/<id>`) — or `/` for whole-cluster inventory |
 | **operate** | `proxmox.operate` → `proxmox.guest.start`, `.stop`, `.shutdown`, `.reboot` | `FleetOperate` | `/pool/<pool>` |
 | **destructive** | `proxmox.destructive` → `proxmox.guest.snapshot`, `.snapshot-revert`, `.snapshot-delete`, `.clone`, `.template`, `proxmox.task-cancel` | `FleetDestructive` | `/pool/<pool>` for existing guests and storage; clone targets also need `/vms/<newid>` (see [clone targets](#why-clone-and-lab-need-more-than-the-pool)); `/sdn/zones/<zone>/<bridge>` |
-| **lab** | `lab.provision` → clone the pinned image, start it, probe readiness | `FleetLab` | source template and storage in `/pool/<pool>`; the new guests' `/vms/<newid>`; `/sdn/zones/<zone>/<bridge>` |
+| **lab** | `lab.provision` → clone the pinned image, start it, probe readiness | `FleetLab` | the template's `/vms/<id>` (protected), `/storage/<id>`, the new guests' `/vms/<newid>`, `/sdn/zones/<zone>/<bridge>`; never `/pool/<pool>` |
 
 ### Required privileges per tier
 
@@ -97,7 +97,7 @@ What this means for Fleet:
 
 ## Setup
 
-Run these commands as `root@pam` on one PVE node (the cluster shares the config), or as an administrator with `Permissions.Modify`. Replace `fleet` (pool), `local-lvm` (storage), and `vmbr0` (bridge) with your own names. None of the commands below prints or accepts the token secret except `token add` in [step 5](#5-token-privilege-separated).
+Run these commands as `root@pam` on one PVE node (the cluster shares the config), or as an administrator with `Permissions.Modify`. Replace `fleet` (pool), `local-lvm` (storage), and `vmbr0` (bridge) with your own names. None of the commands below prints or accepts the token secret except `token add` in [step 4](#4-token-privilege-separated).
 
 ### 1. Pool
 
@@ -110,7 +110,11 @@ pveum pool modify fleet --vms 101,102,103 --storage local-lvm
 
 In both majors, `pveum pool modify` calls `PUT /pools` with `vms` and `storage`. In the web UI, Datacenter → Pools → Members does the same.
 
-### 2. Roles — PVE 9.x
+### 2. Roles
+
+Create the roles for your PVE major; the two blocks are not interchangeable (see [8.x vs 9.x differences](#8x-vs-9x-differences)).
+
+#### PVE 9.x
 
 <!-- privilege-roles:begin major=9 -->
 ```sh
@@ -121,7 +125,7 @@ pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.Allocate
 ```
 <!-- privilege-roles:end -->
 
-### 2. Roles — PVE 8.x
+#### PVE 8.x
 
 <!-- privilege-roles:begin major=8 -->
 ```sh
@@ -146,12 +150,26 @@ pveum user add fleet@pve --comment "Fleet Manager service account (API token onl
 
 The user gets no password. Fleet authenticates only with the token.
 
-### 4. ACLs
+### 4. Token (privilege-separated)
+
+```sh
+# expire: Unix epoch seconds; pick your rotation interval (example: 90 days)
+pveum user token add fleet@pve fleet --privsep 1 \
+  --expire "$(( $(date +%s) + 90*24*3600 ))" \
+  --comment "Fleet Manager"
+```
+
+PVE shows the token value **once**. Do not paste it into a shell command, a file in the repository, or a chat. Keep it at hand for [step 6](#6-register-the-token-in-fleet); grant the token its ACLs first.
+
+Create the token **before** the ACLs: `pveum acl modify … --tokens` refuses a token that does not exist yet ("ACL update failed: no such token").
+
+### 5. ACLs
 
 Grant the tiers you want Fleet to use, **to both the user and the token** (see [privilege separation](#how-pve-evaluates-fleets-token)). Grant only the tiers you enable. A read-only Fleet needs only the FleetDiscover lines.
 
 ```sh
 TOKEN='fleet@pve!fleet'   # the token ID (not a secret)
+TEMPLATE=8000             # the VMID of the template Lab clones (if you enable lab)
 
 for who in "--users fleet@pve" "--tokens $TOKEN"; do
   # discover: node status needs /nodes (nodes cannot be pool members)
@@ -167,14 +185,25 @@ for who in "--users fleet@pve" "--tokens $TOKEN"; do
   # clone: bridges used by the source guests' netN (see below)
   pveum acl modify /sdn/zones/localnetwork/vmbr0 --roles FleetDestructive $who
 
-  # lab: clone source template and storage in the pool, the bridge, and the
-  # new guests' VMIDs (see "Why clone and Lab need more than the pool")
-  pveum acl modify /pool/fleet      --roles FleetLab $who
+  # lab: the template it clones, the storage clones write to, the bridge, and
+  # the new guests' VMIDs (see "Why clone and Lab need more than the pool").
+  # Never on the pool: FleetLab holds VM.Allocate, which on an existing guest
+  # also permits deleting it.
+  pveum acl modify /vms/$TEMPLATE   --roles FleetLab $who
+  pveum acl modify /storage/local-lvm --roles FleetLab $who
   pveum acl modify /sdn/zones/localnetwork/vmbr0 --roles FleetLab $who
 done
 ```
 
-The `$who` expansion is left unquoted on purpose, so that it splits into a flag and its value. For whole-cluster read-only inventory, replace the two FleetDiscover lines with `pveum acl modify / --roles FleetDiscover $who`. On 9.x this grants informational agent reads for every VM. On 8.x, FleetDiscover contains no agent privilege.
+The `$who` expansion is left unquoted on purpose, so that it splits into a flag and its value.
+
+FleetLab's `VM.Allocate` on the template's path would also let the token delete the template. Protect it; PVE then refuses to remove the VM or its disks while the flag is set ("can't remove VM … - protection mode enabled"), and cloning is unaffected:
+
+```sh
+qm set $TEMPLATE --protection 1
+```
+
+Clones inherit the flag: PVE copies `protection` into the new guest's config. Clearing it needs `VM.Config.Options` on the guest, which no Fleet role grants, so the token can neither unprotect the template nor delete a clone. Fleet does not delete VMs today; to remove a Lab clone by hand, run `qm set <vmid> --protection 0` first. Lab `destroy` cleanup, when it lands, has to clear the flag on its own clones (and so needs `VM.Config.Options` on `/vms/{newid}`). For whole-cluster read-only inventory, replace the two FleetDiscover lines with `pveum acl modify / --roles FleetDiscover $who`. On 9.x this grants informational agent reads for every VM. On 8.x, FleetDiscover contains no agent privilege.
 
 On 8.x, if you opt into agent reads for the pool:
 
@@ -183,17 +212,6 @@ for who in "--users fleet@pve" "--tokens $TOKEN"; do
   pveum acl modify /pool/fleet --roles FleetAgent8 $who
 done
 ```
-
-### 5. Token (privilege-separated)
-
-```sh
-# expire: Unix epoch seconds; pick your rotation interval (example: 90 days)
-pveum user token add fleet@pve fleet --privsep 1 \
-  --expire "$(( $(date +%s) + 90*24*3600 ))" \
-  --comment "Fleet Manager"
-```
-
-PVE shows the token value **once**. Do not paste it into a shell command, a file in the repository, or a chat. Register it in Fleet straight away, as described in the next section.
 
 ### 6. Register the token in Fleet
 
@@ -223,6 +241,9 @@ fleetctl proxmox confirm <account-id> --fingerprint <SHA256:...>   # after check
    for id in 9000 9001 9002; do                 # the VMIDs reserved for Fleet clones
      for who in "--users fleet@pve" "--tokens $TOKEN"; do
        pveum acl modify /vms/$id --roles FleetLab $who
+       # 8.x, templates with guest_agent readiness: the probe needs VM.Monitor
+       # on the new guest too (the opt-in FleetAgent8)
+       # pveum acl modify /vms/$id --roles FleetAgent8 $who
      done
    done
    ```
@@ -261,7 +282,7 @@ The command calls `GET /api/v1/proxmox/accounts/{accountId}/privileges`. It need
 
 Opt-in checks (`required: false`) never gate a tier. The text output lists them as `opt-in … not granted`.
 
-**The full setup on 9.x** (every role from [step 4](#4-acls), plus FleetLab on a reserved clone VMID):
+**The full setup on 9.x** (every role from [step 5](#5-acls), plus FleetLab on a reserved clone VMID):
 
 ```text
 account <account-id>  PVE 9.0.10  rules 9.x
@@ -367,9 +388,9 @@ The manual walkthrough of this guide on the FM-612 test host, with this command'
 
 Every value stays off command lines and out of shell history.
 
-1. **Create a new token** with a new ID, for example `fleet-2026q4`, as in [step 5](#5-token-privilege-separated). Re-grant the token ACLs from [step 4](#4-acls) with `TOKEN='fleet@pve!fleet-2026q4'`. Token ACLs belong to the token ID, so the new token starts with none. The user's ACLs stay in place.
+1. **Create a new token** with a new ID, for example `fleet-2026q4`, as in [step 4](#4-token-privilege-separated). Re-grant the token ACLs from [step 5](#5-acls) with `TOKEN='fleet@pve!fleet-2026q4'`. Token ACLs belong to the token ID, so the new token starts with none. The user's ACLs stay in place.
 2. **Register it** with `read -rs` and `fleetctl proxmox create`, then `observe` and `confirm` it, as in [step 6](#6-register-the-token-in-fleet).
-3. **Move references to the new account.** Fleet has no in-place secret replacement for a Proxmox account today: `fleetctl proxmox` offers `create` and `delete` only. Machine guest links (`machines link-guest … --account`) and Lab provisioning (`lab provision-lease … --account`) name the account ID, so re-link them to the new account.
+3. **Move references to the new account.** Fleet has no in-place secret replacement for a Proxmox account today: no `fleetctl proxmox` verb replaces an account's secret, so rotation is create, re-link, delete. Machine guest links (`machines link-guest … --account`) and Lab provisioning (`lab provision-lease … --account`) name the account ID, so re-link them to the new account.
 4. **Retire the old one.** `fleetctl proxmox delete <old-account-id>` removes the account and its stored secret. Then revoke the old token on PVE with `pveum user token remove fleet@pve fleet`. Run `pveum acl list` and confirm that no entry still names the old token ID.
 
 If a token may have leaked, revoke it on PVE first (`pveum user token remove …`). Revoking takes effect immediately and does not disable `fleet@pve` or other tokens.
@@ -379,7 +400,7 @@ If a token may have leaked, revoke it on PVE first (`pveum user token remove …
 `PROXMOX_PRIVILEGE_TABLE` (FM-604) is the single Fleet-owned map from each Proxmox executor kind or read to its required privileges and ACL path, keyed by PVE major. `fleetctl proxmox privileges` evaluates it, and this guide restates it for operators. A test keeps the two in step: `crates/fleet-application/tests/proxmox_token_guide.rs` runs with `cargo test` (and so with `cargo xtask verify`). It fails when:
 
 - a tier's **Required** or **Opt-in** cell in the [per-major tables](#required-privileges-per-tier) differs from the table's rows for that tier and major (the failure prints the expected cell);
-- a [role command](#2-roles--pve-9x) lacks a required privilege of its tier, or grants something not named in **Also in the role**;
+- a [role command](#2-roles) lacks a required privilege of its tier, or grants something not named in **Also in the role**;
 - a role names a privilege the table does not know for that major, for example `VM.Monitor` in a 9.x role;
 - a role that belongs to no tier (8.x `FleetAgent8`) grants anything but opt-in privileges.
 
