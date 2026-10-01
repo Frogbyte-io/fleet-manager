@@ -1,0 +1,65 @@
+{
+ "data": [
+  {
+   "upid": "UPID:pve8:001A2B3C:05F5E100:688BECD8:qmstart:101:fleet@pve!fleet-ops:",
+   "node": "pve8",
+   "pid": 1715004,
+   "pstart": 100000000,
+   "starttime": 1754000600,
+   "type": "qmstart",
+   "id": "101",
+   "user": "fleet@pve",
+   "tokenid": "fleet-ops",
+   "status": "RUNNING"
+  },
+  {
+   "upid": "UPID:pve8:001A2B00:05F5E000:688BEBAC:qmshutdown:101:fleet@pve!fleet-ops:",
+   "node": "pve8",
+   "pid": 1714944,
+   "pstart": 99999744,
+   "starttime": 1754000300,
+   "type": "qmshutdown",
+   "id": "101",
+   "user": "fleet@pve",
+   "tokenid": "fleet-ops",
+   "endtime": 1754000342,
+   "status": "OK"
+  },
+  {
+   "upid": "UPID:pve8:001A2A00:05F5DF00:688BEB48:vzdump::root@pam:",
+   "node": "pve8",
+   "pid": 1714688,
+   "pstart": 99999488,
+   "starttime": 1754000200,
+   "type": "vzdump",
+   "id": "",
+   "user": "root@pam",
+   "endtime": 1754000260,
+   "status": "WARNINGS: 2"
+  },
+  {
+   "upid": "UPID:pve8:001A2900:05F5DE00:688BEAE4:qmclone:900:root@pam:",
+   "node": "pve8",
+   "pid": 1714432,
+   "pstart": 99999232,
+   "starttime": 1754000100,
+   "type": "qmclone",
+   "id": "900",
+   "user": "root@pam",
+   "endtime": 1754000101,
+   "status": "clone failed: storage 'local-lvm' does not exist"
+  },
+  {
+   "upid": "UPID:pve8:001A2800:05F5DD00:688BEA80:aptupdate::root@pam:",
+   "node": "pve8",
+   "pid": 1714176,
+   "pstart": 99998976,
+   "starttime": 1754000000,
+   "type": "aptupdate",
+   "id": "",
+   "user": "root@pam",
+   "endtime": 1754000012,
+   "status": "OK"
+  }
+ ]
+}

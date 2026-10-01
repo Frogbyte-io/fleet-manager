@@ -21,6 +21,8 @@
 //! nothing here mutates a PVE host.
 #![warn(missing_docs)]
 
+pub mod tasks;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -635,6 +637,9 @@ pub struct ProxmoxAccounts {
     /// The token-permissions read (FM-604), attached with
     /// [`ProxmoxAccounts::with_permissions`].
     permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
+    /// The task-history ports (FM-609), attached by
+    /// [`ProxmoxAccounts::with_task_history`].
+    task_history: Option<tasks::TaskHistoryPorts>,
 }
 
 impl ProxmoxAccounts {
@@ -659,6 +664,7 @@ impl ProxmoxAccounts {
             audit,
             events: None,
             permissions: None,
+            task_history: None,
         }
     }
 
