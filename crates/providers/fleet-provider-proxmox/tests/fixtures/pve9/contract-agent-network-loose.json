@@ -1,0 +1,44 @@
+{
+ "data": {
+  "result": [
+   {
+    "name": "lo",
+    "hardware-address": "00:00:00:00:00:00",
+    "ip-addresses": [
+     {
+      "ip-address-type": "ipv4",
+      "ip-address": "127.0.0.1",
+      "prefix": 8
+     }
+    ]
+   },
+   {
+    "name": "eth0",
+    "hardware-address": "BC:24:11:0A:01:31",
+    "ip-addresses": [
+     {
+      "ip-address-type": "ipv4",
+      "ip-address": "192.0.2.131"
+     }
+    ]
+   },
+   {
+    "name": "eth1",
+    "hardware-address": "BC:24:11:0A:01:32"
+   },
+   {
+    "name": "wg0",
+    "ip-addresses": [
+     {
+      "ip-address-type": "ipv4",
+      "ip-address": "203.0.113.131",
+      "prefix": 32
+     }
+    ]
+   },
+   {
+    "name": "dummy0"
+   }
+  ]
+ }
+}

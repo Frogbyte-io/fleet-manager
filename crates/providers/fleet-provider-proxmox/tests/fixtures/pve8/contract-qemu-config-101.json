@@ -1,0 +1,19 @@
+{
+ "data": {
+  "digest": "0000000000000000000000000000000000000000",
+  "name": "web-01",
+  "agent": "1",
+  "cores": 2,
+  "memory": "4096",
+  "ostype": "l26",
+  "scsihw": "virtio-scsi-single",
+  "boot": "order=scsi0;net0",
+  "scsi0": "local:101/vm-101-disk-0.qcow2,iothread=1,size=32G",
+  "net0": "virtio=BC:24:11:0A:01:01,bridge=vmbr0,firewall=1",
+  "net1": "virtio=BC:24:11:0A:01:02,bridge=vmbr1,tag=20",
+  "smbios1": "uuid=00000000-0000-4000-8000-000000000101",
+  "vmgenid": "00000000-0000-4000-8000-0000000001a1",
+  "meta": "creation-qemu=8.1.5,ctime=1717000000",
+  "tags": "fleet;web"
+ }
+}

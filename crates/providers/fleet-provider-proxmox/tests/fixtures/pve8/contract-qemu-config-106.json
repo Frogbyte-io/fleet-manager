@@ -1,0 +1,12 @@
+{
+ "data": {
+  "digest": "6666666666666666666666666666666666666666",
+  "name": "lab-01",
+  "agent": "1",
+  "cores": 2,
+  "memory": "2048",
+  "lock": "backup",
+  "net0": "e1000=bc:24:11:0a:01:31,bridge=vmbr0",
+  "meta": "creation-qemu=8.1.5,ctime=1717000000"
+ }
+}

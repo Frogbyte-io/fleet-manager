@@ -1,0 +1,14 @@
+{
+ "data": {
+  "result": {
+   "id": "debian",
+   "name": "Debian GNU/Linux",
+   "pretty-name": "Debian GNU/Linux 13 (trixie)",
+   "version": "13 (trixie)",
+   "version-id": "13",
+   "kernel-release": "6.12.48+deb13-amd64",
+   "kernel-version": "#1 SMP PREEMPT_DYNAMIC Debian (synthetic)",
+   "machine": "x86_64"
+  }
+ }
+}

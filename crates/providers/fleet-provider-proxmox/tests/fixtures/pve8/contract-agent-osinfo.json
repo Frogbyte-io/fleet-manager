@@ -1,0 +1,14 @@
+{
+ "data": {
+  "result": {
+   "id": "debian",
+   "name": "Debian GNU/Linux",
+   "pretty-name": "Debian GNU/Linux 12 (bookworm)",
+   "version": "12 (bookworm)",
+   "version-id": "12",
+   "kernel-release": "6.1.0-25-amd64",
+   "kernel-version": "#1 SMP PREEMPT_DYNAMIC Debian (synthetic)",
+   "machine": "x86_64"
+  }
+ }
+}
