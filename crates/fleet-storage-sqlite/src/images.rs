@@ -312,7 +312,7 @@ fn recorded_artifact(result_json: Option<&str>) -> Option<String> {
 /// `Artifact.Id()` is the VMID in decimal; the machine-readable stream
 /// Fleet has recorded also carries a `<node>:<vmid>` shape (`pve:102`).
 /// The node part is ignored: the executor reads the template's node from
-/// the cluster.
+/// the cluster. PVE VMIDs are 100..=999999999 (`pve-vmid`).
 fn artifact_vmid(artifact: &str) -> Option<u32> {
     let vmid = match artifact.rsplit_once(':') {
         Some((node, vmid))
@@ -329,7 +329,9 @@ fn artifact_vmid(artifact: &str) -> Option<u32> {
     if vmid.is_empty() || !vmid.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    vmid.parse::<u32>().ok().filter(|vmid| *vmid >= 100)
+    vmid.parse::<u32>()
+        .ok()
+        .filter(|vmid| (100..=999_999_999).contains(vmid))
 }
 
 #[async_trait]
@@ -398,6 +400,7 @@ mod tests {
         assert_eq!(artifact_vmid("120"), Some(120));
         assert_eq!(artifact_vmid("pve:102"), Some(102));
         assert_eq!(artifact_vmid("pve-b.lan:9000"), Some(9000));
+        assert_eq!(artifact_vmid("999999999"), Some(999_999_999));
         for invalid in [
             "",
             "99",
@@ -407,6 +410,7 @@ mod tests {
             "a:b:120",
             "+120",
             "4294967296",
+            "1000000000",
         ] {
             assert_eq!(artifact_vmid(invalid), None, "{invalid}");
         }

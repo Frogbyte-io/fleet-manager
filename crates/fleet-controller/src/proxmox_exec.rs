@@ -1212,8 +1212,11 @@ impl ProvisionExecutor {
         if guest.kind == "qemu" && guest.name.as_deref() == Some(name.as_str()) {
             return Ok(Ok(guest.node.clone().unwrap_or_else(|| node.to_owned())));
         }
-        if guest.kind == "qemu" && guest.name.is_none() {
-            // PVE names the clone only when the clone finishes.
+        // PVE names the clone only when the clone finishes, and reports an
+        // unnamed guest as `VM <vmid>` (qemu-server `vmstatus`), not as a
+        // missing name.
+        let placeholder = format!("VM {vmid}");
+        if guest.kind == "qemu" && guest.name.as_deref().is_none_or(|name| name == placeholder) {
             return Ok(Err(Refusal::new(
                 "target_unverified",
                 format!(
@@ -1481,7 +1484,18 @@ impl ProvisionExecutor {
                 .verify_recorded_guest(request.clone(), &record.id, &node, vmid)
                 .await?
             {
-                Ok(node) => node,
+                Ok(live) if record.node.as_deref() == Some(live.as_str()) => live,
+                Ok(live) => {
+                    // The guest moved since the clone: later cleanup must
+                    // find it where it lives now, even if this run stops
+                    // before readiness rewrites the record.
+                    let mut moved = record.clone();
+                    moved.node = Some(live.clone());
+                    self.provisions.update(&moved).await.map_err(|detail| {
+                        format!("the provision record is unwritable: {detail}")
+                    })?;
+                    live
+                }
                 Err(refusal) => {
                     return complete_failure(
                         operations,

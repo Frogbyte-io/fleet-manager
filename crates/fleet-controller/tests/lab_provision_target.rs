@@ -47,7 +47,8 @@ const START_UPID: &str = "UPID:pve-b:00155300:0C6DF600:6AAFE1F0:qmstart:9000:fle
 struct Seen {
     path: String,
     body: Option<serde_json::Value>,
-    /// The record's stored (node, VMID) when the clone request arrived.
+    /// The record's stored (node, VMID) when a clone or start request
+    /// arrived.
     stored_target: Option<(Option<String>, Option<u32>)>,
 }
 
@@ -142,7 +143,7 @@ impl Transport {
     ) -> Result<PveHttpResponse, PveTransportError> {
         assert_eq!(request.host, API_HOST, "every call goes to the API host");
         let path = request.path.clone();
-        let stored_target = if path.ends_with("/clone") {
+        let stored_target = if path.ends_with("/clone") || path.ends_with("/status/start") {
             let observe = self.0.observe.lock().unwrap().clone();
             match observe {
                 Some((labs, record_id)) => {
@@ -780,6 +781,49 @@ async fn a_resumed_guest_is_revalidated_before_it_is_started() {
         .await;
     assert_eq!(error.unwrap().0, "target_unverified");
     assert_eq!(starts(&pve), 0);
+
+    // Live PVE reports an unnamed guest as `VM <vmid>`: the same case, not
+    // a conflict.
+    let (lease_id, record) = cloned_record(&harness).await;
+    let pve = Pve::new(vec![guest(NEXT_VMID, &format!("VM {NEXT_VMID}"))]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "target_unverified");
+    assert_eq!(starts(&pve), 0);
+}
+
+#[tokio::test]
+async fn a_resumed_guest_that_moved_is_recorded_on_its_live_node() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = cloned_record(&harness).await;
+    let mut moved = guest(NEXT_VMID, &format!("fm-lab-{}", record.id));
+    moved["node"] = serde_json::json!("pve-c");
+    let pve = Pve::new(vec![moved]);
+
+    let (_, _, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert!(
+        pve.paths().contains(&format!(
+            "/api2/json/nodes/pve-c/qemu/{NEXT_VMID}/status/start"
+        )),
+        "{:?}",
+        pve.paths()
+    );
+    // Recorded before the start, so a run that stops before readiness
+    // still leaves cleanup the live node.
+    let start = pve
+        .seen()
+        .into_iter()
+        .find(|seen| seen.path.ends_with("/status/start"))
+        .unwrap();
+    assert_eq!(
+        start.stored_target,
+        Some((Some("pve-c".to_owned()), Some(NEXT_VMID)))
+    );
+    assert_eq!(stored.node.as_deref(), Some("pve-c"));
 }
 
 #[tokio::test]
