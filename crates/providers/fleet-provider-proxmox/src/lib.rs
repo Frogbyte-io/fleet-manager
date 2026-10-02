@@ -2382,6 +2382,12 @@ mod tests {
         let sdn = serde_json::json!({"id": "sdn/zone1", "type": "sdn"});
         assert!(normalize_resource(&sdn).unwrap().is_none());
 
+        let network = serde_json::json!({
+            "id": "network/n1/zone/localnetwork", "network": "localnetwork",
+            "network-type": "zone", "node": "n1", "status": "ok", "type": "network"
+        });
+        assert!(normalize_resource(&network).unwrap().is_none());
+
         let mystery = serde_json::json!({"id": "weird/1", "type": "mystery"});
         let error = normalize_resource(&mystery).unwrap_err();
         assert!(error.contains("unrecognized type"), "{error}");
