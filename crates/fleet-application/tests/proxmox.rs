@@ -1546,6 +1546,15 @@ type ObservedFact = (String, Option<String>, fleet_core::CapabilityStatus);
 /// Observes one guest onto a fresh machine and returns the recorded facts
 /// as `(namespace.name, value, status)`.
 async fn observed_facts(guest: ProviderGuest) -> Vec<ObservedFact> {
+    observe_over(guest, &[]).await.0
+}
+
+/// Observes `guest` onto a machine that already carries `seeded` facts;
+/// returns the recorded facts and the machine's capabilities afterwards.
+async fn observe_over(
+    guest: ProviderGuest,
+    seeded: &[CapabilityFact],
+) -> (Vec<ObservedFact>, Vec<CapabilityFact>) {
     let vmid = guest.vmid.unwrap();
     let (proxmox, _audit, machine_port) = service_with_guests(
         FakeDiscovery::with(Ok(discovery_ok())),
@@ -1555,16 +1564,32 @@ async fn observed_facts(guest: ProviderGuest) -> Vec<ObservedFact> {
     let account = create_account(&proxmox).await;
     observe_and_confirm(&proxmox, &account.id).await;
     let machine_id = register_machine(&machine_port, "box", "ops@203.0.113.9:22", None).await;
+    if !seeded.is_empty() {
+        machine_port
+            .record_capabilities(&machine_id, seeded)
+            .await
+            .unwrap();
+    }
     proxmox
         .observe_guest(&AllowAll, &principal(), &account.id, vmid, &machine_id, NOW)
         .await
         .unwrap();
+    let capabilities = machine_port
+        .machines
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|machine| machine.id == machine_id)
+        .expect("the machine")
+        .capabilities
+        .clone();
     let recorded = machine_port.recorded.lock().unwrap();
     let (_, facts) = recorded
         .iter()
+        .rev()
         .find(|(id, _)| id == &machine_id)
         .expect("the facts recorded");
-    facts
+    let observed = facts
         .iter()
         .map(|fact| {
             assert_eq!(fact.source, "proxmox/9.2.2");
@@ -1574,7 +1599,8 @@ async fn observed_facts(guest: ProviderGuest) -> Vec<ObservedFact> {
                 fact.status,
             )
         })
-        .collect()
+        .collect();
+    (observed, capabilities)
 }
 
 fn fact_of(
@@ -1668,7 +1694,7 @@ async fn windows_server_osinfo_names_the_server_release() {
 }
 
 #[tokio::test]
-async fn unknown_os_ids_stay_unknown_never_linux() {
+async fn unknown_os_ids_record_no_family_never_linux() {
     for id in [Some("freebsd"), Some("MSWINDOWS"), Some(""), None] {
         let mut guest = windows_guest();
         let agent = guest.agent.as_mut().unwrap();
@@ -1679,11 +1705,9 @@ async fn unknown_os_ids_stay_unknown_never_linux() {
             ..ProviderOsInfo::default()
         });
         let facts = observed_facts(guest).await;
-        assert_eq!(
-            fact_of(&facts, "os.family"),
-            Some((None, fleet_core::CapabilityStatus::Unknown)),
-            "{id:?}"
-        );
+        // No family observation at all, so an in-guest one is never
+        // overwritten.
+        assert_eq!(fact_of(&facts, "os.family"), None, "{id:?}");
         assert_eq!(fact_of(&facts, "os.name"), Some(known("Something")));
         assert_eq!(fact_of(&facts, "os.version"), Some(known("14.1")));
     }
@@ -1850,4 +1874,36 @@ async fn windows_guests_associate_and_display_as_vms() {
         .unwrap();
     assert_eq!(view.kind, fleet_application::machine::MachineKind::Vm);
     assert_eq!(view.runs_on.unwrap().vmid, 201);
+}
+
+#[tokio::test]
+async fn no_os_observation_keeps_the_in_guest_os_facts() {
+    // `fleetd` already reported the OS from inside the guest.
+    let seeded: Vec<CapabilityFact> = [("family", "linux"), ("name", "Flatcar Container Linux")]
+        .into_iter()
+        .map(|(name, value)| CapabilityFact {
+            namespace: "os".to_owned(),
+            name: name.to_owned(),
+            value: Some(value.to_owned()),
+            status: fleet_core::CapabilityStatus::Known,
+            observed_at: fleet_core::Timestamp::from_unix_millis(NOW - 1),
+            source: "fleetd/1".to_owned(),
+        })
+        .collect();
+    // The agent is offline, or answers with an id Fleet does not classify.
+    let mut offline = windows_guest();
+    offline.agent = Some(ProviderAgent::default());
+    let mut unlisted = windows_guest();
+    unlisted.agent.as_mut().unwrap().os = Some(ProviderOsInfo {
+        id: Some("flatcar".to_owned()),
+        ..ProviderOsInfo::default()
+    });
+    for (case, guest) in [("offline", offline), ("unlisted id", unlisted)] {
+        let (_, capabilities) = observe_over(guest, &seeded).await;
+        let os: Vec<&CapabilityFact> = capabilities
+            .iter()
+            .filter(|fact| fact.namespace == "os")
+            .collect();
+        assert_eq!(os, seeded.iter().collect::<Vec<_>>(), "{case}");
+    }
 }

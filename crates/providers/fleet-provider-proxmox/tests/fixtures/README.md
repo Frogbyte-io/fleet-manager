@@ -63,9 +63,9 @@ they are synthetic, not live captures:
   `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`), plus loopback,
   IPv6 link-local (`fe80::/10`, optionally with a Windows `%zone` suffix
   that the scan strips), and IPv4 link-local/APIPA (`169.254.0.0/16`,
-  RFC 3927, added for FM-608). Link-local addresses are self-assigned and
-  never routed, so they carry no environment data; the Windows corpus
-  needs them to show they are never usable.
+  RFC 3927, added for FM-608). The link-local values in the fixtures are
+  synthetic, like every other value here; the Windows corpus needs them
+  to show they are never usable.
 - Fingerprints are all zeros, and the token is `fleet@pve!contract`.
 
 A test checks the address rule and that no credentials appear.

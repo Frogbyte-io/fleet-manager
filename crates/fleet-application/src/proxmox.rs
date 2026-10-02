@@ -1548,10 +1548,10 @@ fn association_candidate(
         }
     }
     // The guest-agent's usable addresses against the machine endpoints'
-    // hosts. The shared reference parser strips userinfo and IPv6
-    // brackets; hosts that are IP literals compare as addresses, so the
-    // spelling of an IPv6 address does not matter. Loopback, link-local,
-    // and APIPA addresses are never evidence (see `usable_address`).
+    // hosts. Hosts that are IP literals compare as parsed addresses.
+    // Bracketed IPv6 endpoints do not match yet: the shared reference
+    // parser truncates them (#244). Loopback, link-local, and APIPA
+    // addresses are never evidence (see `usable_address`).
     let endpoint_ips: Vec<std::net::IpAddr> = view
         .endpoints
         .iter()
@@ -1677,9 +1677,10 @@ fn guest_facts(guest: &ProviderGuest, pve_version: &str, now: i64) -> Vec<Capabi
     facts
 }
 
-/// The `os` facts one agent OS answer supports: `family` always (unknown
-/// with no value when the `id` is absent or unrecognized), and `name`,
-/// `version`, and `variant` when the answer carries them.
+/// The `os` facts one agent OS answer supports: `family` when the `id` is
+/// recognized, and `name`, `version`, and `variant` when the answer carries
+/// them. An absent or unrecognized `id` is no family observation: an
+/// `unknown` record would overwrite what an in-guest observer knows.
 ///
 /// On Windows, qemu-ga's `pretty-name` is the registry `ProductName`, which
 /// Windows 11 still spells "Windows 10 …"; its `version` comes from
@@ -1693,10 +1694,10 @@ fn agent_os_facts(os: &ProviderOsInfo) -> Vec<(&'static str, Option<String>, Cap
             .map(str::to_owned)
     };
     let family = os.id.as_deref().and_then(os_family);
-    let mut facts = vec![match family {
-        Some(family) => ("family", Some(family.to_owned()), CapabilityStatus::Known),
-        None => ("family", None, CapabilityStatus::Unknown),
-    }];
+    let mut facts = Vec::new();
+    if let Some(family) = family {
+        facts.push(("family", Some(family.to_owned()), CapabilityStatus::Known));
+    }
     let name = if family == Some("windows") {
         present(&os.version)
             .or_else(|| present(&os.pretty_name))
