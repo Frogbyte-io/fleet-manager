@@ -561,7 +561,7 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         privileges: &["VM.Audit"],
         matching: PrivilegeMatch::All,
         required: true,
-        note: "The provision executor finds the template by name in /cluster/resources, which hides guests without VM.Audit.",
+        note: "The provision executor looks up the image build's recorded template VMID, and the node that holds it, in /cluster/resources, which hides guests without VM.Audit.",
     },
     PrivilegeRequirement {
         id: "lab.provision.clone-source",

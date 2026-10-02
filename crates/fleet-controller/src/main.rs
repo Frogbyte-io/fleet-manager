@@ -448,6 +448,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                             lab_provisions,
                             lab_leases,
                             lab_versions,
+                            std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                store.pool().clone(),
+                            )),
                             fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
                         )
                         .with_task_links(std::sync::Arc::new(

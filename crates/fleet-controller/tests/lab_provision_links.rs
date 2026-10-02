@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use fleet_application::authz::{AccessRequest, Authorizer, Decision};
 use fleet_application::lab::{
-    LabTemplate, LabTemplatePort, LabTemplateVersion, LeasePort, NewLabTemplate, NewLease,
-    NewProvision, ProvisionPort,
+    ImageArtifactPort, LabTemplate, LabTemplatePort, LabTemplateVersion, LeasePort, NewLabTemplate,
+    NewLease, NewProvision, ProvisionPort,
 };
 use fleet_application::operation::{NewOperation, Operations};
 use fleet_application::proxmox::tasks::ProxmoxTaskLinkPort;
@@ -47,13 +47,21 @@ impl PveTransport for Transport {
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         self.paths.lock().unwrap().push(request.path.clone());
         let path = request.path.as_str();
-        let body = if path.ends_with("/clone") {
+        let body = if path == "/api2/json/version" {
+            r#"{"data":{"version":"9.0.3"}}"#.to_owned()
+        } else if path == "/api2/json/cluster/resources" {
+            // The pinned image's template: VMID 103 on node pve.
+            r#"{"data":[{"id":"qemu/103","type":"qemu","node":"pve","vmid":103,"name":"lab-base","template":1}]}"#
+                .to_owned()
+        } else if path == "/api2/json/cluster/nextid" {
+            r#"{"data":"104"}"#.to_owned()
+        } else if path.ends_with("/clone") {
             format!(r#"{{"data":"{CLONE_UPID}"}}"#)
         } else if path.ends_with("/status/start") {
             format!(r#"{{"data":"{START_UPID}"}}"#)
         } else {
-            // Discovery, the agent probe, and anything else: refused, so
-            // the clone source falls back and the guest never reports ready.
+            // The agent probe and anything else: refused, so the guest
+            // never reports ready.
             return Err(PveTransportError::Connect {
                 detail: format!("unexpected path {path}"),
             });
@@ -78,6 +86,20 @@ impl ProxmoxCredentialStore for OneSecret {
     }
     async fn clear(&self, _account_id: &str) -> Result<(), CredentialStoreError> {
         unimplemented!("the executor never clears credentials")
+    }
+}
+
+/// The recorded build artifact: the pinned image's template is VMID 103.
+#[derive(Debug)]
+struct Artifacts;
+
+#[async_trait]
+impl ImageArtifactPort for Artifacts {
+    async fn template_vmid(&self, _image_version_id: &str) -> Result<Option<u32>, String> {
+        Ok(Some(103))
+    }
+    async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
+        Ok(vec![103])
     }
 }
 
@@ -221,7 +243,8 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
         Arc::new(OneSecret),
         labs.clone(),
         leases,
-        labs,
+        labs.clone(),
+        Arc::new(Artifacts),
         ProxmoxClient::new(Arc::new(Transport::default())),
     )
     .with_task_links(links.clone());
@@ -247,6 +270,12 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
     }
     // never_ready is a recorded failure; the links exist regardless.
     assert_eq!(state, "failed");
+    // The record holds the reserved target (104 from nextid) on the
+    // template's node, never the template's VMID from the clone UPID.
+    let stored = ProvisionPort::get(labs.as_ref(), &record.id).await.unwrap();
+    assert_eq!(stored.node.as_deref(), Some("pve"));
+    assert_eq!(stored.vmid, Some(104));
+    assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
 
     let found = links
         .operations_for(&account.id, &[CLONE_UPID.to_owned(), START_UPID.to_owned()])

@@ -1913,6 +1913,40 @@ impl ProxmoxClient {
             .collect())
     }
 
+    /// The cluster's next free VMID (`GET /cluster/nextid`). PVE picks the
+    /// lowest free VMID inside the `datacenter.cfg` `next-id` range
+    /// (`lower` inclusive, `upper` exclusive; default 100..1000000), so an
+    /// operator reserves Fleet's clone targets there. Any caller may read
+    /// it (`user => 'all'`). The answer only reflects the moment of the
+    /// read: the caller reserves the VMID before it uses it.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including an answer that is not a VMID.
+    pub async fn next_vmid(&self, request: PveHttpRequest) -> Result<u32, PveApiError> {
+        let nextid_request = PveHttpRequest {
+            path: "/api2/json/cluster/nextid".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request
+        };
+        let data = self.call(nextid_request).await?;
+        // PVE declares an integer but its JSON formatter may emit it as a
+        // string; both shapes are accepted, nothing else is.
+        let vmid = match &data {
+            serde_json::Value::Number(number) => number.as_u64(),
+            serde_json::Value::String(text) => text.parse::<u64>().ok(),
+            _ => None,
+        }
+        .and_then(|vmid| u32::try_from(vmid).ok())
+        .filter(|vmid| *vmid >= 100);
+        vmid.ok_or_else(|| PveApiError::InvalidPayload {
+            detail: format!(
+                "the nextid answer is not a VMID (it is a {})",
+                type_name_of(&data)
+            ),
+        })
+    }
+
     /// Reads one task's status.
     async fn task_status_impl(
         &self,

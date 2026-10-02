@@ -80,28 +80,6 @@ impl ProxmoxLifecycleExecutor {
 
     /// The trusted account and its resolved secret: the same explicit-trust
     /// gate the read surfaces apply, without duplicating their checks.
-    /// Resolves the clone source VMID from the image version's build
-    /// artifact. Returns None when no successful build exists.
-    #[allow(dead_code)]
-    async fn resolve_source_vmid(
-        &self,
-        request: fleet_provider_proxmox::PveHttpRequest,
-    ) -> Option<u32> {
-        let discovery = self.client.discover(request).await.ok()?;
-        // Find the template VM matching the image version's name.
-        discovery
-            .resources
-            .iter()
-            .find(|resource| {
-                resource.kind == "qemu-template"
-                    && resource
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.contains("fm-image-base"))
-            })
-            .and_then(|resource| resource.vmid)
-    }
-
     async fn bound(
         &self,
         account_id: &str,
@@ -784,28 +762,6 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
 impl ProxmoxDestructiveExecutor {
     /// The trusted account and its resolved secret: the same explicit-trust
     /// gate the other surfaces apply.
-    /// Resolves the clone source VMID from the image version's build
-    /// artifact. Returns None when no successful build exists.
-    #[allow(dead_code)]
-    async fn resolve_source_vmid(
-        &self,
-        request: fleet_provider_proxmox::PveHttpRequest,
-    ) -> Option<u32> {
-        let discovery = self.client.discover(request).await.ok()?;
-        // Find the template VM matching the image version's name.
-        discovery
-            .resources
-            .iter()
-            .find(|resource| {
-                resource.kind == "qemu-template"
-                    && resource
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.contains("fm-image-base"))
-            })
-            .and_then(|resource| resource.vmid)
-    }
-
     async fn bound(
         &self,
         account_id: &str,
@@ -1069,8 +1025,22 @@ pub struct ProvisionExecutor {
     provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
     leases: Arc<dyn fleet_application::lab::LeasePort>,
     templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
+    artifacts: Arc<dyn fleet_application::lab::ImageArtifactPort>,
     client: fleet_provider_proxmox::ProxmoxClient,
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
+}
+
+/// A classified provisioning failure: the operation completes as failed
+/// with this reason and detail instead of erroring.
+struct Refusal {
+    reason: &'static str,
+    detail: String,
+}
+
+impl Refusal {
+    fn new(reason: &'static str, detail: String) -> Self {
+        Self { reason, detail }
+    }
 }
 
 impl ProvisionExecutor {
@@ -1082,6 +1052,7 @@ impl ProvisionExecutor {
         provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
         leases: Arc<dyn fleet_application::lab::LeasePort>,
         templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
+        artifacts: Arc<dyn fleet_application::lab::ImageArtifactPort>,
         client: fleet_provider_proxmox::ProxmoxClient,
     ) -> Self {
         Self {
@@ -1090,6 +1061,7 @@ impl ProvisionExecutor {
             provisions,
             leases,
             templates,
+            artifacts,
             client,
             links: None,
         }
@@ -1101,28 +1073,6 @@ impl ProvisionExecutor {
     pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
         self.links = Some(links);
         self
-    }
-
-    /// Resolves the clone source VMID from the image version's build
-    /// artifact. Returns None when no successful build exists.
-    #[allow(dead_code)]
-    async fn resolve_source_vmid(
-        &self,
-        request: fleet_provider_proxmox::PveHttpRequest,
-    ) -> Option<u32> {
-        let discovery = self.client.discover(request).await.ok()?;
-        // Find the template VM matching the image version's name.
-        discovery
-            .resources
-            .iter()
-            .find(|resource| {
-                resource.kind == "qemu-template"
-                    && resource
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.contains("fm-image-base"))
-            })
-            .and_then(|resource| resource.vmid)
     }
 
     async fn bound(
@@ -1158,6 +1108,300 @@ impl ProvisionExecutor {
             },
             secret,
         ))
+    }
+}
+
+/// The pinned request every provider call of the Lab executor carries. The
+/// account's host is the API endpoint; it is never a PVE node name.
+fn pve_request(
+    account: &fleet_application::proxmox::ProxmoxAccount,
+    secret: String,
+) -> fleet_provider_proxmox::PveHttpRequest {
+    fleet_provider_proxmox::PveHttpRequest {
+        host: account.host.clone(),
+        port: account.port,
+        path: "/api2/json/version".to_owned(),
+        pinned_fingerprint: account.fingerprint.clone(),
+        credentials: Arc::new(fleet_provider_proxmox::PveCredentials {
+            token_id: account.token_id.clone(),
+            token: fleet_core::SensitiveString::new(secret),
+        }),
+        method: fleet_provider_proxmox::PveHttpMethod::Get,
+    }
+}
+
+impl ProvisionExecutor {
+    /// The Lab cleanup guard over the cluster's live truth (issue #220):
+    /// refuses a VMID that `/cluster/resources` reports as a template, or
+    /// that matches a promoted image's recorded build artifact. Lab cleanup
+    /// (`destroy`, FM-711) must pass this before it deletes a guest; the
+    /// provision executor also applies it before it resumes a record.
+    ///
+    /// # Errors
+    ///
+    /// The refusal reason, or why the guard could not decide (an
+    /// unreadable account, artifact store, or resource listing). An
+    /// undecided guard is a refusal too.
+    pub async fn guard_destroy_target(&self, account_id: &str, vmid: u32) -> Result<(), String> {
+        let (account, secret) = self.bound(account_id).await?;
+        self.destroy_guard(pve_request(&account, secret), vmid)
+            .await?
+            .0
+    }
+
+    /// The guard's decision over a fresh resource listing, which it also
+    /// returns: the outer error is an undecided guard, the inner one a
+    /// refusal.
+    async fn destroy_guard(
+        &self,
+        request: fleet_provider_proxmox::PveHttpRequest,
+        vmid: u32,
+    ) -> Result<(Result<(), String>, Vec<fleet_provider_proxmox::PveResource>), String> {
+        let image_vmids = self
+            .artifacts
+            .promoted_template_vmids()
+            .await
+            .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+        let resources = self
+            .client
+            .list_guest_resources(request)
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let is_template = resources
+            .iter()
+            .any(|resource| resource.vmid == Some(vmid) && resource.kind == "qemu-template");
+        Ok((
+            fleet_application::lab::guard_destroy_target(vmid, is_template, &image_vmids),
+            resources,
+        ))
+    }
+
+    /// Before a resumed record's guest is started: the recorded VMID must
+    /// pass the cleanup guard (the pre-#220 source fallback could record
+    /// the template), and the live guest there must still be this
+    /// provision's clone, by its Fleet name. Returns the guest's live
+    /// node.
+    async fn verify_recorded_guest(
+        &self,
+        request: fleet_provider_proxmox::PveHttpRequest,
+        record_id: &str,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<String, Refusal>, String> {
+        let (decision, resources) = self.destroy_guard(request, vmid).await?;
+        if let Err(refusal) = decision {
+            return Ok(Err(Refusal::new(
+                "protected_target",
+                format!(
+                    "the provision record names {node}/qemu/{vmid}, which Lab must not use as its guest: {refusal}"
+                ),
+            )));
+        }
+        let name = format!("fm-lab-{record_id}");
+        let Some(guest) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(vmid))
+        else {
+            return Ok(Err(Refusal::new(
+                "target_missing",
+                format!(
+                    "the recorded guest qemu/{vmid} is not in the cluster's resources; it was removed, or the token lacks VM.Audit on /vms/{vmid}"
+                ),
+            )));
+        };
+        if guest.kind == "qemu" && guest.name.as_deref() == Some(name.as_str()) {
+            return Ok(Ok(guest.node.clone().unwrap_or_else(|| node.to_owned())));
+        }
+        // PVE names the clone only when the clone finishes, and reports an
+        // unnamed guest as `VM <vmid>` (qemu-server `vmstatus`), not as a
+        // missing name.
+        let placeholder = format!("VM {vmid}");
+        if guest.kind == "qemu" && guest.name.as_deref().is_none_or(|name| name == placeholder) {
+            return Ok(Err(Refusal::new(
+                "target_unverified",
+                format!(
+                    "qemu/{vmid} carries no name yet, so it cannot be verified as this provision's clone (the clone may still be running); retry once its task finishes"
+                ),
+            )));
+        }
+        Ok(Err(Refusal::new(
+            "conflict",
+            format!(
+                "the recorded VMID {vmid} now holds a {} named {}, not this provision's clone",
+                guest.kind,
+                guest.name.as_deref().unwrap_or("nothing")
+            ),
+        )))
+    }
+
+    /// Clones the pinned image's template into a VMID reserved on the
+    /// record before the clone call, and records the clone's UPID. The
+    /// outer error is an infrastructure failure; the inner one a
+    /// classified refusal the operation completes with.
+    async fn clone_into_reserved_target(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        image_version_id: &str,
+        account_id: &str,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<Result<(String, u32), Refusal>, String> {
+        // The clone source: the template VMID the pinned image version's
+        // build recorded. No artifact is an honest failure: the pin was
+        // validated as promoted, and promotion requires one.
+        let Some(source_vmid) = self
+            .artifacts
+            .template_vmid(image_version_id)
+            .await
+            .map_err(|detail| format!("the image artifact is unreadable: {detail}"))?
+        else {
+            return Ok(Err(Refusal::new(
+                "artifact_missing",
+                format!(
+                    "the pinned image version {image_version_id} has no recorded build artifact; build and promote it before provisioning"
+                ),
+            )));
+        };
+        // The template's node comes from the cluster's resources: the
+        // clone runs on the node that holds the template.
+        let resources = self
+            .client
+            .list_guest_resources(request.clone())
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let Some(template) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(source_vmid))
+        else {
+            return Ok(Err(Refusal::new(
+                "template_missing",
+                format!(
+                    "the image template qemu/{source_vmid} is not in the cluster's resources; it was removed, or the token lacks VM.Audit on /vms/{source_vmid}"
+                ),
+            )));
+        };
+        if template.kind != "qemu-template" {
+            return Ok(Err(Refusal::new(
+                "template_missing",
+                format!(
+                    "the image artifact qemu/{source_vmid} is a {}, not a template",
+                    template.kind
+                ),
+            )));
+        }
+        let Some(node) = template.node.clone() else {
+            return Ok(Err(Refusal::new(
+                "template_missing",
+                format!("the cluster reports no node for the image template qemu/{source_vmid}"),
+            )));
+        };
+
+        // The target: reserved and recorded before the clone call. A
+        // record that already holds a reservation resumes with it.
+        let mut reserved = if record.vmid.is_some() {
+            record.clone()
+        } else {
+            let candidate = self
+                .client
+                .next_vmid(request.clone())
+                .await
+                .map_err(|error| format!("the next free VMID is unreadable: {error}"))?;
+            // A promoted image's recorded template VMID is never reused as
+            // a lease guest, even after the template is gone: the cleanup
+            // guard would refuse to destroy it.
+            let protected = self
+                .artifacts
+                .promoted_template_vmids()
+                .await
+                .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+            if protected.contains(&candidate) {
+                return Ok(Err(Refusal::new(
+                    "conflict",
+                    format!(
+                        "the next free VMID {candidate} is a promoted image's recorded template, which no longer exists in the cluster; rebuild or demote that image, or move the next-id range"
+                    ),
+                )));
+            }
+            match self
+                .provisions
+                .reserve_clone_target(&record.id, &node, candidate)
+                .await
+                .map_err(|detail| format!("the clone target reservation failed: {detail}"))?
+            {
+                fleet_application::lab::CloneTargetReservation::Reserved(reserved) => reserved,
+                fleet_application::lab::CloneTargetReservation::HeldBy { record_id } => {
+                    return Ok(Err(Refusal::new(
+                        "conflict",
+                        format!(
+                            "VMID {candidate} is reserved by provision {record_id}, whose clone has not landed yet; retry once it has"
+                        ),
+                    )));
+                }
+            }
+        };
+        let target = reserved
+            .vmid
+            .ok_or("the clone target reservation carries no VMID")?;
+        if reserved.node.as_deref() != Some(node.as_str()) {
+            // The template moved since the reservation: the clone lands
+            // on the template's node, and the record says so first.
+            reserved.node = Some(node.clone());
+            self.provisions
+                .update(&reserved)
+                .await
+                .map_err(|detail| format!("the record update failed: {detail}"))?;
+        }
+
+        // FM-603's target-conflict classification against the cluster's
+        // truth: our own clone (by its Fleet name) that landed before its
+        // UPID was recorded is adopted; anything else at the target is a
+        // conflict, never overwritten. The reservation is kept.
+        let name = format!("fm-lab-{}", record.id);
+        if let Some(existing) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(target))
+        {
+            if existing.kind == "qemu" && existing.name.as_deref() == Some(name.as_str()) {
+                let landed = existing.node.clone().unwrap_or(node);
+                return Ok(Ok((landed, target)));
+            }
+            return Ok(Err(Refusal::new(
+                "conflict",
+                format!(
+                    "a guest with the reserved VMID {target} already exists ({} named {}); it is not this provision's clone",
+                    existing.kind,
+                    existing.name.as_deref().unwrap_or("nothing")
+                ),
+            )));
+        }
+
+        let upid = self
+            .client
+            .guest_clone(request.clone(), &node, source_vmid, target, &name, true)
+            .await
+            .map_err(|error| format!("the clone failed: {error}"))?;
+        record_task_link(self.links.as_ref(), account_id, &upid, operation_id).await;
+        // PVE forks `qmclone` with the *source* VMID as the task id, on the
+        // source's node. Anything else is not the clone Fleet requested;
+        // the recorded VMID stays the reserved target either way.
+        if upid.task_type != "qmclone"
+            || upid.node != node
+            || upid.target != source_vmid.to_string()
+        {
+            return Ok(Err(Refusal::new(
+                "task_mismatch",
+                format!(
+                    "the clone answered task {} for {}/{} instead of qmclone for {node}/{source_vmid}; the reserved target {target} must be verified",
+                    upid.task_type, upid.node, upid.target
+                ),
+            )));
+        }
+        reserved.clone_upid = Some(upid.raw.clone());
+        self.provisions
+            .update(&reserved)
+            .await
+            .map_err(|detail| format!("the record update failed: {detail}"))?;
+        Ok(Ok((node, target)))
     }
 }
 
@@ -1220,90 +1464,97 @@ impl ProvisionExecutor {
             .await
             .map_err(|detail| format!("the template version is unreadable: {detail}"))?;
 
-        // The account is the template content's host: the record does not
-        // carry one, so the executor resolves the account that owns the
-        // pinned image's cluster through the first configured account.
-        // FM-711's placement epic owns multi-account selection.
+        // The account is the API endpoint only: the PVE node that holds the
+        // template comes from the cluster's resources, never from the
+        // account's host. FM-711's placement epic owns multi-account
+        // selection.
         let (account, secret) = self.bound(&account_id).await?;
-        let request = fleet_provider_proxmox::PveHttpRequest {
-            host: account.host.clone(),
-            port: account.port,
-            path: "/api2/json/version".to_owned(),
-            pinned_fingerprint: account.fingerprint.clone(),
-            credentials: Arc::new(fleet_provider_proxmox::PveCredentials {
-                token_id: account.token_id.clone(),
-                token: fleet_core::SensitiveString::new(secret),
-            }),
-            method: fleet_provider_proxmox::PveHttpMethod::Get,
-        };
+        let request = pve_request(&account, secret);
 
-        // Step 1: clone from the pinned image, unless the record already
-        // carries a VMID (resume instead of creating a second VM).
-        let (node, vmid) = match (record.node.clone(), record.vmid) {
-            (Some(node), Some(vmid)) => {
-                operations
-                    .record_progress(
+        // Step 1: clone from the pinned image into a reserved VMID, unless
+        // the record's clone already started (resume instead of creating a
+        // second VM).
+        let (node, vmid) = if record.clone_upid.is_some() {
+            let (Some(node), Some(vmid)) = (record.node.clone(), record.vmid) else {
+                return Err("the provision record started a clone but carries no target".to_owned());
+            };
+            // The live guest at the recorded target must still be this
+            // provision's clone before anything starts it.
+            let node = match self
+                .verify_recorded_guest(request.clone(), &record.id, &node, vmid)
+                .await?
+            {
+                Ok(live) if record.node.as_deref() == Some(live.as_str()) => live,
+                Ok(live) => {
+                    // The guest moved since the clone: later cleanup must
+                    // find it where it lives now, even if this run stops
+                    // before readiness rewrites the record.
+                    let mut moved = record.clone();
+                    moved.node = Some(live.clone());
+                    self.provisions.update(&moved).await.map_err(|detail| {
+                        format!("the provision record is unwritable: {detail}")
+                    })?;
+                    live
+                }
+                Err(refusal) => {
+                    return complete_failure(
+                        operations,
                         &operation.id,
-                        Some(1),
-                        Some(3),
-                        Some(&format!("resuming existing guest {node}/qemu/{vmid}")),
+                        refusal.reason,
+                        &refusal.detail,
                     )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                (node, vmid)
-            }
-            _ => {
-                operations
-                    .record_progress(
+                    .await;
+                }
+            };
+            operations
+                .record_progress(
+                    &operation.id,
+                    Some(1),
+                    Some(3),
+                    Some(&format!("resuming existing guest {node}/qemu/{vmid}")),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            (node, vmid)
+        } else {
+            operations
+                .record_progress(
+                    &operation.id,
+                    Some(0),
+                    Some(3),
+                    Some("cloning the pinned image"),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            match self
+                .clone_into_reserved_target(
+                    &record,
+                    &version.content.image_version_id,
+                    &account_id,
+                    &operation.id,
+                    &request,
+                )
+                .await?
+            {
+                Ok(target) => target,
+                Err(refusal) => {
+                    return complete_failure(
+                        operations,
                         &operation.id,
-                        Some(0),
-                        Some(3),
-                        Some("cloning the pinned image"),
+                        refusal.reason,
+                        &refusal.detail,
                     )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                // The clone source: the pinned image version's build
-                // artifact (a template VMID), resolved from the build
-                // operation's result. Falls back to the golden source
-                // (103) when no build artifact exists yet.
-                let source_vmid = self
-                    .resolve_source_vmid(request.clone())
-                    .await
-                    .unwrap_or(103);
-                let upid = self
-                    .client
-                    .guest_clone(
-                        request.clone(),
-                        &account.host,
-                        source_vmid,
-                        0,
-                        &format!("fm-lab-{}", record.id),
-                        true,
-                    )
-                    .await
-                    .map_err(|error| format!("the clone failed: {error}"))?;
-                record_task_link(self.links.as_ref(), &account_id, &upid, &operation.id).await;
-                // Record the clone UPID and the resolved VMID before
-                // continuing: the saga rule.
-                let mut updated = record.clone();
-                updated.clone_upid = Some(upid.raw.clone());
-                updated.node = Some(upid.node.clone());
-                // The clone's VMID: parse from the UPID's target field
-                // (index 6), or fall back to the source VMID.
-                let new_vmid = upid
-                    .raw
-                    .split(':')
-                    .nth(6)
-                    .and_then(|id| id.parse::<u32>().ok())
-                    .unwrap_or(source_vmid);
-                updated.vmid = Some(new_vmid);
-                self.provisions
-                    .update(&updated)
-                    .await
-                    .map_err(|detail| format!("the record update failed: {detail}"))?;
-                (upid.node.clone(), new_vmid)
+                    .await;
+                }
             }
         };
+        // Later transitions build on the stored record, so they keep the
+        // reservation and the clone UPID step 1 recorded.
+        let record = self
+            .provisions
+            .get(&record.id)
+            .await
+            .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
 
         // Step 2: start the guest (idempotent when already running).
         operations
