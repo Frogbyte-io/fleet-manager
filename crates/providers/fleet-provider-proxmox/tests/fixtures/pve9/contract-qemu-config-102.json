@@ -1,0 +1,13 @@
+{
+ "data": {
+  "digest": "1111111111111111111111111111111111111111",
+  "name": "db-01",
+  "agent": "enabled=1,fstrim_cloned_disks=1",
+  "cores": 2,
+  "memory": "8192",
+  "ostype": "l26",
+  "scsi0": "local:102/vm-102-disk-0.qcow2,size=64G",
+  "net0": "virtio=BC:24:11:0A:01:11,bridge=vmbr0",
+  "meta": "creation-qemu=9.2.0,ctime=1727000000"
+ }
+}

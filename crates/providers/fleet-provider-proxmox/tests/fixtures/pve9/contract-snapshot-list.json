@@ -1,0 +1,24 @@
+{
+ "data": [
+  {
+   "name": "pre-upgrade",
+   "snaptime": 1727000000,
+   "vmstate": 0,
+   "description": "before apt full-upgrade\n"
+  },
+  {
+   "name": "with-ram",
+   "snaptime": 1727000600,
+   "vmstate": 1,
+   "description": "",
+   "parent": "pre-upgrade"
+  },
+  {
+   "name": "current",
+   "digest": "0000000000000000000000000000000000000000",
+   "running": 1,
+   "description": "You are here!",
+   "parent": "with-ram"
+  }
+ ]
+}

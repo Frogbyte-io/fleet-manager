@@ -272,7 +272,7 @@ async fn an_unknown_node_filter_warns_instead_of_reading() {
 }
 
 #[tokio::test]
-async fn a_full_node_page_warns_that_older_tasks_are_not_listed() {
+async fn a_full_node_page_warns_that_older_tasks_may_be_unlisted() {
     let transport = FixtureTransport::new("pve9");
     let client = ProxmoxClient::new(transport);
 
@@ -291,6 +291,13 @@ async fn a_full_node_page_warns_that_older_tasks_are_not_listed() {
     assert_eq!(history.tasks.len(), 5);
     assert_eq!(history.warnings.len(), 1, "{:?}", history.warnings);
     assert!(history.warnings[0].contains("the per-node bound"));
+    // A node with exactly `limit` tasks also fills the page, so the
+    // warning must not claim that tasks were dropped.
+    assert!(
+        history.warnings[0].contains("may be unlisted"),
+        "{:?}",
+        history.warnings
+    );
 }
 
 #[tokio::test]

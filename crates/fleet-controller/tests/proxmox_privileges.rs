@@ -215,7 +215,9 @@ async fn raw(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap();
-    (status, serde_json::from_str(rest).unwrap_or(Value::Null))
+    let body = serde_json::from_str(rest)
+        .unwrap_or_else(|error| panic!("the {status} response body is not JSON ({error}): {rest}"));
+    (status, body)
 }
 
 async fn create_account(harness: &Harness) -> String {

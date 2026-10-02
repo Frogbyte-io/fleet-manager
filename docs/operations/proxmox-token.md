@@ -295,11 +295,13 @@ fleetctl proxmox privileges <account-id>                 # text (the default)
 fleetctl proxmox privileges <account-id> --output json   # the controller's report
 ```
 
-The command calls `GET /api/v1/proxmox/accounts/{accountId}/privileges`. It needs only `proxmox.read` in Fleet, changes nothing on either side, and writes no audit event. The controller reads `GET /access/permissions` with the token itself, which any token may do without extra privileges. It then evaluates each tier against Fleet's privilege table for the PVE major it reads from `/version` (`rulesMajor`). A major newer than 9 is evaluated with the 9.x rules and a warning. Each tier is one of:
+The command calls `GET /api/v1/proxmox/accounts/{accountId}/privileges`. It needs only `proxmox.read` in Fleet, changes nothing on either side, and writes no audit event. The controller reads `GET /access/permissions` with the token itself, which any token may do without extra privileges. It then evaluates each tier against Fleet's privilege table for the PVE major it reads from `/version` (`rulesMajor`). A major newer than 9 is evaluated with the 9.x rules and a warning, and a major older than 8 with the 8.x rules and a warning. Each tier is one of:
 
 - `granted`: every required check holds somewhere in its scope.
 - `missing`: the tier lists what to grant, merged per path (`missing[]` with `privileges`, `anyOf`, `path`, and `capabilities`).
 - `unknown`: the permissions read itself was refused (403), or the version has no major number. `unknownReason` says which. Fleet never reports `missing` when it could not read.
+
+The command fails instead of reporting tiers when the controller cannot ask at all: `404` for an unknown account; `409` when the account's trust is unconfirmed (`proxmox_unconfirmed`), its certificate no longer matches the pin (`proxmox_fingerprint_mismatch`), or its token secret is unavailable (`proxmox_no_secret`); `502` when the PVE API fails or refuses the token; `500` when the controller's own storage or secret store fails; and `503` when the controller runs without the Proxmox surface wired.
 
 Opt-in checks (`required: false`) never gate a tier. The text output lists them as `opt-in … not granted`.
 

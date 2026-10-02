@@ -1,0 +1,34 @@
+{
+ "data": {
+  "result": {
+   "version": "7.2.0",
+   "supported_commands": [
+    {
+     "name": "guest-ping",
+     "enabled": true,
+     "success-response": true
+    },
+    {
+     "name": "guest-info",
+     "enabled": true,
+     "success-response": true
+    },
+    {
+     "name": "guest-network-get-interfaces",
+     "enabled": true,
+     "success-response": true
+    },
+    {
+     "name": "guest-get-osinfo",
+     "enabled": true,
+     "success-response": true
+    },
+    {
+     "name": "guest-exec",
+     "enabled": false,
+     "success-response": true
+    }
+   ]
+  }
+ }
+}
