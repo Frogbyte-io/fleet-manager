@@ -693,6 +693,33 @@ impl LifecycleAction {
     }
 }
 
+/// The task types PVE starts without a target id (`fork_worker` with an
+/// undefined or empty id in `pve-manager`): node-wide package, service,
+/// shell, bulk-guest, backup-of-several-guests, cluster, and certificate
+/// work. Only these may carry an empty UPID `id` field. A type missing
+/// here with an empty id is refused by [`Upid::parse`], which the task
+/// history reports as a per-task warning instead of a silent row.
+pub const NODE_LEVEL_TASK_TYPES: &[&str] = &[
+    "acmenewcert",
+    "acmerenew",
+    "acmerevoke",
+    "aptupdate",
+    "clusterjoin",
+    "migrateall",
+    "reloadnetworkall",
+    "spiceshell",
+    "srvreload",
+    "srvrestart",
+    "srvstart",
+    "srvstop",
+    "startall",
+    "stopall",
+    "suspendall",
+    "termproxy",
+    "vncshell",
+    "vzdump",
+];
+
 /// A parsed UPID. Fleet parses the string itself — the node it polls comes
 /// from the parse, never from trust in the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -701,8 +728,8 @@ pub struct Upid {
     pub node: String,
     /// The task type, e.g. `qmstart`.
     pub task_type: String,
-    /// The task's target id (the VMID for guest tasks); empty for
-    /// node-level tasks that carry no id.
+    /// The task's target id (the VMID for guest tasks); empty only for
+    /// the [`NODE_LEVEL_TASK_TYPES`].
     pub target: String,
     /// The user the task runs as.
     pub user: String,
@@ -741,9 +768,6 @@ impl Upid {
         else {
             return Err("the UPID fields did not destructure".to_owned());
         };
-        // The `id` field is legitimately empty for node-level tasks
-        // (`aptupdate`, `srvreload`, an all-guest `vzdump`): PVE encodes
-        // them as `...:<type>::<user>:`. Every other field is required.
         for (label, part) in [
             ("node", node),
             ("pid", pid),
@@ -755,6 +779,17 @@ impl Upid {
             if part.is_empty() {
                 return Err(format!("the UPID's {label} field is empty"));
             }
+        }
+        // The `id` field is legitimately empty only for node-level tasks
+        // (`aptupdate`, `srvreload`, an all-guest `vzdump`): PVE encodes
+        // them as `...:<type>::<user>:`. Any other task type must name its
+        // target, so a guest task with no VMID is refused rather than
+        // read as a node-level one.
+        if target.is_empty() && !NODE_LEVEL_TASK_TYPES.contains(&task_type) {
+            return Err(format!(
+                "the UPID's id field is empty, but {:?} is not a node-level task type",
+                task_type.chars().take(64).collect::<String>()
+            ));
         }
         if !trailing.is_empty() {
             return Err("the UPID carries trailing material".to_owned());
@@ -2214,6 +2249,20 @@ mod tests {
             Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:aptupdate::root@pam:").unwrap();
         assert_eq!(node_task.target, "");
         assert_eq!(node_task.task_type, "aptupdate");
+        for task_type in ["vzdump", "srvreload", "startall", "vncshell"] {
+            let raw = format!("UPID:pve:0015523F:0C6DF532:6AAFE1EC:{task_type}::root@pam:");
+            assert_eq!(Upid::parse(&raw).unwrap().target, "", "{task_type}");
+        }
+        // A guest task type with an empty id is not a node-level task.
+        for task_type in ["qmstart", "qmreboot", "qmclone", "vzstart", "unknowntype"] {
+            let raw = format!("UPID:pve:0015523F:0C6DF532:6AAFE1EC:{task_type}::root@pam:");
+            let error = Upid::parse(&raw).unwrap_err();
+            assert!(error.contains("not a node-level task type"), "{error}");
+        }
+        // A node-level type may still name a target (a single-guest vzdump).
+        let single =
+            Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:vzdump:101:root@pam:").unwrap();
+        assert_eq!(single.target, "101");
         // Trailing material: refused.
         assert!(
             Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101:user:extra").is_err()

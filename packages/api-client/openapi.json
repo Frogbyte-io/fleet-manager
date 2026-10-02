@@ -5423,7 +5423,7 @@
           "proxmox"
         ],
         "summary": "Reports which capability tiers the account's API token can perform.",
-        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or unconfirmed\naccount, or a source failure. A refused permissions read is not an\nerror: every tier reports `unknown`.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or unconfirmed\naccount, a missing token secret, an unwired Proxmox surface, or a source\nfailure. A refused permissions read is not an error: every tier reports\n`unknown`.",
         "operationId": "getProxmoxPrivileges",
         "parameters": [
           {
@@ -5468,7 +5468,17 @@
             }
           },
           "409": {
-            "description": "The account's trust is unconfirmed or its fingerprint was refused.",
+            "description": "The account's trust is unconfirmed (`proxmox_unconfirmed`), its pinned fingerprint no longer matches (`proxmox_fingerprint_mismatch`), or its token secret is unavailable (`proxmox_no_secret`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The controller's account storage or secret store failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5479,6 +5489,16 @@
           },
           "502": {
             "description": "The PVE API failed or refused the token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Proxmox surface is not wired; the controller needs its database and secret store.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11575,7 +11595,7 @@
               "string",
               "null"
             ],
-            "description": "Why every tier is unknown, when the permissions read was refused."
+            "description": "Why every tier is unknown: the permissions read was refused (403),\nor the PVE version is unsupported because it has no major number\nto key the privilege table with. A major outside the table's range\nis not unknown; it is evaluated with the nearest supported rules\nand a warning."
           },
           "warnings": {
             "type": "array",
@@ -13730,7 +13750,7 @@
                   "string",
                   "null"
                 ],
-                "description": "Why every tier is unknown, when the permissions read was refused."
+                "description": "Why every tier is unknown: the permissions read was refused (403),\nor the PVE version is unsupported because it has no major number\nto key the privilege table with. A major outside the table's range\nis not unknown; it is evaluated with the nearest supported rules\nand a warning."
               },
               "warnings": {
                 "type": "array",

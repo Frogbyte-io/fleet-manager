@@ -13,7 +13,9 @@ pub(crate) fn parse(rest: &[&str], output: &mut Output) -> Result<Command, CliEr
     let Some((account_id, flags)) = rest.split_first() else {
         return Err(CliError { message: usage() });
     };
-    if account_id.starts_with("--") {
+    // An empty ID or any leading `-` is a flag or a typo, never an
+    // account: the same guard as `proxmox privileges`.
+    if account_id.is_empty() || account_id.starts_with('-') {
         return Err(CliError { message: usage() });
     }
     let mut node = None;

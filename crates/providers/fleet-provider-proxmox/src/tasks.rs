@@ -281,7 +281,7 @@ impl ProxmoxClient {
         }
         if u32::try_from(returned).is_ok_and(|count| count >= limit) {
             warnings.push(format!(
-                "node {node} returned {returned} tasks, the per-node bound; older tasks are not listed"
+                "node {node} returned {returned} tasks, reaching the per-node bound; older tasks may be unlisted"
             ));
         }
         (node, tasks, warnings)
