@@ -3034,7 +3034,11 @@ export interface ProxmoxPrivilegesDto {
   /** The four tiers: discover, operate, destructive, lab. */
   tiers: ProxmoxTierPrivilegesDto[];
   /**
-     * Why every tier is unknown, when the permissions read was refused.
+     * Why every tier is unknown: the permissions read was refused (403),
+     * or the PVE version is unsupported because it has no major number
+     * to key the privilege table with. A major outside the table's range
+     * is not unknown; it is evaluated with the nearest supported rules
+     * and a warning.
      * @nullable
      */
   unknownReason?: string | null;
@@ -4223,7 +4227,11 @@ export type ResourceProxmoxPrivilegesDtoData = {
   /** The four tiers: discover, operate, destructive, lab. */
   tiers: ProxmoxTierPrivilegesDto[];
   /**
-     * Why every tier is unknown, when the permissions read was refused.
+     * Why every tier is unknown: the permissions read was refused (403),
+     * or the PVE version is unsupported because it has no major number
+     * to key the privilege table with. A major outside the table's range
+     * is not unknown; it is evaluated with the nearest supported rules
+     * and a warning.
      * @nullable
      */
   unknownReason?: string | null;
@@ -10710,15 +10718,25 @@ export type getProxmoxPrivilegesResponse409 = {
   status: 409
 }
 
+export type getProxmoxPrivilegesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
 export type getProxmoxPrivilegesResponse502 = {
   data: ApiError
   status: 502
 }
 
+export type getProxmoxPrivilegesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
 export type getProxmoxPrivilegesResponseSuccess = (getProxmoxPrivilegesResponse200) & {
   headers: Headers;
 };
-export type getProxmoxPrivilegesResponseError = (getProxmoxPrivilegesResponse403 | getProxmoxPrivilegesResponse404 | getProxmoxPrivilegesResponse409 | getProxmoxPrivilegesResponse502) & {
+export type getProxmoxPrivilegesResponseError = (getProxmoxPrivilegesResponse403 | getProxmoxPrivilegesResponse404 | getProxmoxPrivilegesResponse409 | getProxmoxPrivilegesResponse500 | getProxmoxPrivilegesResponse502 | getProxmoxPrivilegesResponse503) & {
   headers: Headers;
 };
 
@@ -10736,8 +10754,9 @@ export const getGetProxmoxPrivilegesUrl = (accountId: string,) => {
  * # Errors
  *
  * Returns the public error envelope on refusal, an unknown or unconfirmed
- * account, or a source failure. A refused permissions read is not an
- * error: every tier reports `unknown`.
+ * account, a missing token secret, an unwired Proxmox surface, or a source
+ * failure. A refused permissions read is not an error: every tier reports
+ * `unknown`.
  * @summary Reports which capability tiers the account's API token can perform.
  */
 export const getProxmoxPrivileges = async (accountId: string, options?: RequestInit): Promise<getProxmoxPrivilegesResponse> => {

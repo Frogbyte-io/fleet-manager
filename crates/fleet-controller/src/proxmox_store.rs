@@ -231,26 +231,7 @@ impl ProxmoxDiscoverPort for ProviderDiscovery {
         account: &fleet_application::proxmox::ProxmoxAccount,
         secret: &SensitiveString,
     ) -> Result<RawDiscovery, ProxmoxSourceError> {
-        let Some(pinned) = account.fingerprint.clone() else {
-            // The use case gates this; a source call without a pin is a
-            // composition defect. Refuse loudly rather than probing with a
-            // credential.
-            return Err(ProxmoxSourceError::Connect {
-                detail: "the account has no confirmed fingerprint; refusing to send credentials"
-                    .to_owned(),
-            });
-        };
-        let request = PveHttpRequest {
-            host: account.host.clone(),
-            port: account.port,
-            path: "/api2/json/cluster/resources".to_owned(),
-            pinned_fingerprint: Some(pinned.clone()),
-            credentials: Arc::new(PveCredentials {
-                token_id: account.token_id.clone(),
-                token: SensitiveString::new(secret.expose().to_owned()),
-            }),
-            method: fleet_provider_proxmox::PveHttpMethod::Get,
-        };
+        let request = pinned_request(account, secret, "/api2/json/cluster/resources")?;
         match self.client.discover(request).await {
             Ok(discovery) => Ok(RawDiscovery {
                 version: discovery.version.clone(),
@@ -310,23 +291,7 @@ impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery 
         account: &fleet_application::proxmox::ProxmoxAccount,
         secret: &SensitiveString,
     ) -> Result<fleet_application::proxmox::RawGuestDiscovery, ProxmoxSourceError> {
-        let Some(pinned) = account.fingerprint.clone() else {
-            return Err(ProxmoxSourceError::Connect {
-                detail: "the account has no confirmed fingerprint; refusing to send credentials"
-                    .to_owned(),
-            });
-        };
-        let request = PveHttpRequest {
-            host: account.host.clone(),
-            port: account.port,
-            path: "/api2/json/cluster/resources".to_owned(),
-            pinned_fingerprint: Some(pinned.clone()),
-            credentials: Arc::new(PveCredentials {
-                token_id: account.token_id.clone(),
-                token: SensitiveString::new(secret.expose().to_owned()),
-            }),
-            method: fleet_provider_proxmox::PveHttpMethod::Get,
-        };
+        let request = pinned_request(account, secret, "/api2/json/cluster/resources")?;
         match self.client.guest_discover(request).await {
             Ok(discovery) => Ok(fleet_application::proxmox::RawGuestDiscovery {
                 version: discovery.version.clone(),
@@ -391,23 +356,7 @@ impl fleet_application::proxmox::privileges::ProxmoxPermissionsPort for Provider
         secret: &SensitiveString,
     ) -> Result<fleet_application::proxmox::privileges::RawTokenPermissions, ProxmoxSourceError>
     {
-        let Some(pinned) = account.fingerprint.clone() else {
-            return Err(ProxmoxSourceError::Connect {
-                detail: "the account has no confirmed fingerprint; refusing to send credentials"
-                    .to_owned(),
-            });
-        };
-        let request = PveHttpRequest {
-            host: account.host.clone(),
-            port: account.port,
-            path: "/api2/json/access/permissions".to_owned(),
-            pinned_fingerprint: Some(pinned),
-            credentials: Arc::new(PveCredentials {
-                token_id: account.token_id.clone(),
-                token: SensitiveString::new(secret.expose().to_owned()),
-            }),
-            method: fleet_provider_proxmox::PveHttpMethod::Get,
-        };
+        let request = pinned_request(account, secret, "/api2/json/access/permissions")?;
         self.client
             .token_permissions(request)
             .await
@@ -422,6 +371,36 @@ impl fleet_application::proxmox::privileges::ProxmoxPermissionsPort for Provider
             )
             .map_err(map_api_error)
     }
+}
+
+/// The authenticated GET request every credentialed read starts from:
+/// the account's host, its token, and its confirmed fingerprint pin.
+///
+/// The use case gates on trust before any source call, so an account
+/// without a pin here is a composition defect. It is refused loudly
+/// rather than sending the credential over an unpinned connection.
+pub(crate) fn pinned_request(
+    account: &fleet_application::proxmox::ProxmoxAccount,
+    secret: &SensitiveString,
+    path: &str,
+) -> Result<PveHttpRequest, ProxmoxSourceError> {
+    let Some(pinned) = account.fingerprint.clone() else {
+        return Err(ProxmoxSourceError::Connect {
+            detail: "the account has no confirmed fingerprint; refusing to send credentials"
+                .to_owned(),
+        });
+    };
+    Ok(PveHttpRequest {
+        host: account.host.clone(),
+        port: account.port,
+        path: path.to_owned(),
+        pinned_fingerprint: Some(pinned),
+        credentials: Arc::new(PveCredentials {
+            token_id: account.token_id.clone(),
+            token: SensitiveString::new(secret.expose().to_owned()),
+        }),
+        method: fleet_provider_proxmox::PveHttpMethod::Get,
+    })
 }
 
 /// Maps one provider API error onto the application taxonomy.

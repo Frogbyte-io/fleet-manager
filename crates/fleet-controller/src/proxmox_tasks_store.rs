@@ -7,8 +7,6 @@
 //! case and passed in for this one call only. Like discovery, an account
 //! without a pinned fingerprint is refused before any credential is sent.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use fleet_application::proxmox::ProxmoxSourceError;
 use fleet_application::proxmox::tasks::{
@@ -16,8 +14,7 @@ use fleet_application::proxmox::tasks::{
 };
 use fleet_core::SensitiveString;
 use fleet_provider_proxmox::{
-    PveCredentials, PveHttpRequest, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
-    TaskStatus,
+    PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary, TaskStatus,
 };
 
 /// The task-history source over the provider client.
@@ -42,23 +39,7 @@ impl ProxmoxTaskHistoryPort for ProviderTaskHistory {
         secret: &SensitiveString,
         query: &RawTaskQuery,
     ) -> Result<RawTaskHistory, ProxmoxSourceError> {
-        let Some(pinned) = account.fingerprint.clone() else {
-            return Err(ProxmoxSourceError::Connect {
-                detail: "the account has no confirmed fingerprint; refusing to send credentials"
-                    .to_owned(),
-            });
-        };
-        let request = PveHttpRequest {
-            host: account.host.clone(),
-            port: account.port,
-            path: "/api2/json/version".to_owned(),
-            pinned_fingerprint: Some(pinned),
-            credentials: Arc::new(PveCredentials {
-                token_id: account.token_id.clone(),
-                token: SensitiveString::new(secret.expose().to_owned()),
-            }),
-            method: fleet_provider_proxmox::PveHttpMethod::Get,
-        };
+        let request = crate::proxmox_store::pinned_request(account, secret, "/api2/json/version")?;
         let history = self
             .client
             .task_history(

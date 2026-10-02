@@ -320,7 +320,14 @@ async fn run_start(harness: &Harness, account_id: &str) -> String {
         if body["data"]["state"] == "succeeded" {
             return operation_id;
         }
-        assert_ne!(body["data"]["state"], "failed", "{body}");
+        // Every other terminal state fails fast instead of polling out.
+        assert!(
+            !matches!(
+                body["data"]["state"].as_str(),
+                Some("failed" | "cancelled" | "timed_out" | "blocked_manual_approval")
+            ),
+            "{body}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("the lifecycle operation did not finish");

@@ -182,7 +182,11 @@ pub struct ProxmoxPrivilegesDto {
     pub rules_major: Option<u8>,
     /// The four tiers: discover, operate, destructive, lab.
     pub tiers: Vec<ProxmoxTierPrivilegesDto>,
-    /// Why every tier is unknown, when the permissions read was refused.
+    /// Why every tier is unknown: the permissions read was refused (403),
+    /// or the PVE version is unsupported because it has no major number
+    /// to key the privilege table with. A major outside the table's range
+    /// is not unknown; it is evaluated with the nearest supported rules
+    /// and a warning.
     pub unknown_reason: Option<String>,
     /// The token's effective permissions as PVE reported them: ACL path →
     /// privilege → propagate flag.
@@ -213,8 +217,9 @@ impl From<PrivilegeReport> for ProxmoxPrivilegesDto {
 /// # Errors
 ///
 /// Returns the public error envelope on refusal, an unknown or unconfirmed
-/// account, or a source failure. A refused permissions read is not an
-/// error: every tier reports `unknown`.
+/// account, a missing token secret, an unwired Proxmox surface, or a source
+/// failure. A refused permissions read is not an error: every tier reports
+/// `unknown`.
 #[utoipa::path(
     get,
     path = "/proxmox/accounts/{accountId}/privileges",
@@ -245,12 +250,22 @@ impl From<PrivilegeReport> for ProxmoxPrivilegesDto {
         ),
         (
             status = 409,
-            description = "The account's trust is unconfirmed or its fingerprint was refused.",
+            description = "The account's trust is unconfirmed (`proxmox_unconfirmed`), its pinned fingerprint no longer matches (`proxmox_fingerprint_mismatch`), or its token secret is unavailable (`proxmox_no_secret`).",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 500,
+            description = "The controller's account storage or secret store failed.",
             body = crate::error::ApiError
         ),
         (
             status = 502,
             description = "The PVE API failed or refused the token.",
+            body = crate::error::ApiError
+        ),
+        (
+            status = 503,
+            description = "The Proxmox surface is not wired; the controller needs its database and secret store.",
             body = crate::error::ApiError
         ),
     )
