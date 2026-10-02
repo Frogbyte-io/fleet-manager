@@ -168,20 +168,16 @@ deploy/pve-test/pve-test status
 
 Create the roles, user, privilege-separated token, and ACLs with [steps 2–5 of the token guide](proxmox-token.md#2-roles). Follow the guide's per-major role definitions and clone-target/storage scopes for each acceptance target. The guide includes the 8.x agent-readiness role and leaves the role for cancelling other principals' tasks ungranted. Verify each token with [the verification section](proxmox-token.md#verify-with-fleetctl-proxmox-privileges), then use its ID and private secret file for `FLEET_PVE_TARGET_<NAME>_TOKEN_ID` and `…_TOKEN_SECRET_FILE` in step 7 below.
 
-Keep a separate read-only token for FM-611's privilege-failure scenario. With a user whose ACLs cover the fixture, create it on the node:
+Keep a separate read-only `PVEAuditor` token for FM-611's privilege-failure scenario. On the machine that runs the suite, use the existing helper to create it on each nested target and capture its secret locally:
 
 ```sh
-pveum user token add <test-user> ro --privsep 1 --output-format json | python3 -c '
-import json, os, sys
-with open(sys.argv[1], "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
-    output.write(json.load(sys.stdin)["value"])
-' '<private-secret-file>'
-pveum acl modify / --tokens '<test-user>!ro' --roles PVEAuditor
+deploy/pve-test/pve-test tokens pve8
+deploy/pve-test/pve-test tokens node-a    # cluster-wide; node-b shares it
 ```
 
-Capture the one-time secret directly into a mode 0600 file in a mode 0700 directory; do not print it. Set `FLEET_PVE_TARGET_<NAME>_RO_TOKEN_ID` and `…_RO_TOKEN_SECRET_FILE` to this token. Privilege separation intersects the token's ACLs with the user's, so `PVEAuditor` remains read-only even when the user has broader fixture permissions. Sources: [User Management](https://pve.proxmox.com/pve-docs/chapter-pveum.html) and the [8.x edition](https://pve.proxmox.com/pve-docs-8/chapter-pveum.html).
+The helper creates a fixture-only test user with `Administrator` on `/`, the user's ACLs, and two privilege-separated tokens: `ro` with `PVEAuditor` and `admin` with `Administrator`. It does not create the token guide's tier roles. Use the guide for the acceptance token; replace the admin token ID/secret-file values printed by `pve-test env` with your tier token's values. Privilege separation intersects the token's ACLs with the user's, so the `ro` token remains read-only. Sources: [User Management](https://pve.proxmox.com/pve-docs/chapter-pveum.html) and the [8.x edition](https://pve.proxmox.com/pve-docs-8/chapter-pveum.html).
 
-The existing `pve-test tokens` helper still creates a fixture-only admin token and a `PVEAuditor` token, with secrets written directly to private files. It does not create the guide's tier roles. Use the guide for the acceptance token; if you use the helper to obtain the read-only token, replace the admin token ID/secret-file values printed by `pve-test env` with your tier token's values.
+Secrets are written directly into `FLEET_PVE_TEST_SECRET_DIR/<role>-<ro|admin>.token` **on the machine running the helper**, never to the terminal (directory mode 0700, file mode 0600). Use the local `<role>-ro.token` path for `FLEET_PVE_TARGET_<NAME>_RO_TOKEN_SECRET_FILE`, and the helper's read-only token ID for `…_RO_TOKEN_ID`. Re-running with the token and file present reuses them. If the token exists but its local secret file is missing, the helper refuses: remove that stale token on the nested node with `pveum user token remove fleet-test@pve ro`, then re-run `tokens`. Remove a stale local file only after revoking its token. Never overwrite a secret file for a token that is still in use.
 
 ## Step 6: the test template for FM-611
 
