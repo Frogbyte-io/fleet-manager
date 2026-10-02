@@ -331,9 +331,9 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 - FM-609 [#210](https://github.com/Frogbyte-io/fleet-manager/issues/210) — [PR #230](https://github.com/Frogbyte-io/fleet-manager/pull/230), [PR #240](https://github.com/Frogbyte-io/fleet-manager/pull/240): task-history read API and CLI.
 - FM-610 [#213](https://github.com/Frogbyte-io/fleet-manager/issues/213) — [PR #232](https://github.com/Frogbyte-io/fleet-manager/pull/232): Proxmox privilege, compatibility and task console.
 - FM-611 [#214](https://github.com/Frogbyte-io/fleet-manager/issues/214) — [PR #231](https://github.com/Frogbyte-io/fleet-manager/pull/231), [PR #236](https://github.com/Frogbyte-io/fleet-manager/pull/236): repeatable acceptance suite and live-run fixes.
-- FM-612 [#211](https://github.com/Frogbyte-io/fleet-manager/issues/211) — [PR #218](https://github.com/Frogbyte-io/fleet-manager/pull/218), [PR #228](https://github.com/Frogbyte-io/fleet-manager/pull/228), [PR #245](https://github.com/Frogbyte-io/fleet-manager/pull/245): nested hosts/runbook, teardown/rebuild evidence and final token-guide links.
+- FM-612 [#211](https://github.com/Frogbyte-io/fleet-manager/issues/211) — [PR #218](https://github.com/Frogbyte-io/fleet-manager/pull/218), [PR #228](https://github.com/Frogbyte-io/fleet-manager/pull/228), [PR #245](https://github.com/Frogbyte-io/fleet-manager/pull/245), [PR #247](https://github.com/Frogbyte-io/fleet-manager/pull/247): nested hosts/runbook, teardown/rebuild evidence and final token-guide links.
 - FM-613 [#215](https://github.com/Frogbyte-io/fleet-manager/issues/215) — [PR #238](https://github.com/Frogbyte-io/fleet-manager/pull/238), [PR #245](https://github.com/Frogbyte-io/fleet-manager/pull/245): both-major and physical-host evidence; completed Live columns.
-- FM-614 [#216](https://github.com/Frogbyte-io/fleet-manager/issues/216): M6 documentation, epics and milestone close-out (this PR).
+- FM-614 [#216](https://github.com/Frogbyte-io/fleet-manager/issues/216) — [PR #246](https://github.com/Frogbyte-io/fleet-manager/pull/246): M6 documentation, epics and milestone close-out.
 
 
 ### FM-601 — Add Proxmox guest associations and guest-agent data
