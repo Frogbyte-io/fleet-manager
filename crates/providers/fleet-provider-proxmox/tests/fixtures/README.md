@@ -104,7 +104,7 @@ Shape drift between the majors:
   `localnetwork` zone as an `sdn` row instead. The provider skips `network` rows the same way it skips `sdn` and
   `pool` (this is an FM-607 fix).
 - **The agent privilege** named in the 403 is `VM.Monitor` on 8.x and
-  `VM.GuestAgent.Audit` on 9.x.
+  `VM.GuestAgent.Audit|VM.GuestAgent.Unrestricted` on 9.x (a `check_any`).
 - **QGA, OS, and kernel versions** follow each major's Debian base
   (bookworm and trixie).
 - **Error bodies** are modelled the same on both majors.

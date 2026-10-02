@@ -1871,7 +1871,13 @@ impl ProxmoxClient {
             Err(PveApiError::Http {
                 status: 400,
                 detail,
-            }) if detail.contains("no such task") => {
+            }) if serde_json::from_str::<serde_json::Value>(&detail)
+                .ok()
+                .as_ref()
+                .and_then(|body| body.pointer("/errors/upid"))
+                .and_then(serde_json::Value::as_str)
+                == Some("no such task") =>
+            {
                 return Ok(TaskStatus::Unknown);
             }
             Err(error) => return Err(error),

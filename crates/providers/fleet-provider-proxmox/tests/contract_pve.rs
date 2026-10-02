@@ -85,6 +85,9 @@ where
 /// lists them once and the major picks its column.
 macro_rules! fixtures {
     ($($name:literal),* $(,)?) => {
+        /// Every `contract-*` fixture name, for the hygiene scan.
+        const CONTRACT_FIXTURES: &[&str] = &[$($name),*];
+
         fn fixture(major: Major, name: &str) -> &'static str {
             match (major.dir, name) {
                 $(
@@ -113,7 +116,6 @@ fixtures!(
     "node-lxc.json",
     "qemu-config-101.json",
     "qemu-config-102.json",
-    "qemu-config-105.json",
     "qemu-config-106.json",
     "lxc-config-104.json",
     "forbidden-config.json",
@@ -1050,23 +1052,26 @@ async fn task_polling_reaches_honest_terminal_states() {
 }
 
 async fn task_status_other_400(major: Major) {
-    // Only "no such task" means unknown; another 400 stays an error.
+    // Only `errors.upid == "no such task"` means unknown; another 400, or
+    // the phrase anywhere else in the body, stays an error.
     let upid = upid_of(major, "status-start.json");
-    let transport = Scripted::new();
-    transport.get(
-        status_path(&upid),
-        400,
+    for body in [
         r#"{"data":null,"errors":{"upid":"unable to parse worker upid"}}"#,
-    );
-    let error = client(&transport)
-        .task_status(request(), &upid)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, PveApiError::Http { status: 400, .. }),
-        "{}: {error:?}",
-        major.dir
-    );
+        r#"{"data":null,"errors":{"node":"no such task"}}"#,
+        r#"{"data":null,"message":"no such task"}"#,
+    ] {
+        let transport = Scripted::new();
+        transport.get(status_path(&upid), 400, body);
+        let error = client(&transport)
+            .task_status(request(), &upid)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PveApiError::Http { status: 400, .. }),
+            "{}: {body}: {error:?}",
+            major.dir
+        );
+    }
 }
 
 #[tokio::test]
@@ -1216,23 +1221,25 @@ async fn snapshot_clone_and_template_round_trip() {
 // ---- fixture hygiene ----
 
 async fn fixtures_are_synthetic(major: Major) {
-    let names = [
-        "cluster-resources.json",
-        "cluster-status.json",
-        "nodes.json",
-        "agent-network.json",
-        "agent-network-loose.json",
-        "qemu-config-101.json",
-        "lxc-config-104.json",
-        "task-ok.json",
-    ];
-    for name in names {
+    for &name in CONTRACT_FIXTURES {
         let value = json(major, name);
         let text = value.to_string();
         // No credentials of any shape.
         for needle in ["PVEAPIToken", "password", "ticket", "CSRF", TOKEN_SECRET] {
             assert!(!text.contains(needle), "{}/{name}: {needle}", major.dir);
         }
+        // Only made-up MACs on the Proxmox prefix (or the loopback zeros).
+        walk(&value, &mut |text| {
+            for part in text.split(',') {
+                if let Some(mac) = fleet_provider_proxmox::normalize_mac(part) {
+                    assert!(
+                        mac.starts_with("bc:24:11:") || mac == "00:00:00:00:00:00",
+                        "{}/{name}: {mac}",
+                        major.dir
+                    );
+                }
+            }
+        });
         // Only documentation, loopback, and link-local addresses.
         walk(&value, &mut |text| {
             if let Ok(ip) = text.parse::<std::net::IpAddr>() {
