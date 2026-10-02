@@ -34,7 +34,7 @@ Setup (run in this order; each is safe to re-run):
   cluster-create             create the cluster on node-a
   cluster-join [--ssh]       join node-b to node-a's cluster (prompts for node-a's root password,
                              or with --ssh joins over root SSH keys without a prompt)
-  tokens <role>              create fixture-only read-only + admin tokens; tier setup: docs/operations/proxmox-token.md
+  tokens <role>              create fixture-only admin user, ACLs, and read-only + admin tokens (no tier roles)
 
 Failure simulation (FM-611 partial-node scenario; node-a or node-b only):
   node-down <role> [--mode stop|partition] [--keep-quorum]
