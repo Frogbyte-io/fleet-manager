@@ -170,7 +170,13 @@ async fn the_template_artifact_is_the_latest_successful_builds_vmid() {
     let artifacts = RecipeRepository::new(store.pool().clone());
 
     assert_eq!(artifacts.template_vmid("rcp-1@a").await.unwrap(), None);
-    assert!(artifacts.image_template_vmids().await.unwrap().is_empty());
+    assert!(
+        artifacts
+            .promoted_template_vmids()
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     build(
         &operations,
@@ -192,10 +198,16 @@ async fn the_template_artifact_is_the_latest_successful_builds_vmid() {
     assert_eq!(artifacts.template_vmid("rcp-1@a").await.unwrap(), Some(120));
     assert_eq!(artifacts.template_vmid("rcp-2@b").await.unwrap(), Some(130));
     assert_eq!(artifacts.template_vmid("rcp-3@c").await.unwrap(), None);
-    assert_eq!(
-        artifacts.image_template_vmids().await.unwrap(),
-        vec![120, 130]
-    );
+
+    // The `<node>:<vmid>` shape the Packer stream also carries.
+    build(
+        &operations,
+        "rcp-3@c",
+        "succeeded",
+        Some(serde_json::json!({ "artifactId": "pve:102" })),
+    )
+    .await;
+    assert_eq!(artifacts.template_vmid("rcp-3@c").await.unwrap(), Some(102));
 
     // An artifact that is not a VMID is an honest error, not a guess.
     build(
@@ -207,8 +219,77 @@ async fn the_template_artifact_is_the_latest_successful_builds_vmid() {
     .await;
     let error = artifacts.template_vmid("rcp-4@d").await.unwrap_err();
     assert!(error.contains("not a Proxmox template VMID"), "{error}");
+
+    // The latest successful build counts alone: when it recorded no
+    // artifact, an older build's VMID is not a fallback.
+    build(
+        &operations,
+        "rcp-1@a",
+        "succeeded",
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(artifacts.template_vmid("rcp-1@a").await.unwrap(), None);
+}
+
+async fn promote(store: &Store, version_id: &str, recipe_id: &str) {
+    sqlx::query(
+        "INSERT INTO image_recipe_versions (id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by) \
+         VALUES (?1, ?2, ?2, '', ?1, '{}', 'iso', 'pve', 'local-lvm', ?3, ?3, 'operator')",
+    )
+    .bind(version_id)
+    .bind(recipe_id)
+    .bind(NOW)
+    .execute(store.pool())
+    .await
+    .expect("the promoted version must insert");
+}
+
+#[tokio::test]
+async fn the_protected_artifacts_are_the_promoted_versions_templates() {
+    let (_dir, store) = setup().await;
+    let operations = OperationRepository::new(store.pool().clone());
+    let artifacts = RecipeRepository::new(store.pool().clone());
+    build(
+        &operations,
+        "rcp-1@a",
+        "succeeded",
+        Some(serde_json::json!({ "artifactId": "120" })),
+    )
+    .await;
+    build(
+        &operations,
+        "rcp-1@a",
+        "succeeded",
+        Some(serde_json::json!({ "artifactId": "pve:121" })),
+    )
+    .await;
+    build(
+        &operations,
+        "rcp-2@b",
+        "succeeded",
+        Some(serde_json::json!({ "artifactId": "130" })),
+    )
+    .await;
+    assert!(
+        artifacts
+            .promoted_template_vmids()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    promote(&store, "rcp-1@a", "rcp-1").await;
+    // Every successful build of a promoted version is protected; an
+    // unpromoted version's template is protected by the live template
+    // check instead.
     assert_eq!(
-        artifacts.image_template_vmids().await.unwrap(),
-        vec![120, 130]
+        artifacts.promoted_template_vmids().await.unwrap(),
+        vec![120, 121]
+    );
+    promote(&store, "rcp-2@b", "rcp-2").await;
+    assert_eq!(
+        artifacts.promoted_template_vmids().await.unwrap(),
+        vec![120, 121, 130]
     );
 }

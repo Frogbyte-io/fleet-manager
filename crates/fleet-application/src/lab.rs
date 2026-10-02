@@ -260,30 +260,39 @@ pub enum CloneTargetReservation {
 
 /// The recorded image build artifacts: the Proxmox template VMIDs that
 /// `image.build` operations produced. The executor clones from these and
-/// the cleanup guard refuses to destroy them.
+/// the cleanup guard refuses to destroy the promoted ones.
+///
+/// A build is not tied to a Fleet Proxmox account (Packer uses its own
+/// credentials), so artifacts are keyed by image version only. The
+/// executor therefore requires the artifact VMID to be a live template in
+/// the cluster it clones in.
 #[async_trait]
 pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
     /// The template VMID recorded by the image version's latest successful
-    /// build, when one exists.
+    /// build. `None` when the version has no successful build, or when
+    /// that latest build recorded no artifact: an older build is never a
+    /// fallback.
     ///
     /// # Errors
     ///
     /// Fails when the store cannot be read or the recorded artifact is not
     /// a VMID.
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String>;
-    /// Every VMID recorded as a successful image build's artifact: a
-    /// superset of the promoted image versions' templates.
+    /// The template VMIDs recorded by the successful builds of every
+    /// currently promoted image version.
     ///
     /// # Errors
     ///
     /// Fails when the store cannot be read.
-    async fn image_template_vmids(&self) -> Result<Vec<u32>, String>;
+    async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String>;
 }
 
 /// The Lab cleanup guard (issue #220): a VMID that is a template, or that
-/// matches a recorded image build artifact, is never destroyed by Lab
-/// cleanup, whatever a provision record claims. Every destroy path calls
-/// this with the cluster's live truth before it deletes anything.
+/// matches a promoted image version's recorded build artifact, is never
+/// destroyed by Lab cleanup, whatever a provision record claims. Fleet has
+/// no Lab destroy path yet; the cleanup that FM-711 adds must call this
+/// with the cluster's live truth before it deletes anything. The
+/// provision executor already applies it before it resumes a record.
 ///
 /// # Errors
 ///
@@ -291,16 +300,16 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
 pub fn guard_destroy_target(
     vmid: u32,
     is_template: bool,
-    image_template_vmids: &[u32],
+    promoted_template_vmids: &[u32],
 ) -> Result<(), String> {
     if is_template {
         return Err(format!(
             "VMID {vmid} is a template; Lab cleanup never destroys a template"
         ));
     }
-    if image_template_vmids.contains(&vmid) {
+    if promoted_template_vmids.contains(&vmid) {
         return Err(format!(
-            "VMID {vmid} is a recorded image build artifact; Lab cleanup never destroys an image template"
+            "VMID {vmid} is a promoted image's recorded build artifact; Lab cleanup never destroys an image template"
         ));
     }
     Ok(())
@@ -1534,7 +1543,7 @@ mod tests {
         assert!(
             guard_destroy_target(9000, false, &[120, 9000])
                 .unwrap_err()
-                .contains("image build artifact")
+                .contains("build artifact")
         );
         assert!(guard_destroy_target(9001, false, &[120, 9000]).is_ok());
     }

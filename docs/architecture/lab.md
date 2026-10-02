@@ -95,9 +95,9 @@ The current clone step works as follows:
 
 - **Source.** The clone source is the template VMID recorded by the pinned image version's latest successful build. If no artifact is recorded, the provision fails; there is no default source. The clone runs on the node that `/cluster/resources` reports for that template. The Proxmox account's host is only the API endpoint.
 - **Target VMID.** The executor takes the next free VMID from `GET /cluster/nextid`. The operator limits it to the VMIDs granted to Fleet with the PVE `datacenter.cfg` `next-id` range (see the [token guide](../operations/proxmox-token.md#why-clone-and-lab-need-more-than-the-pool)). Before the clone request, the executor records the VMID and the node on the provision record in one transaction. That transaction refuses a VMID that another in-flight record already holds.
-- **Re-runs.** A re-run reuses the recorded VMID. If a guest already exists at that VMID, the executor adopts it only when it carries the record's Fleet name (`fm-lab-<record>`). Any other guest there is a conflict.
+- **Re-runs.** A re-run reuses the recorded VMID. Before the clone, if a guest already exists at that VMID, the executor adopts it only when it carries the record's Fleet name (`fm-lab-<record>`); any other guest there is a conflict. After the clone, a resumed record's guest must still exist with that name before it is started; otherwise the provision fails without starting anything.
 - **Task check.** The recorded VMID is always the reserved target. PVE starts a `qmclone` task under the *source* VMID, so the executor checks the returned task against the source and node it requested, and fails on a mismatch.
-- **Cleanup guard.** Cleanup refuses to destroy a VMID that the cluster reports as a template, or that matches a recorded image build artifact. The executor also refuses to resume a provision record that names such a VMID.
+- **Cleanup guard.** Cleanup refuses to destroy a VMID that the cluster reports as a template, or that matches the recorded build artifact of a promoted image version. The executor also refuses to resume a provision record that names such a VMID, and it never reserves a promoted artifact's VMID as a clone target, even after that template is gone.
 
 ## Execution and artifacts
 

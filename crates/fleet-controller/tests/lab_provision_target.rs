@@ -34,6 +34,8 @@ const TEMPLATE_NODE: &str = "pve-b";
 const TEMPLATE_VMID: u32 = 120;
 /// Another recorded image artifact that is no longer a template.
 const OTHER_ARTIFACT_VMID: u32 = 130;
+/// A promoted image's recorded template that no longer exists.
+const GONE_ARTIFACT_VMID: u32 = 140;
 /// What `/cluster/nextid` answers.
 const NEXT_VMID: u32 = 9000;
 /// The UPID PVE answers for the clone: `qmclone` carries the *source*.
@@ -54,6 +56,8 @@ struct Pve {
     /// Extra guests in `/cluster/resources`, beside the node and template.
     guests: Vec<serde_json::Value>,
     clone_upid: String,
+    /// What `/cluster/nextid` answers.
+    next_vmid: u32,
     seen: Mutex<Vec<Seen>>,
     /// The repository and record whose target the clone request observes.
     observe: Mutex<Option<(Arc<LabRepository>, String)>>,
@@ -61,18 +65,18 @@ struct Pve {
 
 impl Pve {
     fn new(guests: Vec<serde_json::Value>) -> Arc<Self> {
-        Arc::new(Self {
-            guests,
-            clone_upid: CLONE_UPID.to_owned(),
-            seen: Mutex::new(Vec::new()),
-            observe: Mutex::new(None),
-        })
+        Self::scripted(guests, CLONE_UPID, NEXT_VMID)
     }
 
     fn with_clone_upid(guests: Vec<serde_json::Value>, upid: &str) -> Arc<Self> {
+        Self::scripted(guests, upid, NEXT_VMID)
+    }
+
+    fn scripted(guests: Vec<serde_json::Value>, upid: &str, next_vmid: u32) -> Arc<Self> {
         Arc::new(Self {
             guests,
             clone_upid: upid.to_owned(),
+            next_vmid,
             seen: Mutex::new(Vec::new()),
             observe: Mutex::new(None),
         })
@@ -161,7 +165,7 @@ impl Transport {
             self.0.resources()
         } else if path == "/api2/json/cluster/nextid" {
             // PVE's JSON formatter answers the integer as a string.
-            format!(r#"{{"data":"{NEXT_VMID}"}}"#)
+            format!(r#"{{"data":"{}"}}"#, self.0.next_vmid)
         } else if path.ends_with("/clone") {
             format!(r#"{{"data":"{}"}}"#, self.0.clone_upid)
         } else if path.ends_with("/status/start") {
@@ -208,8 +212,8 @@ impl ImageArtifactPort for Artifacts {
         assert_eq!(image_version_id, "image-version-1");
         Ok(self.pinned)
     }
-    async fn image_template_vmids(&self) -> Result<Vec<u32>, String> {
-        Ok(vec![TEMPLATE_VMID, OTHER_ARTIFACT_VMID])
+    async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
+        Ok(vec![TEMPLATE_VMID, OTHER_ARTIFACT_VMID, GONE_ARTIFACT_VMID])
     }
 }
 
@@ -418,7 +422,14 @@ impl Harness {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         let _ = stop.send(());
-        let _ = running.await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), running)
+            .await
+            .expect("the worker stops within its bound")
+            .expect("the worker task does not panic");
+        assert!(
+            matches!(state.as_str(), "succeeded" | "failed" | "cancelled"),
+            "the operation never reached a terminal state: {state}"
+        );
         let finished = self
             .operations
             .get(&AllowAll, "tester", &operation.id)
@@ -553,7 +564,7 @@ async fn a_rerun_after_the_clone_started_does_not_clone_again() {
     ProvisionPort::update(harness.labs.as_ref(), &resumable)
         .await
         .unwrap();
-    let second = Pve::new(Vec::new());
+    let second = Pve::new(vec![guest(NEXT_VMID, &format!("fm-lab-{}", record.id))]);
 
     let (_, _, stored) = harness
         .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
@@ -714,6 +725,83 @@ async fn a_clone_task_that_does_not_match_the_request_is_an_error() {
     assert_eq!(stored.clone_upid, None);
 }
 
+/// A record whose clone was recorded, ready to be resumed.
+async fn cloned_record(harness: &Harness) -> (String, ProvisionRecord) {
+    let (lease_id, record) = harness.record().await;
+    let mut cloned = record.clone();
+    cloned.node = Some(TEMPLATE_NODE.to_owned());
+    cloned.vmid = Some(NEXT_VMID);
+    cloned.clone_upid = Some(CLONE_UPID.to_owned());
+    ProvisionPort::update(harness.labs.as_ref(), &cloned)
+        .await
+        .unwrap();
+    (lease_id, cloned)
+}
+
+#[tokio::test]
+async fn a_resumed_guest_is_revalidated_before_it_is_started() {
+    let harness = Harness::new().await;
+    let starts = |pve: &Pve| {
+        pve.paths()
+            .iter()
+            .filter(|path| path.ends_with("/status/start"))
+            .count()
+    };
+
+    // The recorded guest is gone.
+    let (lease_id, record) = cloned_record(&harness).await;
+    let pve = Pve::new(Vec::new());
+    let (state, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "target_missing");
+    assert_eq!(starts(&pve), 0);
+
+    // The VMID was reused by someone else's guest.
+    let (lease_id, record) = cloned_record(&harness).await;
+    let pve = Pve::new(vec![guest(NEXT_VMID, "someone-elses-vm")]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "conflict");
+    assert!(detail.contains("someone-elses-vm"), "{detail}");
+    assert_eq!(starts(&pve), 0);
+
+    // PVE names a clone only when it finishes: unverifiable, not started.
+    let (lease_id, record) = cloned_record(&harness).await;
+    let pve = Pve::new(vec![serde_json::json!({
+        "id": format!("qemu/{NEXT_VMID}"), "type": "qemu", "node": TEMPLATE_NODE,
+        "vmid": NEXT_VMID, "template": 0
+    })]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "target_unverified");
+    assert_eq!(starts(&pve), 0);
+}
+
+#[tokio::test]
+async fn a_promoted_artifact_vmid_is_never_reserved() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // A promoted artifact is gone from the cluster, so nextid hands its
+    // VMID out again.
+    let pve = Pve::scripted(Vec::new(), CLONE_UPID, GONE_ARTIFACT_VMID);
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "conflict");
+    assert!(detail.contains(&GONE_ARTIFACT_VMID.to_string()), "{detail}");
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+}
+
 #[tokio::test]
 async fn a_record_that_names_the_template_is_never_started() {
     let harness = Harness::new().await;
@@ -758,7 +846,7 @@ async fn the_cleanup_guard_refuses_templates_and_image_artifacts() {
         .guard_destroy_target(&harness.account_id, OTHER_ARTIFACT_VMID)
         .await
         .unwrap_err();
-    assert!(refusal.contains("image build artifact"), "{refusal}");
+    assert!(refusal.contains("build artifact"), "{refusal}");
     executor
         .guard_destroy_target(&harness.account_id, NEXT_VMID)
         .await

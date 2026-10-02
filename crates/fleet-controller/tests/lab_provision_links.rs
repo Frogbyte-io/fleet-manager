@@ -98,7 +98,7 @@ impl ImageArtifactPort for Artifacts {
     async fn template_vmid(&self, _image_version_id: &str) -> Result<Option<u32>, String> {
         Ok(Some(103))
     }
-    async fn image_template_vmids(&self) -> Result<Vec<u32>, String> {
+    async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
         Ok(vec![103])
     }
 }
@@ -243,7 +243,7 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
         Arc::new(OneSecret),
         labs.clone(),
         leases,
-        labs,
+        labs.clone(),
         Arc::new(Artifacts),
         ProxmoxClient::new(Arc::new(Transport::default())),
     )
@@ -270,6 +270,12 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
     }
     // never_ready is a recorded failure; the links exist regardless.
     assert_eq!(state, "failed");
+    // The record holds the reserved target (104 from nextid) on the
+    // template's node, never the template's VMID from the clone UPID.
+    let stored = ProvisionPort::get(labs.as_ref(), &record.id).await.unwrap();
+    assert_eq!(stored.node.as_deref(), Some("pve"));
+    assert_eq!(stored.vmid, Some(104));
+    assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
 
     let found = links
         .operations_for(&account.id, &[CLONE_UPID.to_owned(), START_UPID.to_owned()])

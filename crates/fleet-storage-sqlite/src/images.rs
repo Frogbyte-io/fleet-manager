@@ -296,44 +296,83 @@ impl RecipeRepository {
     }
 }
 
-/// The `artifactId` an image build recorded (the Packer Proxmox builder's
-/// artifact id is the template VMID in decimal), when the result carries
-/// one.
+/// The image version a build payload names.
+fn built_version(payload_json: Option<&str>) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json?).ok()?;
+    payload["versionId"].as_str().map(str::to_owned)
+}
+
+/// The `artifactId` an image build recorded, when the result carries one.
 fn recorded_artifact(result_json: Option<&str>) -> Option<String> {
     let result: serde_json::Value = serde_json::from_str(result_json?).ok()?;
     result["artifactId"].as_str().map(str::to_owned)
 }
 
+/// The template VMID in a Packer Proxmox artifact id. The builder's
+/// `Artifact.Id()` is the VMID in decimal; the machine-readable stream
+/// Fleet has recorded also carries a `<node>:<vmid>` shape (`pve:102`).
+/// The node part is ignored: the executor reads the template's node from
+/// the cluster.
+fn artifact_vmid(artifact: &str) -> Option<u32> {
+    let vmid = match artifact.rsplit_once(':') {
+        Some((node, vmid))
+            if !node.is_empty()
+                && node
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') =>
+        {
+            vmid
+        }
+        Some(_) => return None,
+        None => artifact,
+    };
+    if vmid.is_empty() || !vmid.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    vmid.parse::<u32>().ok().filter(|vmid| *vmid >= 100)
+}
+
 #[async_trait]
 impl ImageArtifactPort for RecipeRepository {
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String> {
-        for (payload, result) in self.successful_builds().await? {
-            let built_version = payload
-                .as_deref()
-                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                .and_then(|payload| payload["versionId"].as_str().map(str::to_owned));
-            if built_version.as_deref() != Some(image_version_id) {
-                continue;
-            }
-            let Some(artifact) = recorded_artifact(result.as_deref()) else {
-                continue;
-            };
-            return artifact.parse::<u32>().map(Some).map_err(|_| {
-                format!(
-                    "the image version's build artifact {artifact:?} is not a Proxmox template VMID"
-                )
-            });
-        }
-        Ok(None)
+        // Only the version's latest successful build counts: an older
+        // build's artifact is never a fallback.
+        let Some((_, result)) = self
+            .successful_builds()
+            .await?
+            .into_iter()
+            .find(|(payload, _)| {
+                built_version(payload.as_deref()).as_deref() == Some(image_version_id)
+            })
+        else {
+            return Ok(None);
+        };
+        let Some(artifact) = recorded_artifact(result.as_deref()) else {
+            return Ok(None);
+        };
+        artifact_vmid(&artifact).map(Some).ok_or_else(|| {
+            format!(
+                "the image version's build artifact {artifact:?} is not a Proxmox template VMID"
+            )
+        })
     }
 
-    async fn image_template_vmids(&self) -> Result<Vec<u32>, String> {
+    async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
+        let promoted: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM image_recipe_versions WHERE promoted_at IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("promoted image versions failed: {error}"))?;
         let mut vmids: Vec<u32> = self
             .successful_builds()
             .await?
             .iter()
+            .filter(|(payload, _)| {
+                built_version(payload.as_deref()).is_some_and(|version| promoted.contains(&version))
+            })
             .filter_map(|(_, result)| recorded_artifact(result.as_deref()))
-            .filter_map(|artifact| artifact.parse::<u32>().ok())
+            .filter_map(|artifact| artifact_vmid(&artifact))
             .collect();
         vmids.sort_unstable();
         vmids.dedup();
@@ -348,4 +387,28 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
             .map(sqlx::error::DatabaseError::kind),
         Some(sqlx::error::ErrorKind::UniqueViolation)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::artifact_vmid;
+
+    #[test]
+    fn artifact_ids_parse_in_both_recorded_shapes() {
+        assert_eq!(artifact_vmid("120"), Some(120));
+        assert_eq!(artifact_vmid("pve:102"), Some(102));
+        assert_eq!(artifact_vmid("pve-b.lan:9000"), Some(9000));
+        for invalid in [
+            "",
+            "99",
+            "pve:",
+            ":120",
+            "local:vztmpl/base.tar",
+            "a:b:120",
+            "+120",
+            "4294967296",
+        ] {
+            assert_eq!(artifact_vmid(invalid), None, "{invalid}");
+        }
+    }
 }
