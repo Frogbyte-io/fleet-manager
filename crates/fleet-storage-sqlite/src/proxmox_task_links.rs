@@ -33,8 +33,8 @@ impl ProxmoxTaskLinkRepository {
 
     /// Deletes at most `limit` links recorded before `cutoff` (epoch
     /// millis), oldest first, and returns how many were deleted. `record`
-    /// calls this with the retention window on every write; it is public
-    /// so a sweeper or a test can drive it directly.
+    /// calls this with the retention window after every committed write;
+    /// it is public so a sweeper or a test can drive it directly.
     ///
     /// # Errors
     ///
@@ -99,16 +99,22 @@ impl ProxmoxTaskLinkPort for ProxmoxTaskLinkRepository {
         .execute(&mut *transaction)
         .await
         .map_err(backend)?;
+        transaction.commit().await.map_err(backend)?;
         // Retention rides on the only write path: links only accumulate
         // here, so a bounded batch per record keeps the table bounded
-        // without a separate sweeper.
-        prune(
-            &mut transaction,
-            now.saturating_sub(TASK_LINK_RETENTION_MILLIS),
-            TASK_LINK_PRUNE_BATCH,
-        )
-        .await?;
-        transaction.commit().await.map_err(backend)?;
+        // without a separate sweeper. It runs after the commit and is
+        // best-effort: callers never retry `record`, and the insert is
+        // first-wins, so a cleanup failure must not cost the fresh link.
+        // The next record retries the cleanup.
+        if let Err(error) = self
+            .prune_recorded_before(
+                now.saturating_sub(TASK_LINK_RETENTION_MILLIS),
+                TASK_LINK_PRUNE_BATCH,
+            )
+            .await
+        {
+            eprintln!("proxmox: the task link retention cleanup failed: {error}");
+        }
         Ok(())
     }
 

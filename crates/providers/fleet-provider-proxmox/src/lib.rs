@@ -693,19 +693,50 @@ impl LifecycleAction {
     }
 }
 
-/// The task types PVE starts without a target id (`fork_worker` with an
-/// undefined or empty id in `pve-manager`): node-wide package, service,
-/// shell, bulk-guest, backup-of-several-guests, cluster, and certificate
-/// work. Only these may carry an empty UPID `id` field. A type missing
-/// here with an empty id is refused by [`Upid::parse`], which the task
-/// history reports as a per-task warning instead of a silent row.
+/// The task types PVE starts without a target id. Only these may carry an
+/// empty UPID `id` field. A type missing here with an empty id is refused
+/// by [`Upid::parse`], which the task history reports as a per-task
+/// warning instead of a silent row.
+///
+/// The list is every `$rpcenv->fork_worker(<type>, undef | '' | "", ...)`
+/// call in the PVE sources, checked against the `master` branches of
+/// `pve-manager`, `qemu-server`, `pve-container`, `pve-storage`,
+/// `pve-cluster`, and `pve-network` (October 2026). To re-check it, grep
+/// those repositories for `fork_worker` and look for an undefined or
+/// empty second argument:
+///
+/// - `pve-manager`: `aptupdate`, `startall`/`stopall`/`suspendall`/
+///   `migrateall`, the PVE 9 cluster `bulk-*` actions, `vzdump` (its id is
+///   the VMID only for a single-guest backup), `vncshell` (also what the
+///   node `termproxy` endpoint starts), `spiceshell`, `cephsetflags`, and
+///   the ACME account (`acme{register,update,refresh,deactivate}`) and
+///   certificate (`acme{newcert,renew,revoke}`) tasks.
+/// - `pve-storage`: `imgcopy`, `imgdel`, `pbs-download`.
+/// - `pve-cluster`: `clusterjoin`.
+/// - `pve-network`: `reloadnetworkall`.
+///
+/// The `srv*` service tasks pass the service name today, but they are
+/// node-scoped and never name a guest, so an empty id on one is not a
+/// guest task missing its VMID; they stay accepted.
 pub const NODE_LEVEL_TASK_TYPES: &[&str] = &[
+    "acmedeactivate",
     "acmenewcert",
+    "acmerefresh",
+    "acmeregister",
     "acmerenew",
     "acmerevoke",
+    "acmeupdate",
     "aptupdate",
+    "bulk-migrate",
+    "bulk-shutdown",
+    "bulk-start",
+    "bulk-suspend",
+    "cephsetflags",
     "clusterjoin",
+    "imgcopy",
+    "imgdel",
     "migrateall",
+    "pbs-download",
     "reloadnetworkall",
     "spiceshell",
     "srvreload",
@@ -715,7 +746,6 @@ pub const NODE_LEVEL_TASK_TYPES: &[&str] = &[
     "startall",
     "stopall",
     "suspendall",
-    "termproxy",
     "vncshell",
     "vzdump",
 ];
@@ -2249,10 +2279,18 @@ mod tests {
             Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:aptupdate::root@pam:").unwrap();
         assert_eq!(node_task.target, "");
         assert_eq!(node_task.task_type, "aptupdate");
-        for task_type in ["vzdump", "srvreload", "startall", "vncshell"] {
+        for task_type in NODE_LEVEL_TASK_TYPES {
             let raw = format!("UPID:pve:0015523F:0C6DF532:6AAFE1EC:{task_type}::root@pam:");
             assert_eq!(Upid::parse(&raw).unwrap().target, "", "{task_type}");
         }
+        // The list stays sorted and free of duplicates, so a re-check
+        // against the PVE sources is a plain diff.
+        assert!(
+            NODE_LEVEL_TASK_TYPES
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "{NODE_LEVEL_TASK_TYPES:?}"
+        );
         // A guest task type with an empty id is not a node-level task.
         for task_type in ["qmstart", "qmreboot", "qmclone", "vzstart", "unknowntype"] {
             let raw = format!("UPID:pve:0015523F:0C6DF532:6AAFE1EC:{task_type}::root@pam:");
