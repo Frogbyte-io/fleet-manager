@@ -1862,7 +1862,26 @@ impl ProxmoxClient {
             ),
             ..request.clone()
         };
-        let data = self.call(status_request).await?;
+        let data = match self.call(status_request).await {
+            Ok(data) => data,
+            // A task the node no longer knows (rotated out of its task
+            // index) is a 400 parameter error whose `errors.upid` reads
+            // "no such task" on 8.x and 9.x (`read_task_status` in
+            // pve-manager's `PVE/API2/Tasks.pm`): honest uncertainty.
+            Err(PveApiError::Http {
+                status: 400,
+                detail,
+            }) if serde_json::from_str::<serde_json::Value>(&detail)
+                .ok()
+                .as_ref()
+                .and_then(|body| body.pointer("/errors/upid"))
+                .and_then(serde_json::Value::as_str)
+                == Some("no such task") =>
+            {
+                return Ok(TaskStatus::Unknown);
+            }
+            Err(error) => return Err(error),
+        };
         // The task-status payload: `status: running|stopped`,
         // `exitstatus: OK|ERROR ...`. `data: null` means the task entry is
         // unknown to the node — honest uncertainty.
@@ -1914,6 +1933,15 @@ fn normalize_interface(interface: &serde_json::Value) -> Result<Option<PveGuestI
                 .get("ip-address")
                 .and_then(serde_json::Value::as_str)
             {
+                // Every guest has `127.0.0.1`/`::1`; as address evidence a
+                // loopback address would match any machine registered at
+                // loopback.
+                if text
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+                {
+                    continue;
+                }
                 let bounded = text.chars().take(64).collect::<String>();
                 if !bounded.is_empty() {
                     addresses.push(bounded);
@@ -1999,7 +2027,10 @@ fn normalize_resource(entry: &serde_json::Value) -> Result<Option<PveResource>, 
         ("qemu", true) => "qemu-template",
         ("lxc", _) => "lxc",
         ("storage", _) => "storage",
-        ("sdn" | "pool", _) => return Ok(None),
+        // PVE 9.x lists each node's SDN zones and fabrics as `network` rows
+        // (at least the default `localnetwork` zone per node); like `sdn`
+        // and `pool`, they are not resources Fleet manages.
+        ("sdn" | "pool" | "network", _) => return Ok(None),
         (other, _) => {
             return Err(format!(
                 "entry {id} has an unrecognized type {other:?} (reported honestly, not coerced)"
@@ -2275,9 +2306,9 @@ mod tests {
                 {"ip-address": "127.0.0.1", "ip-address-type": "ipv4", "prefix": 8}
             ]
         });
-        // Loopback carries a MAC (all zeros) and an address: it lands, and
-        // the application layer decides its evidence weight.
-        assert!(normalize_interface(&loopback).unwrap().is_some());
+        // Loopback carries only the all-zero MAC and loopback addresses:
+        // neither is association evidence, so the interface is skipped.
+        assert!(normalize_interface(&loopback).unwrap().is_none());
 
         let nameless = serde_json::json!({"hardware-address": "BC:24:11:97:DB:A8"});
         assert!(normalize_interface(&nameless).is_err());
