@@ -1,0 +1,16 @@
+{
+ "data": {
+  "result": {
+   "id": "mswindows",
+   "name": "Microsoft Windows",
+   "pretty-name": "Windows Server 2022 Standard",
+   "version": "Microsoft Windows Server 2022",
+   "version-id": "2022",
+   "variant": "server",
+   "variant-id": "server",
+   "kernel-release": "20348",
+   "kernel-version": "10.0",
+   "machine": "x86_64"
+  }
+ }
+}

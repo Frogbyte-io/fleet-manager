@@ -45,6 +45,19 @@ struct Major {
     qga_version: &'static str,
     os_name: &'static str,
     kernel: &'static str,
+    /// What the Windows guest 201's fixtures encode (FM-608).
+    win: WindowsOs,
+}
+
+/// The QGA version and `get-osinfo` members of a major's Windows guest.
+#[derive(Clone, Copy, Debug)]
+struct WindowsOs {
+    qga_version: &'static str,
+    pretty_name: &'static str,
+    version: &'static str,
+    version_id: &'static str,
+    variant_id: &'static str,
+    build: &'static str,
 }
 
 const PVE8: Major = Major {
@@ -56,6 +69,14 @@ const PVE8: Major = Major {
     qga_version: "7.2.0",
     os_name: "Debian GNU/Linux 12 (bookworm)",
     kernel: "6.1.0-25-amd64",
+    win: WindowsOs {
+        qga_version: "8.1.2",
+        pretty_name: "Windows Server 2022 Standard",
+        version: "Microsoft Windows Server 2022",
+        version_id: "2022",
+        variant_id: "server",
+        build: "20348",
+    },
 };
 
 const PVE9: Major = Major {
@@ -67,6 +88,17 @@ const PVE9: Major = Major {
     qga_version: "9.2.0",
     os_name: "Debian GNU/Linux 13 (trixie)",
     kernel: "6.12.48+deb13-amd64",
+    // Windows 11 keeps "Windows 10" in the registry `ProductName` that
+    // qemu-ga reports as `pretty-name`; `version` and `version-id` come
+    // from qemu-ga's build-number table and say 11.
+    win: WindowsOs {
+        qga_version: "9.2.0",
+        pretty_name: "Windows 10 Pro",
+        version: "Microsoft Windows 11",
+        version_id: "11",
+        variant_id: "client",
+        build: "26100",
+    },
 };
 
 /// Runs one scenario once per supported major.
@@ -143,6 +175,16 @@ fixtures!(
     "snapshot-delete.json",
     "clone.json",
     "template.json",
+    "windows-cluster-resources.json",
+    "windows-config-201.json",
+    "windows-config-202.json",
+    "windows-config-203.json",
+    "windows-config-204.json",
+    "windows-agent-info.json",
+    "windows-agent-network.json",
+    "windows-agent-osinfo.json",
+    "windows-agent-not-configured.json",
+    "windows-guest-not-running.json",
 );
 
 fn json(major: Major, name: &str) -> serde_json::Value {
@@ -890,6 +932,208 @@ async fn association_evidence_is_decoded_per_tier() {
     for_each_major(association_evidence).await;
 }
 
+// ---- Windows guests (FM-608) ----
+
+/// A Windows-only cluster on the healthy node: 201's agent answers in
+/// full, 202's agent is configured but not running, 203 has no agent in
+/// its config, and 204 is stopped. Each 500 is the `qemu-server`
+/// `assert_agent_available` message for that state.
+fn script_windows(transport: &Scripted, major: Major) {
+    let n1 = major.n1;
+    let qemu = |vmid: u32, tail: &str| format!("/api2/json/nodes/{n1}/qemu/{vmid}/{tail}");
+    transport
+        .get("/api2/json/version", 200, fixture(major, "version.json"))
+        .get(
+            "/api2/json/cluster/resources",
+            200,
+            fixture(major, "windows-cluster-resources.json"),
+        );
+    for vmid in [201, 202, 203, 204] {
+        transport.get(
+            qemu(vmid, "config"),
+            200,
+            fixture(major, &format!("windows-config-{vmid}.json")),
+        );
+    }
+    transport
+        .get(
+            qemu(201, "agent/info"),
+            200,
+            fixture(major, "windows-agent-info.json"),
+        )
+        .get(
+            qemu(201, "agent/network-get-interfaces"),
+            200,
+            fixture(major, "windows-agent-network.json"),
+        )
+        .get(
+            qemu(201, "agent/get-osinfo"),
+            200,
+            fixture(major, "windows-agent-osinfo.json"),
+        )
+        .get(
+            qemu(202, "agent/info"),
+            500,
+            fixture(major, "agent-not-running.json"),
+        )
+        .get(
+            qemu(203, "agent/info"),
+            500,
+            fixture(major, "windows-agent-not-configured.json"),
+        )
+        .get(
+            qemu(204, "agent/info"),
+            500,
+            fixture(major, "windows-guest-not-running.json"),
+        );
+}
+
+async fn windows_guests(major: Major) {
+    let transport = Scripted::new();
+    script_windows(&transport, major);
+
+    let discovery = client(&transport).guest_discover(request()).await.unwrap();
+    assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+
+    // The running agent: the whole osinfo answer, unclassified. The
+    // provider keeps `pretty-name` as `os_name` and the build number as
+    // `kernel`, exactly as for Linux.
+    let win = guest(&discovery.guests, "qemu/201");
+    assert_eq!(win.ostype.as_deref(), Some("win11"), "{}", major.dir);
+    assert_eq!(win.macs, ["bc:24:11:0a:02:01", "bc:24:11:0a:02:02"]);
+    assert!(win.warnings.is_empty(), "{:?}", win.warnings);
+    let agent = win.agent.unwrap();
+    assert!(agent.online);
+    assert_eq!(agent.version.as_deref(), Some(major.win.qga_version));
+    assert_eq!(agent.os_name.as_deref(), Some(major.win.pretty_name));
+    assert_eq!(agent.kernel.as_deref(), Some(major.win.build));
+    let os = agent.os.clone().unwrap();
+    assert_eq!(os.id.as_deref(), Some("mswindows"));
+    assert_eq!(os.name.as_deref(), Some("Microsoft Windows"));
+    assert_eq!(os.pretty_name.as_deref(), Some(major.win.pretty_name));
+    assert_eq!(os.version.as_deref(), Some(major.win.version));
+    assert_eq!(os.version_id.as_deref(), Some(major.win.version_id));
+    assert_eq!(os.variant_id.as_deref(), Some(major.win.variant_id));
+    assert_eq!(os.kernel_release.as_deref(), Some(major.win.build));
+    assert_eq!(os.kernel_version.as_deref(), Some("10.0"));
+    assert_eq!(os.machine.as_deref(), Some("x86_64"));
+
+    // Interfaces: Windows friendly names. The loopback pseudo-interface
+    // has no hardware address and only loopback addresses, so it is
+    // skipped. The raw list keeps link-local (with its `%zone`) and APIPA
+    // addresses; the application decides which are usable.
+    let interfaces = agent
+        .interfaces
+        .iter()
+        .map(|interface| {
+            (
+                interface.name.as_str(),
+                interface.mac.as_deref(),
+                interface.addresses.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let s = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        interfaces,
+        [
+            (
+                "Ethernet",
+                Some("bc:24:11:0a:02:01"),
+                s(&["2001:db8::201", "fe80::be24:11ff:fe0a:201%6", "192.0.2.201"])
+            ),
+            (
+                "Ethernet 2",
+                Some("bc:24:11:0a:02:02"),
+                s(&["fe80::be24:11ff:fe0a:202%12", "169.254.10.20"])
+            ),
+        ],
+        "{}",
+        major.dir
+    );
+
+    // Agent not running, agent not configured, and guest off are each the
+    // same honest offline agent FM-601 defined: reported, not dropped, one
+    // warning, and no other agent surface asked. The config's hint still
+    // lands, and so do the config MACs.
+    for (id, ostype, mac) in [
+        ("qemu/202", "win10", "bc:24:11:0a:02:11"),
+        ("qemu/203", "win11", "bc:24:11:0a:02:21"),
+        ("qemu/204", "win11", "bc:24:11:0a:02:31"),
+    ] {
+        let offline = guest(&discovery.guests, id);
+        assert_eq!(
+            offline.ostype.as_deref(),
+            Some(ostype),
+            "{}: {id}",
+            major.dir
+        );
+        assert_eq!(offline.macs, [mac], "{}: {id}", major.dir);
+        assert_eq!(
+            offline.agent,
+            Some(fleet_provider_proxmox::PveGuestAgent::default()),
+            "{}: {id}",
+            major.dir
+        );
+        assert_eq!(offline.warnings.len(), 1, "{:?}", offline.warnings);
+        let vmid = offline.resource.vmid.unwrap();
+        let asked = transport
+            .calls()
+            .iter()
+            .filter(|(_, path, _)| path.contains(&format!("/qemu/{vmid}/agent/")))
+            .count();
+        assert_eq!(asked, 1, "{}: {id}", major.dir);
+    }
+    assert_eq!(
+        guest(&discovery.guests, "qemu/204")
+            .resource
+            .status
+            .as_deref(),
+        Some("stopped")
+    );
+    let mut all = discovery.warnings.clone();
+    for guest in &discovery.guests {
+        all.extend(guest.warnings.iter().cloned());
+    }
+    assert_secret_free(major, &all);
+}
+
+#[tokio::test]
+async fn windows_guests_report_osinfo_interfaces_and_honest_agent_states() {
+    for_each_major(windows_guests).await;
+}
+
+async fn linux_osinfo_and_ostype(major: Major) {
+    // The Linux corpus carries the same structured osinfo and config hint,
+    // so classification has one input shape for every guest.
+    let transport = Scripted::new();
+    script_discovery(&transport, major);
+    script_guests(&transport, major);
+    script_down_node(&transport, major, Down::Proxy595);
+    let discovery = client(&transport).guest_discover(request()).await.unwrap();
+    let web = guest(&discovery.guests, "qemu/101");
+    assert_eq!(web.ostype.as_deref(), Some("l26"));
+    let os = web.agent.unwrap().os.unwrap();
+    assert_eq!(os.id.as_deref(), Some("debian"));
+    assert_eq!(os.pretty_name.as_deref(), Some(major.os_name));
+    let lab = guest(&discovery.guests, "qemu/106");
+    let os = lab.agent.unwrap().os.unwrap();
+    assert_eq!(os.id.as_deref(), Some("alpine"));
+    assert_eq!(os.pretty_name, None);
+    // LXC's `ostype` is the container's distribution, still only a hint.
+    assert_eq!(
+        guest(&discovery.guests, "lxc/104").ostype.as_deref(),
+        Some("debian")
+    );
+    // A forbidden config carries no hint.
+    assert_eq!(guest(&discovery.guests, "qemu/103").ostype, None);
+}
+
+#[tokio::test]
+async fn linux_guests_carry_the_same_osinfo_and_hint_shape() {
+    for_each_major(linux_osinfo_and_ostype).await;
+}
+
 // ---- lifecycle and task polling ----
 
 fn upid_of(major: Major, name: &str) -> Upid {
@@ -1240,14 +1484,22 @@ async fn fixtures_are_synthetic(major: Major) {
                 }
             }
         });
-        // Only documentation, loopback, and link-local addresses.
+        // Only documentation, loopback, link-local, and APIPA addresses.
+        // Windows prints IPv6 with a `%zone` suffix, so the zone is
+        // stripped before parsing: a zoned address is checked, not
+        // skipped. APIPA (`169.254.0.0/16`, RFC 3927) is IPv4 link-local:
+        // self-assigned, never routed, so like `fe80::/10` it carries no
+        // environment data; the Windows corpus needs it because the
+        // usable-address rule must be shown to exclude it.
         walk(&value, &mut |text| {
-            if let Ok(ip) = text.parse::<std::net::IpAddr>() {
+            let bare = text.split_once('%').map_or(text, |(address, _)| address);
+            if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
                 let documentation = match ip {
                     std::net::IpAddr::V4(v4) => {
                         let [a, b, c, _] = v4.octets();
                         matches!((a, b, c), (192, 0, 2) | (198, 51, 100) | (203, 0, 113))
                             || v4.is_loopback()
+                            || v4.is_link_local()
                     }
                     std::net::IpAddr::V6(v6) => {
                         let segments = v6.segments();

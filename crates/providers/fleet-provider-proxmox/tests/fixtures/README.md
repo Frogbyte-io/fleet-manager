@@ -60,8 +60,12 @@ they are synthetic, not live captures:
 - Node names are `pveN-n1` and `pveN-n2`.
 - MACs use the Proxmox `BC:24:11` prefix with made-up suffixes.
 - Addresses come only from the documentation ranges (`192.0.2.0/24`,
-  `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`), plus loopback and
-  link-local.
+  `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`), plus loopback,
+  IPv6 link-local (`fe80::/10`, optionally with a Windows `%zone` suffix
+  that the scan strips), and IPv4 link-local/APIPA (`169.254.0.0/16`,
+  RFC 3927, added for FM-608). The link-local values in the fixtures are
+  synthetic, like every other value here; the Windows corpus needs them
+  to show they are never usable.
 - Fingerprints are all zeros, and the token is `fleet@pve!contract`.
 
 A test checks the address rule and that no credentials appear.
@@ -132,3 +136,68 @@ fixture. The real `PinningVerifier` is covered by `tests/pin_live.rs` and
 by the FM-611 `trust` scenario in
 `crates/fleet-controller/tests/proxmox_live.rs`, which passed live on PVE
 8.4 and 9.2 (FM-613).
+
+## Windows guests (FM-608)
+
+`contract-windows-*.json` back the Windows scenario in
+`tests/contract_pve.rs` (`windows_guests_report_osinfo_interfaces_and_honest_agent_states`).
+That scenario uses the same `fixtures!` table and runs once per major through
+`for_each_major`. The fixtures are synthetic under the same rules as the
+FM-607 corpus, and no live Windows guest was captured. One healthy node
+carries four Windows guests:
+
+| Guest | Config | Agent answer |
+|---|---|---|
+| 201 | `ostype: win11`, `agent: 1`, two NICs | `info`, `network-get-interfaces`, `get-osinfo` |
+| 202 | `ostype: win10`, `agent: 1` | 500 "QEMU guest agent is not running" (the shared `agent-not-running` body) |
+| 203 | `ostype: win11`, no `agent` key | 500 "No QEMU guest agent configured" (`windows-agent-not-configured`) |
+| 204 | `ostype: win11`, `agent: enabled=1,…`, `status: stopped` | 500 "VM 204 is not running" (`windows-guest-not-running`) |
+
+Upstream sources, read at the commits named:
+
+- **qemu-ga on Windows**: QEMU
+  [`qga/commands-win32.c`](https://github.com/qemu/qemu/blob/f7ada39edacaa5c26b30e98b94017b0b2ccbcf94/qga/commands-win32.c)
+  and [`qga/qapi-schema.json`](https://github.com/qemu/qemu/blob/f7ada39edacaa5c26b30e98b94017b0b2ccbcf94/qga/qapi-schema.json)
+  (`GuestOSInfo`, `guest-get-osinfo` since 2.10). The virtio-win guest tools
+  ship this same agent as `qemu-ga-x86_64.msi`
+  ([virtio-win-pkg-scripts](https://github.com/virtio-win/virtio-win-pkg-scripts)).
+  - `qmp_guest_get_osinfo`:
+    - `id` is `mswindows` and `name` is `Microsoft Windows`.
+    - `pretty-name` is the registry `ProductName`. Windows 11 still says
+      "Windows 10 …" there, and the 9.x fixture shows this.
+    - `version` and `version-id` come from a build-number table: builds from
+      22000 are client "Microsoft Windows 11" / `11`, and builds from 20344
+      are server "Microsoft Windows Server 2022" / `2022`. When the table has
+      no row, both are `N/A`.
+    - `variant` and `variant-id` are `client` or `server`.
+    - `kernel-release` is the build number, `kernel-version` is
+      `major.minor` (`10.0`), and `machine` is one of `x86`, `x86_64`, `arm`,
+      `ia64`.
+  - `qmp_guest_network_get_interfaces`:
+    - `name` is the adapter `FriendlyName` (`Ethernet`, `Ethernet 2`,
+      `Loopback Pseudo-Interface 1`).
+    - `hardware-address` is lowercase `%02x:` and is omitted when the
+      adapter has no physical address, as with the loopback
+      pseudo-interface.
+    - Addresses are printed by `WSAAddressToString`, so an IPv6 link-local
+      address carries a `%zone` suffix.
+    - A DHCP-less NIC holds an APIPA `169.254.x.y/16` address.
+- **The `ostype` enum**: `qemu-server` `src/PVE/QemuServer.pm`, the same on
+  [`stable-bookworm`](https://github.com/proxmox/qemu-server/blob/5ccd363e5908aa5a7b969797babdff1df5159475/src/PVE/QemuServer.pm)
+  (8.x) and
+  [`master`](https://github.com/proxmox/qemu-server/blob/a7b4240bba1dd493d6c76daad1e70af62b2ebcc8/src/PVE/QemuServer.pm)
+  (9.x): `other wxp w2k w2k3 w2k8 wvista win7 win8 win10 win11 l24 l26
+  solaris`. `win10` covers 10/2016/2019 and `win11` covers 11/2022/2025, so
+  the 8.x Windows Server 2022 guest is `win11`. The two branches differ only
+  in the `l26` description and in 9.x's explicit `default => 'other'`.
+- **The agent states**: `qemu-server` `src/PVE/QemuServer/Agent.pm`
+  (`agent_available` on `stable-bookworm`, `assert_agent_available` on
+  `master`). It dies, which the API answers as a 500, with "No QEMU guest
+  agent configured", then "VM <vmid> is not running", then "QEMU guest agent
+  is not running", in that order. The provider stops at the failed `info` in
+  all three cases.
+
+Per major: the 8.x guest 201 is Windows Server 2022 Standard (build 20348,
+qemu-ga 8.1.2), and the 9.x guest 201 is Windows 11 Pro (build 26100,
+qemu-ga 9.2.0). The agent version follows the virtio-win release, not the
+PVE major. The interface shapes are the same on both.
