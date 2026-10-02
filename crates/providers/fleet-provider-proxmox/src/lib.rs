@@ -589,11 +589,59 @@ pub struct PveGuestAgent {
     pub os_name: Option<String>,
     /// The guest's kernel release, when `get-osinfo` carried one.
     pub kernel: Option<String>,
+    /// The whole `get-osinfo` answer, when it answered. Classifying it
+    /// (e.g. `mswindows` → Windows) is an application rule.
+    #[serde(default)]
+    pub os: Option<PveGuestOs>,
     /// The network interfaces the agent saw, when
-    /// `network-get-interfaces` answered. MACs are normalized
-    /// (lowercase, colon-separated); addresses are bare.
+    /// `network-get-interfaces` answered: the raw list, bounded to
+    /// [`MAX_AGENT_INTERFACES`]. MACs are normalized (lowercase,
+    /// colon-separated); addresses are as the agent printed them, minus
+    /// loopback, so link-local and APIPA addresses (and a Windows `%zone`
+    /// suffix) stay. Which addresses are usable is an application rule.
     pub interfaces: Vec<PveGuestInterface>,
 }
+
+/// The QEMU Guest Agent's `guest-get-osinfo` answer, every member bounded
+/// and optional (QAPI omits absent members). On POSIX guests the members
+/// come from os-release(5); on Windows `id` is `mswindows`, `name` is
+/// `Microsoft Windows`, `pretty-name` is the registry `ProductName`,
+/// `version`/`version-id` come from qemu-ga's build-number table, and
+/// `variant`/`variant-id` are `client` or `server`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveGuestOs {
+    /// `id`, e.g. `debian` or `mswindows`.
+    pub id: Option<String>,
+    /// `name`, e.g. `Microsoft Windows`.
+    pub name: Option<String>,
+    /// `pretty-name`.
+    pub pretty_name: Option<String>,
+    /// `version`, e.g. `Microsoft Windows Server 2022`.
+    pub version: Option<String>,
+    /// `version-id`, e.g. `13` or `2022`.
+    pub version_id: Option<String>,
+    /// `variant`.
+    pub variant: Option<String>,
+    /// `variant-id`, e.g. `server` or `client` on Windows.
+    pub variant_id: Option<String>,
+    /// `kernel-release`: the kernel release, or the build number on
+    /// Windows.
+    pub kernel_release: Option<String>,
+    /// `kernel-version`: e.g. `10.0` on Windows.
+    pub kernel_version: Option<String>,
+    /// `machine`, e.g. `x86_64`.
+    pub machine: Option<String>,
+}
+
+/// The bound on the interfaces kept from one agent answer. Windows guests
+/// list every adapter (tunnels, Bluetooth, Hyper-V switches), so the bound
+/// is generous; overflow is a warning, never silence.
+pub const MAX_AGENT_INTERFACES: usize = 64;
+/// The bound on the addresses kept per agent interface.
+pub const MAX_INTERFACE_ADDRESSES: usize = 32;
+/// The bound on one `get-osinfo` member.
+const MAX_OS_FIELD_CHARS: usize = 128;
 
 /// One network interface as the guest agent saw it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -618,6 +666,11 @@ pub struct PveGuest {
     /// The MAC addresses from the guest config's `netN` entries, normalized
     /// lowercase colon-separated. LXC guests carry theirs in `config` too.
     pub macs: Vec<String>,
+    /// The config's `ostype` (e.g. `win11`, `l26`), when the config was
+    /// read and carried a well-formed one. An operator-set hint, not what
+    /// the guest reports.
+    #[serde(default)]
+    pub ostype: Option<String>,
     /// The QEMU Guest Agent view; `None` only for LXC (no
     /// qemu-guest-agent by design). For QEMU the agent is always probed:
     /// per-surface availability lives inside, and a failed config read
@@ -1356,8 +1409,12 @@ impl ProxmoxSource for ProxmoxClient {
             };
             match self.call(config_request.clone()).await {
                 Ok(config) => {
-                    let (macs, config_warnings) = config_macs(&config);
+                    let (macs, mut config_warnings) = config_macs(&config);
                     guest.macs = macs;
+                    match config_ostype(&config) {
+                        Ok(ostype) => guest.ostype = ostype,
+                        Err(warning) => config_warnings.push(warning),
+                    }
                     for warning in config_warnings {
                         guest
                             .warnings
@@ -1706,6 +1763,27 @@ fn config_macs(config: &serde_json::Value) -> (Vec<String>, Vec<String>) {
     (macs, warnings)
 }
 
+/// The config's `ostype`: an enum on both majors (`qemu-server`
+/// `PVE/QemuServer.pm`: `other wxp w2k w2k3 w2k8 wvista win7 win8 win10
+/// win11 l24 l26 solaris`; `pve-container` uses distribution names). The
+/// value is kept verbatim when it is a short lowercase token; anything else
+/// is a warning, never a guess.
+fn config_ostype(config: &serde_json::Value) -> Result<Option<String>, String> {
+    match config.get("ostype") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value))
+            if !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) =>
+        {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err("the ostype entry is not a recognizable OS type".to_owned()),
+    }
+}
+
 /// Normalizes a MAC candidate: `key=AA:BB:…` or bare, lowercase
 /// colon-separated, only when it is six hex pairs.
 #[must_use]
@@ -1781,14 +1859,35 @@ impl ProxmoxClient {
             Ok(data) => {
                 let result = data.get("result").cloned().unwrap_or(data);
                 if let Some(interfaces) = result.as_array() {
+                    let mut dropped = 0_usize;
                     for interface in interfaces {
                         match normalize_interface(interface) {
-                            Ok(Some(interface)) => agent.interfaces.push(interface),
+                            Ok(Some(_)) if agent.interfaces.len() >= MAX_AGENT_INTERFACES => {
+                                dropped += 1;
+                            }
+                            Ok(Some(mut interface)) => {
+                                if interface.addresses.len() > MAX_INTERFACE_ADDRESSES {
+                                    warnings.push(format!(
+                                        "guest qemu/{vmid}: interface {} reported {} addresses; \
+                                         kept the first {MAX_INTERFACE_ADDRESSES}",
+                                        interface.name,
+                                        interface.addresses.len()
+                                    ));
+                                    interface.addresses.truncate(MAX_INTERFACE_ADDRESSES);
+                                }
+                                agent.interfaces.push(interface);
+                            }
                             Ok(None) => {}
                             Err(detail) => {
                                 warnings.push(format!("guest qemu/{vmid}: {detail}"));
                             }
                         }
+                    }
+                    if dropped > 0 {
+                        warnings.push(format!(
+                            "guest qemu/{vmid}: the agent reported {dropped} interfaces over the \
+                             {MAX_AGENT_INTERFACES}-interface bound; they were not kept"
+                        ));
                     }
                 }
             }
@@ -1814,6 +1913,7 @@ impl ProxmoxClient {
                     .get("kernel-release")
                     .and_then(serde_json::Value::as_str)
                     .map(|value| value.chars().take(128).collect());
+                agent.os = normalize_osinfo(&result);
             }
             Err(error) => {
                 warnings.push(format!(
@@ -1906,6 +2006,32 @@ impl ProxmoxClient {
     }
 }
 
+/// Decodes a `guest-get-osinfo` result. `None` when the answer is not an
+/// object; a member that is not a string or is over the bound is dropped
+/// rather than truncated, so a classification never reads an altered id.
+fn normalize_osinfo(result: &serde_json::Value) -> Option<PveGuestOs> {
+    result.as_object()?;
+    let member = |key: &str| {
+        result
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.chars().count() <= MAX_OS_FIELD_CHARS)
+            .map(str::to_owned)
+    };
+    Some(PveGuestOs {
+        id: member("id"),
+        name: member("name"),
+        pretty_name: member("pretty-name"),
+        version: member("version"),
+        version_id: member("version-id"),
+        variant: member("variant"),
+        variant_id: member("variant-id"),
+        kernel_release: member("kernel-release"),
+        kernel_version: member("kernel-version"),
+        machine: member("machine"),
+    })
+}
+
 /// Normalizes one agent network interface. `Ok(None)` skips loopback-style
 /// entries without a MAC; `Err` warns.
 fn normalize_interface(interface: &serde_json::Value) -> Result<Option<PveGuestInterface>, String> {
@@ -1935,8 +2061,12 @@ fn normalize_interface(interface: &serde_json::Value) -> Result<Option<PveGuestI
             {
                 // Every guest has `127.0.0.1`/`::1`; as address evidence a
                 // loopback address would match any machine registered at
-                // loopback.
+                // loopback. Windows prints IPv6 with a `%zone` suffix
+                // (`WSAAddressToString`), so the zone is ignored here.
                 if text
+                    .split('%')
+                    .next()
+                    .unwrap_or(text)
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(|address| address.is_loopback())
                 {
@@ -2312,6 +2442,73 @@ mod tests {
 
         let nameless = serde_json::json!({"hardware-address": "BC:24:11:97:DB:A8"});
         assert!(normalize_interface(&nameless).is_err());
+    }
+
+    #[test]
+    fn windows_interfaces_keep_link_local_and_skip_the_pseudo_loopback() {
+        // qemu-ga on Windows omits `hardware-address` when the adapter has
+        // no physical address and prints IPv6 with a `%zone` suffix.
+        let loopback = serde_json::json!({
+            "name": "Loopback Pseudo-Interface 1",
+            "ip-addresses": [
+                {"ip-address": "::1", "ip-address-type": "ipv6", "prefix": 128},
+                {"ip-address": "127.0.0.1", "ip-address-type": "ipv4", "prefix": 8}
+            ]
+        });
+        assert!(normalize_interface(&loopback).unwrap().is_none());
+
+        let ethernet = serde_json::json!({
+            "name": "Ethernet 2",
+            "hardware-address": "bc:24:11:0a:02:02",
+            "ip-addresses": [
+                {"ip-address": "fe80::be24:11ff:fe0a:202%12", "ip-address-type": "ipv6", "prefix": 64},
+                {"ip-address": "169.254.10.20", "ip-address-type": "ipv4", "prefix": 16}
+            ]
+        });
+        let normalized = normalize_interface(&ethernet).unwrap().unwrap();
+        assert_eq!(normalized.name, "Ethernet 2");
+        // The raw list keeps them; usability is the application's rule.
+        assert_eq!(
+            normalized.addresses,
+            ["fe80::be24:11ff:fe0a:202%12", "169.254.10.20"]
+        );
+    }
+
+    #[test]
+    fn osinfo_members_decode_bounded_and_unclassified() {
+        let windows = serde_json::json!({
+            "id": "mswindows",
+            "name": "Microsoft Windows",
+            "pretty-name": "Windows Server 2022 Standard",
+            "version": "Microsoft Windows Server 2022",
+            "version-id": "2022",
+            "variant": "server",
+            "variant-id": "server",
+            "kernel-release": "20348",
+            "kernel-version": "10.0",
+            "machine": "x86_64"
+        });
+        let os = normalize_osinfo(&windows).unwrap();
+        assert_eq!(os.id.as_deref(), Some("mswindows"));
+        assert_eq!(os.version_id.as_deref(), Some("2022"));
+        assert_eq!(os.variant_id.as_deref(), Some("server"));
+        assert_eq!(os.kernel_version.as_deref(), Some("10.0"));
+
+        let odd = serde_json::json!({"id": 7, "name": "x".repeat(129)});
+        assert_eq!(normalize_osinfo(&odd), Some(PveGuestOs::default()));
+        assert_eq!(normalize_osinfo(&serde_json::json!("nope")), None);
+    }
+
+    #[test]
+    fn config_ostype_is_kept_verbatim_or_warned() {
+        let config = |value: serde_json::Value| serde_json::json!({ "ostype": value });
+        assert_eq!(
+            config_ostype(&config(serde_json::json!("win11"))),
+            Ok(Some("win11".to_owned()))
+        );
+        assert_eq!(config_ostype(&serde_json::json!({})), Ok(None));
+        assert!(config_ostype(&config(serde_json::json!("Win 11"))).is_err());
+        assert!(config_ostype(&config(serde_json::json!(11))).is_err());
     }
 
     #[test]

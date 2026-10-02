@@ -59,9 +59,9 @@ use fleet_application::operation::AuditPort;
 use fleet_application::operation::PortFailure;
 use fleet_application::proxmox::{
     CredentialStoreError, NewProxmoxAccount, ProviderAgent, ProviderGuest, ProviderInterface,
-    ProxmoxAccountPort, ProxmoxAccounts, ProxmoxCredentialStore, ProxmoxDiscoverPort,
-    ProxmoxGuestDiscoverPort, ProxmoxSourceError, ProxmoxTrustProbe, ProxmoxUseCaseError,
-    RawDiscovery, RawGuestDiscovery,
+    ProviderOsInfo, ProxmoxAccountPort, ProxmoxAccounts, ProxmoxCredentialStore,
+    ProxmoxDiscoverPort, ProxmoxGuestDiscoverPort, ProxmoxSourceError, ProxmoxTrustProbe,
+    ProxmoxUseCaseError, RawDiscovery, RawGuestDiscovery,
 };
 use fleet_core::CapabilityFact;
 use fleet_core::SensitiveString;
@@ -973,11 +973,13 @@ fn qemu_guest() -> ProviderGuest {
         name: Some("fleet-test-01".to_owned()),
         status: Some("running".to_owned()),
         macs: vec!["de:ad:be:ef:00:01".to_owned()],
+        ostype: None,
         agent: Some(ProviderAgent {
             online: true,
             version: Some("7.2".to_owned()),
             os_name: Some("Ubuntu 24.04.4 LTS".to_owned()),
             kernel: Some("6.8.0-138-generic".to_owned()),
+            os: None,
             interfaces: vec![ProviderInterface {
                 name: "ens18".to_owned(),
                 mac: Some("de:ad:be:ef:00:01".to_owned()),
@@ -998,7 +1000,54 @@ fn lxc_guest() -> ProviderGuest {
         name: Some("container".to_owned()),
         status: Some("running".to_owned()),
         macs: vec!["de:ad:be:ef:00:02".to_owned()],
+        ostype: None,
         agent: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// A Windows 11 guest as the FM-608 9.x contract fixture decodes it: the
+/// registry `ProductName` still says "Windows 10", the raw interfaces keep
+/// link-local (zoned), APIPA, and documentation addresses.
+fn windows_guest() -> ProviderGuest {
+    let s = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    ProviderGuest {
+        kind: "qemu".to_owned(),
+        id: "qemu/201".to_owned(),
+        node: Some("pve".to_owned()),
+        vmid: Some(201),
+        name: Some("win-desk-01".to_owned()),
+        status: Some("running".to_owned()),
+        macs: s(&["bc:24:11:0a:02:01", "bc:24:11:0a:02:02"]),
+        ostype: Some("win11".to_owned()),
+        agent: Some(ProviderAgent {
+            online: true,
+            version: Some("9.2.0".to_owned()),
+            os_name: Some("Windows 10 Pro".to_owned()),
+            kernel: Some("26100".to_owned()),
+            os: Some(ProviderOsInfo {
+                id: Some("mswindows".to_owned()),
+                name: Some("Microsoft Windows".to_owned()),
+                pretty_name: Some("Windows 10 Pro".to_owned()),
+                version: Some("Microsoft Windows 11".to_owned()),
+                version_id: Some("11".to_owned()),
+                variant_id: Some("client".to_owned()),
+                kernel_release: Some("26100".to_owned()),
+                machine: Some("x86_64".to_owned()),
+            }),
+            interfaces: vec![
+                ProviderInterface {
+                    name: "Ethernet".to_owned(),
+                    mac: Some("bc:24:11:0a:02:01".to_owned()),
+                    addresses: s(&["2001:db8::201", "fe80::be24:11ff:fe0a:201%6", "192.0.2.201"]),
+                },
+                ProviderInterface {
+                    name: "Ethernet 2".to_owned(),
+                    mac: Some("bc:24:11:0a:02:02".to_owned()),
+                    addresses: s(&["fe80::be24:11ff:fe0a:202%12", "169.254.10.20"]),
+                },
+            ],
+        }),
         warnings: Vec::new(),
     }
 }
@@ -1488,4 +1537,317 @@ async fn a_denied_caller_never_lists_guests() {
         .await
         .unwrap_err();
     assert!(matches!(error, ProxmoxUseCaseError::Denied(_)));
+}
+
+// ---- FM-608: Windows guests through the QEMU Guest Agent ----
+
+type ObservedFact = (String, Option<String>, fleet_core::CapabilityStatus);
+
+/// Observes one guest onto a fresh machine and returns the recorded facts
+/// as `(namespace.name, value, status)`.
+async fn observed_facts(guest: ProviderGuest) -> Vec<ObservedFact> {
+    let vmid = guest.vmid.unwrap();
+    let (proxmox, _audit, machine_port) = service_with_guests(
+        FakeDiscovery::with(Ok(discovery_ok())),
+        FakeGuestDiscovery::with(Ok(guest_discovery(vec![guest]))),
+        FakeProbe::with(FP),
+    );
+    let account = create_account(&proxmox).await;
+    observe_and_confirm(&proxmox, &account.id).await;
+    let machine_id = register_machine(&machine_port, "box", "ops@203.0.113.9:22", None).await;
+    proxmox
+        .observe_guest(&AllowAll, &principal(), &account.id, vmid, &machine_id, NOW)
+        .await
+        .unwrap();
+    let recorded = machine_port.recorded.lock().unwrap();
+    let (_, facts) = recorded
+        .iter()
+        .find(|(id, _)| id == &machine_id)
+        .expect("the facts recorded");
+    facts
+        .iter()
+        .map(|fact| {
+            assert_eq!(fact.source, "proxmox/9.2.2");
+            (
+                format!("{}.{}", fact.namespace, fact.name),
+                fact.value.clone(),
+                fact.status,
+            )
+        })
+        .collect()
+}
+
+fn fact_of(
+    facts: &[ObservedFact],
+    key: &str,
+) -> Option<(Option<String>, fleet_core::CapabilityStatus)> {
+    facts
+        .iter()
+        .find(|(name, _, _)| name == key)
+        .map(|(_, value, status)| (value.clone(), *status))
+}
+
+fn known(value: &str) -> (Option<String>, fleet_core::CapabilityStatus) {
+    (Some(value.to_owned()), fleet_core::CapabilityStatus::Known)
+}
+
+#[tokio::test]
+async fn windows_osinfo_normalizes_to_os_facts_beside_the_ostype_hint() {
+    let facts = observed_facts(windows_guest()).await;
+
+    // The agent-reported OS, classified.
+    assert_eq!(fact_of(&facts, "os.family"), Some(known("windows")));
+    // qemu-ga's build-table `version`, not the registry ProductName that
+    // Windows 11 still spells "Windows 10".
+    assert_eq!(
+        fact_of(&facts, "os.name"),
+        Some(known("Microsoft Windows 11"))
+    );
+    assert_eq!(fact_of(&facts, "os.version"), Some(known("11")));
+    assert_eq!(fact_of(&facts, "os.variant"), Some(known("client")));
+    // The raw agent strings are still recorded as before.
+    assert_eq!(fact_of(&facts, "pve.os"), Some(known("Windows 10 Pro")));
+    assert_eq!(fact_of(&facts, "pve.kernel"), Some(known("26100")));
+    assert_eq!(fact_of(&facts, "pve.agent"), Some(known("9.2.0")));
+    // The config hint is a separate `pve` fact, never an `os` fact.
+    assert_eq!(fact_of(&facts, "pve.ostype_hint"), Some(known("win11")));
+    assert!(
+        facts
+            .iter()
+            .filter(|(name, _, _)| name.starts_with("os."))
+            .all(|(_, value, _)| value.as_deref() != Some("win11")),
+        "{facts:?}"
+    );
+    // Only usable addresses are displayed: no link-local, no APIPA.
+    assert_eq!(
+        fact_of(&facts, "pve.address0"),
+        Some(known("2001:db8::201"))
+    );
+    assert_eq!(fact_of(&facts, "pve.address1"), Some(known("192.0.2.201")));
+    assert_eq!(fact_of(&facts, "pve.address2"), None);
+    assert_eq!(
+        fact_of(&facts, "net.mac1"),
+        Some(known("bc:24:11:0a:02:02"))
+    );
+}
+
+#[tokio::test]
+async fn windows_server_osinfo_names_the_server_release() {
+    // The 8.x fixture's Windows Server 2022 answer.
+    let mut guest = windows_guest();
+    let agent = guest.agent.as_mut().unwrap();
+    agent.os = Some(ProviderOsInfo {
+        pretty_name: Some("Windows Server 2022 Standard".to_owned()),
+        version: Some("Microsoft Windows Server 2022".to_owned()),
+        version_id: Some("2022".to_owned()),
+        variant_id: Some("server".to_owned()),
+        ..agent.os.clone().unwrap()
+    });
+    let facts = observed_facts(guest).await;
+    assert_eq!(fact_of(&facts, "os.family"), Some(known("windows")));
+    assert_eq!(
+        fact_of(&facts, "os.name"),
+        Some(known("Microsoft Windows Server 2022"))
+    );
+    assert_eq!(fact_of(&facts, "os.version"), Some(known("2022")));
+    assert_eq!(fact_of(&facts, "os.variant"), Some(known("server")));
+
+    // qemu-ga prints `N/A` when its build table has no row: that is no
+    // value, so the name falls back to the product name and the version
+    // is absent rather than "N/A".
+    let mut guest = windows_guest();
+    let agent = guest.agent.as_mut().unwrap();
+    agent.os = Some(ProviderOsInfo {
+        version: Some("N/A".to_owned()),
+        version_id: Some("N/A".to_owned()),
+        ..agent.os.clone().unwrap()
+    });
+    let facts = observed_facts(guest).await;
+    assert_eq!(fact_of(&facts, "os.name"), Some(known("Windows 10 Pro")));
+    assert_eq!(fact_of(&facts, "os.version"), None);
+}
+
+#[tokio::test]
+async fn unknown_os_ids_stay_unknown_never_linux() {
+    for id in [Some("freebsd"), Some("MSWINDOWS"), Some(""), None] {
+        let mut guest = windows_guest();
+        let agent = guest.agent.as_mut().unwrap();
+        agent.os = Some(ProviderOsInfo {
+            id: id.map(str::to_owned),
+            name: Some("Something".to_owned()),
+            version_id: Some("14.1".to_owned()),
+            ..ProviderOsInfo::default()
+        });
+        let facts = observed_facts(guest).await;
+        assert_eq!(
+            fact_of(&facts, "os.family"),
+            Some((None, fleet_core::CapabilityStatus::Unknown)),
+            "{id:?}"
+        );
+        assert_eq!(fact_of(&facts, "os.name"), Some(known("Something")));
+        assert_eq!(fact_of(&facts, "os.version"), Some(known("14.1")));
+    }
+    // A known Linux id does classify, from the same input shape.
+    let mut guest = windows_guest();
+    guest.ostype = Some("l26".to_owned());
+    guest.agent.as_mut().unwrap().os = Some(ProviderOsInfo {
+        id: Some("debian".to_owned()),
+        pretty_name: Some("Debian GNU/Linux 13 (trixie)".to_owned()),
+        version_id: Some("13".to_owned()),
+        ..ProviderOsInfo::default()
+    });
+    let facts = observed_facts(guest).await;
+    assert_eq!(fact_of(&facts, "os.family"), Some(known("linux")));
+    assert_eq!(
+        fact_of(&facts, "os.name"),
+        Some(known("Debian GNU/Linux 13 (trixie)"))
+    );
+    assert_eq!(fact_of(&facts, "pve.ostype_hint"), Some(known("l26")));
+}
+
+#[tokio::test]
+async fn windows_agent_states_map_to_the_fm601_states() {
+    // Agent not running, agent not configured, and guest off all decode to
+    // the same offline agent (the provider contract tests prove that per
+    // major): `unavailable`, with the config hint still recorded and no
+    // `os` fact. No answer is no observation, and must not overwrite one.
+    for status in ["running", "stopped"] {
+        let mut guest = windows_guest();
+        guest.status = Some(status.to_owned());
+        guest.agent = Some(ProviderAgent::default());
+        let facts = observed_facts(guest).await;
+        assert_eq!(
+            fact_of(&facts, "pve.agent"),
+            Some((None, fleet_core::CapabilityStatus::Unavailable)),
+            "{status}"
+        );
+        assert_eq!(fact_of(&facts, "pve.ostype_hint"), Some(known("win11")));
+        assert!(
+            facts
+                .iter()
+                .all(|(name, _, _)| !name.starts_with("os.") && !name.starts_with("pve.address")),
+            "{status}: {facts:?}"
+        );
+    }
+    // An agent that answered `info` but not `get-osinfo`: available, and
+    // still no `os` fact.
+    let mut guest = windows_guest();
+    guest.agent.as_mut().unwrap().os = None;
+    let facts = observed_facts(guest).await;
+    assert_eq!(fact_of(&facts, "pve.agent"), Some(known("9.2.0")));
+    assert!(facts.iter().all(|(name, _, _)| !name.starts_with("os.")));
+}
+
+#[test]
+fn usable_addresses_exclude_loopback_link_local_and_apipa() {
+    use fleet_application::proxmox::usable_address;
+    for unusable in [
+        "127.0.0.1",
+        "::1",
+        "169.254.10.20",
+        "169.254.0.1",
+        "fe80::be24:11ff:fe0a:201%6",
+        "fe80::1",
+        "febf::1",
+        "0.0.0.0",
+        "::",
+        "224.0.0.251",
+        "ff02::1",
+        "not-an-address",
+        "",
+    ] {
+        assert_eq!(usable_address(unusable), None, "{unusable}");
+    }
+    for usable in [
+        "192.0.2.201",
+        "2001:db8::201",
+        "169.253.255.255",
+        "169.255.0.1",
+        "fec0::1",
+    ] {
+        assert!(usable_address(usable).is_some(), "{usable}");
+    }
+    // The raw list stays whole; only the selection drops entries, and
+    // repeats collapse.
+    let mut agent = windows_guest().agent.unwrap();
+    agent.interfaces[1].addresses.push("192.0.2.201".to_owned());
+    assert_eq!(agent.interfaces[1].addresses.len(), 3);
+    assert_eq!(agent.usable_addresses(), ["2001:db8::201", "192.0.2.201"]);
+}
+
+#[tokio::test]
+async fn windows_guests_associate_and_display_as_vms() {
+    let (proxmox, audit, machine_port) = service_with_guests(
+        FakeDiscovery::with(Ok(discovery_ok())),
+        FakeGuestDiscovery::with(Ok(guest_discovery(vec![windows_guest()]))),
+        FakeProbe::with(FP),
+    );
+    let account = create_account(&proxmox).await;
+    observe_and_confirm(&proxmox, &account.id).await;
+    // A machine registered at the guest's APIPA address, which any
+    // DHCP-less Windows NIC self-assigns: never evidence. (Link-local IPv6
+    // is covered by `usable_addresses_exclude_loopback_link_local_and_apipa`.)
+    let apipa = register_machine(&machine_port, "apipa", "ops@169.254.10.20:22", None).await;
+    // A machine at one of the guest's usable addresses.
+    let by_address =
+        register_machine(&machine_port, "by-address", "ops@192.0.2.201:22", None).await;
+    let by_mac = register_machine(
+        &machine_port,
+        "by-mac",
+        "ops@203.0.113.50:22",
+        Some("BC:24:11:0A:02:02"),
+    )
+    .await;
+
+    let snapshot = proxmox
+        .guests(&AllowAll, &principal(), &account.id, NOW)
+        .await
+        .unwrap();
+    let candidates = &snapshot.guests[0].candidates;
+    let reason = |machine_id: &str| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.machine_id == machine_id)
+            .map(|candidate| (candidate.kind.clone(), candidate.evidence.clone()))
+    };
+    assert_eq!(reason(&apipa), None);
+    assert_eq!(
+        reason(&by_address),
+        Some(("address_match".to_owned(), "192.0.2.201".to_owned()))
+    );
+    assert_eq!(
+        reason(&by_mac),
+        Some(("mac_match".to_owned(), "bc:24:11:0a:02:02".to_owned()))
+    );
+
+    // Confirming the link follows the same rule as Linux, and the displayed
+    // kind is `vm` whatever the guest OS.
+    let links = Arc::new(FakeGuestLinks::default());
+    let machines = Machines::new(machine_port, audit).with_guest_links(links);
+    let identity = GuestIdentity {
+        account_id: account.id.clone(),
+        guest_kind: "qemu".to_owned(),
+        vmid: 201,
+    };
+    let refused = machines
+        .link_guest(&proxmox, &AllowAll, &principal(), &apipa, &identity, NOW)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        refused,
+        fleet_application::machine::MachineUseCaseError::Conflict { .. }
+    ));
+    let view = machines
+        .link_guest(
+            &proxmox,
+            &AllowAll,
+            &principal(),
+            &by_address,
+            &identity,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(view.kind, fleet_application::machine::MachineKind::Vm);
+    assert_eq!(view.runs_on.unwrap().vmid, 201);
 }

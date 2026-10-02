@@ -33,6 +33,14 @@ The application chooses a route from machine endpoints and observed provider cap
 
 Proxmox guest discovery reports evidence-only Fleet machine candidates. The runtime association is a separate, explicitly confirmed one-to-one link between a Fleet machine and an account/kind/VMID guest identity. Confirmation rediscovers that guest and requires current evidence for the selected machine; conflicts are refused by the runtime store. A machine's displayed kind comes from its confirmed guest link first, then its observed `host.virtualization` fact. Names never create links automatically.
 
+Windows guests (FM-608) get the same Proxmox observation as Linux guests. Nothing more is promised.
+- **Source.** Everything comes from the PVE API and the QEMU Guest Agent.
+- **OS facts.** The application classifies the agent's `get-osinfo` answer. `id: mswindows` becomes `os.family = windows`, and Fleet also records `os.name`, `os.version` and `os.variant`. An unrecognized id stays `unknown`, and a missing answer records no `os` fact.
+- **`ostype` hint.** The config `ostype` (`win10`, `win11`, …) is a separate `pve.ostype_hint` fact. It is never treated as the guest's OS.
+- **Addresses.** Association and the displayed `pve.addressN` facts use only usable addresses. Loopback, `169.254.0.0/16` and `fe80::/10` are excluded, after any `%zone` suffix is stripped. The raw interface list is kept, bounded.
+- **Agent states.** Agent not running, agent not configured and guest off are all `unavailable`, the same as for Linux guests.
+- **Not covered.** Windows `fleetd`, WinRM or SSH into the guest, in-guest inventory or exec, and Windows Lab templates. Those are FM-S04 and FM-214.
+
 ## Provider contract requirements
 
 Each call receives operation context containing correlation/operation ID, deadline, cancellation, actor decision digest, target, and redaction policy. It returns:

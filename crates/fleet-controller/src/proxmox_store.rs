@@ -341,6 +341,7 @@ impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery 
                         name: guest.resource.name,
                         status: guest.resource.status,
                         macs: guest.macs,
+                        ostype: guest.ostype,
                         agent: guest
                             .agent
                             .map(|agent| fleet_application::proxmox::ProviderAgent {
@@ -348,6 +349,18 @@ impl fleet_application::proxmox::ProxmoxGuestDiscoverPort for ProviderDiscovery 
                                 version: agent.version,
                                 os_name: agent.os_name,
                                 kernel: agent.kernel,
+                                os: agent
+                                    .os
+                                    .map(|os| fleet_application::proxmox::ProviderOsInfo {
+                                        id: os.id,
+                                        name: os.name,
+                                        pretty_name: os.pretty_name,
+                                        version: os.version,
+                                        version_id: os.version_id,
+                                        variant_id: os.variant_id,
+                                        kernel_release: os.kernel_release,
+                                        machine: os.machine,
+                                    }),
                                 interfaces: agent
                                     .interfaces
                                     .into_iter()
