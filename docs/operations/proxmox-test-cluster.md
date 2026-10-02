@@ -171,7 +171,11 @@ Create the roles, user, privilege-separated token, and ACLs with [steps 2–5 of
 Keep a separate read-only token for FM-611's privilege-failure scenario. With a user whose ACLs cover the fixture, create it on the node:
 
 ```sh
-pveum user token add <test-user> ro --privsep 1 --output-format json
+pveum user token add <test-user> ro --privsep 1 --output-format json | python3 -c '
+import json, os, sys
+with open(sys.argv[1], "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+    output.write(json.load(sys.stdin)["value"])
+' '<private-secret-file>'
 pveum acl modify / --tokens '<test-user>!ro' --roles PVEAuditor
 ```
 
