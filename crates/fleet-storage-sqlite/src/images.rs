@@ -11,6 +11,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use fleet_application::images::{NewRecipe, Recipe, RecipeContent, RecipePort, RecipeVersion};
+use fleet_application::lab::ImageArtifactPort;
 use fleet_core::RecipeSource;
 
 /// The image-recipe repository over a pool.
@@ -272,6 +273,71 @@ impl RecipePort for RecipeRepository {
             .await
             .map_err(|error| format!("promoted_version failed: {error}"))?;
         row.map(|row| Self::row_to_version(&row)).transpose()
+    }
+}
+
+impl RecipeRepository {
+    /// The successful `image.build` operations' (payload, result) pairs,
+    /// newest first. JSON is parsed in Rust so one malformed row cannot
+    /// fail the whole query.
+    async fn successful_builds(&self) -> Result<Vec<(Option<String>, Option<String>)>, String> {
+        let rows = sqlx::query(
+            "SELECT payload_json, result_json FROM operations \
+             WHERE kind = 'image.build' AND state = 'succeeded' \
+             ORDER BY created_at DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("image build artifacts failed: {error}"))?;
+        Ok(rows
+            .iter()
+            .map(|row| (row.get("payload_json"), row.get("result_json")))
+            .collect())
+    }
+}
+
+/// The `artifactId` an image build recorded (the Packer Proxmox builder's
+/// artifact id is the template VMID in decimal), when the result carries
+/// one.
+fn recorded_artifact(result_json: Option<&str>) -> Option<String> {
+    let result: serde_json::Value = serde_json::from_str(result_json?).ok()?;
+    result["artifactId"].as_str().map(str::to_owned)
+}
+
+#[async_trait]
+impl ImageArtifactPort for RecipeRepository {
+    async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String> {
+        for (payload, result) in self.successful_builds().await? {
+            let built_version = payload
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                .and_then(|payload| payload["versionId"].as_str().map(str::to_owned));
+            if built_version.as_deref() != Some(image_version_id) {
+                continue;
+            }
+            let Some(artifact) = recorded_artifact(result.as_deref()) else {
+                continue;
+            };
+            return artifact.parse::<u32>().map(Some).map_err(|_| {
+                format!(
+                    "the image version's build artifact {artifact:?} is not a Proxmox template VMID"
+                )
+            });
+        }
+        Ok(None)
+    }
+
+    async fn image_template_vmids(&self) -> Result<Vec<u32>, String> {
+        let mut vmids: Vec<u32> = self
+            .successful_builds()
+            .await?
+            .iter()
+            .filter_map(|(_, result)| recorded_artifact(result.as_deref()))
+            .filter_map(|artifact| artifact.parse::<u32>().ok())
+            .collect();
+        vmids.sort_unstable();
+        vmids.dedup();
+        Ok(vmids)
     }
 }
 

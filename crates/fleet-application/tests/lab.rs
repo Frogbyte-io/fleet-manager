@@ -281,6 +281,15 @@ impl ProvisionPort for FakeProvisions {
         Ok(self.records.lock().unwrap().clone())
     }
 
+    async fn reserve_clone_target(
+        &self,
+        _record_id: &str,
+        _node: &str,
+        _vmid: u32,
+    ) -> Result<fleet_application::lab::CloneTargetReservation, String> {
+        unimplemented!("the Lab use cases never reserve a clone target")
+    }
+
     async fn find_by_idempotency_key(
         &self,
         key: &str,

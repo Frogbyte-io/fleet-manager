@@ -68,10 +68,10 @@ Notes:
 
 - `proxmox.guest.snapshot-revert` passes if the token has **either** `VM.Snapshot` or `VM.Snapshot.Rollback` (`any => 1`). FleetDestructive already includes `VM.Snapshot`, so `VM.Snapshot.Rollback` is redundant there. It is in the role because it lets you build a rollback-only role if you ever need one.
 - The destructive executors read the snapshot list and the cluster resources before they act (idempotency checks), so `FleetDestructive` carries `VM.Audit` itself.
-- The Lab executor finds the pinned image's template in `/cluster/resources`, which leaves out guests without `VM.Audit`. `FleetLab` therefore carries `VM.Audit` for the template's path (`lab.provision.template-lookup`).
+- The Lab executor looks up the pinned image's template in `/cluster/resources`, which leaves out guests without `VM.Audit`. It uses the template VMID recorded by the image's build, and it takes the template's node from that listing. `FleetLab` therefore carries `VM.Audit` for the template's path (`lab.provision.template-lookup`).
 - `proxmox.guest.template` requires `VM.Allocate` on `/vms/{vmid}`. **`VM.Allocate` also lets the token delete that VM.** It also counts as a substitute for `Permissions.Modify` on `/vms/...`, so the token can delegate subsets of its own privileges on that path. This is why the privilege is scoped to a pool and never granted on `/`.
 - `proxmox.task-cancel` needs no privilege for tasks the token started. The cancel review binds the task's UPID to the reviewed guest's node and VMID, but not to the user that started it, so a reviewed UPID can name another principal's task on that guest. PVE stops such a task only with `Sys.Modify` on `/nodes/{node}`; that is the opt-in `proxmox.task-cancel.other-principal` row. This guide does not grant it: `Sys.Modify` on a node also allows changing its network, DNS, time, and services. Without it, cancelling a task Fleet did not start is refused with 403. If you need it anyway, the role blocks define `FleetCancelAnyTask`; grant it on `/nodes/<node>`.
-- Fleet does not delete VMs today. `DELETE /nodes/{node}/qemu/{vmid}` would need `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. Lab clones inherit the template's protection flag, so Lab `destroy` cleanup will also need `VM.Config.Options` on `/vms/{newid}` to clear it (see [step 5](#5-acls)).
+- Fleet does not delete VMs today. `DELETE /nodes/{node}/qemu/{vmid}` would need `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. Lab clones inherit the template's protection flag, so Lab `destroy` cleanup will also need `VM.Config.Options` on `/vms/{newid}` to clear it (see [step 5](#5-acls)). Independently of the protection flag, Fleet's cleanup guard refuses to destroy any VMID that is a template or that matches a recorded image build artifact.
 - Image builds (`image.build`) run Packer, which uses its own credentials. This guide does not cover Packer's token.
 
 ## 8.x vs 9.x differences
@@ -262,6 +262,14 @@ fleetctl proxmox confirm <account-id> --fingerprint <SHA256:...>   # after check
    ```
 
    `/vms/<id>` ACLs are accepted before the VM exists (the path pattern is `/vms/[1-9][0-9]{2,}`). Avoid `/vms` with propagation: it gives the token `VM.Allocate`, and so delete rights, on every VM in the cluster.
+
+   **How Lab picks the clone VMID.** The Lab provision executor asks PVE for the next free VMID (`GET /cluster/nextid`). It records that VMID on the provision record before it sends the clone, and a re-run reuses the recorded VMID. PVE picks the lowest free VMID inside the `datacenter.cfg` `next-id` range (`lower` inclusive, `upper` exclusive; default 100 to 1000000). Set that range to the VMIDs you granted above, or `nextid` returns a VMID the token cannot allocate and the clone fails with 403:
+
+   ```sh
+   pvesh set /cluster/options --next-id lower=9000,upper=9003   # 9000, 9001, 9002
+   ```
+
+   The range applies to every automatic VMID choice in the cluster, including the web UI's "Create VM" default. When the range is exhausted, `nextid` fails with "unable to get any free VMID in range" and the provision fails without cloning. The clone runs on the node that holds the image template, as `/cluster/resources` reports it. The account's host is only the API endpoint.
 3. `Datastore.AllocateSpace` on `/storage/{storeid}` for **every non-CD-ROM disk** of the source, full or linked clone. When `storage` is passed, the check uses that target storage instead of the source disk's storage. The same privilege is also required on the `vmstatestorage`, if the source defines one. Adding the storage to the pool covers this through the pool ACL. A physical `cdrom` passthrough drive would also need `Sys.Console` on `/`, so keep templates free of host CD-ROM passthrough.
 4. `SDN.Use` on `/sdn/zones/<zone>/<bridge>` for every `netN` of the source. A plain Linux bridge is in the zone `localnetwork`. VLAN-tagged NICs are checked on `/sdn/zones/<zone>/<bridge>/<tag>`, which the bridge ACL covers through propagation.
 
