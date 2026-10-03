@@ -1,0 +1,15 @@
+{
+ "data": {
+  "upid": "UPID:pve8-n1:000A1B2D:0123ABCE:66F00002:qmstart:101:fleet@pve!contract:",
+  "node": "pve8-n1",
+  "pid": 662317,
+  "pstart": 19114958,
+  "starttime": 1727004674,
+  "type": "qmstart",
+  "id": "101",
+  "user": "fleet@pve",
+  "tokenid": "contract",
+  "status": "stopped",
+  "exitstatus": "OK"
+ }
+}

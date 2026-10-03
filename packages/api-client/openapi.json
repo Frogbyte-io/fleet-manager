@@ -5417,6 +5417,231 @@
         }
       }
     },
+    "/api/v1/proxmox/accounts/{accountId}/privileges": {
+      "get": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Reports which capability tiers the account's API token can perform.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown or unconfirmed\naccount, a missing token secret, an unwired Proxmox surface, or a source\nfailure. A refused permissions read is not an error: every tier reports\n`unknown`.",
+        "operationId": "getProxmoxPrivileges",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The per-tier privilege report; `unknown` tiers when the permissions read was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ProxmoxPrivilegesDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed (`proxmox_unconfirmed`), its pinned fingerprint no longer matches (`proxmox_fingerprint_mismatch`), or its token secret is unavailable (`proxmox_no_secret`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The controller's account storage or secret store failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API failed or refused the token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The Proxmox surface is not wired; the controller needs its database and secret store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/proxmox/accounts/{accountId}/tasks": {
+      "get": {
+        "tags": [
+          "proxmox"
+        ],
+        "summary": "Lists the account's recent PVE tasks, newest first, each linked to the\nFleet operation that started it.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a malformed filter or\nstale cursor, an unconfirmed account, or a whole-read source failure.\nA node that cannot be read is a warning, not an error.",
+        "operationId": "listProxmoxTasks",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "path",
+            "description": "The account's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "description": "Only this node's tasks.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "query",
+            "description": "Only this guest's tasks.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only tasks in this status: running, ok, error, or unknown.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The maximum number of tasks to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The opaque cursor: the last task's UPID from the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the task history, with per-node warnings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxmoxTaskPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A filter is malformed, or the cursor names no task in the snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Proxmox surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account's trust is unconfirmed or the host fingerprint was refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The PVE API refused the token or failed before any node was read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/catalog": {
       "get": {
         "tags": [
@@ -11114,6 +11339,40 @@
           }
         }
       },
+      "ProxmoxMissingPrivilegesDto": {
+        "type": "object",
+        "description": "Privileges to grant, and where.",
+        "required": [
+          "privileges",
+          "anyOf",
+          "path",
+          "capabilities"
+        ],
+        "properties": {
+          "anyOf": {
+            "type": "boolean",
+            "description": "Whether any one of them suffices."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The executor kinds or reads that need them."
+          },
+          "path": {
+            "type": "string",
+            "description": "The ACL path template to grant them on, e.g. `/vms/{vmid}`."
+          },
+          "privileges": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The PVE privileges to grant."
+          }
+        }
+      },
       "ProxmoxNodeCapacityDto": {
         "type": "object",
         "description": "Current CPU, memory, and storage usage observed for one node.",
@@ -11173,6 +11432,177 @@
               "$ref": "#/components/schemas/ProxmoxStorageCapacityDto"
             },
             "description": "Storage capacity reported by this node."
+          }
+        }
+      },
+      "ProxmoxPrivilegeCheckDto": {
+        "type": "object",
+        "description": "One row of Fleet's privilege table, evaluated.",
+        "required": [
+          "requirement",
+          "capability",
+          "endpoint",
+          "required",
+          "status",
+          "privileges",
+          "anyOf",
+          "path",
+          "grantedOn",
+          "grantedOnTruncated",
+          "missing",
+          "note"
+        ],
+        "properties": {
+          "anyOf": {
+            "type": "boolean",
+            "description": "Whether any one of them suffices."
+          },
+          "capability": {
+            "type": "string",
+            "description": "The executor kind or read."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "The PVE method and path."
+          },
+          "grantedOn": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The token's effective-permission paths the row is satisfied on."
+          },
+          "grantedOnTruncated": {
+            "type": "boolean",
+            "description": "Whether more paths satisfied the row than `grantedOn` lists."
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The privileges still missing on the closest path in scope."
+          },
+          "note": {
+            "type": "string",
+            "description": "Why the row exists."
+          },
+          "path": {
+            "type": "string",
+            "description": "The ACL path template they are checked on."
+          },
+          "privileges": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The PVE privileges the row names."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether the tier needs it; `false` marks an opt-in sub-capability."
+          },
+          "requirement": {
+            "type": "string",
+            "description": "The table row's id (unique per PVE major)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProxmoxPrivilegeStatusDto",
+            "description": "The outcome."
+          }
+        }
+      },
+      "ProxmoxPrivilegeStatusDto": {
+        "type": "string",
+        "description": "A tier's or check's outcome.",
+        "enum": [
+          "granted",
+          "missing",
+          "unknown"
+        ]
+      },
+      "ProxmoxPrivilegeTierDto": {
+        "type": "string",
+        "description": "A Fleet capability tier.",
+        "enum": [
+          "discover",
+          "operate",
+          "destructive",
+          "lab"
+        ]
+      },
+      "ProxmoxPrivilegesDto": {
+        "type": "object",
+        "description": "Which Fleet capability tiers the account's API token can perform.",
+        "required": [
+          "accountId",
+          "tiers",
+          "effectivePermissions",
+          "warnings",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account evaluated."
+          },
+          "effectivePermissions": {
+            "type": "object",
+            "description": "The token's effective permissions as PVE reported them: ACL path →\nprivilege → propagate flag.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "boolean"
+              },
+              "propertyNames": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the report was taken (epoch millis)."
+          },
+          "pveVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PVE version read, when the read succeeded."
+          },
+          "rulesMajor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The PVE major whose rules were applied (8 or 9).",
+            "minimum": 0
+          },
+          "tiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxTierPrivilegesDto"
+            },
+            "description": "The four tiers: discover, operate, destructive, lab."
+          },
+          "unknownReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why every tier is unknown: the permissions read was refused (403),\nor the PVE version is unsupported because it has no major number\nto key the privilege table with. A major outside the table's range\nis not unknown; it is evaluated with the nearest supported rules\nand a warning."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Normalization and evaluation warnings."
           }
         }
       },
@@ -11303,6 +11733,170 @@
             "format": "int64",
             "description": "Used capacity in bytes.",
             "minimum": 0
+          }
+        }
+      },
+      "ProxmoxTaskDto": {
+        "type": "object",
+        "description": "One PVE task.",
+        "required": [
+          "upid",
+          "node",
+          "taskType",
+          "user",
+          "startedAt",
+          "status"
+        ],
+        "properties": {
+          "endedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the task ended (epoch millis), or null while it runs."
+          },
+          "exitStatus": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PVE's exit status string (`OK`, `WARNINGS: 2`, an error message),\nonce the task has one."
+          },
+          "fleetOperationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Fleet operation that started this task, or null when Fleet did\nnot start it or the caller may not read operations."
+          },
+          "node": {
+            "type": "string",
+            "description": "The node the task runs on."
+          },
+          "startedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the task started (epoch millis)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProxmoxTaskStatusDto",
+            "description": "The status."
+          },
+          "targetId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The target id (the VMID for guest tasks), or null for node-level\ntasks."
+          },
+          "taskType": {
+            "type": "string",
+            "description": "The task type, e.g. `qmstart`, `vzdump`."
+          },
+          "tokenId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The API token name when the task ran under a token (its name, never\nits secret)."
+          },
+          "upid": {
+            "type": "string",
+            "description": "The raw UPID: the task's identity, and the page cursor."
+          },
+          "user": {
+            "type": "string",
+            "description": "The user, exactly as PVE reports it."
+          }
+        }
+      },
+      "ProxmoxTaskPage": {
+        "type": "object",
+        "description": "One page of an account's task history, newest first. The page shape\n(`items`, `page`) is the standard one; the snapshot facts ride along.",
+        "required": [
+          "items",
+          "page",
+          "accountId",
+          "pveVersion",
+          "warnings",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The account that produced the snapshot."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxTaskDto"
+            },
+            "description": "The tasks on this page."
+          },
+          "observedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot was taken (epoch millis)."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the snapshot."
+          },
+          "pveVersion": {
+            "type": "string",
+            "description": "The PVE version seen."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the snapshot is missing and why: unreadable or offline nodes,\nmalformed entries, a per-node bound reached, a withheld operation\nlink. These describe the whole snapshot, so every page repeats them."
+          }
+        }
+      },
+      "ProxmoxTaskStatusDto": {
+        "type": "string",
+        "description": "A task's status, in the provider's task-status taxonomy.",
+        "enum": [
+          "running",
+          "ok",
+          "error",
+          "unknown"
+        ]
+      },
+      "ProxmoxTierPrivilegesDto": {
+        "type": "object",
+        "description": "One tier's outcome.",
+        "required": [
+          "tier",
+          "status",
+          "missing",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxPrivilegeCheckDto"
+            },
+            "description": "Every check of the tier, required and opt-in."
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProxmoxMissingPrivilegesDto"
+            },
+            "description": "The required privileges the token lacks, merged per path."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProxmoxPrivilegeStatusDto",
+            "description": "`granted` when every required check is granted."
+          },
+          "tier": {
+            "$ref": "#/components/schemas/ProxmoxPrivilegeTierDto",
+            "description": "The tier."
           }
         }
       },
@@ -13080,6 +13674,90 @@
               "fingerprint": {
                 "type": "string",
                 "description": "The host certificate's SHA-256 fingerprint."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ProxmoxPrivilegesDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Which Fleet capability tiers the account's API token can perform.",
+            "required": [
+              "accountId",
+              "tiers",
+              "effectivePermissions",
+              "warnings",
+              "observedAt"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The account evaluated."
+              },
+              "effectivePermissions": {
+                "type": "object",
+                "description": "The token's effective permissions as PVE reported them: ACL path →\nprivilege → propagate flag.",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  }
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "observedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the report was taken (epoch millis)."
+              },
+              "pveVersion": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The PVE version read, when the read succeeded."
+              },
+              "rulesMajor": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The PVE major whose rules were applied (8 or 9).",
+                "minimum": 0
+              },
+              "tiers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProxmoxTierPrivilegesDto"
+                },
+                "description": "The four tiers: discover, operate, destructive, lab."
+              },
+              "unknownReason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why every tier is unknown: the permissions read was refused (403),\nor the PVE version is unsupported because it has no major number\nto key the privilege table with. A major outside the table's range\nis not unknown; it is evaluated with the nearest supported rules\nand a warning."
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Normalization and evaluation warnings."
               }
             }
           }

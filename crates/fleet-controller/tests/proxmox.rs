@@ -1164,3 +1164,58 @@ async fn a_tampered_review_payload_is_refused() {
     assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_request");
 }
+
+#[tokio::test]
+async fn task_cancel_refuses_a_node_level_upid_with_an_empty_target() {
+    // FM-234: `Upid::parse` accepts an empty id for node-level task types
+    // (an all-guest vzdump here), but cancellation stays scoped to the
+    // reviewed guest, so such a UPID never matches and is refused before
+    // any stop reaches PVE.
+    let harness = lifecycle_harness(TaskOutcome::OkAfterOne).await;
+    let account_id = trusted_account(&harness).await;
+    let params = json!({"upid": "UPID:pve:00154000:0C6DE000:6AAFDE04:vzdump::root@pam:"});
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/task-cancel/review"),
+            json!({"node": "pve", "params": params}),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let token = body["data"]["reviewToken"].as_str().unwrap().to_owned();
+    let (status, body) = harness
+        .post(
+            &format!("/api/v1/proxmox/accounts/{account_id}/guests/101/task-cancel/run"),
+            json!({
+                "node": "pve",
+                "reviewToken": token,
+                "params": params,
+                "timeoutSeconds": 30
+            }),
+        )
+        .await;
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+    let operation_id = body["data"]["id"].as_str().unwrap().to_owned();
+    let mut last = Value::Null;
+    for _ in 0..50 {
+        let (_, body) = harness
+            .get(&format!("/api/v1/operations/{operation_id}"))
+            .await;
+        if matches!(
+            body["data"]["state"].as_str(),
+            Some("succeeded" | "failed" | "cancelled" | "timed_out")
+        ) {
+            last = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(last["data"]["state"], "failed", "{last}");
+    let error: Value = serde_json::from_str(last["data"]["errorJson"].as_str().unwrap())
+        .expect("the error is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("not the reviewed guest qemu/101")),
+        "{error}"
+    );
+}

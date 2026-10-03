@@ -1,0 +1,99 @@
+name: PVE acceptance
+
+# The M6 real-cluster acceptance suite (FM-611, #214), run by hand against the
+# live Proxmox VE targets the self-hosted runner can reach. It is not part of
+# the required CI gate and never runs on push or pull_request: it creates and
+# destroys guests on real hosts, so only someone with write access starts it.
+#
+# Configuration lives on the runner, never in this repository or in Actions
+# secrets (the workflow policy allows no secret but GITHUB_TOKEN; see
+# .github/scripts/check-workflows.mjs). The runner's local env file holds the
+# FLEET_PVE_TARGET_<NAME>_* block printed by `deploy/pve-test/pve-test env`
+# (docs/operations/proxmox-test-cluster.md, step 7). Token secrets stay in the
+# 0600 files that block points at. The suite reads them itself and redacts
+# hosts, token ids, fingerprints, node names, and addresses from its output.
+# Nothing here prints the env file or a secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Run one target only (the <NAME> of FLEET_PVE_TARGET_<NAME>_*); empty runs every configured target.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+# One run at a time: the suite owns each target's VMID range while it runs.
+concurrency:
+  group: pve-acceptance
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pve-acceptance:
+    name: Real-cluster acceptance (PVE)
+    runs-on: [self-hosted, dev-box]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-toolchain
+        with:
+          node: 'false'
+          rust: 'true'
+
+      - name: Run the suite
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          # Optional repository variable naming the runner-local env file.
+          ENV_FILE: ${{ vars.FLEET_PVE_ACCEPTANCE_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          umask 077
+          env_file="${ENV_FILE:-$HOME/.config/fleet/pve-acceptance.env}"
+          if [ ! -f "$env_file" ]; then
+            echo "::error::The runner has no acceptance env file (set the FLEET_PVE_ACCEPTANCE_ENV_FILE variable or create ~/.config/fleet/pve-acceptance.env)."
+            exit 1
+          fi
+          case "$TARGET" in
+            '') args=() ;;
+            *[!A-Z0-9_]*) echo "::error::target must be upper-case letters, digits, and underscores"; exit 2 ;;
+            *) args=(--target "$TARGET") ;;
+          esac
+          # Values only enter the environment; nothing is echoed.
+          set -a
+          # shellcheck disable=SC1090
+          . "$env_file"
+          set +a
+          export FLEET_PVE_LIVE=1
+          # The partial-node scenario runs deploy/pve-test/pve-test, which reads
+          # FLEET_PVE_TEST_ENV_FILE when the env file sets it, else its default.
+          status=0
+          cargo xtask pve-acceptance "${args[@]}" > "$RUNNER_TEMP/pve-acceptance.json" || status=$?
+          echo "PVE_ACCEPTANCE_STATUS=$status" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Record the summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="$RUNNER_TEMP/pve-acceptance.json"
+          {
+            echo "### PVE acceptance"
+            echo ""
+            echo '```json'
+            if [ -s "$summary" ]; then cat "$summary"; else echo '{"error": "the runner printed no summary"}'; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$summary" ]; then cat "$summary"; fi
+          rm -f "$summary"
+          if [ "${PVE_ACCEPTANCE_STATUS:-1}" != "0" ]; then
+            echo "::error::The acceptance suite reported failures (see the summary)."
+            exit 1
+          fi

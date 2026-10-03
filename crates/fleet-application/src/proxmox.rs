@@ -21,6 +21,8 @@
 //! nothing here mutates a PVE host.
 #![warn(missing_docs)]
 
+pub mod tasks;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -31,6 +33,8 @@ use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permiss
 use crate::machine::{GuestIdentity, MachineFilter, MachineUseCaseError, MachineView, Machines};
 use crate::operation::AuditPort;
 use fleet_core::{CapabilityFact, CapabilityStatus, SensitiveString, Timestamp};
+
+pub mod privileges;
 
 /// Binds one credential-carrying call to one account, resolving the secret
 /// just in time.
@@ -311,6 +315,10 @@ pub struct ProviderGuest {
     pub status: Option<String>,
     /// The config's MAC addresses, normalized.
     pub macs: Vec<String>,
+    /// The config's `ostype` (e.g. `win11`, `l26`): an operator-set hint,
+    /// never what the guest itself reports.
+    #[serde(default)]
+    pub ostype: Option<String>,
     /// The guest-agent view, when the guest has one (QEMU only).
     pub agent: Option<ProviderAgent>,
     /// The bounded per-surface warnings.
@@ -329,9 +337,124 @@ pub struct ProviderAgent {
     pub os_name: Option<String>,
     /// The guest's kernel release, when carried.
     pub kernel: Option<String>,
-    /// The network interfaces the agent saw.
+    /// The agent's structured OS answer, when `get-osinfo` answered.
+    #[serde(default)]
+    pub os: Option<ProviderOsInfo>,
+    /// The network interfaces the agent saw: the raw, provider-bounded
+    /// list, link-local and APIPA addresses included.
     pub interfaces: Vec<ProviderInterface>,
 }
+
+impl ProviderAgent {
+    /// The agent's usable addresses, in report order and without
+    /// duplicates: the ones [`usable_address`] accepts. Association and
+    /// the displayed address facts use only these.
+    #[must_use]
+    pub fn usable_addresses(&self) -> Vec<String> {
+        let mut usable: Vec<String> = Vec::new();
+        for address in self
+            .interfaces
+            .iter()
+            .flat_map(|interface| &interface.addresses)
+        {
+            if let Some(ip) = usable_address(address) {
+                let text = ip.to_string();
+                if !usable.contains(&text) {
+                    usable.push(text);
+                }
+            }
+        }
+        usable
+    }
+}
+
+/// The agent's `get-osinfo` answer as the application sees it. Every
+/// member is optional, exactly as the agent reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderOsInfo {
+    /// `id`: os-release `ID` on POSIX, `mswindows` on Windows.
+    pub id: Option<String>,
+    /// `name`.
+    pub name: Option<String>,
+    /// `pretty-name`; on Windows the registry `ProductName`.
+    pub pretty_name: Option<String>,
+    /// `version`; on Windows e.g. `Microsoft Windows Server 2022`.
+    pub version: Option<String>,
+    /// `version-id`; on Windows e.g. `11` or `2022`.
+    pub version_id: Option<String>,
+    /// `variant-id`; on Windows `client` or `server`.
+    pub variant_id: Option<String>,
+    /// `kernel-release`; the build number on Windows.
+    pub kernel_release: Option<String>,
+    /// `machine`, e.g. `x86_64`.
+    pub machine: Option<String>,
+}
+
+/// The OS family an agent `id` names, in the vocabulary `fleetd` reports
+/// (`std::env::consts::OS`): `windows` for qemu-ga's `mswindows`, `linux`
+/// for a known os-release `ID`. Anything else is `None` — unknown, never a
+/// guess at Linux.
+#[must_use]
+pub fn os_family(id: &str) -> Option<&'static str> {
+    // os-release `ID` values of Linux distributions (os-release(5) says
+    // `ID` is lowercase); a distribution not listed reads as unknown.
+    const LINUX_IDS: &[&str] = &[
+        "almalinux",
+        "alpine",
+        "amzn",
+        "arch",
+        "centos",
+        "debian",
+        "devuan",
+        "fedora",
+        "gentoo",
+        "kali",
+        "linuxmint",
+        "manjaro",
+        "nixos",
+        "ol",
+        "opensuse",
+        "opensuse-leap",
+        "opensuse-tumbleweed",
+        "pop",
+        "raspbian",
+        "rhel",
+        "rocky",
+        "sles",
+        "ubuntu",
+        "void",
+    ];
+    match id {
+        "mswindows" => Some("windows"),
+        id if LINUX_IDS.contains(&id) => Some("linux"),
+        _ => None,
+    }
+}
+
+/// Whether one agent-reported address is usable for association and
+/// display, and its parsed form when it is. Loopback, unspecified,
+/// multicast, IPv4 link-local (APIPA, `169.254.0.0/16`), and IPv6
+/// link-local (`fe80::/10`) addresses are not: every guest has them, so
+/// they identify nothing and reach nothing from outside the link. A
+/// `%zone` suffix (Windows prints one) is ignored; an address that does not
+/// parse is not usable.
+#[must_use]
+pub fn usable_address(raw: &str) -> Option<std::net::IpAddr> {
+    let bare = raw.split_once('%').map_or(raw, |(address, _)| address);
+    let ip = bare.parse::<std::net::IpAddr>().ok()?;
+    let unusable = ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || match ip {
+            std::net::IpAddr::V4(v4) => v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        };
+    (!unusable).then_some(ip)
+}
+
+/// The bound on the usable addresses recorded as display facts.
+const MAX_ADDRESS_FACTS: usize = 8;
 
 /// One guest network interface as the application sees it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +753,12 @@ pub struct ProxmoxAccounts {
     machines: Arc<Machines>,
     audit: Arc<dyn AuditPort>,
     events: Option<Arc<crate::events::EventHub>>,
+    /// The task-history ports (FM-609), attached by
+    /// [`ProxmoxAccounts::with_task_history`].
+    task_history: Option<tasks::TaskHistoryPorts>,
+    /// The token-permissions read (FM-604), attached with
+    /// [`ProxmoxAccounts::with_permissions`].
+    permissions: Option<Arc<dyn privileges::ProxmoxPermissionsPort>>,
 }
 
 impl ProxmoxAccounts {
@@ -653,6 +782,8 @@ impl ProxmoxAccounts {
             machines,
             audit,
             events: None,
+            task_history: None,
+            permissions: None,
         }
     }
 
@@ -1416,28 +1547,29 @@ fn association_candidate(
             });
         }
     }
-    // The guest-agent addresses against the machine endpoints' hosts. The
-    // shared reference parser strips userinfo and IPv6 brackets, so
-    // bracketed IPv6 evidence compares bare.
-    let endpoint_hosts: Vec<&str> = view
+    // The guest-agent's usable addresses against the machine endpoints'
+    // hosts. Hosts that are IP literals compare as parsed addresses.
+    // Bracketed IPv6 endpoints do not match yet: the shared reference
+    // parser truncates them (#244). Loopback, link-local, and APIPA
+    // addresses are never evidence (see `usable_address`).
+    let endpoint_ips: Vec<std::net::IpAddr> = view
         .endpoints
         .iter()
         .filter_map(|endpoint| crate::onboarding::reference_host(&endpoint.reference))
+        .filter_map(|host| host.parse().ok())
         .collect();
-    for interface in guest.agent.iter().flat_map(|agent| &agent.interfaces) {
-        for address in &interface.addresses {
-            if endpoint_hosts
-                .iter()
-                .any(|host| host.eq_ignore_ascii_case(address))
-            {
-                return Some(AssociationCandidate {
-                    machine_id: view.id.clone(),
-                    machine_name: view.name.clone(),
-                    machine_status: view.machine_status.id().to_owned(),
-                    kind: AssociationKind::AddressMatch.id().to_owned(),
-                    evidence: address.clone(),
-                });
-            }
+    for address in guest.agent.iter().flat_map(ProviderAgent::usable_addresses) {
+        if address
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| endpoint_ips.contains(&ip))
+        {
+            return Some(AssociationCandidate {
+                machine_id: view.id.clone(),
+                machine_name: view.name.clone(),
+                machine_status: view.machine_status.id().to_owned(),
+                kind: AssociationKind::AddressMatch.id().to_owned(),
+                evidence: address,
+            });
         }
     }
     // The name match: the guest's display name against the machine's name,
@@ -1457,8 +1589,9 @@ fn association_candidate(
 }
 
 /// The capability facts one guest contributes to its confirmed machine:
-/// the guest identity, the agent's availability and version, the OS and
-/// kernel when the agent answered, and the MACs. Provenance is the
+/// the guest identity, the config's `ostype` hint, the agent's availability
+/// and version, the OS, kernel, and usable addresses when the agent
+/// answered (the classified OS as `os.*`), and the MACs. Provenance is the
 /// account's observation path; every fact carries the observation time.
 #[must_use]
 fn guest_facts(guest: &ProviderGuest, pve_version: &str, now: i64) -> Vec<CapabilityFact> {
@@ -1481,6 +1614,12 @@ fn guest_facts(guest: &ProviderGuest, pve_version: &str, now: i64) -> Vec<Capabi
     if let Some(node) = &guest.node {
         push("node", Some(node.clone()), CapabilityStatus::Known);
     }
+    // The config's `ostype` is what the operator told PVE, not what the
+    // guest reports: it stays a `pve` hint, never an `os` fact.
+    if let Some(ostype) = &guest.ostype {
+        push("ostype_hint", Some(ostype.clone()), CapabilityStatus::Known);
+    }
+    let mut os_facts = Vec::new();
     match &guest.agent {
         Some(agent) if agent.online => {
             push("agent", agent.version.clone(), CapabilityStatus::Known);
@@ -1490,12 +1629,40 @@ fn guest_facts(guest: &ProviderGuest, pve_version: &str, now: i64) -> Vec<Capabi
             if let Some(kernel) = &agent.kernel {
                 push("kernel", Some(kernel.clone()), CapabilityStatus::Known);
             }
+            for (index, address) in agent
+                .usable_addresses()
+                .into_iter()
+                .take(MAX_ADDRESS_FACTS)
+                .enumerate()
+            {
+                push(
+                    &format!("address{index}"),
+                    Some(address),
+                    CapabilityStatus::Known,
+                );
+            }
+            if let Some(os) = &agent.os {
+                os_facts = agent_os_facts(os);
+            }
         }
         // A QEMU guest whose agent did not answer: unavailable is honest —
         // the guest may be off, not agentless.
         Some(_) => push("agent", None, CapabilityStatus::Unavailable),
         // LXC has no qemu-guest-agent by design: the absence is known.
         None => push("agent", None, CapabilityStatus::Unknown),
+    }
+    // The agent-reported OS, only when `get-osinfo` answered: without an
+    // answer there is no observation, and an `unknown` here would overwrite
+    // what an in-guest observer (`fleetd`, SSH inventory) knows.
+    for (name, value, status) in os_facts {
+        facts.push(CapabilityFact {
+            namespace: "os".to_owned(),
+            name: name.to_owned(),
+            value,
+            status,
+            observed_at: Timestamp::from_unix_millis(now),
+            source: source.clone(),
+        });
     }
     for (index, mac) in guest.macs.iter().enumerate() {
         facts.push(CapabilityFact {
@@ -1506,6 +1673,46 @@ fn guest_facts(guest: &ProviderGuest, pve_version: &str, now: i64) -> Vec<Capabi
             observed_at: Timestamp::from_unix_millis(now),
             source: source.clone(),
         });
+    }
+    facts
+}
+
+/// The `os` facts one agent OS answer supports: `family` when the `id` is
+/// recognized, and `name`, `version`, and `variant` when the answer carries
+/// them. An absent or unrecognized `id` is no family observation: an
+/// `unknown` record would overwrite what an in-guest observer knows.
+///
+/// On Windows, qemu-ga's `pretty-name` is the registry `ProductName`, which
+/// Windows 11 still spells "Windows 10 …"; its `version` comes from
+/// qemu-ga's build-number table, so it names the guest. `N/A` is what
+/// qemu-ga prints when that table has no row, and is no value.
+fn agent_os_facts(os: &ProviderOsInfo) -> Vec<(&'static str, Option<String>, CapabilityStatus)> {
+    let present = |value: &Option<String>| {
+        value
+            .as_deref()
+            .filter(|value| !value.is_empty() && *value != "N/A")
+            .map(str::to_owned)
+    };
+    let family = os.id.as_deref().and_then(os_family);
+    let mut facts = Vec::new();
+    if let Some(family) = family {
+        facts.push(("family", Some(family.to_owned()), CapabilityStatus::Known));
+    }
+    let name = if family == Some("windows") {
+        present(&os.version)
+            .or_else(|| present(&os.pretty_name))
+            .or_else(|| present(&os.name))
+    } else {
+        present(&os.pretty_name).or_else(|| present(&os.name))
+    };
+    if let Some(name) = name {
+        facts.push(("name", Some(name), CapabilityStatus::Known));
+    }
+    if let Some(version) = present(&os.version_id).or_else(|| present(&os.version)) {
+        facts.push(("version", Some(version), CapabilityStatus::Known));
+    }
+    if let Some(variant) = present(&os.variant_id) {
+        facts.push(("variant", Some(variant), CapabilityStatus::Known));
     }
     facts
 }

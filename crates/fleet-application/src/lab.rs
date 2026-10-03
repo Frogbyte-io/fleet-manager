@@ -227,6 +227,92 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn list(&self) -> Result<Vec<ProvisionRecord>, String>;
+    /// Reserves the clone target (node and VMID) on a `provisioning` record
+    /// that has not started its clone yet, in one transaction, before the
+    /// clone is requested (the saga rule, issue #220). The reservation is
+    /// refused when another `provisioning` record already holds the VMID.
+    /// A record that already holds a reservation keeps it: the returned
+    /// record carries whatever target is stored.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the record is unknown, is not `provisioning`, already
+    /// started its clone, or the backend errors.
+    async fn reserve_clone_target(
+        &self,
+        record_id: &str,
+        node: &str,
+        vmid: u32,
+    ) -> Result<CloneTargetReservation, String>;
+}
+
+/// The outcome of [`ProvisionPort::reserve_clone_target`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CloneTargetReservation {
+    /// The record holds a reservation; it carries the stored node and VMID.
+    Reserved(ProvisionRecord),
+    /// Another in-flight record already holds the VMID.
+    HeldBy {
+        /// The record that holds the VMID.
+        record_id: String,
+    },
+}
+
+/// The recorded image build artifacts: the Proxmox template VMIDs that
+/// `image.build` operations produced. The executor clones from these and
+/// the cleanup guard refuses to destroy the promoted ones.
+///
+/// A build is not tied to a Fleet Proxmox account (Packer uses its own
+/// credentials), so artifacts are keyed by image version only. The
+/// executor therefore requires the artifact VMID to be a live template in
+/// the cluster it clones in.
+#[async_trait]
+pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
+    /// The template VMID recorded by the image version's latest successful
+    /// build. `None` when the version has no successful build, or when
+    /// that latest build recorded no artifact: an older build is never a
+    /// fallback.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read or the recorded artifact is not
+    /// a VMID.
+    async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String>;
+    /// The template VMIDs recorded by the successful builds of every
+    /// currently promoted image version.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store cannot be read.
+    async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String>;
+}
+
+/// The Lab cleanup guard (issue #220): a VMID that is a template, or that
+/// matches a promoted image version's recorded build artifact, is never
+/// destroyed by Lab cleanup, whatever a provision record claims. Fleet has
+/// no Lab destroy path yet; the cleanup that FM-711 adds must call this
+/// with the cluster's live truth before it deletes anything. The
+/// provision executor already applies it before it resumes a record.
+///
+/// # Errors
+///
+/// Returns the refusal reason.
+pub fn guard_destroy_target(
+    vmid: u32,
+    is_template: bool,
+    promoted_template_vmids: &[u32],
+) -> Result<(), String> {
+    if is_template {
+        return Err(format!(
+            "VMID {vmid} is a template; Lab cleanup never destroys a template"
+        ));
+    }
+    if promoted_template_vmids.contains(&vmid) {
+        return Err(format!(
+            "VMID {vmid} is a promoted image's recorded build artifact; Lab cleanup never destroys an image template"
+        ));
+    }
+    Ok(())
 }
 
 /// A lease creation request.
@@ -1440,5 +1526,25 @@ impl Lab {
                 context: "audit",
                 detail,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guard_destroy_target;
+
+    #[test]
+    fn the_cleanup_guard_refuses_templates_and_image_artifacts() {
+        assert!(
+            guard_destroy_target(9000, true, &[])
+                .unwrap_err()
+                .contains("is a template")
+        );
+        assert!(
+            guard_destroy_target(9000, false, &[120, 9000])
+                .unwrap_err()
+                .contains("build artifact")
+        );
+        assert!(guard_destroy_target(9001, false, &[120, 9000]).is_ok());
     }
 }

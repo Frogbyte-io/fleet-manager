@@ -271,6 +271,8 @@ This milestone may execute in parallel with M3/M4 after M2 provider and operatio
 
 ### M6 — Proxmox infrastructure provider
 
+Status: complete (2026-10-02 — FM-604–FM-614 closed; both-major and physical-host [FM-613 acceptance evidence](https://github.com/Frogbyte-io/fleet-manager/issues/215) recorded in the [endpoint compatibility matrix](research/proxmox-compatibility.md)).
+
 Outcome: Fleet discovers Proxmox clusters and safely performs bounded QEMU/LXC lifecycle operations.
 
 - Multi-account authentication, TLS trust/pinning, health, privilege diagnostics, and an API compatibility matrix covering PVE 8.x and 9.x.

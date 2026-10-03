@@ -1,0 +1,78 @@
+{
+ "data": {
+  "result": [
+   {
+    "name": "Ethernet",
+    "hardware-address": "bc:24:11:0a:02:01",
+    "ip-addresses": [
+     {
+      "ip-address-type": "ipv6",
+      "ip-address": "2001:db8::201",
+      "prefix": 64
+     },
+     {
+      "ip-address-type": "ipv6",
+      "ip-address": "fe80::be24:11ff:fe0a:201%6",
+      "prefix": 64
+     },
+     {
+      "ip-address-type": "ipv4",
+      "ip-address": "192.0.2.201",
+      "prefix": 24
+     }
+    ],
+    "statistics": {
+     "rx-bytes": 1000,
+     "rx-dropped": 0,
+     "rx-errs": 0,
+     "rx-packets": 10,
+     "tx-bytes": 2000,
+     "tx-dropped": 0,
+     "tx-errs": 0,
+     "tx-packets": 20
+    }
+   },
+   {
+    "name": "Ethernet 2",
+    "hardware-address": "bc:24:11:0a:02:02",
+    "ip-addresses": [
+     {
+      "ip-address-type": "ipv6",
+      "ip-address": "fe80::be24:11ff:fe0a:202%12",
+      "prefix": 64
+     },
+     {
+      "ip-address-type": "ipv4",
+      "ip-address": "169.254.10.20",
+      "prefix": 16
+     }
+    ],
+    "statistics": {
+     "rx-bytes": 1000,
+     "rx-dropped": 0,
+     "rx-errs": 0,
+     "rx-packets": 10,
+     "tx-bytes": 2000,
+     "tx-dropped": 0,
+     "tx-errs": 0,
+     "tx-packets": 20
+    }
+   },
+   {
+    "name": "Loopback Pseudo-Interface 1",
+    "ip-addresses": [
+     {
+      "ip-address-type": "ipv6",
+      "ip-address": "::1",
+      "prefix": 128
+     },
+     {
+      "ip-address-type": "ipv4",
+      "ip-address": "127.0.0.1",
+      "prefix": 8
+     }
+    ]
+   }
+  ]
+ }
+}

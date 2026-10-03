@@ -1,0 +1,8 @@
+{
+ "data": {
+  "result": {
+   "id": "alpine",
+   "kernel-release": "6.6.58-0-virt"
+  }
+ }
+}

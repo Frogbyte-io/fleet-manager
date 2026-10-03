@@ -1,0 +1,16 @@
+{
+ "data": {
+  "result": {
+   "id": "mswindows",
+   "name": "Microsoft Windows",
+   "pretty-name": "Windows 10 Pro",
+   "version": "Microsoft Windows 11",
+   "version-id": "11",
+   "variant": "client",
+   "variant-id": "client",
+   "kernel-release": "26100",
+   "kernel-version": "10.0",
+   "machine": "x86_64"
+  }
+ }
+}

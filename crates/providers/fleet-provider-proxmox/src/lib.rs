@@ -22,6 +22,12 @@
 //! bounds is a payload error, not silent truncation.
 #![warn(missing_docs)]
 
+mod tasks;
+
+pub use tasks::{
+    MAX_TASKS_PER_NODE, PveTaskHistory, PveTaskOutcome, PveTaskQuery, PveTaskSource, PveTaskSummary,
+};
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +39,13 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use sha2::Digest;
+
+mod permissions;
+
+pub use permissions::{
+    MAX_PERMISSION_PATHS, MAX_PRIVILEGES_PER_PATH, MAX_VMID_CHECKS, PveTokenPermissions,
+    concrete_vmids, normalize_token_permissions,
+};
 
 /// The default PVE API port.
 pub const DEFAULT_PORT: u16 = 8006;
@@ -576,11 +589,59 @@ pub struct PveGuestAgent {
     pub os_name: Option<String>,
     /// The guest's kernel release, when `get-osinfo` carried one.
     pub kernel: Option<String>,
+    /// The whole `get-osinfo` answer, when it answered. Classifying it
+    /// (e.g. `mswindows` → Windows) is an application rule.
+    #[serde(default)]
+    pub os: Option<PveGuestOs>,
     /// The network interfaces the agent saw, when
-    /// `network-get-interfaces` answered. MACs are normalized
-    /// (lowercase, colon-separated); addresses are bare.
+    /// `network-get-interfaces` answered: the raw list, bounded to
+    /// [`MAX_AGENT_INTERFACES`]. MACs are normalized (lowercase,
+    /// colon-separated); addresses are as the agent printed them, minus
+    /// loopback, so link-local and APIPA addresses (and a Windows `%zone`
+    /// suffix) stay. Which addresses are usable is an application rule.
     pub interfaces: Vec<PveGuestInterface>,
 }
+
+/// The QEMU Guest Agent's `guest-get-osinfo` answer, every member bounded
+/// and optional (QAPI omits absent members). On POSIX guests the members
+/// come from os-release(5); on Windows `id` is `mswindows`, `name` is
+/// `Microsoft Windows`, `pretty-name` is the registry `ProductName`,
+/// `version`/`version-id` come from qemu-ga's build-number table, and
+/// `variant`/`variant-id` are `client` or `server`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PveGuestOs {
+    /// `id`, e.g. `debian` or `mswindows`.
+    pub id: Option<String>,
+    /// `name`, e.g. `Microsoft Windows`.
+    pub name: Option<String>,
+    /// `pretty-name`.
+    pub pretty_name: Option<String>,
+    /// `version`, e.g. `Microsoft Windows Server 2022`.
+    pub version: Option<String>,
+    /// `version-id`, e.g. `13` or `2022`.
+    pub version_id: Option<String>,
+    /// `variant`.
+    pub variant: Option<String>,
+    /// `variant-id`, e.g. `server` or `client` on Windows.
+    pub variant_id: Option<String>,
+    /// `kernel-release`: the kernel release, or the build number on
+    /// Windows.
+    pub kernel_release: Option<String>,
+    /// `kernel-version`: e.g. `10.0` on Windows.
+    pub kernel_version: Option<String>,
+    /// `machine`, e.g. `x86_64`.
+    pub machine: Option<String>,
+}
+
+/// The bound on the interfaces kept from one agent answer. Windows guests
+/// list every adapter (tunnels, Bluetooth, Hyper-V switches), so the bound
+/// is generous; overflow is a warning, never silence.
+pub const MAX_AGENT_INTERFACES: usize = 64;
+/// The bound on the addresses kept per agent interface.
+pub const MAX_INTERFACE_ADDRESSES: usize = 32;
+/// The bound on one `get-osinfo` member.
+const MAX_OS_FIELD_CHARS: usize = 128;
 
 /// One network interface as the guest agent saw it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -605,6 +666,11 @@ pub struct PveGuest {
     /// The MAC addresses from the guest config's `netN` entries, normalized
     /// lowercase colon-separated. LXC guests carry theirs in `config` too.
     pub macs: Vec<String>,
+    /// The config's `ostype` (e.g. `win11`, `l26`), when the config was
+    /// read and carried a well-formed one. An operator-set hint, not what
+    /// the guest reports.
+    #[serde(default)]
+    pub ostype: Option<String>,
     /// The QEMU Guest Agent view; `None` only for LXC (no
     /// qemu-guest-agent by design). For QEMU the agent is always probed:
     /// per-surface availability lives inside, and a failed config read
@@ -680,6 +746,63 @@ impl LifecycleAction {
     }
 }
 
+/// The task types PVE starts without a target id. Only these may carry an
+/// empty UPID `id` field. A type missing here with an empty id is refused
+/// by [`Upid::parse`], which the task history reports as a per-task
+/// warning instead of a silent row.
+///
+/// The list is every `$rpcenv->fork_worker(<type>, undef | '' | "", ...)`
+/// call in the PVE sources, checked against the `master` branches of
+/// `pve-manager`, `qemu-server`, `pve-container`, `pve-storage`,
+/// `pve-cluster`, and `pve-network` (October 2026). To re-check it, grep
+/// those repositories for `fork_worker` and look for an undefined or
+/// empty second argument:
+///
+/// - `pve-manager`: `aptupdate`, `startall`/`stopall`/`suspendall`/
+///   `migrateall`, the PVE 9 cluster `bulk-*` actions, `vzdump` (its id is
+///   the VMID only for a single-guest backup), `vncshell` (also what the
+///   node `termproxy` endpoint starts), `spiceshell`, `cephsetflags`, and
+///   the ACME account (`acme{register,update,refresh,deactivate}`) and
+///   certificate (`acme{newcert,renew,revoke}`) tasks.
+/// - `pve-storage`: `imgcopy`, `imgdel`, `pbs-download`.
+/// - `pve-cluster`: `clusterjoin`.
+/// - `pve-network`: `reloadnetworkall`.
+///
+/// The `srv*` service tasks pass the service name today, but they are
+/// node-scoped and never name a guest, so an empty id on one is not a
+/// guest task missing its VMID; they stay accepted.
+pub const NODE_LEVEL_TASK_TYPES: &[&str] = &[
+    "acmedeactivate",
+    "acmenewcert",
+    "acmerefresh",
+    "acmeregister",
+    "acmerenew",
+    "acmerevoke",
+    "acmeupdate",
+    "aptupdate",
+    "bulk-migrate",
+    "bulk-shutdown",
+    "bulk-start",
+    "bulk-suspend",
+    "cephsetflags",
+    "clusterjoin",
+    "imgcopy",
+    "imgdel",
+    "migrateall",
+    "pbs-download",
+    "reloadnetworkall",
+    "spiceshell",
+    "srvreload",
+    "srvrestart",
+    "srvstart",
+    "srvstop",
+    "startall",
+    "stopall",
+    "suspendall",
+    "vncshell",
+    "vzdump",
+];
+
 /// A parsed UPID. Fleet parses the string itself — the node it polls comes
 /// from the parse, never from trust in the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -688,7 +811,8 @@ pub struct Upid {
     pub node: String,
     /// The task type, e.g. `qmstart`.
     pub task_type: String,
-    /// The task's target id (the VMID for guest tasks).
+    /// The task's target id (the VMID for guest tasks); empty only for
+    /// the [`NODE_LEVEL_TASK_TYPES`].
     pub target: String,
     /// The user the task runs as.
     pub user: String,
@@ -733,12 +857,22 @@ impl Upid {
             ("pstart", pstart),
             ("starttime", starttime),
             ("type", task_type),
-            ("id", target),
             ("user", user),
         ] {
             if part.is_empty() {
                 return Err(format!("the UPID's {label} field is empty"));
             }
+        }
+        // The `id` field is legitimately empty only for node-level tasks
+        // (`aptupdate`, `srvreload`, an all-guest `vzdump`): PVE encodes
+        // them as `...:<type>::<user>:`. Any other task type must name its
+        // target, so a guest task with no VMID is refused rather than
+        // read as a node-level one.
+        if target.is_empty() && !NODE_LEVEL_TASK_TYPES.contains(&task_type) {
+            return Err(format!(
+                "the UPID's id field is empty, but {:?} is not a node-level task type",
+                task_type.chars().take(64).collect::<String>()
+            ));
         }
         if !trailing.is_empty() {
             return Err("the UPID carries trailing material".to_owned());
@@ -802,6 +936,21 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
         &self,
         request: PveHttpRequest,
     ) -> Result<PveGuestDiscovery, PveApiError>;
+
+    /// Reads the calling token's own effective permissions
+    /// (`GET /access/permissions`, FM-604) with the PVE version they apply
+    /// to. Every principal may read its own permissions, so a refusal here
+    /// is itself evidence. Read-only and bounded; unknown privilege names
+    /// are kept, not rejected.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`] on auth, privilege, HTTP, payload, or
+    /// transport failures.
+    async fn token_permissions(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveTokenPermissions, PveApiError>;
 
     /// Runs one lifecycle action on one QEMU guest, returning the parsed
     /// UPID of the task PVE started. Read-only until this point; this is
@@ -1016,23 +1165,7 @@ impl ProxmoxClient {
         request: &PveHttpRequest,
     ) -> Result<(String, Vec<serde_json::Value>), PveApiError> {
         // The version first: it anchors provenance and proves the trust.
-        let version_request = PveHttpRequest {
-            path: "/api2/json/version".to_owned(),
-            ..request.clone()
-        };
-        let version_data = self.call(version_request).await?;
-        let version = version_data
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .chars()
-            .take(32)
-            .collect::<String>();
-        if version.is_empty() {
-            return Err(PveApiError::InvalidPayload {
-                detail: "the version payload carries no version string".to_owned(),
-            });
-        }
+        let version = self.read_version(request).await?;
         let resources_request = PveHttpRequest {
             path: "/api2/json/cluster/resources".to_owned(),
             ..request.clone()
@@ -1052,6 +1185,30 @@ impl ProxmoxClient {
             }
         };
         Ok((version, entries))
+    }
+
+    /// The bounded PVE version string (`GET /version`, which every
+    /// authenticated principal may read).
+    async fn read_version(&self, request: &PveHttpRequest) -> Result<String, PveApiError> {
+        let version_request = PveHttpRequest {
+            path: "/api2/json/version".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request.clone()
+        };
+        let version_data = self.call(version_request).await?;
+        let version = version_data
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(32)
+            .collect::<String>();
+        if version.is_empty() {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the version payload carries no version string".to_owned(),
+            });
+        }
+        Ok(version)
     }
 
     async fn call(&self, request: PveHttpRequest) -> Result<serde_json::Value, PveApiError> {
@@ -1317,8 +1474,12 @@ impl ProxmoxSource for ProxmoxClient {
             };
             match self.call(config_request.clone()).await {
                 Ok(config) => {
-                    let (macs, config_warnings) = config_macs(&config);
+                    let (macs, mut config_warnings) = config_macs(&config);
                     guest.macs = macs;
+                    match config_ostype(&config) {
+                        Ok(ostype) => guest.ostype = ostype,
+                        Err(warning) => config_warnings.push(warning),
+                    }
                     for warning in config_warnings {
                         guest
                             .warnings
@@ -1352,6 +1513,59 @@ impl ProxmoxSource for ProxmoxClient {
             guests,
             warnings,
         })
+    }
+
+    async fn token_permissions(
+        &self,
+        request: PveHttpRequest,
+    ) -> Result<PveTokenPermissions, PveApiError> {
+        // The version keys the privilege table (PVE 9 split VM.Monitor),
+        // so it is read first; both reads go through the same pinned
+        // request, never an unpinned one.
+        let version = self.read_version(&request).await?;
+        let permissions_request = PveHttpRequest {
+            path: "/api2/json/access/permissions".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request.clone()
+        };
+        let data = self.call(permissions_request).await?;
+        let mut permissions = normalize_token_permissions(version, &data)?;
+        // A grant on one concrete /vms/{id} is a usable clone target only
+        // while that VMID is free. `/cluster/nextid?vmid=` answers that for
+        // any caller (`user => 'all'` on 8.x and 9.x): 200 when free, 400
+        // when the VMID exists or is invalid. Any other outcome fails the
+        // read like every other source error. The checks run concurrently,
+        // bounded like discovery's per-node reads.
+        let vmids = concrete_vmids(&permissions.paths);
+        if vmids.len() > MAX_VMID_CHECKS {
+            permissions.warnings.push(format!(
+                "{} VMID paths were not checked for being free (the first {MAX_VMID_CHECKS} were); they don't count as clone targets",
+                vmids.len() - MAX_VMID_CHECKS
+            ));
+        }
+        let checks =
+            futures_util::stream::iter(vmids.into_iter().take(MAX_VMID_CHECKS).map(|vmid| {
+                let nextid_request = PveHttpRequest {
+                    path: format!("/api2/json/cluster/nextid?vmid={vmid}"),
+                    method: PveHttpMethod::Get,
+                    ..request.clone()
+                };
+                async move {
+                    match self.call(nextid_request).await {
+                        Ok(_) => Ok((vmid, false)),
+                        Err(PveApiError::Http { status: 400, .. }) => Ok((vmid, true)),
+                        Err(error) => Err(error),
+                    }
+                }
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        for check in checks {
+            let (vmid, in_use) = check?;
+            permissions.vmids_in_use.insert(vmid, in_use);
+        }
+        Ok(permissions)
     }
 
     async fn guest_lifecycle(
@@ -1614,6 +1828,27 @@ fn config_macs(config: &serde_json::Value) -> (Vec<String>, Vec<String>) {
     (macs, warnings)
 }
 
+/// The config's `ostype`: an enum on both majors (`qemu-server`
+/// `PVE/QemuServer.pm`: `other wxp w2k w2k3 w2k8 wvista win7 win8 win10
+/// win11 l24 l26 solaris`; `pve-container` uses distribution names). The
+/// value is kept verbatim when it is a short lowercase token; anything else
+/// is a warning, never a guess.
+fn config_ostype(config: &serde_json::Value) -> Result<Option<String>, String> {
+    match config.get("ostype") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value))
+            if !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) =>
+        {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err("the ostype entry is not a recognizable OS type".to_owned()),
+    }
+}
+
 /// Normalizes a MAC candidate: `key=AA:BB:…` or bare, lowercase
 /// colon-separated, only when it is six hex pairs.
 #[must_use]
@@ -1689,14 +1924,35 @@ impl ProxmoxClient {
             Ok(data) => {
                 let result = data.get("result").cloned().unwrap_or(data);
                 if let Some(interfaces) = result.as_array() {
+                    let mut dropped = 0_usize;
                     for interface in interfaces {
                         match normalize_interface(interface) {
-                            Ok(Some(interface)) => agent.interfaces.push(interface),
+                            Ok(Some(_)) if agent.interfaces.len() >= MAX_AGENT_INTERFACES => {
+                                dropped += 1;
+                            }
+                            Ok(Some(mut interface)) => {
+                                if interface.addresses.len() > MAX_INTERFACE_ADDRESSES {
+                                    warnings.push(format!(
+                                        "guest qemu/{vmid}: interface {} reported {} addresses; \
+                                         kept the first {MAX_INTERFACE_ADDRESSES}",
+                                        interface.name,
+                                        interface.addresses.len()
+                                    ));
+                                    interface.addresses.truncate(MAX_INTERFACE_ADDRESSES);
+                                }
+                                agent.interfaces.push(interface);
+                            }
                             Ok(None) => {}
                             Err(detail) => {
                                 warnings.push(format!("guest qemu/{vmid}: {detail}"));
                             }
                         }
+                    }
+                    if dropped > 0 {
+                        warnings.push(format!(
+                            "guest qemu/{vmid}: the agent reported {dropped} interfaces over the \
+                             {MAX_AGENT_INTERFACES}-interface bound; they were not kept"
+                        ));
                     }
                 }
             }
@@ -1722,6 +1978,7 @@ impl ProxmoxClient {
                     .get("kernel-release")
                     .and_then(serde_json::Value::as_str)
                     .map(|value| value.chars().take(128).collect());
+                agent.os = normalize_osinfo(&result);
             }
             Err(error) => {
                 warnings.push(format!(
@@ -1756,6 +2013,40 @@ impl ProxmoxClient {
             .collect())
     }
 
+    /// The cluster's next free VMID (`GET /cluster/nextid`). PVE picks the
+    /// lowest free VMID inside the `datacenter.cfg` `next-id` range
+    /// (`lower` inclusive, `upper` exclusive; default 100..1000000), so an
+    /// operator reserves Fleet's clone targets there. Any caller may read
+    /// it (`user => 'all'`). The answer only reflects the moment of the
+    /// read: the caller reserves the VMID before it uses it.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including an answer that is not a VMID.
+    pub async fn next_vmid(&self, request: PveHttpRequest) -> Result<u32, PveApiError> {
+        let nextid_request = PveHttpRequest {
+            path: "/api2/json/cluster/nextid".to_owned(),
+            method: PveHttpMethod::Get,
+            ..request
+        };
+        let data = self.call(nextid_request).await?;
+        // PVE declares an integer but its JSON formatter may emit it as a
+        // string; both shapes are accepted, nothing else is.
+        let vmid = match &data {
+            serde_json::Value::Number(number) => number.as_u64(),
+            serde_json::Value::String(text) => text.parse::<u64>().ok(),
+            _ => None,
+        }
+        .and_then(|vmid| u32::try_from(vmid).ok())
+        .filter(|vmid| *vmid >= 100);
+        vmid.ok_or_else(|| PveApiError::InvalidPayload {
+            detail: format!(
+                "the nextid answer is not a VMID (it is a {})",
+                type_name_of(&data)
+            ),
+        })
+    }
+
     /// Reads one task's status.
     async fn task_status_impl(
         &self,
@@ -1770,7 +2061,26 @@ impl ProxmoxClient {
             ),
             ..request.clone()
         };
-        let data = self.call(status_request).await?;
+        let data = match self.call(status_request).await {
+            Ok(data) => data,
+            // A task the node no longer knows (rotated out of its task
+            // index) is a 400 parameter error whose `errors.upid` reads
+            // "no such task" on 8.x and 9.x (`read_task_status` in
+            // pve-manager's `PVE/API2/Tasks.pm`): honest uncertainty.
+            Err(PveApiError::Http {
+                status: 400,
+                detail,
+            }) if serde_json::from_str::<serde_json::Value>(&detail)
+                .ok()
+                .as_ref()
+                .and_then(|body| body.pointer("/errors/upid"))
+                .and_then(serde_json::Value::as_str)
+                == Some("no such task") =>
+            {
+                return Ok(TaskStatus::Unknown);
+            }
+            Err(error) => return Err(error),
+        };
         // The task-status payload: `status: running|stopped`,
         // `exitstatus: OK|ERROR ...`. `data: null` means the task entry is
         // unknown to the node — honest uncertainty.
@@ -1793,6 +2103,32 @@ impl ProxmoxClient {
             _ => Ok(TaskStatus::Unknown),
         }
     }
+}
+
+/// Decodes a `guest-get-osinfo` result. `None` when the answer is not an
+/// object; a member that is not a string or is over the bound is dropped
+/// rather than truncated, so a classification never reads an altered id.
+fn normalize_osinfo(result: &serde_json::Value) -> Option<PveGuestOs> {
+    result.as_object()?;
+    let member = |key: &str| {
+        result
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.chars().count() <= MAX_OS_FIELD_CHARS)
+            .map(str::to_owned)
+    };
+    Some(PveGuestOs {
+        id: member("id"),
+        name: member("name"),
+        pretty_name: member("pretty-name"),
+        version: member("version"),
+        version_id: member("version-id"),
+        variant: member("variant"),
+        variant_id: member("variant-id"),
+        kernel_release: member("kernel-release"),
+        kernel_version: member("kernel-version"),
+        machine: member("machine"),
+    })
 }
 
 /// Normalizes one agent network interface. `Ok(None)` skips loopback-style
@@ -1822,6 +2158,19 @@ fn normalize_interface(interface: &serde_json::Value) -> Result<Option<PveGuestI
                 .get("ip-address")
                 .and_then(serde_json::Value::as_str)
             {
+                // Every guest has `127.0.0.1`/`::1`; as address evidence a
+                // loopback address would match any machine registered at
+                // loopback. Windows prints IPv6 with a `%zone` suffix
+                // (`WSAAddressToString`), so the zone is ignored here.
+                if text
+                    .split('%')
+                    .next()
+                    .unwrap_or(text)
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+                {
+                    continue;
+                }
                 let bounded = text.chars().take(64).collect::<String>();
                 if !bounded.is_empty() {
                     addresses.push(bounded);
@@ -1907,7 +2256,10 @@ fn normalize_resource(entry: &serde_json::Value) -> Result<Option<PveResource>, 
         ("qemu", true) => "qemu-template",
         ("lxc", _) => "lxc",
         ("storage", _) => "storage",
-        ("sdn" | "pool", _) => return Ok(None),
+        // PVE 9.x lists each node's SDN zones and fabrics as `network` rows
+        // (at least the default `localnetwork` zone per node); like `sdn`
+        // and `pool`, they are not resources Fleet manages.
+        ("sdn" | "pool" | "network", _) => return Ok(None),
         (other, _) => {
             return Err(format!(
                 "entry {id} has an unrecognized type {other:?} (reported honestly, not coerced)"
@@ -2030,6 +2382,12 @@ mod tests {
         let sdn = serde_json::json!({"id": "sdn/zone1", "type": "sdn"});
         assert!(normalize_resource(&sdn).unwrap().is_none());
 
+        let network = serde_json::json!({
+            "id": "network/n1/zone/localnetwork", "network": "localnetwork",
+            "network-type": "zone", "node": "n1", "status": "ok", "type": "network"
+        });
+        assert!(normalize_resource(&network).unwrap().is_none());
+
         let mystery = serde_json::json!({"id": "weird/1", "type": "mystery"});
         let error = normalize_resource(&mystery).unwrap_err();
         assert!(error.contains("unrecognized type"), "{error}");
@@ -2116,6 +2474,34 @@ mod tests {
         assert!(Upid::parse("UPID:pve:0015:0C6D:6AAF:qmreboot:101:").is_err());
         // A field is empty: refused.
         assert!(Upid::parse("UPID:pve::0C6DF532:6AAFE1EC:qmreboot:101:user:").is_err());
+        assert!(Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101::").is_err());
+        // Except the id: node-level tasks carry none.
+        let node_task =
+            Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:aptupdate::root@pam:").unwrap();
+        assert_eq!(node_task.target, "");
+        assert_eq!(node_task.task_type, "aptupdate");
+        for task_type in NODE_LEVEL_TASK_TYPES {
+            let raw = format!("UPID:pve:0015523F:0C6DF532:6AAFE1EC:{task_type}::root@pam:");
+            assert_eq!(Upid::parse(&raw).unwrap().target, "", "{task_type}");
+        }
+        // The list stays sorted and free of duplicates, so a re-check
+        // against the PVE sources is a plain diff.
+        assert!(
+            NODE_LEVEL_TASK_TYPES
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "{NODE_LEVEL_TASK_TYPES:?}"
+        );
+        // A guest task type with an empty id is not a node-level task.
+        for task_type in ["qmstart", "qmreboot", "qmclone", "vzstart", "unknowntype"] {
+            let raw = format!("UPID:pve:0015523F:0C6DF532:6AAFE1EC:{task_type}::root@pam:");
+            let error = Upid::parse(&raw).unwrap_err();
+            assert!(error.contains("not a node-level task type"), "{error}");
+        }
+        // A node-level type may still name a target (a single-guest vzdump).
+        let single =
+            Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:vzdump:101:root@pam:").unwrap();
+        assert_eq!(single.target, "101");
         // Trailing material: refused.
         assert!(
             Upid::parse("UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmreboot:101:user:extra").is_err()
@@ -2177,12 +2563,79 @@ mod tests {
                 {"ip-address": "127.0.0.1", "ip-address-type": "ipv4", "prefix": 8}
             ]
         });
-        // Loopback carries a MAC (all zeros) and an address: it lands, and
-        // the application layer decides its evidence weight.
-        assert!(normalize_interface(&loopback).unwrap().is_some());
+        // Loopback carries only the all-zero MAC and loopback addresses:
+        // neither is association evidence, so the interface is skipped.
+        assert!(normalize_interface(&loopback).unwrap().is_none());
 
         let nameless = serde_json::json!({"hardware-address": "BC:24:11:97:DB:A8"});
         assert!(normalize_interface(&nameless).is_err());
+    }
+
+    #[test]
+    fn windows_interfaces_keep_link_local_and_skip_the_pseudo_loopback() {
+        // qemu-ga on Windows omits `hardware-address` when the adapter has
+        // no physical address and prints IPv6 with a `%zone` suffix.
+        let loopback = serde_json::json!({
+            "name": "Loopback Pseudo-Interface 1",
+            "ip-addresses": [
+                {"ip-address": "::1", "ip-address-type": "ipv6", "prefix": 128},
+                {"ip-address": "127.0.0.1", "ip-address-type": "ipv4", "prefix": 8}
+            ]
+        });
+        assert!(normalize_interface(&loopback).unwrap().is_none());
+
+        let ethernet = serde_json::json!({
+            "name": "Ethernet 2",
+            "hardware-address": "bc:24:11:0a:02:02",
+            "ip-addresses": [
+                {"ip-address": "fe80::be24:11ff:fe0a:202%12", "ip-address-type": "ipv6", "prefix": 64},
+                {"ip-address": "169.254.10.20", "ip-address-type": "ipv4", "prefix": 16}
+            ]
+        });
+        let normalized = normalize_interface(&ethernet).unwrap().unwrap();
+        assert_eq!(normalized.name, "Ethernet 2");
+        // The raw list keeps them; usability is the application's rule.
+        assert_eq!(
+            normalized.addresses,
+            ["fe80::be24:11ff:fe0a:202%12", "169.254.10.20"]
+        );
+    }
+
+    #[test]
+    fn osinfo_members_decode_bounded_and_unclassified() {
+        let windows = serde_json::json!({
+            "id": "mswindows",
+            "name": "Microsoft Windows",
+            "pretty-name": "Windows Server 2022 Standard",
+            "version": "Microsoft Windows Server 2022",
+            "version-id": "2022",
+            "variant": "server",
+            "variant-id": "server",
+            "kernel-release": "20348",
+            "kernel-version": "10.0",
+            "machine": "x86_64"
+        });
+        let os = normalize_osinfo(&windows).unwrap();
+        assert_eq!(os.id.as_deref(), Some("mswindows"));
+        assert_eq!(os.version_id.as_deref(), Some("2022"));
+        assert_eq!(os.variant_id.as_deref(), Some("server"));
+        assert_eq!(os.kernel_version.as_deref(), Some("10.0"));
+
+        let odd = serde_json::json!({"id": 7, "name": "x".repeat(129)});
+        assert_eq!(normalize_osinfo(&odd), Some(PveGuestOs::default()));
+        assert_eq!(normalize_osinfo(&serde_json::json!("nope")), None);
+    }
+
+    #[test]
+    fn config_ostype_is_kept_verbatim_or_warned() {
+        let config = |value: serde_json::Value| serde_json::json!({ "ostype": value });
+        assert_eq!(
+            config_ostype(&config(serde_json::json!("win11"))),
+            Ok(Some("win11".to_owned()))
+        );
+        assert_eq!(config_ostype(&serde_json::json!({})), Ok(None));
+        assert!(config_ostype(&config(serde_json::json!("Win 11"))).is_err());
+        assert!(config_ostype(&config(serde_json::json!(11))).is_err());
     }
 
     #[test]

@@ -1,0 +1,23 @@
+{
+ "data": {
+  "digest": "0000000000000000000000000000000000000000",
+  "name": "win-stopped-01",
+  "ostype": "win11",
+  "machine": "pc-q35-9.2+pve1",
+  "bios": "ovmf",
+  "cpu": "x86-64-v2-AES",
+  "cores": 4,
+  "memory": "8192",
+  "scsihw": "virtio-scsi-single",
+  "boot": "order=scsi0;net0",
+  "efidisk0": "local:204/vm-204-disk-0.qcow2,efitype=4m,pre-enrolled-keys=1,size=528K",
+  "tpmstate0": "local:204/vm-204-disk-2.raw,size=4M,version=v2.0",
+  "scsi0": "local:204/vm-204-disk-1.qcow2,discard=on,iothread=1,size=64G",
+  "smbios1": "uuid=00000000-0000-4000-8000-000000000204",
+  "vmgenid": "00000000-0000-4000-8000-000000000204",
+  "meta": "creation-qemu=9.2.0,ctime=1727000000",
+  "tags": "fleet;windows",
+  "agent": "enabled=1,fstrim_cloned_disks=1",
+  "net0": "virtio=BC:24:11:0A:02:31,bridge=vmbr0,firewall=1"
+ }
+}

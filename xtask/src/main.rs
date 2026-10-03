@@ -3,10 +3,14 @@ use std::process::ExitCode;
 
 use xtask::{ProcessRunner, package_fleetd, verify_with};
 
-const HELP: &str = "Usage: cargo xtask verify | cargo xtask package-fleetd";
+const HELP: &str = "Usage: cargo xtask verify | cargo xtask package-fleetd | cargo xtask pve-acceptance [--target NAME]";
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.first().map(String::as_str) == Some("pve-acceptance") {
+        return pve_acceptance(&all[1..]);
+    }
+    let mut args = all.into_iter();
     match (args.next().as_deref(), args.next()) {
         (Some("verify"), None) => {
             let mut runner = ProcessRunner;
@@ -38,6 +42,33 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("{HELP}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Runs the real-cluster acceptance suite and prints its JSON summary on
+/// stdout; everything else goes to stderr. Exits non-zero when any
+/// scenario/target pair failed.
+fn pve_acceptance(args: &[String]) -> ExitCode {
+    let target = match xtask::pve_acceptance::parse_args(args) {
+        Ok(target) => target,
+        Err(message) => {
+            eprintln!("error: {message}\n{HELP}");
+            return ExitCode::from(2);
+        }
+    };
+    match xtask::pve_acceptance::run(&find_repo_root(), target.as_deref()) {
+        Ok(summary) => {
+            println!("{}", summary.to_json());
+            if summary.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
         }
     }
 }

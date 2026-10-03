@@ -16,6 +16,7 @@ import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import { proxmoxAccountCommand, proxmoxConfirmCommand } from '../../machine/fleetctl'
 import {
+  compatibility,
   mismatchFingerprints,
   pveUrl,
   sameFingerprint,
@@ -23,7 +24,8 @@ import {
   trustTone,
   type AccountView,
 } from '../proxmox'
-import { discoveryKey, guestsKey } from '../useProxmox'
+import { discoveryKey, guestsKey, privilegesKey } from '../useProxmox'
+import PrivilegeTiers from './PrivilegeTiers.vue'
 
 // One account and its trust anchor. A new or changed certificate is pinned
 // only after the operator observes it and states they verified it out of
@@ -79,10 +81,16 @@ async function confirm() {
   error.value = ''
   try {
     unwrap<ProxmoxAccountDto>(await confirmProxmoxFingerprint(account.value.id, { fingerprint }))
+    // Discovery re-verifies the new pin first; only then are the
+    // credentialed reads marked stale, so none of them goes out on the
+    // trust that was just replaced.
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ACCOUNTS_KEY }),
       queryClient.invalidateQueries({ queryKey: discoveryKey(account.value.id) }),
+    ])
+    await Promise.all([
       queryClient.invalidateQueries({ queryKey: guestsKey(account.value.id) }),
+      queryClient.invalidateQueries({ queryKey: privilegesKey(account.value.id) }),
     ])
     observed.value = null
   }
@@ -99,6 +107,13 @@ const command = computed(() => (observed.value && needsPin.value
   : proxmoxAccountCommand('observe', account.value.id)))
 
 const discovery = computed(() => props.view.discovery)
+// The privilege report's version and rules major when it is current;
+// otherwise (none yet, or its last read failed) discovery's version alone.
+const report = computed(() => (props.view.privilegesError ? null : props.view.privileges ?? null))
+const compat = computed(() => compatibility(
+  report.value?.pveVersion ?? discovery.value?.pveVersion,
+  report.value?.rulesMajor,
+))
 const counts = computed(() => {
   const resources = discovery.value?.resources ?? []
   return {
@@ -140,12 +155,34 @@ const counts = computed(() => {
       >Open in PVE ↗</a>
     </header>
 
-    <p
+    <div
       v-if="discovery"
-      class="font-mono text-[10px] uppercase tracking-wide text-fc-muted"
+      class="flex flex-wrap items-center gap-2"
     >
-      PVE {{ discovery.pveVersion }} · {{ counts.nodes }} node{{ counts.nodes === 1 ? '' : 's' }} · {{ counts.guests }} guests · {{ counts.templates }} templates · seen {{ relativeTime(discovery.observedAt) }}
-    </p>
+      <p class="font-mono text-[10px] uppercase tracking-wide text-fc-muted">
+        PVE {{ discovery.pveVersion }} · {{ counts.nodes }} node{{ counts.nodes === 1 ? '' : 's' }} · {{ counts.guests }} guests · {{ counts.templates }} templates · seen {{ relativeTime(discovery.observedAt) }}
+      </p>
+      <span
+        v-if="compat"
+        :title="compat.title"
+        data-testid="compatibility"
+        :data-verified="compat.verified"
+      >
+        <StatusChip
+          :label="compat.label"
+          :tone="compat.tone"
+        />
+        <span class="sr-only">{{ compat.title }}</span>
+      </span>
+    </div>
+
+    <PrivilegeTiers
+      v-if="state === 'pinned'"
+      :account-id="account.id"
+      :privileges="view.privileges"
+      :loading="view.privilegesLoading"
+      :error="view.privilegesError"
+    />
 
     <!-- Pinned -->
     <p

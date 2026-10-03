@@ -1,0 +1,32 @@
+{
+ "data": [
+  {
+   "type": "cluster",
+   "id": "cluster",
+   "name": "fleet-contract",
+   "nodes": 2,
+   "version": 4,
+   "quorate": 0
+  },
+  {
+   "type": "node",
+   "id": "node/pve8-n1",
+   "name": "pve8-n1",
+   "nodeid": 1,
+   "local": 1,
+   "online": 1,
+   "ip": "192.0.2.11",
+   "level": ""
+  },
+  {
+   "type": "node",
+   "id": "node/pve8-n2",
+   "name": "pve8-n2",
+   "nodeid": 2,
+   "local": 0,
+   "online": 0,
+   "ip": "192.0.2.12",
+   "level": ""
+  }
+ ]
+}

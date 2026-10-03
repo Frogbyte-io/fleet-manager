@@ -2919,6 +2919,134 @@ export interface ProxmoxFingerprintDto {
 }
 
 /**
+ * Privileges to grant, and where.
+ */
+export interface ProxmoxMissingPrivilegesDto {
+  /** Whether any one of them suffices. */
+  anyOf: boolean;
+  /** The executor kinds or reads that need them. */
+  capabilities: string[];
+  /** The ACL path template to grant them on, e.g. `/vms/{vmid}`. */
+  path: string;
+  /** The PVE privileges to grant. */
+  privileges: string[];
+}
+
+/**
+ * A tier's or check's outcome.
+ */
+export type ProxmoxPrivilegeStatusDto = typeof ProxmoxPrivilegeStatusDto[keyof typeof ProxmoxPrivilegeStatusDto];
+
+
+export const ProxmoxPrivilegeStatusDto = {
+  granted: 'granted',
+  missing: 'missing',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * One row of Fleet's privilege table, evaluated.
+ */
+export interface ProxmoxPrivilegeCheckDto {
+  /** Whether any one of them suffices. */
+  anyOf: boolean;
+  /** The executor kind or read. */
+  capability: string;
+  /** The PVE method and path. */
+  endpoint: string;
+  /** The token's effective-permission paths the row is satisfied on. */
+  grantedOn: string[];
+  /** Whether more paths satisfied the row than `grantedOn` lists. */
+  grantedOnTruncated: boolean;
+  /** The privileges still missing on the closest path in scope. */
+  missing: string[];
+  /** Why the row exists. */
+  note: string;
+  /** The ACL path template they are checked on. */
+  path: string;
+  /** The PVE privileges the row names. */
+  privileges: string[];
+  /** Whether the tier needs it; `false` marks an opt-in sub-capability. */
+  required: boolean;
+  /** The table row's id (unique per PVE major). */
+  requirement: string;
+  /** The outcome. */
+  status: ProxmoxPrivilegeStatusDto;
+}
+
+/**
+ * A Fleet capability tier.
+ */
+export type ProxmoxPrivilegeTierDto = typeof ProxmoxPrivilegeTierDto[keyof typeof ProxmoxPrivilegeTierDto];
+
+
+export const ProxmoxPrivilegeTierDto = {
+  discover: 'discover',
+  operate: 'operate',
+  destructive: 'destructive',
+  lab: 'lab',
+} as const;
+
+/**
+ * The token's effective permissions as PVE reported them: ACL path →
+ * privilege → propagate flag.
+ */
+export type ProxmoxPrivilegesDtoEffectivePermissions = {[key: string]: {[key: string]: boolean}};
+
+/**
+ * One tier's outcome.
+ */
+export interface ProxmoxTierPrivilegesDto {
+  /** Every check of the tier, required and opt-in. */
+  checks: ProxmoxPrivilegeCheckDto[];
+  /** The required privileges the token lacks, merged per path. */
+  missing: ProxmoxMissingPrivilegesDto[];
+  /** `granted` when every required check is granted. */
+  status: ProxmoxPrivilegeStatusDto;
+  /** The tier. */
+  tier: ProxmoxPrivilegeTierDto;
+}
+
+/**
+ * Which Fleet capability tiers the account's API token can perform.
+ */
+export interface ProxmoxPrivilegesDto {
+  /** The account evaluated. */
+  accountId: string;
+  /**
+     * The token's effective permissions as PVE reported them: ACL path →
+     * privilege → propagate flag.
+     */
+  effectivePermissions: ProxmoxPrivilegesDtoEffectivePermissions;
+  /** When the report was taken (epoch millis). */
+  observedAt: number;
+  /**
+     * The PVE version read, when the read succeeded.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /**
+     * The PVE major whose rules were applied (8 or 9).
+     * @minimum 0
+     * @nullable
+     */
+  rulesMajor?: number | null;
+  /** The four tiers: discover, operate, destructive, lab. */
+  tiers: ProxmoxTierPrivilegesDto[];
+  /**
+     * Why every tier is unknown: the permissions read was refused (403),
+     * or the PVE version is unsupported because it has no major number
+     * to key the privilege table with. A major outside the table's range
+     * is not unknown; it is evaluated with the nearest supported rules
+     * and a warning.
+     * @nullable
+     */
+  unknownReason?: string | null;
+  /** Normalization and evaluation warnings. */
+  warnings: string[];
+}
+
+/**
  * The review record: exactly what the destructive operation will run,
  * bound to a token the create call must present.
  */
@@ -2938,6 +3066,89 @@ export interface ProxmoxReviewDto {
      * @minimum 0
      */
   vmid: number;
+}
+
+/**
+ * A task's status, in the provider's task-status taxonomy.
+ */
+export type ProxmoxTaskStatusDto = typeof ProxmoxTaskStatusDto[keyof typeof ProxmoxTaskStatusDto];
+
+
+export const ProxmoxTaskStatusDto = {
+  running: 'running',
+  ok: 'ok',
+  error: 'error',
+  unknown: 'unknown',
+} as const;
+
+/**
+ * One PVE task.
+ */
+export interface ProxmoxTaskDto {
+  /**
+     * When the task ended (epoch millis), or null while it runs.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /**
+     * PVE's exit status string (`OK`, `WARNINGS: 2`, an error message),
+     * once the task has one.
+     * @nullable
+     */
+  exitStatus?: string | null;
+  /**
+     * The Fleet operation that started this task, or null when Fleet did
+     * not start it or the caller may not read operations.
+     * @nullable
+     */
+  fleetOperationId?: string | null;
+  /** The node the task runs on. */
+  node: string;
+  /** When the task started (epoch millis). */
+  startedAt: number;
+  /** The status. */
+  status: ProxmoxTaskStatusDto;
+  /**
+     * The target id (the VMID for guest tasks), or null for node-level
+     * tasks.
+     * @nullable
+     */
+  targetId?: string | null;
+  /** The task type, e.g. `qmstart`, `vzdump`. */
+  taskType: string;
+  /**
+     * The API token name when the task ran under a token (its name, never
+     * its secret).
+     * @nullable
+     */
+  tokenId?: string | null;
+  /** The raw UPID: the task's identity, and the page cursor. */
+  upid: string;
+  /** The user, exactly as PVE reports it. */
+  user: string;
+}
+
+/**
+ * One page of an account's task history, newest first. The page shape
+ * (`items`, `page`) is the standard one; the snapshot facts ride along.
+ */
+export interface ProxmoxTaskPage {
+  /** The account that produced the snapshot. */
+  accountId: string;
+  /** The tasks on this page. */
+  items: ProxmoxTaskDto[];
+  /** When the snapshot was taken (epoch millis). */
+  observedAt: number;
+  /** Where this page sits in the snapshot. */
+  page: PageInfo;
+  /** The PVE version seen. */
+  pveVersion: string;
+  /**
+     * What the snapshot is missing and why: unreadable or offline nodes,
+     * malformed entries, a per-node bound reached, a withheld operation
+     * link. These describe the whole snapshot, so every page repeats them.
+     */
+  warnings: string[];
 }
 
 /**
@@ -3984,6 +4195,62 @@ export interface ResourceProxmoxFingerprintDto {
 }
 
 /**
+ * The token's effective permissions as PVE reported them: ACL path →
+ * privilege → propagate flag.
+ */
+export type ResourceProxmoxPrivilegesDtoDataEffectivePermissions = {[key: string]: {[key: string]: boolean}};
+
+/**
+ * Which Fleet capability tiers the account's API token can perform.
+ */
+export type ResourceProxmoxPrivilegesDtoData = {
+  /** The account evaluated. */
+  accountId: string;
+  /**
+     * The token's effective permissions as PVE reported them: ACL path →
+     * privilege → propagate flag.
+     */
+  effectivePermissions: ResourceProxmoxPrivilegesDtoDataEffectivePermissions;
+  /** When the report was taken (epoch millis). */
+  observedAt: number;
+  /**
+     * The PVE version read, when the read succeeded.
+     * @nullable
+     */
+  pveVersion?: string | null;
+  /**
+     * The PVE major whose rules were applied (8 or 9).
+     * @minimum 0
+     * @nullable
+     */
+  rulesMajor?: number | null;
+  /** The four tiers: discover, operate, destructive, lab. */
+  tiers: ProxmoxTierPrivilegesDto[];
+  /**
+     * Why every tier is unknown: the permissions read was refused (403),
+     * or the PVE version is unsupported because it has no major number
+     * to key the privilege table with. A major outside the table's range
+     * is not unknown; it is evaluated with the nearest supported rules
+     * and a warning.
+     * @nullable
+     */
+  unknownReason?: string | null;
+  /** Normalization and evaluation warnings. */
+  warnings: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceProxmoxPrivilegesDto {
+  /** Which Fleet capability tiers the account's API token can perform. */
+  data: ResourceProxmoxPrivilegesDtoData;
+}
+
+/**
  * The review record: exactly what the destructive operation will run,
  * bound to a token the create call must present.
  */
@@ -4879,6 +5146,31 @@ export type ListProxmoxGuestsParams = {
 limit?: number;
 /**
  * The opaque cursor: the last guest's cluster id of the previous page.
+ */
+cursor?: string;
+};
+
+export type ListProxmoxTasksParams = {
+/**
+ * Only this node's tasks.
+ */
+node?: string;
+/**
+ * Only this guest's tasks.
+ * @minimum 0
+ */
+vmid?: number;
+/**
+ * Only tasks in this status: running, ok, error, or unknown.
+ */
+status?: string;
+/**
+ * The maximum number of tasks to return.
+ * @minimum 0
+ */
+limit?: number;
+/**
+ * The opaque cursor: the last task's UPID from the previous page.
  */
 cursor?: string;
 };
@@ -10402,6 +10694,172 @@ export const observeProxmoxFingerprint = async (accountId: string, options?: Req
 
   const data: observeProxmoxFingerprintResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as observeProxmoxFingerprintResponse
+}
+
+
+
+export type getProxmoxPrivilegesResponse200 = {
+  data: ResourceProxmoxPrivilegesDto
+  status: 200
+}
+
+export type getProxmoxPrivilegesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getProxmoxPrivilegesResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getProxmoxPrivilegesResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type getProxmoxPrivilegesResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getProxmoxPrivilegesResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type getProxmoxPrivilegesResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getProxmoxPrivilegesResponseSuccess = (getProxmoxPrivilegesResponse200) & {
+  headers: Headers;
+};
+export type getProxmoxPrivilegesResponseError = (getProxmoxPrivilegesResponse403 | getProxmoxPrivilegesResponse404 | getProxmoxPrivilegesResponse409 | getProxmoxPrivilegesResponse500 | getProxmoxPrivilegesResponse502 | getProxmoxPrivilegesResponse503) & {
+  headers: Headers;
+};
+
+export type getProxmoxPrivilegesResponse = (getProxmoxPrivilegesResponseSuccess | getProxmoxPrivilegesResponseError)
+
+export const getGetProxmoxPrivilegesUrl = (accountId: string,) => {
+
+
+
+
+  return `/api/v1/proxmox/accounts/${accountId}/privileges`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown or unconfirmed
+ * account, a missing token secret, an unwired Proxmox surface, or a source
+ * failure. A refused permissions read is not an error: every tier reports
+ * `unknown`.
+ * @summary Reports which capability tiers the account's API token can perform.
+ */
+export const getProxmoxPrivileges = async (accountId: string, options?: RequestInit): Promise<getProxmoxPrivilegesResponse> => {
+
+  const res = await fetch(getGetProxmoxPrivilegesUrl(accountId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getProxmoxPrivilegesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getProxmoxPrivilegesResponse
+}
+
+
+
+export type listProxmoxTasksResponse200 = {
+  data: ProxmoxTaskPage
+  status: 200
+}
+
+export type listProxmoxTasksResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listProxmoxTasksResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listProxmoxTasksResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type listProxmoxTasksResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type listProxmoxTasksResponse502 = {
+  data: ApiError
+  status: 502
+}
+
+export type listProxmoxTasksResponseSuccess = (listProxmoxTasksResponse200) & {
+  headers: Headers;
+};
+export type listProxmoxTasksResponseError = (listProxmoxTasksResponse400 | listProxmoxTasksResponse403 | listProxmoxTasksResponse404 | listProxmoxTasksResponse409 | listProxmoxTasksResponse502) & {
+  headers: Headers;
+};
+
+export type listProxmoxTasksResponse = (listProxmoxTasksResponseSuccess | listProxmoxTasksResponseError)
+
+export const getListProxmoxTasksUrl = (accountId: string,
+    params?: ListProxmoxTasksParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/proxmox/accounts/${accountId}/tasks?${stringifiedParams}` : `/api/v1/proxmox/accounts/${accountId}/tasks`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed filter or
+ * stale cursor, an unconfirmed account, or a whole-read source failure.
+ * A node that cannot be read is a warning, not an error.
+ * @summary Lists the account's recent PVE tasks, newest first, each linked to the
+Fleet operation that started it.
+ */
+export const listProxmoxTasks = async (accountId: string,
+    params?: ListProxmoxTasksParams, options?: RequestInit): Promise<listProxmoxTasksResponse> => {
+
+  const res = await fetch(getListProxmoxTasksUrl(accountId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listProxmoxTasksResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listProxmoxTasksResponse
 }
 
 

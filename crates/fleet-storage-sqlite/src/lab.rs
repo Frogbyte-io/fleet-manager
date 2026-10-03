@@ -7,8 +7,8 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use fleet_application::lab::{
-    LabTemplate, LabTemplateContent, LabTemplatePort, LabTemplateVersion, Lease, LeasePort,
-    NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
+    CloneTargetReservation, LabTemplate, LabTemplateContent, LabTemplatePort, LabTemplateVersion,
+    Lease, LeasePort, NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
 };
 use fleet_core::{CleanupStrategy, GuestState, LeaseState, ReadinessProbe};
 
@@ -415,6 +415,78 @@ impl ProvisionPort for LabRepository {
             .await
             .map_err(|error| format!("list failed: {error}"))?;
         rows.iter().map(Self::row_to_provision).collect()
+    }
+
+    async fn reserve_clone_target(
+        &self,
+        record_id: &str,
+        node: &str,
+        vmid: u32,
+    ) -> Result<CloneTargetReservation, String> {
+        // One immediate transaction: the holder check and the write cannot
+        // interleave with another reservation of the same VMID.
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| format!("begin reservation transaction failed: {error}"))?;
+        let record = sqlx::query("SELECT * FROM lab_provisions WHERE id = ?1")
+            .bind(record_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| format!("read provision failed: {error}"))?
+            .map(|row| Self::row_to_provision(&row))
+            .transpose()?
+            .ok_or_else(|| format!("provision {record_id} not found"))?;
+        if record.state != GuestState::Provisioning {
+            return Err(format!(
+                "provision {record_id} is {} and cannot reserve a clone target",
+                record.state.id()
+            ));
+        }
+        if record.clone_upid.is_some() {
+            return Err(format!(
+                "provision {record_id} already started its clone; its target is fixed"
+            ));
+        }
+        if record.vmid.is_some() {
+            // An existing reservation is kept: a re-run resumes with it.
+            return Ok(CloneTargetReservation::Reserved(record));
+        }
+        let holder: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM lab_provisions WHERE vmid = ?1 AND id != ?2 AND state = 'provisioning' \
+             ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(i64::from(vmid))
+        .bind(record_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("read VMID holder failed: {error}"))?;
+        if let Some(record_id) = holder {
+            return Ok(CloneTargetReservation::HeldBy { record_id });
+        }
+        sqlx::query(
+            "UPDATE lab_provisions SET node = ?2, vmid = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND state = 'provisioning' AND clone_upid IS NULL AND vmid IS NULL",
+        )
+        .bind(record_id)
+        .bind(node)
+        .bind(i64::from(vmid))
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("reserve clone target failed: {error}"))?;
+        let reserved = sqlx::query("SELECT * FROM lab_provisions WHERE id = ?1")
+            .bind(record_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|error| format!("read reservation failed: {error}"))
+            .and_then(|row| Self::row_to_provision(&row))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit reservation transaction failed: {error}"))?;
+        Ok(CloneTargetReservation::Reserved(reserved))
     }
 }
 

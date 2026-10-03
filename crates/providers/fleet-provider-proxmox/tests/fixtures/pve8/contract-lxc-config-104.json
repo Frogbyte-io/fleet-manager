@@ -1,0 +1,15 @@
+{
+ "data": {
+  "digest": "4444444444444444444444444444444444444444",
+  "hostname": "cache-01",
+  "arch": "amd64",
+  "cores": 2,
+  "memory": 1024,
+  "swap": 512,
+  "ostype": "debian",
+  "rootfs": "local:104/vm-104-disk-0.raw,size=8G",
+  "net0": "name=eth0,bridge=vmbr0,firewall=1,hwaddr=BC:24:11:0A:01:21,ip=dhcp,ip6=auto,type=veth",
+  "unprivileged": 1,
+  "features": "nesting=1"
+ }
+}
