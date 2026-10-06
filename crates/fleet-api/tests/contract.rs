@@ -2282,6 +2282,10 @@ async fn project_linked_lab_router() -> (
             &NewLabTemplate {
                 content: LabTemplateContent {
                     name: "linked-lab".to_owned(),
+                    ssh_user: "root".to_owned(),
+                    ssh_port: 22,
+                    ssh_trust_mode: "tofu".to_owned(),
+                    ssh_fingerprint: None,
                     description: String::new(),
                     image_version_id: "rcp-1@abc".to_owned(),
                     cores: 2,

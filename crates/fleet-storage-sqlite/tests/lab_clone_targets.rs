@@ -692,7 +692,7 @@ async fn readiness_migration_preserves_existing_provision_and_lease_identifiers(
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     for entry in std::fs::read_dir(&source).unwrap() {
         let entry = entry.unwrap();
-        if entry.file_name() != "0035_lab_readiness.sql" {
+        if entry.file_name() != "0037_lab_readiness.sql" {
             std::fs::copy(entry.path(), migrations_dir.join(entry.file_name())).unwrap();
         }
     }
@@ -712,8 +712,8 @@ async fn readiness_migration_preserves_existing_provision_and_lease_identifiers(
     sqlx::query("INSERT INTO lab_provisions (id, template_version_id, state, node, vmid, clone_upid, guest_ipv4, idempotency_key, created_at, updated_at, lease_id) VALUES ('old-record', 'version-1', 'provisioning', 'pve', 9000, 'old-upid', '192.0.2.42', 'old-key', 1800000000000, 1800000000000, 'old-lease')")
         .execute(&pool).await.unwrap();
     std::fs::copy(
-        source.join("0035_lab_readiness.sql"),
-        migrations_dir.join("0035_lab_readiness.sql"),
+        source.join("0037_lab_readiness.sql"),
+        migrations_dir.join("0037_lab_readiness.sql"),
     )
     .unwrap();
     sqlx::migrate::Migrator::new(migrations_dir.as_path())
