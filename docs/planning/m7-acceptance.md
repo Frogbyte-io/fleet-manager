@@ -46,7 +46,7 @@ All M7 PRs target the **`dev`** branch, not `main`. Each issue has an agent labe
 | FM-722 Lab console parity | [#264](https://github.com/Frogbyte-io/fleet-manager/issues/264) | #15 | claude | FM-713, FM-715, FM-716, FM-718, FM-720, FM-721 |
 | FM-723 `fleet` skill: one-command Lab workflow | [#265](https://github.com/Frogbyte-io/fleet-manager/issues/265) | #15 | glm | FM-720, FM-721 |
 | FM-742 Run and record the exit gate | [#266](https://github.com/Frogbyte-io/fleet-manager/issues/266) | #15 | claude | FM-704, FM-741, FM-723 |
-| FM-743 M7 close-out | [#267](https://github.com/Frogbyte-io/fleet-manager/issues/267) | #15 | glm | FM-742 and all of the above |
+| FM-743 M7 close-out | [#267](https://github.com/Frogbyte-io/fleet-manager/issues/267) | #15 | glm | FM-742 and every gate-path issue above (FM-717 excluded) |
 
 Totals: 9 codex, 6 claude (2 GUI), 4 glm. Codex holds under half: FM-718 is spelled out step by step for GLM, and the live build harness (FM-704) and the optional pooling (FM-717) go to Claude.
 
@@ -101,7 +101,7 @@ Windows in-guest management and readiness also remain a later sub-epic.
 
 ## Exit
 
-M7 (first Lab release) is complete when FM-742 records passing image, Lab, failure-injection, agent, and TTL-after-restart evidence, and FM-743 closes epics #13–#15. `dev` then merges to `main` through a normal reviewed PR.
+M7 (first Lab release) is complete when FM-742 records passing image, Lab, failure-injection, agent, and TTL-after-restart evidence, and FM-743 closes epics #13–#15 and ticks the remaining boxes on the already-closed image epic #109. `dev` then merges to `main` through a normal reviewed PR.
 
 ## Evidence
 
