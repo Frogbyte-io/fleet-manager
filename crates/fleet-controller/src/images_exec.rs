@@ -689,7 +689,7 @@ mod tests {
         })
     }
 
-    const CONTENT: &str = r#"{"builders":[{"type":"proxmox-clone","node":"pve","vm_storage_pool":"local-lvm","vm_name":"ubuntu-base","proxmox_url":"https://pve.example.test:8006/api2/json"}],"provisioners":[{"type":"shell","inline":["echo ready"]}]}"#;
+    const CONTENT: &str = r#"{"builders":[{"type":"proxmox-clone","node":"pve","disks":[{"type":"scsi","storage_pool":"local-lvm","disk_size":"8G"}],"vm_name":"ubuntu-base","proxmox_url":"https://pve.example.test:8006/api2/json"}],"provisioners":[{"type":"shell","inline":["echo ready"]}]}"#;
 
     async fn setup(
         content: &str,

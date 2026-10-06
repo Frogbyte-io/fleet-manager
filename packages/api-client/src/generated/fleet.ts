@@ -2703,7 +2703,7 @@ export interface PageRecipeDto {
  */
 export interface StructuredRecipeDto {
   /**
-     * The network bridge.
+     * The first network adapter's bridge (`network_adapters[0].bridge`).
      * @nullable
      */
   bridge?: string | null;
@@ -2713,18 +2713,13 @@ export interface StructuredRecipeDto {
      */
   cloneVm?: string | null;
   /**
-     * The cloud-init user.
-     * @nullable
-     */
-  cloudInitUser?: string | null;
-  /**
      * The vCPU count.
      * @minimum 0
      * @nullable
      */
   cores?: number | null;
   /**
-     * The disk size.
+     * The first disk's size (`disks[0].disk_size`).
      * @nullable
      */
   diskSize?: string | null;
@@ -2749,11 +2744,9 @@ export interface StructuredRecipeDto {
   /** What the recipe builds from: `iso` or `clone`. */
   source: string;
   /**
-     * The cloud-init SSH keys.
-     * @nullable
+     * The first disk's storage pool (`disks[0].storage_pool`). Empty when
+     * the builder declares no disk: a clone then keeps its source's storage.
      */
-  sshKeys?: string | null;
-  /** The PVE storage pool the build writes to. */
   storagePool: string;
 }
 

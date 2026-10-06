@@ -13,7 +13,13 @@ import { shellQuote } from '../machine/fleetctl'
 
 export type BuilderType = 'proxmox-iso' | 'proxmox-clone'
 
-/** The fields the server's structured view reads, as the form edits them. */
+/**
+ * The fields the server's structured view reads, as the form edits them.
+ * Each maps to a key the Packer Proxmox plugin (1.2.x) actually has: the
+ * storage pool and disk size live on `disks[0]`, the bridge on
+ * `network_adapters[0]`, and the ISO on `boot_iso` (or the plugin's
+ * deprecated top-level keys, when the template already uses them).
+ */
 export interface StructuredFields {
   builderType: BuilderType
   node: string
@@ -25,12 +31,16 @@ export interface StructuredFields {
   memory: number | null
   diskSize: string
   bridge: string
-  cloudInitUser: string
-  sshKeys: string
 }
 
+/**
+ * `diskless`: a `proxmox-clone` that declares no `disks`. It keeps the
+ * source template's storage, which the plugin has no key for, so the
+ * storage pool is draft metadata only, and the form never adds a disk to a
+ * clone implicitly (the plugin appends `disks` after the source's).
+ */
 export type Analysis =
-  | { editable: true, fields: StructuredFields }
+  | { editable: true, fields: StructuredFields, diskless: boolean }
   | { editable: false, reason: string }
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -80,6 +90,19 @@ function str(value: Json | undefined): string {
   return typeof value === 'string' ? value : ''
 }
 
+/** The first entry of a list field, when it is an object (`disks[0]`). */
+function firstEntry(builder: JsonObject, list: string): JsonObject | undefined {
+  const entries = builder[list]
+  const first = Array.isArray(entries) ? entries[0] : undefined
+  return isObject(first) ? first : undefined
+}
+
+/** A `boot_iso` field, falling back to the deprecated top-level key. */
+function bootIso(builder: JsonObject, key: string): string {
+  const iso = builder.boot_iso
+  return (isObject(iso) ? str(iso[key]) : '') || str(builder[key])
+}
+
 /** fleet-core reads cores and memory as `u32`; anything outside that is absent. */
 const U32_MAX = 0xFFFFFFFF
 
@@ -93,24 +116,24 @@ export function analyze(raw: string): Analysis {
   if ('reason' in parsed)
     return { editable: false, reason: parsed.reason }
   const b = parsed.builder
+  const disk = firstEntry(b, 'disks')
   const cloneVm = b.clone_vm !== undefined
     ? (typeof b.clone_vm === 'string' ? b.clone_vm : JSON.stringify(b.clone_vm))
     : (count(b.clone_vm_id)?.toString() ?? '')
   return {
     editable: true,
+    diskless: b.type === 'proxmox-clone' && b.disks === undefined,
     fields: {
       builderType: b.type as BuilderType,
       node: str(b.node),
-      storagePool: str(b.vm_storage_pool) || str(b.storage_pool),
-      isoFile: str(b.iso_file),
-      isoStoragePool: str(b.iso_storage_pool),
+      storagePool: disk ? str(disk.storage_pool) : '',
+      isoFile: bootIso(b, 'iso_file'),
+      isoStoragePool: bootIso(b, 'iso_storage_pool'),
       cloneVm,
       cores: count(b.cores),
       memory: count(b.memory),
-      diskSize: str(b.disk_size),
-      bridge: str(b.bridge),
-      cloudInitUser: str(b.ciuser),
-      sshKeys: str(b.sshkeys),
+      diskSize: disk ? str(disk.disk_size) : '',
+      bridge: str(firstEntry(b, 'network_adapters')?.bridge),
     },
   }
 }
@@ -131,6 +154,35 @@ function setOrDelete(target: JsonObject, key: string, value: Json | undefined) {
 }
 
 /**
+ * Sets `key` on the first entry of `list`, creating `[seed]` when the list
+ * is absent and a seed is given. A cleared value only removes the key.
+ */
+function setOnFirst(builder: JsonObject, list: string, key: string, value: string, seed: JsonObject | null) {
+  const existing = firstEntry(builder, list)
+  if (existing) {
+    setOrDelete(existing, key, value)
+    return
+  }
+  if (value === '' || !seed || builder[list] !== undefined)
+    return
+  builder[list] = [{ ...seed, [key]: value }]
+}
+
+/** Sets an ISO key where the template keeps it: `boot_iso`, unless the deprecated top-level key is already in use. */
+function setIso(builder: JsonObject, key: string, value: string) {
+  if (builder[key] !== undefined && !isObject(builder.boot_iso)) {
+    setOrDelete(builder, key, value)
+    return
+  }
+  const iso = isObject(builder.boot_iso) ? builder.boot_iso : {}
+  setOrDelete(iso, key, value)
+  if (Object.keys(iso).length)
+    builder.boot_iso = iso
+  else
+    delete builder.boot_iso
+}
+
+/**
  * Applies structured fields to the raw content in place. Only keys whose
  * structured value changed are written, so anything the form cannot
  * represent (an out-of-range number, a non-string value) and every other
@@ -145,6 +197,9 @@ export function applyFields(raw: string, fields: StructuredFields): string {
     return raw
   const was = current.fields
   const b = parsed.builder
+  // A field edit can be a no-op on the content (a disk-less clone's pool
+  // is metadata only), so the result is compared, not just the fields.
+  const original = JSON.stringify(parsed.doc)
   let changed = false
   const set = <K extends keyof StructuredFields>(key: K, apply: () => void) => {
     const before = was[key]
@@ -156,13 +211,13 @@ export function applyFields(raw: string, fields: StructuredFields): string {
   }
   set('builderType', () => (b.type = fields.builderType))
   set('node', () => setOrDelete(b, 'node', fields.node.trim()))
-  // The storage pool keeps whichever key the template already uses.
-  set('storagePool', () => {
-    const poolKey = b.vm_storage_pool !== undefined || b.storage_pool === undefined ? 'vm_storage_pool' : 'storage_pool'
-    setOrDelete(b, poolKey, fields.storagePool.trim())
-  })
-  set('isoFile', () => setOrDelete(b, 'iso_file', fields.isoFile.trim()))
-  set('isoStoragePool', () => setOrDelete(b, 'iso_storage_pool', fields.isoStoragePool.trim()))
+  // Pool and size live on disks[0]. An ISO build gets a first disk when it
+  // has none; a clone never gets one implicitly (the plugin would add it
+  // next to the source's disks).
+  const diskSeed: JsonObject | null = b.type === 'proxmox-iso' ? { type: 'scsi' } : null
+  set('storagePool', () => setOnFirst(b, 'disks', 'storage_pool', fields.storagePool.trim(), diskSeed))
+  set('isoFile', () => setIso(b, 'iso_file', fields.isoFile.trim()))
+  set('isoStoragePool', () => setIso(b, 'iso_storage_pool', fields.isoStoragePool.trim()))
   // Packer's `clone_vm` is a VM name; `clone_vm_id` is the numeric VMID.
   // Keep the form the template uses.
   set('cloneVm', () => {
@@ -176,11 +231,9 @@ export function applyFields(raw: string, fields: StructuredFields): string {
   })
   set('cores', () => setOrDelete(b, 'cores', fields.cores))
   set('memory', () => setOrDelete(b, 'memory', fields.memory))
-  set('diskSize', () => setOrDelete(b, 'disk_size', fields.diskSize.trim()))
-  set('bridge', () => setOrDelete(b, 'bridge', fields.bridge.trim()))
-  set('cloudInitUser', () => setOrDelete(b, 'ciuser', fields.cloudInitUser.trim()))
-  set('sshKeys', () => setOrDelete(b, 'sshkeys', fields.sshKeys.trim()))
-  if (!changed)
+  set('diskSize', () => setOnFirst(b, 'disks', 'disk_size', fields.diskSize.trim(), diskSeed))
+  set('bridge', () => setOnFirst(b, 'network_adapters', 'bridge', fields.bridge.trim(), { model: 'virtio' }))
+  if (!changed || JSON.stringify(parsed.doc) === original)
     return raw
   const out = JSON.stringify(parsed.doc, null, indentOf(raw))
   return raw.endsWith('\n') ? `${out}\n` : out
@@ -223,7 +276,6 @@ export const NEW_RECIPE = `{
       "type": "proxmox-clone",
       "node": "",
       "clone_vm": "",
-      "vm_storage_pool": "",
       "cores": 2,
       "memory": 4096
     }

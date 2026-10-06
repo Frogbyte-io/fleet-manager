@@ -223,14 +223,18 @@ mod tests {
 pub struct StructuredRecipe {
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The PVE storage pool the build writes to. `None` when the builder
-    /// block omits it (consistent with `node`'s absence rule).
+    /// The PVE storage pool of the builder's first declared disk
+    /// (`disks[0].storage_pool`). `None` when the builder declares no disk:
+    /// a `proxmox-clone` without `disks` keeps the source template's
+    /// storage, which the plugin offers no key for.
     pub storage_pool: Option<String>,
     /// What the recipe builds from.
     pub source: RecipeSource,
-    /// The ISO file path, for the iso source.
+    /// The ISO file path, for the iso source: `boot_iso.iso_file`, or the
+    /// plugin's deprecated top-level `iso_file`.
     pub iso_file: Option<String>,
-    /// The ISO's storage pool, for the iso source.
+    /// The ISO's storage pool, for the iso source: `boot_iso.iso_storage_pool`,
+    /// or the deprecated top-level `iso_storage_pool`.
     pub iso_storage_pool: Option<String>,
     /// The guest to clone, for the clone source.
     pub clone_vm: Option<String>,
@@ -238,14 +242,11 @@ pub struct StructuredRecipe {
     pub cores: Option<u32>,
     /// The memory in MiB.
     pub memory: Option<u32>,
-    /// The disk size, as Packer's `Gb`-suffixed string.
+    /// The first disk's size (`disks[0].disk_size`), as Packer's
+    /// `G`-suffixed string.
     pub disk_size: Option<String>,
-    /// The network bridge.
+    /// The first network adapter's bridge (`network_adapters[0].bridge`).
     pub bridge: Option<String>,
-    /// The cloud-init user.
-    pub cloud_init_user: Option<String>,
-    /// The cloud-init SSH keys (URL-encoded text, the FM-211 shape).
-    pub ssh_keys: Option<String>,
 }
 
 /// A parsed `.pkr.json`'s shape, as the structured view needs: the
@@ -303,6 +304,29 @@ fn field_str<'a>(builder: &'a BuilderBlock, key: &str) -> Option<&'a str> {
     builder.fields.get(key).and_then(serde_json::Value::as_str)
 }
 
+/// One string field of the first entry of a builder's list field, e.g.
+/// `disks[0].storage_pool`: the plugin's block shape (packer-plugin-proxmox
+/// 1.2.x, `builder/proxmox/common/config.go`).
+fn first_entry_str<'a>(builder: &'a BuilderBlock, list: &str, key: &str) -> Option<&'a str> {
+    builder
+        .fields
+        .get(list)
+        .and_then(serde_json::Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get(key))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// A `boot_iso` field, falling back to the deprecated top-level key.
+fn boot_iso_str<'a>(builder: &'a BuilderBlock, key: &str) -> Option<&'a str> {
+    builder
+        .fields
+        .get("boot_iso")
+        .and_then(|iso| iso.get(key))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| field_str(builder, key))
+}
+
 impl StructuredRecipe {
     /// The structured view of raw content, when it carries a Proxmox
     /// builder block. `None` means the content has no structured view (a
@@ -313,12 +337,7 @@ impl StructuredRecipe {
         let builder = parsed.builder?;
         Some(Self {
             node: field_str(&builder, "node")?.to_owned(),
-            storage_pool: builder
-                .fields
-                .get("vm_storage_pool")
-                .or_else(|| builder.fields.get("storage_pool"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
+            storage_pool: first_entry_str(&builder, "disks", "storage_pool").map(str::to_owned),
 
             // The builder type is the source of truth, not the presence
             // of a clone field.
@@ -326,8 +345,8 @@ impl StructuredRecipe {
                 "proxmox-clone" => RecipeSource::Clone,
                 _ => RecipeSource::Iso,
             },
-            iso_file: field_str(&builder, "iso_file").map(str::to_owned),
-            iso_storage_pool: field_str(&builder, "iso_storage_pool").map(str::to_owned),
+            iso_file: boot_iso_str(&builder, "iso_file").map(str::to_owned),
+            iso_storage_pool: boot_iso_str(&builder, "iso_storage_pool").map(str::to_owned),
             // Packer's `clone_vm` is the VM **name** (a string); the
             // numeric VMID is the separate `clone_vm_id` field. Both are
             // accepted; the name form is the documented one.
@@ -356,10 +375,8 @@ impl StructuredRecipe {
                 .get("memory")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok()),
-            disk_size: field_str(&builder, "disk_size").map(str::to_owned),
-            bridge: field_str(&builder, "bridge").map(str::to_owned),
-            cloud_init_user: field_str(&builder, "ciuser").map(str::to_owned),
-            ssh_keys: field_str(&builder, "sshkeys").map(str::to_owned),
+            disk_size: first_entry_str(&builder, "disks", "disk_size").map(str::to_owned),
+            bridge: first_entry_str(&builder, "network_adapters", "bridge").map(str::to_owned),
         })
     }
 }
@@ -375,13 +392,10 @@ mod structured_tests {
                 "type": "proxmox-clone",
                 "node": "pve",
                 "clone_vm": 101,
-                "vm_storage_pool": "local-lvm",
                 "cores": 2,
                 "memory": 2048,
-                "disk_size": "10G",
-                "bridge": "vmbr0",
-                "ciuser": "dev",
-                "sshkeys": "ssh-ed25519%20AAA",
+                "disks": [{"type": "scsi", "storage_pool": "local-lvm", "disk_size": "10G"}],
+                "network_adapters": [{"model": "virtio", "bridge": "vmbr0"}],
                 "unknown_field": {"nested": true}
             }],
             "variables": {"x": 1}
@@ -395,8 +409,38 @@ mod structured_tests {
         assert_eq!(structured.memory, Some(2048));
         assert_eq!(structured.disk_size.as_deref(), Some("10G"));
         assert_eq!(structured.bridge.as_deref(), Some("vmbr0"));
-        assert_eq!(structured.cloud_init_user.as_deref(), Some("dev"));
-        assert_eq!(structured.ssh_keys.as_deref(), Some("ssh-ed25519%20AAA"));
+    }
+
+    #[test]
+    fn the_structured_view_reads_only_keys_the_plugin_has() {
+        // The plugin has no top-level storage, disk size, or bridge key
+        // (`packer validate` refuses them), so the view ignores them rather
+        // than presenting a value Packer would never apply.
+        let invalid = r#"{"builders": [{
+            "type": "proxmox-iso", "node": "pve",
+            "vm_storage_pool": "local-lvm", "storage_pool": "local-lvm",
+            "disk_size": "10G", "bridge": "vmbr0"
+        }]}"#;
+        let structured = StructuredRecipe::from_raw(invalid).expect("a structured view");
+        assert_eq!(structured.storage_pool, None);
+        assert_eq!(structured.disk_size, None);
+        assert_eq!(structured.bridge, None);
+        // boot_iso wins over the deprecated top-level ISO keys.
+        let iso = r#"{"builders": [{
+            "type": "proxmox-iso", "node": "pve",
+            "boot_iso": {"iso_file": "local:iso/new.iso", "iso_storage_pool": "local"},
+            "iso_file": "local:iso/old.iso"
+        }]}"#;
+        let structured = StructuredRecipe::from_raw(iso).expect("a structured view");
+        assert_eq!(structured.iso_file.as_deref(), Some("local:iso/new.iso"));
+        assert_eq!(structured.iso_storage_pool.as_deref(), Some("local"));
+        let deprecated = r#"{"builders": [{"type": "proxmox-iso", "node": "pve", "iso_file": "local:iso/old.iso"}]}"#;
+        assert_eq!(
+            StructuredRecipe::from_raw(deprecated)
+                .and_then(|s| s.iso_file)
+                .as_deref(),
+            Some("local:iso/old.iso")
+        );
     }
 
     #[test]
@@ -484,8 +528,30 @@ impl RecipeVersion {
                         })
                 })
             && structured.node == self.node
-            && structured.storage_pool.as_deref() == Some(self.storage_pool.as_str())
+            && self.frozen_storage(&content)
             && structured.source == self.source
+    }
+
+    /// Whether the builder's storage matches the version's. Every declared
+    /// disk must name the version's pool literally. A `proxmox-clone` with
+    /// no `disks` keeps the source template's storage, for which the plugin
+    /// has no key: the version's pool is then the operator's declaration,
+    /// not something the recipe can prove. An ISO build always needs a disk.
+    fn frozen_storage(&self, content: &serde_json::Value) -> bool {
+        let disks = content
+            .get("builders")
+            .and_then(|builders| builders.get(0))
+            .and_then(|builder| builder.get("disks"));
+        match disks {
+            None => self.source == RecipeSource::Clone,
+            Some(serde_json::Value::Array(disks)) if !disks.is_empty() => {
+                disks.iter().all(|disk| {
+                    disk.get("storage_pool").and_then(serde_json::Value::as_str)
+                        == Some(self.storage_pool.as_str())
+                })
+            }
+            Some(_) => false,
+        }
     }
 }
 
@@ -505,11 +571,53 @@ mod frozen_target_tests {
             let version = RecipeVersion {
                 id: "v".to_owned(), recipe_id: "r".to_owned(), name: "image".to_owned(),
                 description: String::new(), content_digest: "digest".to_owned(),
-                content: serde_json::json!({"builders":[{"type":"proxmox-clone", "node":node, "vm_storage_pool":storage_pool}]}).to_string(),
+                content: serde_json::json!({"builders":[{"type":"proxmox-clone", "node":node, "disks":[{"type":"scsi", "storage_pool":storage_pool, "disk_size":"8G"}]}]}).to_string(),
                 source: RecipeSource::Clone, node: node.to_owned(), storage_pool: storage_pool.to_owned(),
                 published_at: 1, promoted_at: None, promoted_by: None,
             };
             assert_eq!(version.has_frozen_build_target(), expected);
         }
+    }
+
+    fn version(source: RecipeSource, builder: &serde_json::Value) -> RecipeVersion {
+        RecipeVersion {
+            id: "v".to_owned(),
+            recipe_id: "r".to_owned(),
+            name: "image".to_owned(),
+            description: String::new(),
+            content_digest: "digest".to_owned(),
+            content: serde_json::json!({ "builders": [builder] }).to_string(),
+            source,
+            node: "pve".to_owned(),
+            storage_pool: "local-lvm".to_owned(),
+            published_at: 1,
+            promoted_at: None,
+            promoted_by: None,
+        }
+    }
+
+    #[test]
+    fn the_storage_target_follows_the_plugin_schema() {
+        let clone =
+            serde_json::json!({"type": "proxmox-clone", "node": "pve", "clone_vm_id": 7000});
+        // A disk-less clone inherits the source's storage.
+        assert!(version(RecipeSource::Clone, &clone).has_frozen_build_target());
+        // Declared disks must all name the version's pool.
+        let mut with_disks = clone.clone();
+        with_disks["disks"] = serde_json::json!([
+            {"type": "scsi", "storage_pool": "local-lvm", "disk_size": "8G"},
+            {"type": "scsi", "storage_pool": "other", "disk_size": "8G"}
+        ]);
+        assert!(!version(RecipeSource::Clone, &with_disks).has_frozen_build_target());
+        // An ISO build without a disk has no storage target at all.
+        let iso = serde_json::json!({"type": "proxmox-iso", "node": "pve"});
+        assert!(!version(RecipeSource::Iso, &iso).has_frozen_build_target());
+        let mut iso_disk = iso;
+        iso_disk["disks"] =
+            serde_json::json!([{"type": "scsi", "storage_pool": "local-lvm", "disk_size": "8G"}]);
+        assert!(version(RecipeSource::Iso, &iso_disk).has_frozen_build_target());
+        // The plugin-invalid top-level key no longer freezes anything.
+        let legacy = serde_json::json!({"type": "proxmox-iso", "node": "pve", "vm_storage_pool": "local-lvm"});
+        assert!(!version(RecipeSource::Iso, &legacy).has_frozen_build_target());
     }
 }

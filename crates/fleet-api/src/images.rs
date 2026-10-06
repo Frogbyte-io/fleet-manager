@@ -156,7 +156,8 @@ pub struct RecipeVersionDto {
 pub struct StructuredRecipeDto {
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The PVE storage pool the build writes to.
+    /// The first disk's storage pool (`disks[0].storage_pool`). Empty when
+    /// the builder declares no disk: a clone then keeps its source's storage.
     pub storage_pool: String,
     /// What the recipe builds from: `iso` or `clone`.
     pub source: String,
@@ -170,14 +171,10 @@ pub struct StructuredRecipeDto {
     pub cores: Option<u32>,
     /// The memory in MiB.
     pub memory: Option<u32>,
-    /// The disk size.
+    /// The first disk's size (`disks[0].disk_size`).
     pub disk_size: Option<String>,
-    /// The network bridge.
+    /// The first network adapter's bridge (`network_adapters[0].bridge`).
     pub bridge: Option<String>,
-    /// The cloud-init user.
-    pub cloud_init_user: Option<String>,
-    /// The cloud-init SSH keys.
-    pub ssh_keys: Option<String>,
 }
 
 impl From<fleet_core::StructuredRecipe> for StructuredRecipeDto {
@@ -193,8 +190,6 @@ impl From<fleet_core::StructuredRecipe> for StructuredRecipeDto {
             memory: structured.memory,
             disk_size: structured.disk_size,
             bridge: structured.bridge,
-            cloud_init_user: structured.cloud_init_user,
-            ssh_keys: structured.ssh_keys,
         }
     }
 }

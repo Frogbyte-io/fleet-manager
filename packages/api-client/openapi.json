@@ -15631,7 +15631,7 @@
               "string",
               "null"
             ],
-            "description": "The network bridge."
+            "description": "The first network adapter's bridge (`network_adapters[0].bridge`)."
           },
           "cloneVm": {
             "type": [
@@ -15639,13 +15639,6 @@
               "null"
             ],
             "description": "The guest to clone, for the clone source."
-          },
-          "cloudInitUser": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The cloud-init user."
           },
           "cores": {
             "type": [
@@ -15661,7 +15654,7 @@
               "string",
               "null"
             ],
-            "description": "The disk size."
+            "description": "The first disk's size (`disks[0].disk_size`)."
           },
           "isoFile": {
             "type": [
@@ -15694,16 +15687,9 @@
             "type": "string",
             "description": "What the recipe builds from: `iso` or `clone`."
           },
-          "sshKeys": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The cloud-init SSH keys."
-          },
           "storagePool": {
             "type": "string",
-            "description": "The PVE storage pool the build writes to."
+            "description": "The first disk's storage pool (`disks[0].storage_pool`). Empty when\nthe builder declares no disk: a clone then keeps its source's storage."
           }
         }
       },
