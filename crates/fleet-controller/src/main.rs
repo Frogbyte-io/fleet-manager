@@ -543,6 +543,8 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         ));
         // The Lab surface composes over the store and the image pin
         // validator: a template cannot pin an unpromoted image version.
+        // Lease creation validates an explicit project against the same
+        // repository the project surface serves.
         let lab = std::sync::Arc::new(fleet_application::lab::Lab::new(
             std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                 store.pool().clone(),
@@ -556,6 +558,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             std::sync::Arc::new(
                 fleet_controller::proxmox_store::RecipeImagePinValidator::new(recipe_versions),
             ),
+            std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         ));
         // The Proxmox surface composes over the store, the secret store,

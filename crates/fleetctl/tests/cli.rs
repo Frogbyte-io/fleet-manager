@@ -2813,7 +2813,15 @@ fn parsing_walks_the_lease_forms() {
     let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
     assert!(matches!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeases
+        fleetctl::Command::LabLeases { project: None }
+    ));
+    let args: Vec<String> = ["lab", "leases", "--project", "proj-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases { project: Some(_) }
     ));
     let args: Vec<String> = ["lab", "lease", "tpl-1@abc", "--purpose", "the demo"]
         .iter()
@@ -2821,7 +2829,26 @@ fn parsing_walks_the_lease_forms() {
         .collect();
     assert!(matches!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeaseCreate { .. }
+        fleetctl::Command::LabLeaseCreate { project: None, .. }
+    ));
+    let args: Vec<String> = [
+        "lab",
+        "lease",
+        "tpl-1@abc",
+        "--purpose",
+        "the demo",
+        "--project",
+        "proj-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeaseCreate {
+            project: Some(_),
+            ..
+        }
     ));
     let args: Vec<String> = ["lab", "release", "lease-1", "--keep"]
         .iter()

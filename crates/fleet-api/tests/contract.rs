@@ -2047,7 +2047,7 @@ impl fleet_application::lab::ImagePinValidator for NoPromotedVersions {
 async fn lab_lease_extension_returns_the_updated_deadline() {
     use fleet_application::lab::{Lab, LeasePort, NewLease};
     use fleet_core::{CleanupStrategy, LeaseState};
-    use fleet_storage_sqlite::{LabRepository, LeaseRepository, Store};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
 
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
@@ -2078,6 +2078,7 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
         repository,
         leases.clone(),
         Arc::new(NoPromotedVersions),
+        Arc::new(ProjectRepository::new(store.pool().clone())),
         Arc::new(FakeAudit),
     ));
     let base = test_state().0;
@@ -2175,6 +2176,7 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     assert!(body["correlationId"].as_str().is_some());
 }
 
+
 #[tokio::test]
 async fn image_build_history_routes_and_schema_are_registered() {
     let (router, _, _) = test_router();
@@ -2231,4 +2233,147 @@ async fn image_build_history_requires_images_read_on_both_endpoints() {
         assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["code"], "denied");
     }
+
+/// The project-linked lab surface over a real store: the router, the
+/// registered project, and one published template version to lease from.
+async fn project_linked_lab_router() -> (
+    axum::Router,
+    tempfile::TempDir,
+    fleet_core::Project,
+    String,
+    Arc<fleet_storage_sqlite::ProjectRepository>,
+) {
+    use fleet_application::lab::{
+        Lab, LabTemplateContent, LabTemplatePort as _, LabTemplateVersion, NewLabTemplate,
+    };
+    use fleet_application::project::ProjectPort as _;
+    use fleet_core::{CleanupStrategy, ReadinessProbe};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let versions = Arc::new(LabRepository::new(store.pool().clone()));
+    let projects = Arc::new(ProjectRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let lab = Arc::new(Lab::new(
+        versions.clone(),
+        versions.clone(),
+        leases.clone(),
+        Arc::new(NoPromotedVersions),
+        projects.clone(),
+        Arc::new(FakeAudit),
+    ));
+    let base = test_state().0;
+    let mut state = (*base).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+
+    let project = projects
+        .create(&fleet_application::project::NewProject {
+            remote: "https://github.com/example/linked.git".to_owned(),
+            idempotency_key: None,
+            name: "linked".to_owned(),
+            description: String::new(),
+        })
+        .await
+        .unwrap();
+    let template = versions
+        .create(
+            &NewLabTemplate {
+                content: LabTemplateContent {
+                    name: "linked-lab".to_owned(),
+                    description: String::new(),
+                    image_version_id: "rcp-1@abc".to_owned(),
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    bootstrap_project_id: None,
+                    readiness_probe: ReadinessProbe::GuestAgent,
+                    readiness_command: None,
+                    readiness_deadline_seconds: 300,
+                    ttl_seconds: 3_600,
+                    cleanup: CleanupStrategy::Destroy,
+                },
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let version = versions
+        .publish(
+            &template.id,
+            &LabTemplateVersion {
+                id: format!("{}@draft", template.id),
+                template_id: template.id.clone(),
+                name: template.content.name.clone(),
+                content: template.content.clone(),
+                image_digest: "abc".to_owned(),
+                published_by: "tester".to_owned(),
+                published_at: 2,
+            },
+        )
+        .await
+        .unwrap();
+    (router, dir, project, version.id, projects)
+}
+
+#[tokio::test]
+async fn lab_lease_create_refuses_an_unknown_project() {
+    let (router, _dir, _project, version_id, _projects) = project_linked_lab_router().await;
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases"))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"templateVersionId":"{version_id}","purpose":"the demo","projectId":"ghost"}}"#
+        )))
+        .unwrap();
+    let (parts, body) = call_via(&router, request).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn lab_lease_creates_carry_and_filter_their_project() {
+    let (router, _dir, project, version_id, _projects) = project_linked_lab_router().await;
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("{API_BASE_PATH}/lab/leases"))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"templateVersionId":"{version_id}","purpose":"the linked demo","projectId":"{}"}}"#,
+            project.id
+        )))
+        .unwrap();
+    let (parts, body) = call_via(&router, request).await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["data"]["projectId"], project.id.as_str());
+
+    let (parts, body) = call_via(
+        &router,
+        get(&format!(
+            "{API_BASE_PATH}/lab/leases?projectId={}",
+            project.id
+        )),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().cloned().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["projectId"], project.id.as_str());
+
+    let (parts, body) = call_via(
+        &router,
+        get(&format!("{API_BASE_PATH}/lab/leases?projectId=other")),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().cloned().unwrap().len(), 0);
+
+    let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}/lab/leases"))).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().cloned().unwrap().len(), 1);
+
 }

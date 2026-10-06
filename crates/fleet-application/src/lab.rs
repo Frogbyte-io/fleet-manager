@@ -20,7 +20,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
-use crate::operation::AuditPort;
+use crate::operation::{AuditPort, PortFailure};
+use crate::project::ProjectPort;
 pub use fleet_core::{
     CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe, RecipeVersion,
 };
@@ -351,12 +352,12 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn update(&self, lease: &Lease) -> Result<(), String>;
-    /// Lists leases, newest first.
+    /// Lists leases, newest first, narrowed by the project when given.
     ///
     /// # Errors
     ///
     /// Fails when the backend errors.
-    async fn list(&self) -> Result<Vec<Lease>, String>;
+    async fn list(&self, project_id: Option<&str>) -> Result<Vec<Lease>, String>;
     /// Lists the leases whose TTL has expired at `now`.
     ///
     /// # Errors
@@ -473,6 +474,7 @@ pub struct Lab {
     provisions: Arc<dyn ProvisionPort>,
     leases: Arc<dyn LeasePort>,
     image_pins: Arc<dyn ImagePinValidator>,
+    projects: Arc<dyn ProjectPort>,
     audit: Arc<dyn AuditPort>,
 }
 
@@ -484,6 +486,7 @@ impl Lab {
         provisions: Arc<dyn ProvisionPort>,
         leases: Arc<dyn LeasePort>,
         image_pins: Arc<dyn ImagePinValidator>,
+        projects: Arc<dyn ProjectPort>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
@@ -491,18 +494,22 @@ impl Lab {
             provisions,
             leases,
             image_pins,
+            projects,
             audit,
         }
     }
 
     /// Creates a lease from a published template version: the lease
-    /// inherits the template's cleanup strategy and TTL, starts in
-    /// `requested`, and is audited. The provisioning saga is started by
-    /// the caller (the executor composes them).
+    /// inherits the template's cleanup strategy, TTL, and bootstrap
+    /// project, starts in `requested`, and is audited. An explicit project
+    /// id that names an existing project overrides the inheritance. The
+    /// provisioning saga is started by the caller (the executor composes
+    /// them).
     ///
     /// # Errors
     ///
-    /// Fails on denial, an unknown version/lease, a lifecycle conflict, or a backend failure.
+    /// Fails on denial, an unknown version/project/lease, a lifecycle
+    /// conflict, or a backend failure.
     pub async fn create_lease(
         &self,
         authorizer: &dyn Authorizer,
@@ -542,20 +549,45 @@ impl Lab {
                 detail: "the purpose must be 1..=512 characters".to_owned(),
             });
         }
-        // The lease inherits the template's frozen cleanup strategy and
-        // TTL: destroy/revert/keep behavior and the expiry deadline are
-        // data on the lease, not scattered constants.
-        let inherited = NewLease {
-            cleanup: version.content.cleanup,
-            ttl_seconds: version.content.ttl_seconds,
-            ..new
+        // An explicit project must exist; otherwise the lease inherits the
+        // template version's bootstrap project.
+        let inherited = match &new.project_id {
+            Some(id) => {
+                match self.projects.get(id).await {
+                    Ok(_) => {}
+                    Err(PortFailure::NotFound { .. }) => {
+                        return Err(LabUseCaseError::Invalid {
+                            detail: format!("the project {id} does not exist"),
+                        });
+                    }
+                    Err(failure) => {
+                        return Err(LabUseCaseError::Backend {
+                            context: "projects",
+                            detail: failure.to_string(),
+                        });
+                    }
+                }
+                NewLease {
+                    project_id: Some(id.clone()),
+                    cleanup: version.content.cleanup,
+                    ttl_seconds: version.content.ttl_seconds,
+                    ..new
+                }
+            }
+            None => NewLease {
+                project_id: version.content.bootstrap_project_id.clone(),
+                cleanup: version.content.cleanup,
+                ttl_seconds: version.content.ttl_seconds,
+                ..new
+            },
         };
+        let audit_fact = inherited.project_id.as_deref().map(|id| ("projectId", id));
         self.audit_event(
             principal,
             Permission::LabLease,
             Some(&version.id),
             "lab_lease_creating",
-            None,
+            audit_fact,
         )
         .await?;
         self.leases
@@ -567,7 +599,7 @@ impl Lab {
             })
     }
 
-    /// Lists the caller's leases (all leases in the trusted-LAN mode).
+    /// Lists the leases, narrowed by the project when given.
     ///
     /// # Errors
     ///
@@ -576,6 +608,7 @@ impl Lab {
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
+        project_id: Option<&str>,
     ) -> Result<Vec<Lease>, LabUseCaseError> {
         authorize(
             authorizer,
@@ -587,7 +620,7 @@ impl Lab {
         )
         .map_err(LabUseCaseError::Denied)?;
         self.leases
-            .list()
+            .list(project_id)
             .await
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "leases",

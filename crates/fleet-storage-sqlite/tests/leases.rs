@@ -4,6 +4,7 @@
 use fleet_application::lab::{
     AttachProvisionOutcome, LeasePort as _, NewLease, NewProvision, ProvisionPort as _,
 };
+use fleet_application::project::{NewProject, ProjectPort as _};
 use fleet_core::{CleanupStrategy, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS};
 use fleet_storage_sqlite::{LeaseRepository, Store};
 
@@ -260,4 +261,65 @@ async fn readiness_transaction_rolls_back_when_lease_expiry_exceeds_its_cap() {
         provisions.get(&provision.id).await.unwrap().state,
         fleet_core::GuestState::Provisioning
     );
+}
+
+#[tokio::test]
+async fn leases_narrow_by_project_and_deleting_it_nulls_the_link() {
+    let (_dir, store, leases) = setup().await;
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+
+    // The migration applies (opening the store ran it) and the stored
+    // lease keeps the FK-constrained column.
+    let project = projects
+        .create(&NewProject {
+            remote: "https://github.com/example/linked.git".to_owned(),
+            idempotency_key: None,
+            name: "linked".to_owned(),
+            description: String::new(),
+        })
+        .await
+        .expect("the project must be registered");
+
+    let with_project = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the linked lease".to_owned(),
+                project_id: Some(project.id.clone()),
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "operator",
+            NOW,
+        )
+        .await
+        .expect("the lease must store the project");
+    assert_eq!(with_project.project_id, Some(project.id.clone()));
+    let without_project = ready_lease(&leases, NOW + 1_000).await;
+    assert_eq!(without_project.project_id, None);
+
+    // The project filter narrows the list.
+    let linked = leases
+        .list(Some(&project.id))
+        .await
+        .expect("the project-filtered list must succeed");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].id, with_project.id);
+    let everything = leases
+        .list(None)
+        .await
+        .expect("the unfiltered list must succeed");
+    assert_eq!(everything.len(), 2);
+
+    // Deleting the project nulls the lease's project reference instead of
+    // deleting the lease.
+    projects
+        .delete(&project.id)
+        .await
+        .expect("the project must be deleted");
+    let unlinked = leases
+        .get(&with_project.id)
+        .await
+        .expect("the lease must survive the project deletion");
+    assert_eq!(unlinked.project_id, None);
 }

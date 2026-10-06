@@ -21,6 +21,8 @@ Fleet Lab owns image-recipe/version lifecycle, infrastructure selection, provisi
 
 Lab templates reference image versions/provider resources by stable IDs and an observed fingerprint/version. “Latest template named win11” is not reproducible enough for an active lease.
 
+A lease names the Fleet project it serves: an explicit project id given at creation must exist, otherwise the lease inherits the template version's `bootstrap_project_id`.
+
 ## Image recipe and promotion lifecycle
 
 The first image-build provider invokes a compatible, externally installed Packer CLI. Fleet edits and stores modern `*.pkr.json`: a structured editor covers the supported Proxmox subset and an advanced raw editor exposes the complete JSON while preserving unknown fields. Recipes and provisioning scripts are privileged build inputs.
