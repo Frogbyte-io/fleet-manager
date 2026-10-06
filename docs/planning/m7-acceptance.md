@@ -20,8 +20,8 @@ All M7 PRs target the **`dev`** branch, not `main`. Each issue has an agent labe
 
 | Label | Work |
 |---|---|
-| `agent:codex` | Logic, API, provider, storage, test harnesses |
-| `agent:claude` | All GUI work, plus everything else needing judgment (runbooks, acceptance runs) |
+| `agent:codex` | Logic, API, provider, storage, the failure-injection harness |
+| `agent:claude` | All GUI work, plus everything else needing judgment (runbooks, live acceptance harnesses and runs, optional pooling) |
 | `agent:glm` | Simple, tightly specified tasks |
 
 ## Issues
@@ -32,14 +32,14 @@ All M7 PRs target the **`dev`** branch, not `main`. Each issue has an agent labe
 | FM-703 Recorded Packer CLI fixtures | [#250](https://github.com/Frogbyte-io/fleet-manager/issues/250) | #109 | glm | — |
 | FM-712 Proxmox guest destroy primitive | [#251](https://github.com/Frogbyte-io/fleet-manager/issues/251) | #14 | codex | — |
 | FM-714 Readiness probes, guest machine, bootstrap project | [#252](https://github.com/Frogbyte-io/fleet-manager/issues/252) | #13 | codex | — |
-| FM-718 Lease project linkage | [#253](https://github.com/Frogbyte-io/fleet-manager/issues/253) | #15 | codex | — |
+| FM-718 Lease project linkage | [#253](https://github.com/Frogbyte-io/fleet-manager/issues/253) | #15 | glm | — |
 | FM-713 Lab cleanup executor and failure compensation | [#254](https://github.com/Frogbyte-io/fleet-manager/issues/254) | #14 | codex | FM-712 (FM-714 soft) |
-| FM-704 Real-host image build suite | [#255](https://github.com/Frogbyte-io/fleet-manager/issues/255) | #109 | codex | FM-702, FM-703 |
+| FM-704 Real-host image build suite | [#255](https://github.com/Frogbyte-io/fleet-manager/issues/255) | #109 | claude | FM-702, FM-703 |
 | FM-705 Images console: build provenance | [#256](https://github.com/Frogbyte-io/fleet-manager/issues/256) | #109 | claude | FM-702 |
 | FM-715 Placement and capacity reservation | [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257) | #14 | codex | FM-713 |
 | FM-716 Sweeper loop and cleanup reconciler | [#258](https://github.com/Frogbyte-io/fleet-manager/issues/258) | #14 | codex | FM-713 |
 | FM-720 `lab create/status/exec/destroy` and exec API | [#259](https://github.com/Frogbyte-io/fleet-manager/issues/259) | #15 | codex | FM-713, FM-714 |
-| FM-717 Pooled guests and revert cleanup (off gate path) | [#260](https://github.com/Frogbyte-io/fleet-manager/issues/260) | #14 | codex | FM-713, FM-715 |
+| FM-717 Pooled guests and revert cleanup (off gate path) | [#260](https://github.com/Frogbyte-io/fleet-manager/issues/260) | #14 | claude | FM-713, FM-715 |
 | FM-721 Lab artifacts and exec logs | [#261](https://github.com/Frogbyte-io/fleet-manager/issues/261) | #15 | codex | FM-720 |
 | FM-741 Lab failure-injection suite | [#262](https://github.com/Frogbyte-io/fleet-manager/issues/262) | #14 | codex | FM-713, FM-714, FM-715, FM-716 |
 | FM-728 Fleet Lab operator runbook | [#263](https://github.com/Frogbyte-io/fleet-manager/issues/263) | #15 | claude | FM-713, FM-715, FM-716 |
@@ -48,18 +48,18 @@ All M7 PRs target the **`dev`** branch, not `main`. Each issue has an agent labe
 | FM-742 Run and record the exit gate | [#266](https://github.com/Frogbyte-io/fleet-manager/issues/266) | #15 | claude | FM-704, FM-741, FM-723 |
 | FM-743 M7 close-out | [#267](https://github.com/Frogbyte-io/fleet-manager/issues/267) | #15 | glm | FM-742 and all of the above |
 
-Totals: 12 codex, 4 claude (2 GUI), 3 glm.
+Totals: 9 codex, 6 claude (2 GUI), 4 glm. Codex holds under half: FM-718 is spelled out step by step for GLM, and the live build harness (FM-704) and the optional pooling (FM-717) go to Claude.
 
 ## Stages
 
 ```text
-stage 1  FM-702 codex  FM-703 glm  FM-712 codex  FM-714 codex  FM-718 codex
+stage 1  FM-702 codex  FM-703 glm  FM-712 codex  FM-714 codex  FM-718 glm
             |   \         |            |             |
-stage 2  FM-705 claude  FM-704 codex  FM-713 codex <-+ (714 soft)
+stage 2  FM-705 claude  FM-704 claude FM-713 codex <-+ (714 soft)
                                        |
 stage 3              FM-715 codex  FM-716 codex  FM-720 codex (713+714)
                           |             |             |
-stage 4  FM-741 codex (713-716)  FM-728 claude  FM-721 codex  FM-717 codex (optional)
+stage 4  FM-741 codex (713-716)  FM-728 claude  FM-721 codex  FM-717 claude (optional)
                                                      |
 stage 5  FM-722 claude (GUI)   FM-723 glm   ->   FM-742 claude (704+741+723)
                                                      |
