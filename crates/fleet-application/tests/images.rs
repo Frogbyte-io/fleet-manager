@@ -89,8 +89,20 @@ impl RecipePort for FakeRecipes {
         let mut items = self
             .list_builds(query.recipe.as_deref(), query.version.as_deref())
             .await?;
-        let more = items.len() > query.limit as usize;
-        items.truncate(query.limit as usize);
+        if let Some(cursor) = query.cursor.as_deref() {
+            let position = items
+                .iter()
+                .position(|item| item.id == cursor)
+                .ok_or_else(|| fleet_application::images::BUILD_CURSOR_INVALID.to_owned())?;
+            items = items.split_off(position + 1);
+        }
+        let limit = if query.limit == 0 {
+            50
+        } else {
+            query.limit.min(200)
+        };
+        let more = items.len() > limit as usize;
+        items.truncate(limit as usize);
         let next_cursor = if more {
             items.last().map(|item| item.id.clone())
         } else {
@@ -99,7 +111,7 @@ impl RecipePort for FakeRecipes {
         Ok(fleet_application::images::BuildPage {
             items,
             next_cursor,
-            limit: query.limit,
+            limit,
         })
     }
     async fn get_build(&self, id: &str) -> Result<fleet_core::ImageBuildRecord, String> {
@@ -743,6 +755,7 @@ async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_new
             .await,
         Err(RecipeUseCaseError::Invalid { .. })
     ));
+    assert_fake_build_pagination(&images, &version).await;
     assert!(matches!(
         images.list_builds(&DenyAll, &principal(), None, None).await,
         Err(RecipeUseCaseError::Denied(_))
@@ -763,4 +776,61 @@ async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_new
             .len(),
         2
     );
+}
+
+async fn assert_fake_build_pagination(images: &Images, version: &RecipeVersion) {
+    let first = images
+        .list_build_page(
+            &AllowAll,
+            &principal(),
+            fleet_application::images::BuildPageRequest {
+                version: Some(version.id.clone()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.items[0].id, "z-failed");
+    let second = images
+        .list_build_page(
+            &AllowAll,
+            &principal(),
+            fleet_application::images::BuildPageRequest {
+                version: Some(version.id.clone()),
+                cursor: first.next_cursor,
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.items[0].id, "a-success");
+    assert!(second.next_cursor.is_none());
+    for query in [
+        fleet_application::images::BuildPageRequest {
+            cursor: Some("unknown".to_owned()),
+            ..Default::default()
+        },
+        fleet_application::images::BuildPageRequest {
+            version: Some("other-version".to_owned()),
+            cursor: Some("z-failed".to_owned()),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            images.list_build_page(&AllowAll, &principal(), query).await,
+            Err(RecipeUseCaseError::Invalid { .. })
+        ));
+    }
+    assert!(matches!(
+        images
+            .list_build_page(
+                &DenyAll,
+                &principal(),
+                fleet_application::images::BuildPageRequest::default()
+            )
+            .await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
 }
