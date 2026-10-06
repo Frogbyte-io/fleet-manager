@@ -488,6 +488,20 @@ impl ProvisionPort for LabRepository {
         <Self as ProvisionPort>::get(self, record_id).await
     }
 
+    async fn find_by_machine_id(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<ProvisionRecord>, String> {
+        sqlx::query("SELECT * FROM lab_provisions WHERE machine_id = ?1")
+            .bind(machine_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .map(Self::row_to_provision)
+            .transpose()
+    }
+
     async fn list(&self) -> Result<Vec<ProvisionRecord>, String> {
         let rows = sqlx::query("SELECT * FROM lab_provisions ORDER BY created_at DESC, id DESC")
             .fetch_all(&self.pool)

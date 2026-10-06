@@ -300,10 +300,19 @@ impl LabTemplateContent {
         }
         if self.ssh_trust_mode == "pinned"
             && self.ssh_fingerprint.as_deref().is_none_or(|value| {
-                !value.starts_with("SHA256:")
-                    || value.len() <= 7
-                    || value.len() > 128
-                    || value.bytes().any(|b| b.is_ascii_whitespace())
+                let Some(digest) = value.strip_prefix("SHA256:") else {
+                    return true;
+                };
+                // OpenSSH emits the canonical unpadded base64 of 32 bytes:
+                // 43 symbols, with two zero padding bits in the final symbol.
+                digest.len() != 43
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/'))
+                    || !digest
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|b| b"AEIMQUYcgkosw048".contains(b))
             })
         {
             return Err("pinned Lab SSH trust requires an OpenSSH SHA256 fingerprint".to_owned());
@@ -403,7 +412,8 @@ mod tests {
         assert!(template.validate().is_ok());
         template.ssh_trust_mode = "pinned".to_owned();
         assert!(template.validate().is_err());
-        template.ssh_fingerprint = Some("SHA256:public-key-digest".to_owned());
+        template.ssh_fingerprint =
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
         assert!(template.validate().is_ok());
         template.ssh_user = "-oProxyCommand=bad".to_owned();
         assert!(template.validate().is_err());
@@ -413,6 +423,27 @@ mod tests {
         template.ssh_port = 2222;
         template.ssh_trust_mode = "insecure".to_owned();
         assert!(template.validate().is_err());
+    }
+
+    #[test]
+    fn pinned_ssh_fingerprints_require_canonical_sha256_encoding() {
+        let mut template = content();
+        template.ssh_trust_mode = "pinned".to_owned();
+        for digest in [
+            "public-key-digest".to_owned(),
+            "A".repeat(42),
+            "A".repeat(44),
+            format!("{}=", "A".repeat(42)),
+            format!("{}B", "A".repeat(42)),
+            format!("{}-", "A".repeat(42)),
+        ] {
+            template.ssh_fingerprint = Some(format!("SHA256:{digest}"));
+            assert!(template.validate_ssh().is_err());
+        }
+        for last in "AEIMQUYcgkosw048".chars() {
+            template.ssh_fingerprint = Some(format!("SHA256:{}{last}", "A".repeat(42)));
+            assert!(template.validate_ssh().is_ok());
+        }
     }
 
     #[test]
@@ -571,19 +602,21 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// Marks a provisioning lease ready and starts its TTL, capped by the
-    /// creation-relative absolute lifetime.
+    /// Marks a provisioning, booting, or bootstrapping lease ready and starts
+    /// its TTL, capped by the creation-relative absolute lifetime.
     ///
     /// # Errors
     ///
-    /// Fails if the lease is not provisioning, has no provision record, has
-    /// an invalid TTL, or the deadline arithmetic overflows.
+    /// Fails outside provisioning, booting, and bootstrapping, or when the
+    /// provision link, TTL, or deadline arithmetic is invalid.
     pub fn mark_ready(&mut self, now: i64) -> Result<(), String> {
         if !matches!(
             self.state,
             LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
         ) {
-            return Err("only provisioning leases can become ready".to_owned());
+            return Err(
+                "only provisioning, booting, or bootstrapping leases can become ready".to_owned(),
+            );
         }
         if self.provision_id.is_none() {
             return Err("a ready lease must be linked to a provision record".to_owned());

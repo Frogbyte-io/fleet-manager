@@ -530,7 +530,12 @@ async fn bootstrap_dispatches_each_probe_and_prepares_projects_before_ready() {
         // Re-running bootstrap keeps the machine and persisted child identity.
         if project.is_some() {
             let resumed = bootstrap
-                .run(&operations, &parent.id, finished.clone(), &content)
+                .run(
+                    &operations,
+                    &parent.id,
+                    labs.get(&finished.id).await.unwrap(),
+                    &content,
+                )
                 .await
                 .unwrap();
             assert_eq!(resumed.machine_id, finished.machine_id);
@@ -817,4 +822,94 @@ async fn booting_and_bootstrapping_lease_links_resume_and_commit_ready_atomicall
             GuestState::Ready
         );
     }
+}
+
+#[tokio::test]
+async fn a_failed_project_association_write_cancels_the_durable_child() {
+    let (_dir, store) = setup().await;
+    let labs = LabRepository::new(store.pool().clone());
+    let provision = bootstrap_record(&labs).await;
+    sqlx::query("CREATE TRIGGER reject_project_link BEFORE UPDATE OF ready_project_operation_id ON lab_provisions WHEN NEW.ready_project_operation_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'test association failure'); END")
+        .execute(store.pool()).await.unwrap();
+    let audit = std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+    let operations = fleet_application::operation::Operations::new(
+        std::sync::Arc::new(OperationRepository::new(store.pool().clone())),
+        audit.clone(),
+    );
+    let parent = operations
+        .create(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "noop".to_owned(),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+                payload_json: None,
+                review_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    let readiness = Readiness::default();
+    let principal = fleet_application::authz::ActingPrincipal {
+        id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+    };
+    let bootstrap = fleet_application::lab::LabBootstrap {
+        provisions: &labs,
+        readiness: &readiness,
+        audit: audit.as_ref(),
+        authorizer: &fleet_auth::LanAllowAllAuthorizer,
+        principal: &principal,
+    };
+    let content = fleet_core::LabTemplateContent {
+        bootstrap_project_id: Some("project-1".to_owned()),
+        ..fleet_core::LabTemplateContent::default()
+    };
+    assert_eq!(
+        bootstrap
+            .run(&operations, &parent.id, provision.clone(), &content)
+            .await
+            .unwrap_err()
+            .step,
+        "project_setup"
+    );
+    assert!(
+        labs.get(&provision.id)
+            .await
+            .unwrap()
+            .ready_project_operation_id
+            .is_none()
+    );
+    let children = operations
+        .list(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            100,
+        )
+        .await
+        .unwrap();
+    let child = children
+        .iter()
+        .find(|child| child.correlation_id.as_deref() == Some(&provision.id))
+        .unwrap();
+    assert!(
+        child.cancel_requested,
+        "cancelling must not depend on the failed association write"
+    );
+    assert_eq!(
+        *readiness.calls.lock().unwrap(),
+        vec!["trust", "project_create"]
+    );
+    let machine = labs.get(&provision.id).await.unwrap().machine_id.unwrap();
+    assert_eq!(
+        labs.find_by_machine_id(&machine).await.unwrap().unwrap().id,
+        provision.id
+    );
+    assert!(
+        labs.find_by_machine_id("ordinary-machine")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

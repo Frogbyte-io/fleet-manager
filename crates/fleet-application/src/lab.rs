@@ -242,6 +242,19 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
         Err("Lab machine registration is unavailable".to_owned())
     }
 
+    /// Reads the unique durable Lab association for a machine, including
+    /// terminal records whose queued children still need cancellation checks.
+    async fn find_by_machine_id(
+        &self,
+        machine_id: &str,
+    ) -> Result<Option<ProvisionRecord>, String> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .find(|record| record.machine_id.as_deref() == Some(machine_id)))
+    }
+
     /// Lists records, newest first.
     ///
     /// # Errors
@@ -416,44 +429,25 @@ impl LabBootstrap<'_> {
             .update(&record)
             .await
             .map_err(|_| failure("bootstrapping"))?;
-        loop {
-            let remaining = self
-                .remaining(operations, operation_id, &record, "ssh_trust")
-                .await?;
-            match tokio::time::timeout(remaining, self.readiness.trust(&record, content, remaining))
-                .await
-            {
-                Ok(Ok(true)) => break,
-                Ok(Ok(false)) => {
-                    tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
-                }
-                _ => return Err(failure("ssh_trust")),
-            }
-        }
+        self.poll(
+            operations,
+            operation_id,
+            &record,
+            "ssh_trust",
+            |remaining| self.readiness.trust(&record, content, remaining),
+        )
+        .await?;
         if content.readiness_probe == ReadinessProbe::SshExec {
             let command = content
                 .readiness_command
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| failure("ssh_exec"))?;
-            loop {
-                let remaining = self
-                    .remaining(operations, operation_id, &record, "ssh_exec")
-                    .await?;
-                match tokio::time::timeout(
-                    remaining,
-                    self.readiness
-                        .ssh_probe(operations, operation_id, &record, command, remaining),
-                )
-                .await
-                {
-                    Ok(Ok(true)) => break,
-                    Ok(Ok(false)) => {
-                        tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
-                    }
-                    _ => return Err(failure("ssh_exec")),
-                }
-            }
+            self.poll(operations, operation_id, &record, "ssh_exec", |remaining| {
+                self.readiness
+                    .ssh_probe(operations, operation_id, &record, command, remaining)
+            })
+            .await?;
         }
         if content.readiness_probe == ReadinessProbe::ProjectReady
             && content.bootstrap_project_id.is_none()
@@ -478,40 +472,61 @@ impl LabBootstrap<'_> {
                 .await
                 .map_err(|_| failure("project_setup"))?
                 .map_err(|_| failure("project_setup"))?;
-                record.ready_project_operation_id = Some(child);
-                self.provisions
-                    .update(&record)
-                    .await
-                    .map_err(|_| failure("project_setup"))?;
-            }
-            loop {
-                let remaining = self
-                    .remaining(operations, operation_id, &record, "project_ready")
-                    .await?;
-                match tokio::time::timeout(
-                    remaining,
-                    self.readiness.project_verified(
-                        operations,
-                        record
-                            .ready_project_operation_id
-                            .as_deref()
-                            .expect("recorded above"),
-                        remaining,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(true)) => break,
-                    Ok(Ok(false)) => {
-                        tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
-                    }
-                    _ => return Err(failure("project_ready")),
+                record.ready_project_operation_id = Some(child.clone());
+                if self.provisions.update(&record).await.is_err() {
+                    // Cancellation must not depend on the association write
+                    // having succeeded: this child is already durable.
+                    let _ = operations
+                        .cancel(self.authorizer, &self.principal.id, &child)
+                        .await;
+                    return Err(failure("project_setup"));
                 }
             }
+            let child = record
+                .ready_project_operation_id
+                .as_deref()
+                .expect("recorded above");
+            self.poll(
+                operations,
+                operation_id,
+                &record,
+                "project_ready",
+                |remaining| {
+                    self.readiness
+                        .project_verified(operations, child, remaining)
+                },
+            )
+            .await?;
         }
         self.remaining(operations, operation_id, &record, "ready")
             .await?;
         Ok(record)
+    }
+
+    async fn poll<F, Fut>(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        record: &ProvisionRecord,
+        step: &'static str,
+        mut attempt: F,
+    ) -> Result<(), LabReadinessFailure>
+    where
+        F: FnMut(std::time::Duration) -> Fut,
+        Fut: std::future::Future<Output = Result<bool, String>>,
+    {
+        loop {
+            let remaining = self
+                .remaining(operations, operation_id, record, step)
+                .await?;
+            match tokio::time::timeout(remaining, attempt(remaining)).await {
+                Ok(Ok(true)) => return Ok(()),
+                Ok(Ok(false)) => {
+                    tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
+                }
+                _ => return Err(LabReadinessFailure { step }),
+            }
+        }
     }
 
     async fn remaining(

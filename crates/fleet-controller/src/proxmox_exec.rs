@@ -1134,11 +1134,9 @@ impl OperationExecutor for LabReadinessExecutor {
             && let Some(machine) = payload["machineId"].as_str()
         {
             let active = provisions
-                .list()
+                .find_by_machine_id(machine)
                 .await
-                .map_err(|_| "Lab readiness record unavailable")?
-                .into_iter()
-                .find(|record| record.machine_id.as_deref() == Some(machine));
+                .map_err(|_| "Lab readiness record unavailable")?;
             if let Some(record) = active {
                 if let Some(child_id) = record.ready_project_operation_id {
                     let child = operations
@@ -1195,6 +1193,10 @@ impl OperationExecutor for LabReadinessExecutor {
                         .await
                         .map_err(|_| "Lab provision unavailable")?;
                     if record.state != fleet_core::GuestState::Bootstrapping
+                        || operations
+                            .cancel_requested(&operation.id)
+                            .await
+                            .unwrap_or(true)
                         || fleet_core::SystemClock::now_unix_millis() >= deadline
                         || operations
                             .cancel_requested(&steps.parent)
@@ -1234,6 +1236,7 @@ pub struct ProvisionReadiness {
     inner: Arc<dyn OperationExecutor>,
     operations: Arc<Operations>,
     work_dir: std::path::PathBuf,
+    started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl ProvisionReadiness {
@@ -1254,15 +1257,30 @@ impl ProvisionReadiness {
             inner,
             operations,
             work_dir,
+            started: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
     async fn execute_child(&self, operations: &Operations, id: &str) -> Result<Operation, String> {
-        let state = operations
-            .get_state(id)
+        let current = operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                id,
+            )
             .await
             .map_err(|_| "child record unavailable")?;
-        if state == "pending" {
+        if current.cancel_requested {
+            return Ok(current);
+        }
+        let state = current.state;
+        if matches!(state.as_str(), "pending" | "running")
+            && self
+                .started
+                .lock()
+                .map_err(|_| "child startup guard unavailable")?
+                .insert(id.to_owned())
+        {
             // The normal worker can win this claim. Read its resulting state
             // rather than executing the child twice when that happens.
             let operations = self.operations.clone();
@@ -1270,6 +1288,7 @@ impl ProvisionReadiness {
             let id = id.to_owned();
             let watchdog_operations = operations.clone();
             let watchdog_id = id.clone();
+            let started = self.started.clone();
             tokio::spawn(async move {
                 loop {
                     let Ok(child) = watchdog_operations
@@ -1282,7 +1301,9 @@ impl ProvisionReadiness {
                     else {
                         break;
                     };
-                    if !matches!(child.state.as_str(), "pending" | "running") {
+                    if child.cancel_requested
+                        || !matches!(child.state.as_str(), "pending" | "running")
+                    {
                         break;
                     }
                     let payload: serde_json::Value =
@@ -1320,11 +1341,29 @@ impl ProvisionReadiness {
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
+                if let Ok(mut started) = started.lock() {
+                    started.remove(&watchdog_id);
+                }
             });
             tokio::spawn(async move {
-                let _ = operations
+                if operations
                     .claim_only_execute(inner.as_ref(), &id, fleet_auth::LAN_PRINCIPAL_ID)
-                    .await;
+                    .await
+                    .is_err()
+                    && operations
+                        .get_state(&id)
+                        .await
+                        .is_ok_and(|state| state == "pending")
+                {
+                    let _ = operations
+                        .complete(
+                            &id,
+                            "failed",
+                            None,
+                            Some(r#"{"reason":"lab_child_claim_failed"}"#),
+                        )
+                        .await;
+                }
             });
         }
         operations
@@ -1429,6 +1468,9 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
         let deadline = tokio::time::Instant::now() + remaining;
         loop {
             let finished = self.execute_child(operations, &child.id).await?;
+            if finished.cancel_requested {
+                return Err("SSH probe was cancelled".to_owned());
+            }
             if !matches!(finished.state.as_str(), "pending" | "running") {
                 return Ok(finished.state == "succeeded");
             }
@@ -1490,6 +1532,9 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
         _remaining: Duration,
     ) -> Result<bool, String> {
         let child = self.execute_child(operations, child_id).await?;
+        if child.cancel_requested {
+            return Err("bootstrap project was cancelled".to_owned());
+        }
         if matches!(child.state.as_str(), "pending" | "running") {
             return Ok(false);
         }
@@ -1506,6 +1551,101 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
         } else {
             Err("bootstrap project verify did not pass".to_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_startup_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct HeldChild {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl OperationExecutor for HeldChild {
+        async fn execute(
+            &self,
+            operations: &Operations,
+            operation: &Operation,
+        ) -> Result<(), String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.release.notified().await;
+            operations
+                .complete(&operation.id, "succeeded", Some("{}"), None)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_polls_reuse_one_startup_and_watchdog() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            audit.clone(),
+        ));
+        let child = operations
+            .create(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &fleet_application::operation::NewOperation {
+                    kind: "noop".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    payload_json: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let readiness = ProvisionReadiness::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+                store.pool().clone(),
+            )),
+            audit,
+            Arc::new(HeldChild {
+                calls: calls.clone(),
+                release: release.clone(),
+            }),
+            operations.clone(),
+            dir.path().join("ssh"),
+        );
+        for _ in 0..30 {
+            readiness
+                .execute_child(&operations, &child.id)
+                .await
+                .unwrap();
+            assert_eq!(readiness.started.lock().unwrap().len(), 1);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if readiness.started.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(operations.get_state(&child.id).await.unwrap(), "succeeded");
     }
 }
 
