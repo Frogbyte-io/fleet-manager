@@ -160,6 +160,16 @@ pub struct ProvisionRecord {
     pub clone_upid: Option<String>,
     /// The guest's IPv4 address, once the agent reported one.
     pub guest_ipv4: Option<String>,
+    /// The temporary Fleet machine, retained for cleanup.
+    pub machine_id: Option<String>,
+    /// The SSH endpoint belonging to that machine.
+    pub endpoint_id: Option<String>,
+    /// The durable M3 child operation, recorded before execution.
+    pub ready_project_operation_id: Option<String>,
+    /// Absolute readiness deadline, unchanged by a resumed execution.
+    pub readiness_deadline_at: Option<i64>,
+    /// The named saga step that failed, without provider output or secrets.
+    pub failed_step: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
     /// When the guest reached ready (epoch millis), when it did — the TTL
@@ -221,6 +231,17 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
         record: &ProvisionRecord,
         lease_expires_at: Option<i64>,
     ) -> Result<(), String>;
+    /// Registers and associates one Lab-owned machine atomically, or returns
+    /// the existing association. The application authorizes and audits intent
+    /// before invoking this mutation.
+    async fn ensure_guest_machine(
+        &self,
+        _record_id: &str,
+        _reference: &str,
+    ) -> Result<ProvisionRecord, String> {
+        Err("Lab machine registration is unavailable".to_owned())
+    }
+
     /// Lists records, newest first.
     ///
     /// # Errors
@@ -246,8 +267,284 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ) -> Result<CloneTargetReservation, String>;
 }
 
+/// Adapter contract for the existing SSH trust/exec and M3 operation paths.
+/// `false` means retryable unavailability; an error is terminal. Provider
+/// output must not be returned as an error because it may contain secrets.
+#[async_trait]
+pub trait LabReadinessPort: fmt::Debug + Send + Sync {
+    /// Observes and pins/compares the host key through FM-201.
+    async fn trust(
+        &self,
+        record: &ProvisionRecord,
+        content: &LabTemplateContent,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+    /// Runs the template command through FM-202, succeeding only on exit 0.
+    async fn ssh_probe(
+        &self,
+        operations: &crate::operation::Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        command: &str,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+    /// Creates or re-finds a durable M3 child with a provision-scoped key.
+    async fn create_project(
+        &self,
+        operations: &crate::operation::Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        project_id: &str,
+        remaining: std::time::Duration,
+    ) -> Result<String, String>;
+    /// Executes/polls that child and accepts only a successful verify step.
+    async fn project_verified(
+        &self,
+        operations: &crate::operation::Operations,
+        child_id: &str,
+        remaining: std::time::Duration,
+    ) -> Result<bool, String>;
+}
+
+/// A safe named readiness failure. External output is excluded.
+#[derive(Debug)]
+pub struct LabReadinessFailure {
+    /// The saga step that did not complete.
+    pub step: &'static str,
+}
+
+/// Executes Lab readiness policy using the existing adapter contracts.
+/// The absolute deadline and child identity are durable before remote work.
+pub struct LabBootstrap<'a> {
+    /// Provision persistence.
+    pub provisions: &'a dyn ProvisionPort,
+    /// SSH and ready-project adapters.
+    pub readiness: &'a dyn LabReadinessPort,
+    /// Mutation audit sink.
+    pub audit: &'a dyn AuditPort,
+    /// Active centralized authorization policy.
+    pub authorizer: &'a dyn Authorizer,
+    /// The controller's acting identity.
+    pub principal: &'a ActingPrincipal,
+}
+
+impl LabBootstrap<'_> {
+    /// Associates the guest, trusts SSH, runs the configured probe and applies
+    /// the bootstrap project. Returns the latest record; the caller commits
+    /// readiness and its TTL atomically only after this succeeds.
+    ///
+    /// # Errors
+    /// Returns the safe named step on denial, deadline, cancellation or failure.
+    pub async fn run(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        record: ProvisionRecord,
+        content: &LabTemplateContent,
+    ) -> Result<ProvisionRecord, LabReadinessFailure> {
+        let record_id = record.id.clone();
+        let outcome = self
+            .run_inner(operations, operation_id, record, content)
+            .await;
+        if outcome.is_err()
+            && let Ok(record) = self.provisions.get(&record_id).await
+            && let Some(child) = record.ready_project_operation_id.as_deref()
+        {
+            let _ = operations
+                .cancel(self.authorizer, &self.principal.id, child)
+                .await;
+        }
+        outcome
+    }
+
+    // Keep the ordered saga transitions together for review.
+    #[allow(clippy::too_many_lines)]
+    async fn run_inner(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        mut record: ProvisionRecord,
+        content: &LabTemplateContent,
+    ) -> Result<ProvisionRecord, LabReadinessFailure> {
+        let failure = |step| LabReadinessFailure { step };
+        self.remaining(operations, operation_id, &record, "machine_registration")
+            .await?;
+        content
+            .validate_ssh()
+            .map_err(|_| failure("ssh_configuration"))?;
+        let host = record
+            .guest_ipv4
+            .as_deref()
+            .ok_or_else(|| failure("guest_ip"))?;
+        host.parse::<std::net::Ipv4Addr>()
+            .map_err(|_| failure("guest_ip"))?;
+        for action in [Permission::LabProvision, Permission::MachineCreate] {
+            authorize(
+                self.authorizer,
+                AccessRequest {
+                    principal_id: &self.principal.id,
+                    action,
+                    resource: if action == Permission::LabProvision {
+                        Some(record.lease_id.as_deref().unwrap_or(&record.id))
+                    } else {
+                        None
+                    },
+                },
+            )
+            .map_err(|_| failure("machine_registration"))?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: self.principal.id.clone(),
+                action: Permission::MachineCreate.id().to_owned(),
+                resource: Some(record.id.clone()),
+                decision: Decision::allow(),
+                correlation_id: Some(operation_id.to_owned()),
+                operation_id: Some(operation_id.to_owned()),
+                metadata: crate::audit::AuditMetadata::default(),
+            })
+            .await
+            .map_err(|_| failure("machine_registration"))?;
+        let reference = format!("{}@{host}:{}", content.ssh_user, content.ssh_port);
+        record = self
+            .provisions
+            .ensure_guest_machine(&record.id, &reference)
+            .await
+            .map_err(|_| failure("machine_registration"))?;
+        record.state = GuestState::Bootstrapping;
+        self.provisions
+            .update(&record)
+            .await
+            .map_err(|_| failure("bootstrapping"))?;
+        loop {
+            let remaining = self
+                .remaining(operations, operation_id, &record, "ssh_trust")
+                .await?;
+            match tokio::time::timeout(remaining, self.readiness.trust(&record, content, remaining))
+                .await
+            {
+                Ok(Ok(true)) => break,
+                Ok(Ok(false)) => {
+                    tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
+                }
+                _ => return Err(failure("ssh_trust")),
+            }
+        }
+        if content.readiness_probe == ReadinessProbe::SshExec {
+            let command = content
+                .readiness_command
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| failure("ssh_exec"))?;
+            loop {
+                let remaining = self
+                    .remaining(operations, operation_id, &record, "ssh_exec")
+                    .await?;
+                match tokio::time::timeout(
+                    remaining,
+                    self.readiness
+                        .ssh_probe(operations, operation_id, &record, command, remaining),
+                )
+                .await
+                {
+                    Ok(Ok(true)) => break,
+                    Ok(Ok(false)) => {
+                        tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
+                    }
+                    _ => return Err(failure("ssh_exec")),
+                }
+            }
+        }
+        if content.readiness_probe == ReadinessProbe::ProjectReady
+            && content.bootstrap_project_id.is_none()
+        {
+            return Err(failure("project_ready"));
+        }
+        if let Some(project_id) = content.bootstrap_project_id.as_deref() {
+            if record.ready_project_operation_id.is_none() {
+                let remaining = self
+                    .remaining(operations, operation_id, &record, "project_setup")
+                    .await?;
+                let child = tokio::time::timeout(
+                    remaining,
+                    self.readiness.create_project(
+                        operations,
+                        operation_id,
+                        &record,
+                        project_id,
+                        remaining,
+                    ),
+                )
+                .await
+                .map_err(|_| failure("project_setup"))?
+                .map_err(|_| failure("project_setup"))?;
+                record.ready_project_operation_id = Some(child);
+                self.provisions
+                    .update(&record)
+                    .await
+                    .map_err(|_| failure("project_setup"))?;
+            }
+            loop {
+                let remaining = self
+                    .remaining(operations, operation_id, &record, "project_ready")
+                    .await?;
+                match tokio::time::timeout(
+                    remaining,
+                    self.readiness.project_verified(
+                        operations,
+                        record
+                            .ready_project_operation_id
+                            .as_deref()
+                            .expect("recorded above"),
+                        remaining,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(true)) => break,
+                    Ok(Ok(false)) => {
+                        tokio::time::sleep(remaining.min(std::time::Duration::from_secs(2))).await;
+                    }
+                    _ => return Err(failure("project_ready")),
+                }
+            }
+        }
+        self.remaining(operations, operation_id, &record, "ready")
+            .await?;
+        Ok(record)
+    }
+
+    async fn remaining(
+        &self,
+        operations: &crate::operation::Operations,
+        operation_id: &str,
+        record: &ProvisionRecord,
+        step: &'static str,
+    ) -> Result<std::time::Duration, LabReadinessFailure> {
+        if operations
+            .cancel_requested(operation_id)
+            .await
+            .map_err(|_| LabReadinessFailure { step })?
+        {
+            return Err(LabReadinessFailure { step: "cancelled" });
+        }
+        let millis = record
+            .readiness_deadline_at
+            .unwrap_or(0)
+            .saturating_sub(fleet_core::SystemClock::now_unix_millis());
+        if millis <= 0 {
+            return Err(LabReadinessFailure { step });
+        }
+        Ok(std::time::Duration::from_millis(
+            u64::try_from(millis).unwrap_or(0),
+        ))
+    }
+}
+
 /// The outcome of [`ProvisionPort::reserve_clone_target`].
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Retain the existing port contract as the readiness record gains durable IDs.
+#[allow(clippy::large_enum_variant)]
 pub enum CloneTargetReservation {
     /// The record holds a reservation; it carries the stored node and VMID.
     Reserved(ProvisionRecord),
@@ -1219,7 +1516,10 @@ impl Lab {
                 });
             }
             if lease.state != LeaseState::Requested
-                && !(lease.state == LeaseState::Provisioning && lease.provision_id.is_some())
+                && !(matches!(
+                    lease.state,
+                    LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
+                ) && lease.provision_id.is_some())
             {
                 return Err(LabUseCaseError::Conflict {
                     detail: format!("lease {lease_id} is not awaiting provisioning"),

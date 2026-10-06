@@ -8126,6 +8126,9 @@
           "memoryMib",
           "diskGib",
           "readinessProbe",
+          "sshUser",
+          "sshPort",
+          "sshTrustMode",
           "readinessDeadlineSeconds",
           "ttlSeconds",
           "cleanup"
@@ -8189,6 +8192,27 @@
             "type": "string",
             "description": "The readiness probe."
           },
+          "sshFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Public OpenSSH SHA256 fingerprint for pinned trust."
+          },
+          "sshPort": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest SSH listener port.",
+            "minimum": 0
+          },
+          "sshTrustMode": {
+            "type": "string",
+            "description": "Host-key trust: tofu or pinned."
+          },
+          "sshUser": {
+            "type": "string",
+            "description": "The SSH account preconfigured in the image."
+          },
           "ttlSeconds": {
             "type": "integer",
             "format": "int32",
@@ -8209,6 +8233,9 @@
           "memoryMib",
           "diskGib",
           "readinessProbe",
+          "sshUser",
+          "sshPort",
+          "sshTrustMode",
           "readinessDeadlineSeconds",
           "ttlSeconds",
           "cleanup",
@@ -8289,6 +8316,27 @@
           "readinessProbe": {
             "type": "string",
             "description": "The readiness probe."
+          },
+          "sshFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Public OpenSSH SHA256 fingerprint for pinned trust."
+          },
+          "sshPort": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest SSH listener port.",
+            "minimum": 0
+          },
+          "sshTrustMode": {
+            "type": "string",
+            "description": "Host-key trust: tofu or pinned."
+          },
+          "sshUser": {
+            "type": "string",
+            "description": "The SSH account preconfigured in the image."
           },
           "ttlSeconds": {
             "type": "integer",
@@ -9836,6 +9884,9 @@
                 "memoryMib",
                 "diskGib",
                 "readinessProbe",
+                "sshUser",
+                "sshPort",
+                "sshTrustMode",
                 "readinessDeadlineSeconds",
                 "ttlSeconds",
                 "cleanup",
@@ -9916,6 +9967,27 @@
                 "readinessProbe": {
                   "type": "string",
                   "description": "The readiness probe."
+                },
+                "sshFingerprint": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Public OpenSSH SHA256 fingerprint for pinned trust."
+                },
+                "sshPort": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The guest SSH listener port.",
+                  "minimum": 0
+                },
+                "sshTrustMode": {
+                  "type": "string",
+                  "description": "Host-key trust: tofu or pinned."
+                },
+                "sshUser": {
+                  "type": "string",
+                  "description": "The SSH account preconfigured in the image."
                 },
                 "ttlSeconds": {
                   "type": "integer",
@@ -12486,6 +12558,9 @@
               "memoryMib",
               "diskGib",
               "readinessProbe",
+              "sshUser",
+              "sshPort",
+              "sshTrustMode",
               "readinessDeadlineSeconds",
               "ttlSeconds",
               "cleanup",
@@ -12566,6 +12641,27 @@
               "readinessProbe": {
                 "type": "string",
                 "description": "The readiness probe."
+              },
+              "sshFingerprint": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Public OpenSSH SHA256 fingerprint for pinned trust."
+              },
+              "sshPort": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The guest SSH listener port.",
+                "minimum": 0
+              },
+              "sshTrustMode": {
+                "type": "string",
+                "description": "Host-key trust: tofu or pinned."
+              },
+              "sshUser": {
+                "type": "string",
+                "description": "The SSH account preconfigured in the image."
               },
               "ttlSeconds": {
                 "type": "integer",
@@ -14261,6 +14357,27 @@
           "readinessProbe": {
             "type": "string",
             "description": "The readiness probe."
+          },
+          "sshFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Public OpenSSH SHA256 fingerprint for pinned trust."
+          },
+          "sshPort": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest SSH listener port.",
+            "minimum": 0
+          },
+          "sshTrustMode": {
+            "type": "string",
+            "description": "Host-key trust: tofu or pinned."
+          },
+          "sshUser": {
+            "type": "string",
+            "description": "The SSH account preconfigured in the image."
           },
           "ttlSeconds": {
             "type": "integer",

@@ -108,6 +108,10 @@ pub enum GuestState {
     /// The clone completed and the guest started (verified through the
     /// FM-601 agent data), but the readiness probe has not passed.
     Provisioned,
+    /// The clone is booting; a usable guest IP is not yet observed.
+    Booting,
+    /// SSH trust, configured probes, and project preparation are in progress.
+    Bootstrapping,
     /// The readiness probe passed; the TTL clock starts here.
     Ready,
     /// The readiness deadline expired without the probe passing: an
@@ -122,6 +126,8 @@ impl GuestState {
         match self {
             Self::Provisioning => "provisioning",
             Self::Provisioned => "provisioned",
+            Self::Booting => "booting",
+            Self::Bootstrapping => "bootstrapping",
             Self::Ready => "ready",
             Self::NeverReady => "never_ready",
         }
@@ -136,6 +142,8 @@ impl GuestState {
         match id {
             "provisioning" => Ok(Self::Provisioning),
             "provisioned" => Ok(Self::Provisioned),
+            "booting" => Ok(Self::Booting),
+            "bootstrapping" => Ok(Self::Bootstrapping),
             "ready" => Ok(Self::Ready),
             "never_ready" => Ok(Self::NeverReady),
             other => Err(format!("unrecognized guest state {other:?}")),
@@ -143,9 +151,19 @@ impl GuestState {
     }
 }
 
+fn default_ssh_user() -> String {
+    "root".to_owned()
+}
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_ssh_trust_mode() -> String {
+    "tofu".to_owned()
+}
+
 /// A Lab template's content: the pinned image version, runtime
 /// constraints, the bootstrap profile, and the policies.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabTemplateContent {
     /// The operator-facing template name.
@@ -167,12 +185,47 @@ pub struct LabTemplateContent {
     pub readiness_probe: ReadinessProbe,
     /// The SSH probe command, for the `ssh_exec` probe.
     pub readiness_command: Option<String>,
+    /// SSH account already configured in the pinned Linux image.
+    #[serde(default = "default_ssh_user")]
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    /// Host-key policy: `tofu` for Fleet-created guests or `pinned`.
+    #[serde(default = "default_ssh_trust_mode")]
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint required for pinned trust.
+    #[serde(default)]
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds; expiry is `never_ready`.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds, beginning at ready.
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: CleanupStrategy,
+}
+
+impl Default for LabTemplateContent {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            image_version_id: String::new(),
+            cores: 0,
+            memory_mib: 0,
+            disk_gib: 0,
+            bootstrap_project_id: None,
+            readiness_probe: ReadinessProbe::default(),
+            readiness_command: None,
+            ssh_user: default_ssh_user(),
+            ssh_port: default_ssh_port(),
+            ssh_trust_mode: default_ssh_trust_mode(),
+            ssh_fingerprint: None,
+            readiness_deadline_seconds: 0,
+            ttl_seconds: 0,
+            cleanup: CleanupStrategy::default(),
+        }
+    }
 }
 
 impl LabTemplateContent {
@@ -214,6 +267,47 @@ impl LabTemplateContent {
         {
             return Err("the ssh_exec probe requires a readiness command".to_owned());
         }
+        self.validate_ssh()?;
+        if self.readiness_probe == ReadinessProbe::ProjectReady
+            && self
+                .bootstrap_project_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err("the project_ready probe requires a bootstrap project".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Validates the non-secret SSH connection and host-key policy.
+    ///
+    /// # Errors
+    /// Fails on an invalid user/port, trust mode or missing pinned key.
+    pub fn validate_ssh(&self) -> Result<(), String> {
+        if self.ssh_user.is_empty()
+            || self.ssh_user.len() > 64
+            || self.ssh_user.starts_with('-')
+            || !self
+                .ssh_user
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            || self.ssh_port == 0
+        {
+            return Err("the Lab SSH user or port is invalid".to_owned());
+        }
+        if !matches!(self.ssh_trust_mode.as_str(), "tofu" | "pinned") {
+            return Err("Lab SSH trust must be tofu or pinned".to_owned());
+        }
+        if self.ssh_trust_mode == "pinned"
+            && self.ssh_fingerprint.as_deref().is_none_or(|value| {
+                !value.starts_with("SHA256:")
+                    || value.len() <= 7
+                    || value.len() > 128
+                    || value.bytes().any(|b| b.is_ascii_whitespace())
+            })
+        {
+            return Err("pinned Lab SSH trust requires an OpenSSH SHA256 fingerprint".to_owned());
+        }
         Ok(())
     }
 }
@@ -233,6 +327,10 @@ mod tests {
             bootstrap_project_id: None,
             readiness_probe: ReadinessProbe::GuestAgent,
             readiness_command: None,
+            ssh_user: "root".to_owned(),
+            ssh_port: 22,
+            ssh_trust_mode: "tofu".to_owned(),
+            ssh_fingerprint: None,
             readiness_deadline_seconds: 300,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
@@ -297,6 +395,40 @@ mod tests {
     }
 
     #[test]
+    fn project_ready_requires_a_project_and_ssh_trust_is_validated() {
+        let mut template = content();
+        template.readiness_probe = ReadinessProbe::ProjectReady;
+        assert!(template.validate().is_err());
+        template.bootstrap_project_id = Some("project-1".to_owned());
+        assert!(template.validate().is_ok());
+        template.ssh_trust_mode = "pinned".to_owned();
+        assert!(template.validate().is_err());
+        template.ssh_fingerprint = Some("SHA256:public-key-digest".to_owned());
+        assert!(template.validate().is_ok());
+        template.ssh_user = "-oProxyCommand=bad".to_owned();
+        assert!(template.validate().is_err());
+        template.ssh_user = "fleet".to_owned();
+        template.ssh_port = 0;
+        assert!(template.validate().is_err());
+        template.ssh_port = 2222;
+        template.ssh_trust_mode = "insecure".to_owned();
+        assert!(template.validate().is_err());
+    }
+
+    #[test]
+    fn historical_template_versions_inherit_lab_tofu_defaults() {
+        let mut json = serde_json::to_value(content()).unwrap();
+        for key in ["sshUser", "sshPort", "sshTrustMode", "sshFingerprint"] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let version: LabTemplateContent = serde_json::from_value(json).unwrap();
+        assert_eq!(version.ssh_user, "root");
+        assert_eq!(version.ssh_port, 22);
+        assert_eq!(version.ssh_trust_mode, "tofu");
+        assert_eq!(version.ssh_fingerprint, None);
+    }
+
+    #[test]
     fn enums_round_trip_their_ids() {
         for id in ["guest_agent", "ssh_exec", "project_ready"] {
             assert_eq!(ReadinessProbe::from_id(id).unwrap().id(), id);
@@ -306,7 +438,14 @@ mod tests {
             assert_eq!(CleanupStrategy::from_id(id).unwrap().id(), id);
         }
         assert!(CleanupStrategy::from_id("mystery").is_err());
-        for id in ["provisioning", "provisioned", "ready", "never_ready"] {
+        for id in [
+            "provisioning",
+            "provisioned",
+            "booting",
+            "bootstrapping",
+            "ready",
+            "never_ready",
+        ] {
             assert_eq!(GuestState::from_id(id).unwrap().id(), id);
         }
         assert!(GuestState::from_id("mystery").is_err());
@@ -440,7 +579,10 @@ impl Lease {
     /// Fails if the lease is not provisioning, has no provision record, has
     /// an invalid TTL, or the deadline arithmetic overflows.
     pub fn mark_ready(&mut self, now: i64) -> Result<(), String> {
-        if self.state != LeaseState::Provisioning {
+        if !matches!(
+            self.state,
+            LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
+        ) {
             return Err("only provisioning leases can become ready".to_owned());
         }
         if self.provision_id.is_none() {

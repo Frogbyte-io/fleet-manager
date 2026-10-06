@@ -1013,6 +1013,502 @@ async fn complete_failure(
         .map_err(|error| error.to_string())
 }
 
+/// Bounds Lab children without changing the general M3 workflow contract.
+#[derive(Debug)]
+pub struct LabReadinessExecutor {
+    fallback: Arc<dyn OperationExecutor>,
+    steps: Arc<dyn OperationExecutor>,
+    machines: Arc<dyn fleet_application::machine::MachinePort>,
+    operations: Arc<Operations>,
+    work_dir: std::path::PathBuf,
+    limiter: Arc<fleet_provider_ssh::ExecutionLimiter>,
+    provisions: Option<Arc<dyn fleet_application::lab::ProvisionPort>>,
+}
+
+impl LabReadinessExecutor {
+    /// Reuses M3 with a parent-aware adapter for its nested operations.
+    #[must_use]
+    pub fn new(
+        fallback: Arc<dyn OperationExecutor>,
+        steps: Arc<dyn OperationExecutor>,
+        machines: Arc<dyn fleet_application::machine::MachinePort>,
+        operations: Arc<Operations>,
+        work_dir: std::path::PathBuf,
+        limiter: Arc<fleet_provider_ssh::ExecutionLimiter>,
+    ) -> Self {
+        Self {
+            fallback,
+            steps,
+            machines,
+            operations,
+            work_dir,
+            limiter,
+            provisions: None,
+        }
+    }
+    /// Applies the same bound when a queue worker wins a nested M3 claim.
+    #[must_use]
+    pub fn with_provisions(
+        mut self,
+        provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+    ) -> Self {
+        self.provisions = Some(provisions);
+        self
+    }
+}
+
+#[derive(Debug)]
+struct LabBoundedStep {
+    inner: Arc<dyn OperationExecutor>,
+    parent: String,
+    workflow: String,
+    deadline: i64,
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for LabBoundedStep {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        for id in [&self.parent, &self.workflow] {
+            let current = operations
+                .get(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    id,
+                )
+                .await
+                .map_err(|_| "Lab parent unavailable")?;
+            if current.cancel_requested || !matches!(current.state.as_str(), "pending" | "running")
+            {
+                return Err("Lab readiness was stopped".to_owned());
+            }
+        }
+        let seconds = self
+            .deadline
+            .saturating_sub(fleet_core::SystemClock::now_unix_millis())
+            / 1000;
+        // A whole-second CLI timeout must fit inside the absolute budget.
+        if seconds < 1 {
+            return Err("Lab readiness deadline expired".to_owned());
+        }
+        let mut bounded = operation.clone();
+        let mut payload: serde_json::Value = serde_json::from_str(
+            bounded
+                .payload_json
+                .as_deref()
+                .ok_or("missing Lab step payload")?,
+        )
+        .map_err(|_| "invalid Lab step payload")?;
+        let requested = payload["timeoutSeconds"].as_u64().unwrap_or(120);
+        payload["timeoutSeconds"] =
+            serde_json::json!(requested.min(u64::try_from(seconds).unwrap_or(0)));
+        bounded.payload_json = Some(payload.to_string());
+        bounded.deadline_at = Some(self.deadline);
+        self.inner.execute(operations, &bounded).await
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationExecutor for LabReadinessExecutor {
+    async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap_or("null"))
+                .unwrap_or_default();
+        let mut parent = payload["labParentOperationId"].as_str().map(str::to_owned);
+        let mut deadline = operation.deadline_at;
+        let mut workflow = operation.id.clone();
+        // M3 creates its steps in the durable queue before claiming them in
+        // process. If another worker wins, those unchanged step payloads must
+        // still inherit the active Lab workflow's budget and cancellation.
+        if parent.is_none()
+            && matches!(
+                operation.kind.as_str(),
+                "mise.status"
+                    | "frogenv.status"
+                    | "projects.clone"
+                    | "mise.install"
+                    | "frogenv.setup"
+                    | "skills.deploy"
+                    | "tools.inventory"
+            )
+            && let Some(provisions) = &self.provisions
+            && let Some(machine) = payload["machineId"].as_str()
+        {
+            let active = provisions
+                .list()
+                .await
+                .map_err(|_| "Lab readiness record unavailable")?
+                .into_iter()
+                .find(|record| record.machine_id.as_deref() == Some(machine));
+            if let Some(record) = active {
+                if let Some(child_id) = record.ready_project_operation_id {
+                    let child = operations
+                        .get(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &child_id,
+                        )
+                        .await
+                        .map_err(|_| "Lab workflow unavailable")?;
+                    // Ordinary operations created after bootstrap finishes are
+                    // independent. Already queued workflow steps keep ownership
+                    // even after the provision itself becomes terminal.
+                    if matches!(child.state.as_str(), "pending" | "running" | "cancelling")
+                        || operation.created_at <= child.updated_at
+                    {
+                        if record.state == fleet_core::GuestState::NeverReady {
+                            return Err("Lab readiness was stopped".to_owned());
+                        }
+                        let child_payload: serde_json::Value =
+                            serde_json::from_str(child.payload_json.as_deref().unwrap_or("null"))
+                                .unwrap_or_default();
+                        parent = Some(
+                            child_payload["labParentOperationId"]
+                                .as_str()
+                                .ok_or("missing Lab workflow parent")?
+                                .to_owned(),
+                        );
+                        workflow = child_id;
+                        deadline = record.readiness_deadline_at;
+                    }
+                } else if record.state == fleet_core::GuestState::Bootstrapping {
+                    return Err("Lab workflow association is not durable yet".to_owned());
+                }
+            }
+        }
+        let Some(parent) = parent else {
+            return self.fallback.execute(operations, operation).await;
+        };
+        let deadline = deadline.ok_or("missing Lab readiness deadline")?;
+        let steps = Arc::new(LabBoundedStep {
+            inner: self.steps.clone(),
+            parent,
+            workflow,
+            deadline,
+        });
+        if operation.kind == "ready.workflow" {
+            if let (Some(provisions), Some(record_id)) =
+                (&self.provisions, operation.correlation_id.as_deref())
+            {
+                loop {
+                    let record = provisions
+                        .get(record_id)
+                        .await
+                        .map_err(|_| "Lab provision unavailable")?;
+                    if record.state != fleet_core::GuestState::Bootstrapping
+                        || fleet_core::SystemClock::now_unix_millis() >= deadline
+                        || operations
+                            .cancel_requested(&steps.parent)
+                            .await
+                            .unwrap_or(true)
+                    {
+                        return Err("Lab readiness was stopped".to_owned());
+                    }
+                    if record.ready_project_operation_id.as_deref() == Some(&operation.id) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+            crate::ready::ReadyExecutor::new(
+                self.machines.clone(),
+                self.operations.clone(),
+                steps,
+                self.work_dir.clone(),
+                self.limiter.clone(),
+            )
+            .execute(operations, operation)
+            .await
+        } else {
+            steps.execute(operations, operation).await
+        }
+    }
+}
+
+/// FM-201/202 and M3 adapters for Lab readiness. Uses the controller's shared
+/// SSH directory, operation services and existing executor chain.
+#[derive(Debug)]
+pub struct ProvisionReadiness {
+    machines: Arc<dyn fleet_application::machine::MachinePort>,
+    projects: Arc<dyn fleet_application::project::ProjectPort>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+    inner: Arc<dyn OperationExecutor>,
+    operations: Arc<Operations>,
+    work_dir: std::path::PathBuf,
+}
+
+impl ProvisionReadiness {
+    /// Composes the existing adapters; no alternate SSH or project runtime.
+    #[must_use]
+    pub fn new(
+        machines: Arc<dyn fleet_application::machine::MachinePort>,
+        projects: Arc<dyn fleet_application::project::ProjectPort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+        inner: Arc<dyn OperationExecutor>,
+        operations: Arc<Operations>,
+        work_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            machines,
+            projects,
+            audit,
+            inner,
+            operations,
+            work_dir,
+        }
+    }
+
+    async fn execute_child(&self, operations: &Operations, id: &str) -> Result<Operation, String> {
+        let state = operations
+            .get_state(id)
+            .await
+            .map_err(|_| "child record unavailable")?;
+        if state == "pending" {
+            // The normal worker can win this claim. Read its resulting state
+            // rather than executing the child twice when that happens.
+            let operations = self.operations.clone();
+            let inner = self.inner.clone();
+            let id = id.to_owned();
+            let watchdog_operations = operations.clone();
+            let watchdog_id = id.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok(child) = watchdog_operations
+                        .get(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &watchdog_id,
+                        )
+                        .await
+                    else {
+                        break;
+                    };
+                    if !matches!(child.state.as_str(), "pending" | "running") {
+                        break;
+                    }
+                    let payload: serde_json::Value =
+                        serde_json::from_str(child.payload_json.as_deref().unwrap_or("null"))
+                            .unwrap_or_default();
+                    let parent_stopped =
+                        if let Some(parent) = payload["labParentOperationId"].as_str() {
+                            watchdog_operations
+                                .get(
+                                    &fleet_auth::LanAllowAllAuthorizer,
+                                    fleet_auth::LAN_PRINCIPAL_ID,
+                                    parent,
+                                )
+                                .await
+                                .map_or(true, |parent| {
+                                    parent.cancel_requested
+                                        || !matches!(parent.state.as_str(), "pending" | "running")
+                                })
+                        } else {
+                            false
+                        };
+                    if parent_stopped
+                        || child.deadline_at.is_some_and(|deadline| {
+                            deadline <= fleet_core::SystemClock::now_unix_millis()
+                        })
+                    {
+                        let _ = watchdog_operations
+                            .cancel(
+                                &fleet_auth::LanAllowAllAuthorizer,
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                &watchdog_id,
+                            )
+                            .await;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+            tokio::spawn(async move {
+                let _ = operations
+                    .claim_only_execute(inner.as_ref(), &id, fleet_auth::LAN_PRINCIPAL_ID)
+                    .await;
+            });
+        }
+        operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                id,
+            )
+            .await
+            .map_err(|_| "child record unavailable".to_owned())
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
+    async fn trust(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        if remaining.as_secs() == 0 {
+            return Err("SSH trust deadline expired".to_owned());
+        }
+        let endpoint = record
+            .endpoint_id
+            .as_deref()
+            .ok_or("missing SSH endpoint")?;
+        let expected = self
+            .machines
+            .verified_fingerprint(endpoint)
+            .await
+            .map_err(|_| "host key record unavailable")?;
+        let host = record.guest_ipv4.clone().ok_or("missing guest IP")?;
+        let port = content.ssh_port;
+        let work_dir = self.work_dir.clone();
+        let observed = tokio::task::spawn_blocking(move || {
+            let staging = work_dir.join(format!("lab-trust-{}", uuid::Uuid::now_v7()));
+            let provider = fleet_provider_ssh::SshProvider::new(staging.clone())
+                .map_err(|_| "SSH provider unavailable")?;
+            let result = provider
+                .probe_host_key(&host, port, remaining.min(Duration::from_secs(5)))
+                .map_err(|_| "SSH host key unavailable");
+            let _ = std::fs::remove_dir_all(staging);
+            result
+        })
+        .await
+        .map_err(|_| "SSH trust worker failed")?;
+        let Ok(observation) = observed else {
+            return Ok(false);
+        };
+        if expected
+            .as_deref()
+            .is_some_and(|key| key != observation.fingerprint)
+            || (content.ssh_trust_mode == "pinned"
+                && content.ssh_fingerprint.as_deref() != Some(observation.fingerprint.as_str()))
+        {
+            return Err("the SSH host key differs from the pinned key".to_owned());
+        }
+        let machines =
+            fleet_application::machine::Machines::new(self.machines.clone(), self.audit.clone());
+        if expected.is_none() {
+            machines
+                .confirm_host_key(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &fleet_application::authz::ActingPrincipal {
+                        id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                    },
+                    endpoint,
+                    &observation.fingerprint,
+                )
+                .await
+                .map_err(|_| "SSH trust confirmation failed")?;
+        }
+        let provider = fleet_provider_ssh::SshProvider::new(self.work_dir.clone())
+            .map_err(|_| "SSH provider unavailable")?;
+        provider
+            .pin(&observation)
+            .map_err(|_| "SSH pinning failed")?;
+        Ok(true)
+    }
+
+    async fn ssh_probe(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        command: &str,
+        remaining: Duration,
+    ) -> Result<bool, String> {
+        let child = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "ssh.exec".to_owned(), idempotency_key: None,
+                deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+                payload_json: Some(serde_json::json!({
+                    "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                    "auth": {"type": "agent"}, "script": command,
+                    "labParentOperationId": parent_id,
+                    "timeoutSeconds": remaining.as_secs().clamp(1, crate::exec::MAX_SCRIPT_TIMEOUT),
+                }).to_string()),
+            }).await.map_err(|_| "SSH probe operation could not be created")?;
+        let deadline = tokio::time::Instant::now() + remaining;
+        loop {
+            let finished = self.execute_child(operations, &child.id).await?;
+            if !matches!(finished.state.as_str(), "pending" | "running") {
+                return Ok(finished.state == "succeeded");
+            }
+            if tokio::time::Instant::now() >= deadline
+                || operations.cancel_requested(parent_id).await.unwrap_or(true)
+            {
+                let _ = operations
+                    .cancel(
+                        &fleet_auth::LanAllowAllAuthorizer,
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &child.id,
+                    )
+                    .await;
+                return Err("SSH probe deadline expired".to_owned());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn create_project(
+        &self,
+        operations: &Operations,
+        parent_id: &str,
+        record: &fleet_application::lab::ProvisionRecord,
+        project_id: &str,
+        remaining: Duration,
+    ) -> Result<String, String> {
+        let projects =
+            fleet_application::project::Projects::new(self.projects.clone(), self.audit.clone());
+        let project = projects
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &fleet_application::authz::ActingPrincipal {
+                    id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                },
+                project_id,
+            )
+            .await
+            .map_err(|_| "bootstrap project unavailable")?;
+        let operation = operations.create(&fleet_auth::LanAllowAllAuthorizer, fleet_auth::LAN_PRINCIPAL_ID,
+            &fleet_application::operation::NewOperation {
+                kind: "ready.workflow".to_owned(), idempotency_key: Some(format!("lab-ready:{}", record.id)),
+                deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+                payload_json: Some(serde_json::json!({
+                    "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                    "auth": {"type": "agent"}, "remote": project.remote,
+                    "root": format!("/tmp/fleet-projects/{}", project.id),
+                    "labParentOperationId": parent_id,
+                    "timeoutSeconds": remaining.as_secs().clamp(1, crate::ready::MAX_WORKFLOW_TIMEOUT),
+                }).to_string()),
+            }).await.map_err(|_| "bootstrap project operation could not be created")?;
+        Ok(operation.id)
+    }
+
+    async fn project_verified(
+        &self,
+        operations: &Operations,
+        child_id: &str,
+        _remaining: Duration,
+    ) -> Result<bool, String> {
+        let child = self.execute_child(operations, child_id).await?;
+        if matches!(child.state.as_str(), "pending" | "running") {
+            return Ok(false);
+        }
+        let result: serde_json::Value =
+            serde_json::from_str(child.result_json.as_deref().unwrap_or("null"))
+                .unwrap_or_default();
+        if child.state == "succeeded"
+            && result["ready"] == true
+            && result["completed"]
+                .as_array()
+                .is_some_and(|steps| steps.iter().any(|step| step == "verify"))
+        {
+            Ok(true)
+        } else {
+            Err("bootstrap project verify did not pass".to_owned())
+        }
+    }
+}
+
 /// The Lab provisioning executor (FM-710): drives the provisioning saga's
 /// external steps for one record — clone from the pinned image version,
 /// start, and verify through the guest agent — updating the record's
@@ -1028,6 +1524,8 @@ pub struct ProvisionExecutor {
     artifacts: Arc<dyn fleet_application::lab::ImageArtifactPort>,
     client: fleet_provider_proxmox::ProxmoxClient,
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
+    readiness: Option<Arc<dyn fleet_application::lab::LabReadinessPort>>,
+    audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
 }
 
 /// A classified provisioning failure: the operation completes as failed
@@ -1064,6 +1562,8 @@ impl ProvisionExecutor {
             artifacts,
             client,
             links: None,
+            readiness: None,
+            audit: None,
         }
     }
 
@@ -1073,6 +1573,55 @@ impl ProvisionExecutor {
     pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
         self.links = Some(links);
         self
+    }
+
+    /// Supplies the existing SSH and M3 readiness ports and mutation audit sink.
+    #[must_use]
+    pub fn with_readiness(
+        mut self,
+        readiness: Arc<dyn fleet_application::lab::LabReadinessPort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+    ) -> Self {
+        self.readiness = Some(readiness);
+        self.audit = Some(audit);
+        self
+    }
+
+    async fn persist_failure(&self, record_id: &str, step: &str) -> Result<(), String> {
+        let mut record = self.provisions.get(record_id).await?;
+        if record.state == fleet_core::GuestState::Ready {
+            return Ok(());
+        }
+        record.state = fleet_core::GuestState::NeverReady;
+        record.failed_step = Some(step.to_owned());
+        self.provisions.update(&record).await?;
+        if let Some(id) = record.lease_id.as_deref() {
+            let mut lease = self.leases.get(id).await?;
+            if matches!(
+                lease.state,
+                fleet_core::LeaseState::Provisioning
+                    | fleet_core::LeaseState::Booting
+                    | fleet_core::LeaseState::Bootstrapping
+            ) {
+                lease.state = fleet_core::LeaseState::Failed;
+                self.leases.update(&lease).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn fail(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        record_id: &str,
+        reason: &str,
+        step: &str,
+    ) -> Result<(), String> {
+        self.persist_failure(record_id, step).await?;
+        operations.complete(operation_id, "failed", None,
+            Some(&serde_json::json!({"reason": reason, "step": step, "detail": format!("Lab provisioning failed at {step}; recorded external IDs are retained")}).to_string()))
+            .await.map(|_| ()).map_err(|error| error.to_string())
     }
 
     async fn bound(
@@ -1451,12 +2000,34 @@ impl ProvisionExecutor {
         }
         if !matches!(
             lease.state,
-            fleet_core::LeaseState::Provisioning | fleet_core::LeaseState::Ready
+            fleet_core::LeaseState::Provisioning
+                | fleet_core::LeaseState::Booting
+                | fleet_core::LeaseState::Bootstrapping
+                | fleet_core::LeaseState::Ready
         ) {
             return Err(format!(
                 "the linked lease is in {} and cannot be provisioned",
                 lease.state.id()
             ));
+        }
+        if record.state == fleet_core::GuestState::Ready
+            && lease.state == fleet_core::LeaseState::Ready
+        {
+            return operations.complete(&operation.id, "succeeded", Some(&serde_json::json!({
+                "recordId": record.id, "machineId": record.machine_id, "endpointId": record.endpoint_id,
+                "node": record.node, "vmid": record.vmid, "state": "ready"
+            }).to_string()), None).await.map(|_| ()).map_err(|error| error.to_string());
+        }
+        if record.state == fleet_core::GuestState::NeverReady {
+            return self
+                .fail(
+                    operations,
+                    &operation.id,
+                    &record.id,
+                    "never_ready",
+                    record.failed_step.as_deref().unwrap_or("readiness"),
+                )
+                .await;
         }
         let version = self
             .templates
@@ -1556,6 +2127,19 @@ impl ProvisionExecutor {
             .await
             .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
 
+        let mut record = record;
+        record.readiness_deadline_at.get_or_insert_with(|| {
+            fleet_core::SystemClock::now_unix_millis()
+                .saturating_add(i64::from(version.content.readiness_deadline_seconds) * 1_000)
+        });
+        record.state = fleet_core::GuestState::Booting;
+        self.provisions.update(&record).await?;
+        let mut booting_lease = self.leases.get(&lease_id).await?;
+        if booting_lease.state != fleet_core::LeaseState::Ready {
+            booting_lease.state = fleet_core::LeaseState::Booting;
+            self.leases.update(&booting_lease).await?;
+        }
+
         // Step 2: start the guest (idempotent when already running).
         operations
             .record_progress(
@@ -1575,64 +2159,155 @@ impl ProvisionExecutor {
                 fleet_provider_proxmox::LifecycleAction::Start,
             )
             .await;
-        // A refused start stays tolerated (the guest may already run); an
-        // accepted one is linked like every other task Fleet starts.
+        // A refusal is idempotent only when live provider state confirms
+        // this already-owned guest is running.
         if let Ok(upid) = &started {
             record_task_link(self.links.as_ref(), &account_id, upid, &operation.id).await;
+        } else {
+            let running = self
+                .client
+                .list_guest_resources(request.clone())
+                .await
+                .map_err(|_| "the boot state is unreadable")?
+                .iter()
+                .any(|guest| {
+                    guest.vmid == Some(vmid)
+                        && guest.kind == "qemu"
+                        && guest.name.as_deref() == Some(format!("fm-lab-{}", record.id).as_str())
+                        && guest.status.as_deref() == Some("running")
+                });
+            if !running {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record.id,
+                        "provision_failed",
+                        "boot",
+                    )
+                    .await;
+            }
         }
 
-        // Step 3: the readiness probe. The guest-agent probe polls the
-        // FM-601 agent data; the deadline comes from the template.
-        let deadline =
-            std::time::Duration::from_secs(u64::from(version.content.readiness_deadline_seconds));
-        let started = std::time::Instant::now();
+        // Step 3: obtain a usable IP from normalized FM-601 agent data.
         loop {
-            let cancelled = operations
+            if operations
                 .cancel_requested(&operation.id)
                 .await
-                .unwrap_or(false);
-            if cancelled {
-                return complete_failure(
-                    operations,
-                    &operation.id,
-                    "cancelled",
-                    &format!(
-                        "cancelled while waiting for readiness; the guest {node}/qemu/{vmid} keeps running and its state is recorded"
-                    ),
-                )
-                .await;
+                .map_err(|error| error.to_string())?
+            {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record.id,
+                        "cancelled",
+                        "guest_ip",
+                    )
+                    .await;
             }
-            // The agent probe: the guest answers `agent/info` when ready.
-            let agent_ready = self
-                .client
-                .guest_agent_info(request.clone(), &node, vmid)
-                .await
-                .is_ok();
-            if agent_ready {
+            let remaining = record
+                .readiness_deadline_at
+                .unwrap_or(0)
+                .saturating_sub(fleet_core::SystemClock::now_unix_millis());
+            if remaining <= 0 {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record.id,
+                        "never_ready",
+                        "guest_ip",
+                    )
+                    .await;
+            }
+            let budget = Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
+            let discovery =
+                tokio::time::timeout(budget, self.client.guest_discover(request.clone())).await;
+            let ip = match discovery {
+                Ok(Ok(discovery)) => discovery
+                    .guests
+                    .iter()
+                    .find(|guest| guest.resource.vmid == Some(vmid))
+                    .and_then(|guest| guest.agent.as_ref())
+                    .filter(|agent| agent.online)
+                    .and_then(|agent| {
+                        agent
+                            .interfaces
+                            .iter()
+                            .flat_map(|interface| &interface.addresses)
+                            .filter_map(|address| address.parse::<std::net::Ipv4Addr>().ok())
+                            .find(|ip| {
+                                !ip.is_loopback()
+                                    && !ip.is_link_local()
+                                    && !ip.is_unspecified()
+                                    && !ip.is_multicast()
+                                    && !ip.is_broadcast()
+                            })
+                    })
+                    .map(|ip| ip.to_string()),
+                _ => None,
+            };
+            if let Some(ip) = ip {
+                // Keep the originally associated endpoint stable on resume.
+                if record.machine_id.is_some() && record.guest_ipv4.as_deref() != Some(ip.as_str())
+                {
+                    return self
+                        .fail(
+                            operations,
+                            &operation.id,
+                            &record.id,
+                            "never_ready",
+                            "guest_ip_changed",
+                        )
+                        .await;
+                }
+                record.guest_ipv4 = Some(ip);
+                self.provisions.update(&record).await?;
                 break;
             }
-            if started.elapsed() >= deadline {
-                // never_ready: an explicit recorded failure, never a hang.
-                let mut updated = record.clone();
-                updated.state = fleet_core::GuestState::NeverReady;
-                updated.node = Some(node.clone());
-                updated.vmid = Some(vmid);
-                self.provisions
-                    .update(&updated)
-                    .await
-                    .map_err(|detail| format!("the record update failed: {detail}"))?;
-                return complete_failure(
+            tokio::time::sleep(POLL_INTERVAL.min(budget)).await;
+        }
+        let (Some(readiness), Some(audit)) = (&self.readiness, &self.audit) else {
+            return self
+                .fail(
                     operations,
                     &operation.id,
+                    &record.id,
                     "never_ready",
-                    &format!(
-                        "the readiness deadline expired without the probe passing; the guest {node}/qemu/{vmid} is recorded as never_ready"
-                    ),
+                    "readiness_adapter",
                 )
                 .await;
+        };
+        let mut bootstrapping_lease = self.leases.get(&lease_id).await?;
+        bootstrapping_lease.state = fleet_core::LeaseState::Bootstrapping;
+        self.leases.update(&bootstrapping_lease).await?;
+        let bootstrap = fleet_application::lab::LabBootstrap {
+            provisions: self.provisions.as_ref(),
+            readiness: readiness.as_ref(),
+            audit: audit.as_ref(),
+            authorizer: &fleet_auth::LanAllowAllAuthorizer,
+            principal: &fleet_application::authz::ActingPrincipal {
+                id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+            },
+        };
+        let record = match bootstrap
+            .run(operations, &operation.id, record, &version.content)
+            .await
+        {
+            Ok(record) => record,
+            Err(failure) => {
+                return self
+                    .fail(
+                        operations,
+                        &operation.id,
+                        &record_id,
+                        "never_ready",
+                        failure.step,
+                    )
+                    .await;
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+        };
 
         // Ready: record the state; the TTL clock starts here.
         let (ready_at, lease_expires_at) = if let Some(lease_id) = record.lease_id.as_deref() {
@@ -1687,6 +2362,9 @@ impl ProvisionExecutor {
                 Some(
                     &serde_json::json!({
                         "recordId": record.id,
+                        "machineId": record.machine_id,
+                        "endpointId": record.endpoint_id,
+                        "readyProjectOperationId": record.ready_project_operation_id,
                         "node": node,
                         "vmid": vmid,
                         "state": "ready"
@@ -1704,7 +2382,39 @@ impl ProvisionExecutor {
 #[async_trait::async_trait]
 impl OperationExecutor for ProvisionExecutor {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
-        self.execute_linked(operations, operation).await
+        let outcome = self.execute_linked(operations, operation).await;
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap_or("null"))
+                .unwrap_or_default();
+        if let Some(record_id) = payload["recordId"].as_str() {
+            let failed = outcome.is_err()
+                || operations
+                    .get_state(&operation.id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    == "failed";
+            if failed {
+                let record = self.provisions.get(record_id).await?;
+                let step = record.failed_step.as_deref().unwrap_or(match record.state {
+                    fleet_core::GuestState::Provisioning => "clone",
+                    fleet_core::GuestState::Booting => "boot",
+                    _ => "readiness",
+                });
+                self.persist_failure(record_id, step).await?;
+                if outcome.is_err() {
+                    return self
+                        .fail(
+                            operations,
+                            &operation.id,
+                            record_id,
+                            "provision_failed",
+                            step,
+                        )
+                        .await;
+                }
+            }
+        }
+        outcome
     }
 }
 

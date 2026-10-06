@@ -62,6 +62,7 @@ struct Pve {
     seen: Mutex<Vec<Seen>>,
     /// The repository and record whose target the clone request observes.
     observe: Mutex<Option<(Arc<LabRepository>, String)>>,
+    ready_ip: bool,
 }
 
 impl Pve {
@@ -80,6 +81,7 @@ impl Pve {
             next_vmid,
             seen: Mutex::new(Vec::new()),
             observe: Mutex::new(None),
+            ready_ip: false,
         })
     }
 
@@ -171,6 +173,10 @@ impl Transport {
             format!(r#"{{"data":"{}"}}"#, self.0.clone_upid)
         } else if path.ends_with("/status/start") {
             format!(r#"{{"data":"{START_UPID}"}}"#)
+        } else if self.0.ready_ip && path.ends_with("/agent/info") {
+            r#"{"data":{"result":{"version":"9"}}}"#.to_owned()
+        } else if self.0.ready_ip && path.ends_with("/agent/network-get-interfaces") {
+            r#"{"data":{"result":[{"name":"ens18","ip-addresses":[{"ip-address":"192.0.2.42","ip-address-type":"ipv4","prefix":24}]}]}}"#.to_owned()
         } else {
             // The agent probe: refused, so the zero readiness deadline
             // ends the saga as never_ready right after the start.
@@ -235,6 +241,7 @@ struct Harness {
     operations: Arc<Operations>,
     account_id: String,
     version_id: String,
+    pool: sqlx::SqlitePool,
 }
 
 impl Harness {
@@ -269,6 +276,10 @@ impl Harness {
             bootstrap_project_id: None,
             readiness_probe: ReadinessProbe::GuestAgent,
             readiness_command: None,
+            ssh_user: "root".to_owned(),
+            ssh_port: 22,
+            ssh_trust_mode: "tofu".to_owned(),
+            ssh_fingerprint: None,
             readiness_deadline_seconds: 0,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
@@ -299,7 +310,7 @@ impl Harness {
             .unwrap();
         let operations = Arc::new(Operations::new(
             Arc::new(OperationRepository::new(pool.clone())),
-            Arc::new(AuditSink::new(pool)),
+            Arc::new(AuditSink::new(pool.clone())),
         ));
         Self {
             _dir: dir,
@@ -309,6 +320,7 @@ impl Harness {
             operations,
             account_id: account.id,
             version_id: version.id,
+            pool,
         }
     }
 
@@ -373,6 +385,17 @@ impl Harness {
         lease_id: &str,
         record_id: &str,
     ) -> (String, Option<(String, String)>, ProvisionRecord) {
+        self.run_executor(pve, self.executor(pve, pinned), lease_id, record_id)
+            .await
+    }
+
+    async fn run_executor(
+        &self,
+        pve: &Arc<Pve>,
+        executor: fleet_controller::proxmox_exec::ProvisionExecutor,
+        lease_id: &str,
+        record_id: &str,
+    ) -> (String, Option<(String, String)>, ProvisionRecord) {
         *pve.observe.lock().unwrap() = Some((self.labs.clone(), record_id.to_owned()));
         let operation = self
             .operations
@@ -402,7 +425,7 @@ impl Harness {
             self.operations.clone(),
             Arc::new(fleet_controller::proxmox_exec::LabDispatch::new(
                 Arc::new(fleet_application::worker::NoopExecutor),
-                Arc::new(self.executor(pve, pinned)),
+                Arc::new(executor),
             )),
             2,
         );
@@ -561,6 +584,12 @@ async fn a_rerun_after_the_clone_started_does_not_clone_again() {
     let mut resumable = ProvisionPort::get(harness.labs.as_ref(), &record.id)
         .await
         .unwrap();
+    // The simulated interruption precedes terminal readiness failure on
+    // both rows; an actual failed lease is intentionally not resumable.
+    let mut resumable_lease = harness.leases.get(&lease_id).await.unwrap();
+    resumable_lease.state = fleet_core::LeaseState::Provisioning;
+    harness.leases.update(&resumable_lease).await.unwrap();
+    resumable.failed_step = None;
     resumable.state = GuestState::Provisioning;
     ProvisionPort::update(harness.labs.as_ref(), &resumable)
         .await
@@ -895,4 +924,552 @@ async fn the_cleanup_guard_refuses_templates_and_image_artifacts() {
         .guard_destroy_target(&harness.account_id, NEXT_VMID)
         .await
         .expect("a Lab clone may be destroyed");
+}
+
+#[derive(Debug)]
+struct ReadyPorts {
+    labs: Arc<LabRepository>,
+    fail: Option<&'static str>,
+    calls: Mutex<Vec<&'static str>>,
+}
+
+#[async_trait]
+impl fleet_application::lab::LabReadinessPort for ReadyPorts {
+    async fn trust(
+        &self,
+        record: &ProvisionRecord,
+        _content: &LabTemplateContent,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("trust");
+        let stored = ProvisionPort::get(self.labs.as_ref(), &record.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.state, GuestState::Bootstrapping);
+        assert!(stored.machine_id.is_some());
+        if self.fail == Some("trust") {
+            Err("unsafe provider diagnostic".to_owned())
+        } else {
+            Ok(true)
+        }
+    }
+    async fn ssh_probe(
+        &self,
+        _operations: &Operations,
+        _parent_id: &str,
+        _record: &ProvisionRecord,
+        command: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("ssh");
+        assert_eq!(command, "test -f /tmp/ready");
+        if self.fail == Some("ssh") {
+            Err("unsafe SSH diagnostic".to_owned())
+        } else {
+            Ok(true)
+        }
+    }
+    async fn create_project(
+        &self,
+        operations: &Operations,
+        _parent_id: &str,
+        record: &ProvisionRecord,
+        project_id: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<String, String> {
+        self.calls.lock().unwrap().push("create_project");
+        assert_eq!(project_id, "project-1");
+        if self.fail == Some("project") {
+            return Err("unsafe project diagnostic".to_owned());
+        }
+        let child = operations.create(&AllowAll, "tester", &NewOperation {
+            kind: "ready.workflow".to_owned(), idempotency_key: Some(format!("lab-ready:{}", record.id)),
+            deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
+            payload_json: Some(serde_json::json!({"machineId": record.machine_id, "endpointId": record.endpoint_id, "auth":{"type":"agent"}, "remote":"example.org/demo", "root":"/tmp/demo", "timeoutSeconds":30}).to_string()),
+        }).await.map_err(|error| error.to_string())?;
+        Ok(child.id)
+    }
+    async fn project_verified(
+        &self,
+        operations: &Operations,
+        child_id: &str,
+        _remaining: std::time::Duration,
+    ) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("verify");
+        let provisions = ProvisionPort::list(self.labs.as_ref()).await.unwrap();
+        assert!(
+            provisions
+                .iter()
+                .any(|record| record.ready_project_operation_id.as_deref() == Some(child_id)),
+            "child identity must be committed before execution"
+        );
+        if self.fail == Some("verify") {
+            return Err("unsafe verify diagnostic".to_owned());
+        }
+        if operations.get_state(child_id).await.unwrap() == "pending" {
+            operations
+                .claim_only_execute(&ProjectVerify, child_id, "test-project")
+                .await?;
+        }
+        Ok(operations.get_state(child_id).await.unwrap() == "succeeded")
+    }
+}
+
+#[derive(Debug)]
+struct ProjectVerify;
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for ProjectVerify {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        operations
+            .complete(
+                &operation.id,
+                "succeeded",
+                Some(r#"{"ready":true,"completed":["verify"]}"#),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+async fn ready_harness(
+    probe: ReadinessProbe,
+    project: bool,
+    fail: Option<&'static str>,
+) -> (Harness, String, ProvisionRecord, Arc<Pve>, Arc<ReadyPorts>) {
+    let harness = Harness::new().await;
+    let mut version = harness.labs.get_version(&harness.version_id).await.unwrap();
+    version.content.readiness_deadline_seconds = 30;
+    version.content.readiness_probe = probe;
+    version.content.readiness_command = Some("test -f /tmp/ready".to_owned());
+    version.content.bootstrap_project_id = project.then(|| "project-1".to_owned());
+    sqlx::query("UPDATE lab_template_versions SET content = ?2 WHERE id = ?1")
+        .bind(&version.id)
+        .bind(serde_json::to_string(&version.content).unwrap())
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    let (lease_id, mut record) = harness.record().await;
+    record.vmid = Some(NEXT_VMID);
+    record.node = Some(TEMPLATE_NODE.to_owned());
+    record.clone_upid = Some(CLONE_UPID.to_owned());
+    ProvisionPort::update(harness.labs.as_ref(), &record)
+        .await
+        .unwrap();
+    let mut pve = Pve::new(vec![guest(NEXT_VMID, &format!("fm-lab-{}", record.id))]);
+    Arc::get_mut(&mut pve).unwrap().ready_ip = true;
+    let ports = Arc::new(ReadyPorts {
+        labs: harness.labs.clone(),
+        fail,
+        calls: Mutex::new(Vec::new()),
+    });
+    (harness, lease_id, record, pve, ports)
+}
+
+#[tokio::test]
+async fn every_probe_registers_a_lab_machine_and_starts_ttl_only_after_bootstrap() {
+    for (probe, project, expected) in [
+        (ReadinessProbe::GuestAgent, false, vec!["trust"]),
+        (ReadinessProbe::SshExec, false, vec!["trust", "ssh"]),
+        (
+            ReadinessProbe::ProjectReady,
+            true,
+            vec!["trust", "create_project", "verify"],
+        ),
+        (
+            ReadinessProbe::GuestAgent,
+            true,
+            vec!["trust", "create_project", "verify"],
+        ),
+    ] {
+        let (harness, lease_id, record, pve, ports) = ready_harness(probe, project, None).await;
+        let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_readiness(
+            ports.clone(),
+            Arc::new(AuditSink::new(harness.pool.clone())),
+        );
+        let (state, error, stored) = harness
+            .run_executor(&pve, executor, &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "succeeded", "{error:?}");
+        assert_eq!(stored.state, GuestState::Ready);
+        assert_eq!(stored.guest_ipv4.as_deref(), Some("192.0.2.42"));
+        assert!(stored.machine_id.is_some());
+        assert!(stored.endpoint_id.is_some());
+        assert_eq!(*ports.calls.lock().unwrap(), expected);
+        let lease = harness.leases.get(&lease_id).await.unwrap();
+        assert_eq!(lease.state, fleet_core::LeaseState::Ready);
+        assert_eq!(lease.ready_at, stored.ready_at);
+        assert_eq!(
+            lease.expires_at,
+            stored.ready_at.map(|ready| ready + 3_600_000)
+        );
+        let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_readiness(
+            ports.clone(),
+            Arc::new(AuditSink::new(harness.pool.clone())),
+        );
+        let (state, _, resumed) = harness
+            .run_executor(&pve, executor, &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "succeeded");
+        assert_eq!(resumed.machine_id, stored.machine_id);
+        assert_eq!(
+            resumed.ready_project_operation_id,
+            stored.ready_project_operation_id
+        );
+        assert_eq!(
+            harness.leases.get(&lease_id).await.unwrap().expires_at,
+            lease.expires_at
+        );
+        assert_eq!(
+            *ports.calls.lock().unwrap(),
+            expected,
+            "a ready resume does no remote work"
+        );
+        assert!(pve.clones().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn each_readiness_failure_names_the_step_and_retains_allocations() {
+    for (fail, step) in [
+        ("trust", "ssh_trust"),
+        ("ssh", "ssh_exec"),
+        ("project", "project_setup"),
+        ("verify", "project_ready"),
+    ] {
+        let (harness, lease_id, record, pve, ports) =
+            ready_harness(ReadinessProbe::SshExec, true, Some(fail)).await;
+        let executor = harness
+            .executor(&pve, Some(TEMPLATE_VMID))
+            .with_readiness(ports, Arc::new(AuditSink::new(harness.pool.clone())));
+        let (state, error, stored) = harness
+            .run_executor(&pve, executor, &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "failed");
+        assert_eq!(stored.state, GuestState::NeverReady);
+        assert_eq!(stored.failed_step.as_deref(), Some(step));
+        assert_eq!(stored.vmid, Some(NEXT_VMID));
+        assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+        assert!(stored.machine_id.is_some());
+        assert!(stored.endpoint_id.is_some());
+        assert!(stored.ready_at.is_none());
+        assert_eq!(
+            harness.leases.get(&lease_id).await.unwrap().state,
+            fleet_core::LeaseState::Failed
+        );
+        assert!(!error.unwrap().1.contains("unsafe"));
+        assert_eq!(
+            stored.ready_project_operation_id.is_some(),
+            fail == "verify"
+        );
+    }
+}
+
+#[derive(Debug, Default)]
+struct BudgetStep(Mutex<Vec<u64>>);
+
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for BudgetStep {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        self.0
+            .lock()
+            .unwrap()
+            .push(payload["timeoutSeconds"].as_u64().unwrap());
+        operations
+            .complete(&operation.id, "succeeded", Some("{}"), None)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[tokio::test]
+async fn production_readiness_adapter_bounds_children_and_refuses_stopped_parents() {
+    let harness = Harness::new().await;
+    let step = Arc::new(BudgetStep::default());
+    let executor = fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+        step.clone(),
+        step.clone(),
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+        fleet_provider_ssh::ExecutionLimiter::new(2),
+    );
+    for stopped in [false, true] {
+        let parent = harness
+            .operations
+            .create(
+                &AllowAll,
+                "tester",
+                &NewOperation {
+                    kind: "ssh.exec".to_owned(),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    review_token: None,
+                    payload_json: Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "script":"true", "timeoutSeconds":30}).to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        if stopped {
+            harness
+                .operations
+                .cancel(&AllowAll, "tester", &parent.id)
+                .await
+                .unwrap();
+        }
+        let child = harness.operations.create(&AllowAll, "tester", &NewOperation {
+            kind: "ssh.exec".to_owned(), idempotency_key: None,
+            deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + 5_000),
+            correlation_id: None, review_token: None,
+            payload_json: Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "script":"true", "timeoutSeconds":900, "labParentOperationId":parent.id}).to_string()),
+        }).await.unwrap();
+        harness
+            .operations
+            .claim_only_execute(&executor, &child.id, "tester")
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.operations.get_state(&child.id).await.unwrap(),
+            if stopped { "failed" } else { "succeeded" }
+        );
+    }
+    let budgets = step.0.lock().unwrap();
+    assert_eq!(
+        budgets.len(),
+        1,
+        "a cancelled parent must never reach the executor"
+    );
+    assert!(
+        (1..=5).contains(&budgets[0]),
+        "nested CLI timeout must fit inside the Lab deadline"
+    );
+}
+
+#[derive(Debug)]
+struct CancelAfterClone {
+    parent: String,
+    calls: Mutex<Vec<(String, u64)>>,
+}
+
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for CancelAfterClone {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        self.calls.lock().unwrap().push((
+            operation.kind.clone(),
+            payload["timeoutSeconds"].as_u64().unwrap(),
+        ));
+        operations
+            .complete(&operation.id, "succeeded", Some("{}"), None)
+            .await
+            .map_err(|e| e.to_string())?;
+        if operation.kind == "projects.clone" {
+            operations
+                .cancel(&AllowAll, "tester", &self.parent)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+async fn readiness_parent(operations: &Operations) -> fleet_application::operation::Operation {
+    operations.create(&AllowAll, "tester", &NewOperation {
+        kind: "ssh.exec".to_owned(), idempotency_key: None, deadline_at: None,
+        correlation_id: None, review_token: None,
+        payload_json: Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "script":"true", "timeoutSeconds":30}).to_string()),
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn production_m3_child_bounds_nested_steps_and_stops_after_parent_cancellation() {
+    let harness = Harness::new().await;
+    let parent = readiness_parent(&harness.operations).await;
+    let steps = Arc::new(CancelAfterClone {
+        parent: parent.id.clone(),
+        calls: Mutex::new(Vec::new()),
+    });
+    let executor = fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+        steps.clone(),
+        steps.clone(),
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+        fleet_provider_ssh::ExecutionLimiter::new(2),
+    );
+    let child = harness.operations.create(&AllowAll, "tester", &NewOperation {
+        kind:"ready.workflow".to_owned(), idempotency_key:None,
+        deadline_at:Some(fleet_core::SystemClock::now_unix_millis()+10_000), correlation_id:None, review_token:None,
+        payload_json:Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "remote":"https://example.test/demo.git", "root":"/tmp/demo", "timeoutSeconds":900, "labParentOperationId":parent.id}).to_string()),
+    }).await.unwrap();
+    harness
+        .operations
+        .claim_only_execute(&executor, &child.id, "tester")
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.operations.get_state(&child.id).await.unwrap(),
+        "failed"
+    );
+    let calls = steps.calls.lock().unwrap();
+    assert!(calls.iter().any(|(kind, _)| kind == "projects.clone"));
+    assert!(
+        !calls
+            .iter()
+            .any(|(kind, _)| kind == "frogenv.setup" || kind == "tools.inventory")
+    );
+    assert!(calls.iter().all(|(_, seconds)| (1..=10).contains(seconds)));
+}
+
+#[derive(Debug)]
+struct SlowChild;
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for SlowChild {
+    async fn execute(
+        &self,
+        _: &Operations,
+        _: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Err("bounded test child ended".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn production_child_watchdog_survives_the_callers_timeout() {
+    use fleet_application::lab::LabReadinessPort as _;
+    let harness = Harness::new().await;
+    let parent = readiness_parent(&harness.operations).await;
+    let (_, mut record) = harness.record().await;
+    record.machine_id = Some("machine".to_owned());
+    record.endpoint_id = Some("endpoint".to_owned());
+    record.readiness_deadline_at = Some(fleet_core::SystemClock::now_unix_millis() + 250);
+    let readiness = fleet_controller::proxmox_exec::ProvisionReadiness::new(
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+            harness.pool.clone(),
+        )),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+        Arc::new(SlowChild),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            readiness.ssh_probe(
+                &harness.operations,
+                &parent.id,
+                &record,
+                "true",
+                std::time::Duration::from_millis(250)
+            )
+        )
+        .await
+        .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let children = harness
+        .operations
+        .list(&AllowAll, "tester", 100)
+        .await
+        .unwrap();
+    let child = children
+        .iter()
+        .find(|child| child.correlation_id.as_deref() == Some(&record.id))
+        .unwrap();
+    assert!(
+        child.cancel_requested,
+        "dropping the caller must not drop child cancellation"
+    );
+}
+
+#[tokio::test]
+async fn queue_claimed_m3_steps_inherit_the_persisted_lab_workflows_bound() {
+    let harness = Harness::new().await;
+    let parent = readiness_parent(&harness.operations).await;
+    let workflow = harness.operations.create(&AllowAll, "tester", &NewOperation {
+        kind: "ready.workflow".to_owned(), idempotency_key:None,
+        deadline_at: Some(fleet_core::SystemClock::now_unix_millis()+10_000), correlation_id: None, review_token:None,
+        payload_json:Some(serde_json::json!({"machineId":"machine", "endpointId":"endpoint", "auth":{"type":"agent"}, "remote":"https://example.test/demo.git", "root":"/tmp/demo", "timeoutSeconds":10, "labParentOperationId":parent.id}).to_string()),
+    }).await.unwrap();
+    let (_, record) = harness.record().await;
+    let mut record = harness
+        .labs
+        .ensure_guest_machine(&record.id, "root@192.0.2.20:22")
+        .await
+        .unwrap();
+    record.state = GuestState::Bootstrapping;
+    record.ready_project_operation_id = Some(workflow.id.clone());
+    record.readiness_deadline_at = Some(fleet_core::SystemClock::now_unix_millis() + 10_000);
+    ProvisionPort::update(harness.labs.as_ref(), &record)
+        .await
+        .unwrap();
+    let steps = Arc::new(BudgetStep::default());
+    let executor = fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+        steps.clone(),
+        steps.clone(),
+        Arc::new(fleet_storage_sqlite::MachineRepository::new(
+            harness.pool.clone(),
+        )),
+        harness.operations.clone(),
+        harness._dir.path().join("ssh"),
+        fleet_provider_ssh::ExecutionLimiter::new(2),
+    )
+    .with_provisions(harness.labs.clone());
+    for stopped in [false, true] {
+        if stopped {
+            harness
+                .operations
+                .cancel(&AllowAll, "tester", &parent.id)
+                .await
+                .unwrap();
+        }
+        let child = harness.operations.create(&AllowAll, "tester", &NewOperation {
+            kind:"projects.clone".to_owned(), idempotency_key:None, deadline_at:None, correlation_id:None, review_token:None,
+            payload_json:Some(serde_json::json!({"machineId":record.machine_id, "endpointId":record.endpoint_id, "auth":{"type":"agent"}, "remote":"https://example.test/demo.git", "root":"/tmp/demo", "timeoutSeconds":600}).to_string()),
+        }).await.unwrap();
+        if stopped {
+            record.state = GuestState::NeverReady;
+            ProvisionPort::update(harness.labs.as_ref(), &record)
+                .await
+                .unwrap();
+        }
+        harness
+            .operations
+            .claim_only_execute(&executor, &child.id, "other-worker")
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.operations.get_state(&child.id).await.unwrap(),
+            if stopped { "failed" } else { "succeeded" }
+        );
+    }
+    let calls = steps.0.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!((1..=10).contains(&calls[0]));
 }

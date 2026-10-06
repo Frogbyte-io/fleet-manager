@@ -150,6 +150,10 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
         bootstrap_project_id: None,
         readiness_probe: ReadinessProbe::GuestAgent,
         readiness_command: None,
+        ssh_user: "root".to_owned(),
+        ssh_port: 22,
+        ssh_trust_mode: "tofu".to_owned(),
+        ssh_fingerprint: None,
         // Zero: the first failed agent probe ends the saga as never_ready.
         readiness_deadline_seconds: 0,
         ttl_seconds: 3_600,
