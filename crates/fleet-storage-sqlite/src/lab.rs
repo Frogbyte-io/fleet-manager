@@ -693,11 +693,21 @@ impl LeasePort for LeaseRepository {
         Ok(())
     }
 
-    async fn list(&self) -> Result<Vec<Lease>, String> {
-        let rows = sqlx::query("SELECT * FROM lab_leases ORDER BY created_at DESC, id DESC")
+    async fn list(&self, project_id: Option<&str>) -> Result<Vec<Lease>, String> {
+        let rows = match project_id {
+            Some(project_id) => sqlx::query(
+                "SELECT * FROM lab_leases WHERE project_id = ?1 \
+                     ORDER BY created_at DESC, id DESC",
+            )
+            .bind(project_id)
             .fetch_all(&self.pool)
             .await
-            .map_err(|error| format!("list failed: {error}"))?;
+            .map_err(|error| format!("list failed: {error}"))?,
+            None => sqlx::query("SELECT * FROM lab_leases ORDER BY created_at DESC, id DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| format!("list failed: {error}"))?,
+        };
         rows.iter().map(Self::row_to_lease).collect()
     }
 

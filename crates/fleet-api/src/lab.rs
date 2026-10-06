@@ -879,7 +879,15 @@ pub async fn create_lab_lease(
     Ok((StatusCode::CREATED, Json(Resource::new(lease.into()))))
 }
 
-/// Lists the leases.
+/// The list-leases query parameters.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListLeasesParams {
+    /// Only leases serving this project.
+    pub project_id: Option<String>,
+}
+
+/// Lists the leases, narrowed by the project when given.
 ///
 /// # Errors
 ///
@@ -889,8 +897,10 @@ pub async fn create_lab_lease(
     path = "/lab/leases",
     tag = "lab",
     operation_id = "listLabLeases",
+    params(("projectId" = Option<String>, Query, description = "Only leases serving this project.")),
     responses(
         (status = 200, description = "The leases, newest first.", body = Page<LeaseDto>),
+        (status = 400, description = "The query parameters are malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not read the Lab surface.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
@@ -899,11 +909,25 @@ pub async fn list_lab_leases(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    params: Result<
+        axum::extract::Query<ListLeasesParams>,
+        axum::extract::rejection::QueryRejection,
+    >,
 ) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
+    let params = params.map_err(|rejection| {
+        crate::machines::invalid_request(
+            &format!("the leases list query is malformed: {rejection}"),
+            correlation_id,
+        )
+    })?;
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let leases = lab
-        .list_leases(state.authorizer.as_ref(), &principal)
+        .list_leases(
+            state.authorizer.as_ref(),
+            &principal,
+            params.project_id.as_deref(),
+        )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     let items: Vec<LeaseDto> = leases.into_iter().map(Into::into).collect();

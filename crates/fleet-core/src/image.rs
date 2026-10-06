@@ -407,3 +407,109 @@ mod structured_tests {
         assert!(StructuredRecipe::from_raw(r#"{"builders":[{"type":"docker"}]}"#).is_none());
     }
 }
+
+/// A safe, immutable snapshot of an image build. Raw variables, credentials,
+/// filesystem paths and Packer output are deliberately excluded.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBuildRecord {
+    /// Stable build identity (the durable operation id).
+    pub id: String,
+    /// The durable operation executing this build.
+    pub operation_id: String,
+    /// The recipe this build belongs to.
+    pub recipe_id: String,
+    /// The immutable recipe version.
+    pub version_id: String,
+    /// Digest binding the build to all recipe inputs.
+    pub content_digest: String,
+    /// Digests of provisioning assets; never their paths or contents.
+    pub asset_digests: Vec<String>,
+    /// Probed Packer version; absent when the probe failed.
+    pub packer_version: Option<String>,
+    /// Probed Proxmox plugin version; absent when the probe failed.
+    pub proxmox_plugin_version: Option<String>,
+    /// Resolved target Fleet account; absent only when target binding failed.
+    pub account_id: Option<String>,
+    /// Frozen target node.
+    pub node: String,
+    /// Frozen target storage pool.
+    pub storage_pool: String,
+    /// Start time in epoch milliseconds.
+    pub started_at: i64,
+    /// Completion time in epoch milliseconds.
+    pub ended_at: Option<i64>,
+    /// Running, succeeded, failed, or cancelled.
+    pub outcome: String,
+    /// Safe terminal reason code; never provider output.
+    pub reason: Option<String>,
+    /// Concrete output template identity, present only on success.
+    pub template: Option<ImageBuildTemplate>,
+}
+
+/// The concrete template produced by an image build.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBuildTemplate {
+    /// Target node reported by the artifact or frozen recipe.
+    pub node: String,
+    /// Proxmox VMID.
+    pub vmid: u32,
+    /// Template name from the frozen recipe builder.
+    pub name: String,
+}
+
+impl RecipeVersion {
+    /// Whether a single builder's declared target matches this version's
+    /// immutable Fleet metadata. Dynamic or ambiguous targets cannot be
+    /// represented by one reproducible build record.
+    #[must_use]
+    pub fn has_frozen_build_target(&self) -> bool {
+        let Some(structured) = StructuredRecipe::from_raw(&self.content) else {
+            return false;
+        };
+        let Ok(content) = serde_json::from_str::<serde_json::Value>(&self.content) else {
+            return false;
+        };
+        content
+            .get("builders")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|builders| builders.len() == 1)
+            && [self.node.as_str(), self.storage_pool.as_str()]
+                .iter()
+                .all(|target| {
+                    !target.is_empty()
+                        && target.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                        })
+                })
+            && structured.node == self.node
+            && structured.storage_pool.as_deref() == Some(self.storage_pool.as_str())
+            && structured.source == self.source
+    }
+}
+
+#[cfg(test)]
+mod frozen_target_tests {
+    use super::*;
+
+    #[test]
+    fn matching_metadata_cannot_freeze_interpolated_targets() {
+        for (node, storage_pool, expected) in [
+            ("pve-1", "local-lvm", true),
+            ("{{user `node`}}", "local-lvm", false),
+            ("pve", "{{user `storage`}}", false),
+            ("${var.node}", "local-lvm", false),
+            ("pve", "${var.storage}", false),
+        ] {
+            let version = RecipeVersion {
+                id: "v".to_owned(), recipe_id: "r".to_owned(), name: "image".to_owned(),
+                description: String::new(), content_digest: "digest".to_owned(),
+                content: serde_json::json!({"builders":[{"type":"proxmox-clone", "node":node, "vm_storage_pool":storage_pool}]}).to_string(),
+                source: RecipeSource::Clone, node: node.to_owned(), storage_pool: storage_pool.to_owned(),
+                published_at: 1, promoted_at: None, promoted_by: None,
+            };
+            assert_eq!(version.has_frozen_build_target(), expected);
+        }
+    }
+}

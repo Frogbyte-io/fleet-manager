@@ -4,6 +4,7 @@
 use fleet_application::lab::{
     AttachProvisionOutcome, LeasePort as _, NewLease, NewProvision, ProvisionPort as _,
 };
+use fleet_application::project::{NewProject, ProjectPort as _};
 use fleet_core::{CleanupStrategy, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS};
 use fleet_storage_sqlite::{LeaseRepository, Store};
 
@@ -260,4 +261,148 @@ async fn readiness_transaction_rolls_back_when_lease_expiry_exceeds_its_cap() {
         provisions.get(&provision.id).await.unwrap().state,
         fleet_core::GuestState::Provisioning
     );
+}
+
+#[tokio::test]
+async fn leases_narrow_by_project_and_deleting_it_nulls_the_link() {
+    let (_dir, store, leases) = setup().await;
+    let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
+
+    // The migration applies (opening the store ran it) and the stored
+    // lease keeps the FK-constrained column.
+    let project = projects
+        .create(&NewProject {
+            remote: "https://github.com/example/linked.git".to_owned(),
+            idempotency_key: None,
+            name: "linked".to_owned(),
+            description: String::new(),
+        })
+        .await
+        .expect("the project must be registered");
+
+    let with_project = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the linked lease".to_owned(),
+                project_id: Some(project.id.clone()),
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "operator",
+            NOW,
+        )
+        .await
+        .expect("the lease must store the project");
+    assert_eq!(with_project.project_id, Some(project.id.clone()));
+    let without_project = ready_lease(&leases, NOW + 1_000).await;
+    assert_eq!(without_project.project_id, None);
+
+    // The project filter narrows the list.
+    let linked = leases
+        .list(Some(&project.id))
+        .await
+        .expect("the project-filtered list must succeed");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].id, with_project.id);
+    let everything = leases
+        .list(None)
+        .await
+        .expect("the unfiltered list must succeed");
+    assert_eq!(everything.len(), 2);
+
+    // Deleting the project nulls the lease's project reference instead of
+    // deleting the lease.
+    projects
+        .delete(&project.id)
+        .await
+        .expect("the project must be deleted");
+    let unlinked = leases
+        .get(&with_project.id)
+        .await
+        .expect("the lease must survive the project deletion");
+    assert_eq!(unlinked.project_id, None);
+}
+
+#[tokio::test]
+async fn the_project_link_migration_tolerates_linked_provisions_and_orphans() {
+    use sqlx::sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+    };
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("legacy.db");
+
+    // Install the pre-migration schema (everything up to 0035) and seed it
+    // exactly like a live controller would have had: a provision row linked
+    // to a lease (0025's plain lease_id FK, no ON DELETE action) and one
+    // lease pointing at a project that no longer exists (0022's project_id
+    // was unconstrained).
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options)
+        .await
+        .expect("the legacy pool must connect");
+    fleet_storage_sqlite::MIGRATOR
+        .run_to(35, &pool)
+        .await
+        .expect("the legacy schema must install");
+    sqlx::query(
+        "INSERT INTO projects (id, remote, name, description, created_at, updated_at) \
+         VALUES ('alive', 'https://github.com/example/alive.git', 'alive', '', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("the surviving project must exist");
+    sqlx::query(
+        "INSERT INTO lab_leases \
+         (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, ttl_seconds) \
+         VALUES ('lease-live', 'tv-1', 'tester', 'live', 'alive', 'ready', 'destroy', 1, 3600)",
+    )
+    .execute(&pool)
+    .await
+    .expect("the linked lease must exist");
+    sqlx::query(
+        "INSERT INTO lab_leases \
+         (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, ttl_seconds) \
+         VALUES ('lease-orphan', 'tv-1', 'tester', 'orphan', 'ghost', 'ready', 'destroy', 1, 3600)",
+    )
+    .execute(&pool)
+    .await
+    .expect("the orphaned lease must exist");
+    sqlx::query(
+        "INSERT INTO lab_provisions \
+         (id, template_version_id, state, created_at, updated_at, lease_id) \
+         VALUES ('p-1', 'tv-1', 'ready', 1, 1, 'lease-live')",
+    )
+    .execute(&pool)
+    .await
+    .expect("the linked provision must exist");
+    pool.close().await;
+
+    // The rebuild must survive both the referenced-parent drop and the
+    // orphaned project id.
+    let store = Store::open(&path)
+        .await
+        .expect("the migration must apply cleanly");
+    let leases = LeaseRepository::new(store.pool().clone());
+    let live = leases.get("lease-live").await.expect("the lease survived");
+    assert_eq!(live.project_id, Some("alive".to_owned()));
+    let orphan = leases
+        .get("lease-orphan")
+        .await
+        .expect("the orphaned lease survived");
+    assert_eq!(orphan.project_id, None);
+    let provisions = fleet_storage_sqlite::LabRepository::new(store.pool().clone());
+    let provision = provisions
+        .get("p-1")
+        .await
+        .expect("the provision survived the parent-rename");
+    assert_eq!(provision.lease_id, Some("lease-live".to_owned()));
+    store.close().await;
 }

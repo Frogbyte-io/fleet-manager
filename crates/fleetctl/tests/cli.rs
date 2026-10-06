@@ -2811,18 +2811,55 @@ fn text_output_renders_lab_leases() {
 #[test]
 fn parsing_walks_the_lease_forms() {
     let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
-    assert!(matches!(
+    assert_eq!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeases
-    ));
+        fleetctl::Command::LabLeases { project: None }
+    );
+    let args: Vec<String> = ["lab", "leases", "--project", "proj-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases {
+            project: Some("proj-1".to_owned())
+        }
+    );
     let args: Vec<String> = ["lab", "lease", "tpl-1@abc", "--purpose", "the demo"]
         .iter()
         .map(ToString::to_string)
         .collect();
-    assert!(matches!(
-        fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeaseCreate { .. }
-    ));
+    assert!(
+        matches!(
+            fleetctl::parse(&args).unwrap().command,
+            fleetctl::Command::LabLeaseCreate { project: None, .. }
+        ),
+        "the no-project lease create must parse without one"
+    );
+    let args: Vec<String> = [
+        "lab",
+        "lease",
+        "tpl-1@abc",
+        "--purpose",
+        "the demo",
+        "--project",
+        "proj-1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    match fleetctl::parse(&args).unwrap().command {
+        fleetctl::Command::LabLeaseCreate {
+            version_id,
+            purpose,
+            project,
+        } => {
+            assert_eq!(version_id, "tpl-1@abc");
+            assert_eq!(purpose, "the demo");
+            assert_eq!(project, Some("proj-1".to_owned()));
+        }
+        other => panic!("{other:?}"),
+    }
     let args: Vec<String> = ["lab", "release", "lease-1", "--keep"]
         .iter()
         .map(ToString::to_string)
@@ -2864,4 +2901,228 @@ fn parsing_walks_the_lease_forms() {
             account_id: "pve-1".to_owned(),
         }
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn image_build_history_round_trips_through_the_real_api_and_json_cli() {
+    use fleet_application::images::{NewRecipe, RecipePort as _};
+    use fleet_application::operation::OperationPort as _;
+    use fleet_core::{
+        ImageBuildRecord, ImageBuildTemplate, RecipeContent, RecipeSource, RecipeVersion,
+    };
+    use fleet_storage_sqlite::{OperationRepository, RecipeRepository, Store};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let recipes = RecipeRepository::new(store.pool().clone());
+    let draft = recipes
+        .create(
+            &NewRecipe {
+                content: RecipeContent {
+                    name: "image".to_owned(),
+                    description: String::new(),
+                    node: "pve".to_owned(),
+                    storage_pool: Some("local-lvm".to_owned()),
+                    source: RecipeSource::Clone,
+                    content: "{}".to_owned(),
+                },
+            },
+            1000,
+        )
+        .await
+        .unwrap();
+    let version = RecipeVersion {
+        id: "image@digest".to_owned(),
+        recipe_id: draft.id.clone(),
+        name: "image".to_owned(),
+        description: String::new(),
+        content_digest: draft.content.content_digest().unwrap(),
+        content: "{}".to_owned(),
+        source: RecipeSource::Clone,
+        node: "pve".to_owned(),
+        storage_pool: "local-lvm".to_owned(),
+        published_at: 1001,
+        promoted_at: None,
+        promoted_by: None,
+    };
+    recipes.publish(&draft.id, &version).await.unwrap();
+    let operations = OperationRepository::new(store.pool().clone());
+    // A deliberately failed operation proves promotion reads first-class
+    // evidence, rather than inferring a result from the generic operation.
+    let operation = operations.create("image.build", None, None, None, Some(r#"{"versionId":"image@digest","secretVars":[{"name":"token","reference":"secret-reference"}]}"#)).await.unwrap();
+    operations
+        .transition(&operation.id, "running")
+        .await
+        .unwrap();
+    let mut build = ImageBuildRecord {
+        id: operation.id.clone(),
+        operation_id: operation.id,
+        recipe_id: draft.id,
+        version_id: version.id,
+        content_digest: version.content_digest,
+        asset_digests: vec!["asset-digest".to_owned()],
+        packer_version: None,
+        proxmox_plugin_version: None,
+        account_id: Some("account-1".to_owned()),
+        node: "pve".to_owned(),
+        storage_pool: "local-lvm".to_owned(),
+        started_at: 1002,
+        ended_at: None,
+        outcome: "running".to_owned(),
+        reason: None,
+        template: None,
+    };
+    recipes.start_build(&build).await.unwrap();
+    build.packer_version = Some("1.16.1".to_owned());
+    build.proxmox_plugin_version = Some("1.2.4".to_owned());
+    build.outcome = "succeeded".to_owned();
+    build.ended_at = Some(1003);
+    build.template = Some(ImageBuildTemplate {
+        node: "pve".to_owned(),
+        vmid: 120,
+        name: "image".to_owned(),
+    });
+    recipes.finish_build(&build).await.unwrap();
+    operations
+        .complete(
+            &build.operation_id,
+            "failed",
+            None,
+            Some(r#"{"reason":"test"}"#),
+        )
+        .await
+        .unwrap();
+
+    let settings = fleet_controller::Settings {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        web_dist: dir.path().to_path_buf(),
+        artifacts_dir: None,
+        tailscale_serve_listen: None,
+    };
+    let images = std::sync::Arc::new(fleet_application::images::Images::new(
+        std::sync::Arc::new(recipes),
+        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+    ));
+    let router = fleet_controller::build_router(
+        &settings,
+        Some(store.pool().clone()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&images),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let run = |words: Vec<String>| async move {
+        let mut args = vec![
+            "--url".to_owned(),
+            format!("http://{address}"),
+            "--output".to_owned(),
+            "json".to_owned(),
+            "images".to_owned(),
+        ];
+        args.extend(words);
+        let invocation = fleetctl::parse(&args).unwrap();
+        tokio::task::spawn_blocking(move || fleetctl::run(&invocation))
+            .await
+            .unwrap()
+    };
+    let page: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--limit".to_owned(),
+            "1".to_owned(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["page"]["limit"], 1);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page["page"]["nextCursor"].is_null());
+    assert!(
+        run(vec![
+            "builds".to_owned(),
+            "--cursor".to_owned(),
+            "unknown".to_owned()
+        ])
+        .await
+        .is_err()
+    );
+    let list: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--version".to_owned(),
+            build.version_id.clone(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(list["items"][0]["id"], build.id);
+    let shown = run(vec!["build-show".to_owned(), build.id.clone()])
+        .await
+        .unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(shown["template"]["vmid"], 120);
+    assert_eq!(shown["contentDigest"], build.content_digest);
+    let promoted: serde_json::Value = serde_json::from_str(
+        &run(vec!["promote".to_owned(), build.version_id.clone()])
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(promoted["promotedAt"].is_number());
+    let empty: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--version".to_owned(),
+            "other@version".to_owned(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(empty["items"].as_array().unwrap().is_empty());
+    assert!(
+        run(vec!["build-show".to_owned(), "unknown".to_owned()])
+            .await
+            .unwrap_err()
+            .message
+            .contains("not_found")
+    );
+    for value in [&list, &shown] {
+        let public = value.to_string();
+        assert!(!public.contains("secretVars"));
+        assert!(!public.contains("secret-reference"));
+        assert!(!public.contains("var-file"));
+    }
+    server.abort();
+}
+
+#[test]
+fn image_build_history_commands_refuse_missing_and_extra_arguments() {
+    for words in [
+        vec!["images", "build", "version", "--account", "--wait"],
+        vec!["images", "build", "version", "--account", "--timeout", "10"],
+        vec!["images", "build", "version", "--account", ""],
+        vec!["images", "builds", "--version"],
+        vec!["images", "build-show"],
+        vec!["images", "build-show", "one", "two"],
+        vec!["images", "builds", "--unknown", "x"],
+    ] {
+        let args: Vec<String> = words.into_iter().map(str::to_owned).collect();
+        assert!(fleetctl::parse(&args).is_err());
+    }
 }
