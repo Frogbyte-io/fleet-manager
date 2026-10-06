@@ -916,6 +916,13 @@ impl ProxmoxDestructiveExecutor {
         let is_template = resources.iter().any(|resource| {
             resource.vmid == Some(payload.vmid) && resource.kind == "qemu-template"
         });
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("destroy cancelled before delete".to_owned());
+        }
         fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)
     }
 
@@ -1924,6 +1931,7 @@ mod destroy_tests {
         stop_error: bool,
         stop_running: bool,
         seen: Mutex<Vec<String>>,
+        cancel_on_recheck: Mutex<Option<(Arc<Operations>, String)>>,
     }
     #[async_trait::async_trait]
     impl PveTransport for Transport {
@@ -1933,6 +1941,24 @@ mod destroy_tests {
         ) -> Result<PveHttpResponse, PveTransportError> {
             let path = request.path;
             self.seen.lock().unwrap().push(path.clone());
+            let recheck = path == "/api2/json/cluster/resources"
+                && self
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|path| path.as_str() == "/api2/json/cluster/resources")
+                    .count()
+                    == 2;
+            if recheck {
+                let cancellation = self.cancel_on_recheck.lock().unwrap().take();
+                if let Some((operations, id)) = cancellation {
+                    operations
+                        .cancel(&Policy(false), "anonymous-lan-admin", &id)
+                        .await
+                        .unwrap();
+                }
+            }
             let mut status = 200;
             let body = if path == "/api2/json/version" {
                 json!({"data":{"version":"9.0.3"}})
@@ -2061,6 +2087,7 @@ mod destroy_tests {
                 stop_error,
                 stop_running,
                 seen: Mutex::new(vec![]),
+                cancel_on_recheck: Mutex::new(None),
             });
             let executor = ProxmoxDestructiveExecutor::new(
                 accounts,
@@ -2101,7 +2128,7 @@ mod destroy_tests {
                 .unwrap();
             (status, serde_json::from_slice(&bytes).unwrap())
         }
-        async fn run(&self, timeout: u64) -> Operation {
+        async fn create_operation(&self, timeout: u64) -> Operation {
             let payload = json!({"accountId":self.account,"node":"pve","vmid":101,"timeoutSeconds":timeout,"params":{"purge":false}}).to_string();
             let new = fleet_application::operation::NewOperation {
                 kind: "proxmox.guest.destroy".into(),
@@ -2114,11 +2141,13 @@ mod destroy_tests {
                 deadline_at: None,
                 correlation_id: None,
             };
-            let operation = self
-                .operations
+            self.operations
                 .create(&Policy(false), "anonymous-lan-admin", &new)
                 .await
-                .unwrap();
+                .unwrap()
+        }
+        async fn run(&self, timeout: u64) -> Operation {
+            let operation = self.create_operation(timeout).await;
             self.operations
                 .claim_only_execute(&self.executor, &operation.id, "destroy-test")
                 .await
@@ -2275,6 +2304,27 @@ mod destroy_tests {
                 .iter()
                 .any(|path| path.contains("?purge="))
         );
+    }
+    #[tokio::test]
+    async fn destroy_honors_cancellation_during_post_stop_lookup() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let operation = h.create_operation(30).await;
+        *h.transport.cancel_on_recheck.lock().unwrap() =
+            Some((h.operations.clone(), operation.id.clone()));
+        h.operations
+            .claim_only_execute(&h.executor, &operation.id, "cancel-test")
+            .await
+            .unwrap();
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("?purge=")),
+            "a cancellation during the final resource lookup must prevent DELETE"
+        );
+        assert!(h.operations.cancel_requested(&operation.id).await.unwrap());
     }
     #[tokio::test]
     async fn destroy_never_deletes_after_failed_or_timed_out_stop() {
