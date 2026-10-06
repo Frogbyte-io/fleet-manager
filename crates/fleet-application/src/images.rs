@@ -560,13 +560,17 @@ impl Images {
             })?;
         let records = self
             .recipes
-            .list_builds(None, Some(version_id))
+            .list_build_page(&BuildPageRequest {
+                version: Some(version_id.to_owned()),
+                limit: 1,
+                ..Default::default()
+            })
             .await
             .map_err(|detail| RecipeUseCaseError::Backend {
                 context: "builds",
                 detail,
             })?;
-        let Some(record) = records.first() else {
+        let Some(record) = records.items.first() else {
             return Err(RecipeUseCaseError::Invalid {
                 detail: "the version has no build record; build it before promoting".to_owned(),
             });

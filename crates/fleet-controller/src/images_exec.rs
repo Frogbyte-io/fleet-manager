@@ -411,7 +411,7 @@ fn numeric_version(value: &str) -> Option<(u32, u32, u32)> {
     let result = (
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
+        parts.next().map_or(Some(0), |part| part.parse().ok())?,
     );
     parts.next().is_none().then_some(result)
 }
@@ -791,6 +791,40 @@ mod tests {
                 false,
             ),
         ]
+    }
+
+    #[test]
+    fn numeric_versions_accept_the_existing_two_component_contract() {
+        assert_eq!(numeric_version("1.15"), Some((1, 15, 0)));
+        assert_eq!(numeric_version("1.16.1"), Some((1, 16, 1)));
+        for invalid in ["1", "1.15.", "1.15.0.1", "1.15.secret", "1.15-beta"] {
+            assert_eq!(numeric_version(invalid), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn two_component_packer_versions_build_and_pve_names_remain_dns_names() {
+        let mut replies = probes();
+        replies[0] = reply("1,,version,1.15", Some(0), false);
+        replies.extend([
+            reply("", Some(0), false),
+            reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+        ]);
+        let (dir, _store, repository, operations, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, false).await;
+        let executor =
+            ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded");
+        assert_eq!(record.packer_version.as_deref(), Some("1.15"));
+        let mut version = repository.get_version(&record.version_id).await.unwrap();
+        version.content = CONTENT.replace("ubuntu-base", "ubuntu_base");
+        assert!(output_template("120", &version).is_none());
     }
 
     #[tokio::test]

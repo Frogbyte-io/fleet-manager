@@ -507,9 +507,9 @@ fn artifact_vmid(artifact: &str) -> Option<u32> {
 #[async_trait]
 impl ImageArtifactPort for RecipeRepository {
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String> {
-        let records = self.list_builds(None, Some(image_version_id)).await?;
-        if let Some(record) = records.iter().find(|record| record.outcome == "succeeded") {
-            return Ok(record.template.as_ref().map(|template| template.vmid));
+        if let Some(vmid) = sqlx::query_scalar::<_, u32>("SELECT template_vmid FROM image_build_records WHERE version_id = ?1 AND outcome = 'succeeded' ORDER BY started_at DESC, id DESC LIMIT 1")
+            .bind(image_version_id).fetch_optional(&self.pool).await.map_err(|e| e.to_string())? {
+            return Ok(Some(vmid));
         }
         // Compatibility for artifacts built before first-class records existed.
         // Only the version's latest successful build counts: an older
@@ -535,30 +535,17 @@ impl ImageArtifactPort for RecipeRepository {
     }
 
     async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
-        let promoted: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM image_recipe_versions WHERE promoted_at IS NOT NULL",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("promoted image versions failed: {error}"))?;
-        let mut vmids: Vec<u32> = self
-            .successful_builds()
-            .await?
-            .iter()
-            .filter(|(payload, _)| {
-                built_version(payload.as_deref()).is_some_and(|version| promoted.contains(&version))
-            })
-            .filter_map(|(_, result)| recorded_artifact(result.as_deref()))
-            .filter_map(|artifact| artifact_vmid(&artifact))
-            .collect();
+        // Fetch only the artifact columns of successful builds whose versions
+        // are promoted. Build provenance and failed history never enter memory.
+        let mut vmids: Vec<u32> = sqlx::query_scalar("SELECT DISTINCT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.outcome = 'succeeded' AND v.promoted_at IS NOT NULL")
+            .fetch_all(&self.pool).await.map_err(|error| format!("promoted image build artifacts failed: {error}"))?;
+        let legacy: Vec<Option<String>> = sqlx::query_scalar("SELECT o.result_json FROM operations o JOIN image_recipe_versions v ON v.id = json_extract(CASE WHEN json_valid(o.payload_json) THEN o.payload_json ELSE '{}' END, '$.versionId') WHERE o.kind = 'image.build' AND o.state = 'succeeded' AND v.promoted_at IS NOT NULL")
+            .fetch_all(&self.pool).await.map_err(|error| format!("promoted legacy artifacts failed: {error}"))?;
         vmids.extend(
-            self.list_builds(None, None)
-                .await?
+            legacy
                 .iter()
-                .filter(|record| {
-                    record.outcome == "succeeded" && promoted.contains(&record.version_id)
-                })
-                .filter_map(|record| record.template.as_ref().map(|template| template.vmid)),
+                .filter_map(|result| recorded_artifact(result.as_deref()))
+                .filter_map(|artifact| artifact_vmid(&artifact)),
         );
         vmids.sort_unstable();
         vmids.dedup();
@@ -858,6 +845,41 @@ mod build_record_tests {
         assert_eq!(
             recipes.template_vmid(&record.version_id).await.unwrap(),
             Some(123)
+        );
+        assert!(recipes.promoted_template_vmids().await.unwrap().is_empty());
+        let successful = OperationRepository::new(store.pool().clone())
+            .create("image.build", None, None, None, None)
+            .await
+            .unwrap();
+        record.id = successful.id.clone();
+        record.operation_id = successful.id;
+        record.started_at = 1004;
+        record.outcome = "running".to_owned();
+        record.ended_at = None;
+        record.reason = None;
+        recipes.start_build(&record).await.unwrap();
+        record.packer_version = Some("1.15".to_owned());
+        record.proxmox_plugin_version = Some("1.2.4".to_owned());
+        record.outcome = "succeeded".to_owned();
+        record.ended_at = Some(1005);
+        record.template = Some(ImageBuildTemplate {
+            node: "pve".to_owned(),
+            vmid: 124,
+            name: "image".to_owned(),
+        });
+        recipes.finish_build(&record).await.unwrap();
+        assert!(recipes.promoted_template_vmids().await.unwrap().is_empty());
+        recipes
+            .promote(&record.version_id, "fixture", 1006)
+            .await
+            .unwrap();
+        assert_eq!(
+            recipes.promoted_template_vmids().await.unwrap(),
+            vec![123, 124]
+        );
+        assert_eq!(
+            recipes.template_vmid(&record.version_id).await.unwrap(),
+            Some(124)
         );
     }
 }

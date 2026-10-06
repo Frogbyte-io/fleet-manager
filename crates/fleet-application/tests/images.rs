@@ -43,6 +43,7 @@ struct FakeRecipes {
     port_calls: Mutex<Vec<&'static str>>,
     builds: Mutex<Vec<fleet_core::ImageBuildRecord>>,
     reject_promotion: Mutex<bool>,
+    build_page_limits: Mutex<Vec<u32>>,
 }
 
 impl FakeRecipes {
@@ -79,6 +80,27 @@ impl RecipePort for FakeRecipes {
                 .then_with(|| b.id.cmp(&a.id))
         });
         Ok(records)
+    }
+    async fn list_build_page(
+        &self,
+        query: &fleet_application::images::BuildPageRequest,
+    ) -> Result<fleet_application::images::BuildPage, String> {
+        self.build_page_limits.lock().unwrap().push(query.limit);
+        let mut items = self
+            .list_builds(query.recipe.as_deref(), query.version.as_deref())
+            .await?;
+        let more = items.len() > query.limit as usize;
+        items.truncate(query.limit as usize);
+        let next_cursor = if more {
+            items.last().map(|item| item.id.clone())
+        } else {
+            None
+        };
+        Ok(fleet_application::images::BuildPage {
+            items,
+            next_cursor,
+            limit: query.limit,
+        })
     }
     async fn get_build(&self, id: &str) -> Result<fleet_core::ImageBuildRecord, String> {
         self.builds
@@ -559,6 +581,15 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         .await
         .unwrap();
     assert_eq!(promoted.promoted_at, Some(NOW + 2));
+    assert!(
+        recipes
+            .build_page_limits
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|limit| *limit == 1)
+    );
+
     assert_eq!(promoted.promoted_by.as_deref(), Some("anonymous-lan-admin"));
 
     // The promotion is audited twice (intent + completion).
