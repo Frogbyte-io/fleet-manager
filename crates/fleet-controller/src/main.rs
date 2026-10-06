@@ -384,6 +384,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                             credentials,
                             proxmox_client,
                         )
+                        .with_image_artifacts(std::sync::Arc::new(
+                            fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                        ))
                         .with_task_links(task_links),
                     ),
                 ))
