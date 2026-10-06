@@ -502,14 +502,15 @@ impl Lab {
     /// Creates a lease from a published template version: the lease
     /// inherits the template's cleanup strategy, TTL, and bootstrap
     /// project, starts in `requested`, and is audited. An explicit project
-    /// id that names an existing project overrides the inheritance. The
-    /// provisioning saga is started by the caller (the executor composes
-    /// them).
+    /// id that names an existing project overrides the inheritance; an
+    /// inherited bootstrap project that no longer exists fails the
+    /// creation so the caller can supply a replacement. The provisioning
+    /// saga is started by the caller (the executor composes them).
     ///
     /// # Errors
     ///
-    /// Fails on denial, an unknown version/project/lease, a lifecycle
-    /// conflict, or a backend failure.
+    /// Fails on denial, an unknown version/project/lease, a stale template
+    /// bootstrap project, a lifecycle conflict, or a backend failure.
     pub async fn create_lease(
         &self,
         authorizer: &dyn Authorizer,
@@ -549,37 +550,24 @@ impl Lab {
                 detail: "the purpose must be 1..=512 characters".to_owned(),
             });
         }
-        // An explicit project must exist; otherwise the lease inherits the
-        // template version's bootstrap project.
-        let inherited = match &new.project_id {
-            Some(id) => {
-                match self.projects.get(id).await {
-                    Ok(_) => {}
-                    Err(PortFailure::NotFound { .. }) => {
-                        return Err(LabUseCaseError::Invalid {
-                            detail: format!("the project {id} does not exist"),
-                        });
-                    }
-                    Err(failure) => {
-                        return Err(LabUseCaseError::Backend {
-                            context: "projects",
-                            detail: failure.to_string(),
-                        });
-                    }
-                }
-                NewLease {
-                    project_id: Some(id.clone()),
-                    cleanup: version.content.cleanup,
-                    ttl_seconds: version.content.ttl_seconds,
-                    ..new
-                }
-            }
-            None => NewLease {
-                project_id: version.content.bootstrap_project_id.clone(),
+        // An explicit project must exist. Without one, the lease inherits
+        // the template version's bootstrap project — which must also still
+        // exist: deleting a project leaves the frozen template versions
+        // pointing at it, and the lease's FK would otherwise reject the
+        // inherited id as an opaque backend failure.
+        let inherited = {
+            let project_id = self
+                .resolve_lease_project(
+                    new.project_id.as_deref(),
+                    version.content.bootstrap_project_id.as_deref(),
+                )
+                .await?;
+            NewLease {
+                project_id,
                 cleanup: version.content.cleanup,
                 ttl_seconds: version.content.ttl_seconds,
                 ..new
-            },
+            }
         };
         let audit_fact = inherited.project_id.as_deref().map(|id| ("projectId", id));
         self.audit_event(
@@ -597,6 +585,42 @@ impl Lab {
                 context: "leases",
                 detail,
             })
+    }
+
+    /// Resolves the lease's project linkage: an explicit id must exist,
+    /// and with none given the template version's bootstrap project must
+    /// also still exist — deleting a project leaves the frozen template
+    /// versions pointing at it, and the lease's FK would otherwise reject
+    /// the inherited id as an opaque backend failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Invalid` when a referenced project is missing so the API
+    /// maps it to a 400, and `Backend` on a port failure.
+    async fn resolve_lease_project(
+        &self,
+        explicit: Option<&str>,
+        bootstrap: Option<&str>,
+    ) -> Result<Option<String>, LabUseCaseError> {
+        let (id, what) = match (explicit, bootstrap) {
+            (Some(id), _) => (id, format!("project {id} does not exist")),
+            (None, Some(id)) => (
+                id,
+                format!(
+                    "the template version's bootstrap project {id} no longer \
+                     exists; supply an explicit project id for the lease"
+                ),
+            ),
+            (None, None) => return Ok(None),
+        };
+        match self.projects.get(id).await {
+            Ok(_) => Ok(Some(id.to_owned())),
+            Err(PortFailure::NotFound { .. }) => Err(LabUseCaseError::Invalid { detail: what }),
+            Err(failure) => Err(LabUseCaseError::Backend {
+                context: "projects",
+                detail: failure.to_string(),
+            }),
+        }
     }
 
     /// Lists the leases, narrowed by the project when given.

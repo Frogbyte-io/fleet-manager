@@ -1539,6 +1539,16 @@
               }
             }
           },
+          "400": {
+            "description": "The query parameters are malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The caller may not read the Lab surface.",
             "content": {

@@ -1341,16 +1341,19 @@ async fn lease_creation_records_an_existent_explicit_project() {
         .await
         .unwrap();
     assert_eq!(lease.project_id, Some("proj-1".to_owned()));
+    // The create event itself carries the linkage: both entries must sit
+    // on the same `lab_lease_creating` intent.
     let intents = audit.intents.lock().unwrap();
     assert!(
-        intents.iter().any(|intent| intent
-            .metadata
-            .entries()
-            .any(|(k, v)| k == "event" && v == "lab_lease_creating"))
-            && intents.iter().any(|intent| intent
-                .metadata
-                .entries()
-                .any(|(k, v)| k == "projectId" && v == "proj-1")),
+        intents.iter().any(|intent| {
+            let entries: Vec<(&str, &str)> = intent.metadata.entries().collect();
+            entries
+                .iter()
+                .any(|(k, v)| k == &"event" && v == &"lab_lease_creating")
+                && entries
+                    .iter()
+                    .any(|(k, v)| k == &"projectId" && v == &"proj-1")
+        }),
         "{intents:?}"
     );
 }
@@ -1521,4 +1524,61 @@ async fn lease_listing_narrows_by_project() {
         .await
         .unwrap();
     assert_eq!(everything.len(), 3);
+}
+
+#[tokio::test]
+async fn lease_creation_refuses_a_stale_template_bootstrap_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: LabTemplateContent {
+                    bootstrap_project_id: Some("deleted".to_owned()),
+                    ..content("ubuntu-lab", "rcp-1@abc")
+                },
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let error = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    match error {
+        LabUseCaseError::Invalid { detail } => {
+            assert!(detail.contains("deleted"), "{detail}");
+            assert!(detail.contains("explicit project id"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        leases.leases.lock().unwrap().is_empty(),
+        "the lease was created for a stale bootstrap project"
+    );
 }

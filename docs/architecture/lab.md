@@ -21,7 +21,7 @@ Fleet Lab owns image-recipe/version lifecycle, infrastructure selection, provisi
 
 Lab templates reference image versions/provider resources by stable IDs and an observed fingerprint/version. “Latest template named win11” is not reproducible enough for an active lease.
 
-A lease names the Fleet project it serves: an explicit project id given at creation must exist, otherwise the lease inherits the template version's `bootstrap_project_id`.
+A lease names the Fleet project it serves, when one is recorded: creation accepts an explicit project id that must exist (a nonexistent id fails the creation), and with no explicit id the lease inherits the template version's `bootstrap_project_id` — also validated at creation — leaving the lease without a project when the template carries none.
 
 ## Image recipe and promotion lifecycle
 

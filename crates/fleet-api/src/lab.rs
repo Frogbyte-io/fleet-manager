@@ -850,6 +850,7 @@ pub struct ListLeasesParams {
     params(("projectId" = Option<String>, Query, description = "Only leases serving this project.")),
     responses(
         (status = 200, description = "The leases, newest first.", body = Page<LeaseDto>),
+        (status = 400, description = "The query parameters are malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not read the Lab surface.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
@@ -858,8 +859,17 @@ pub async fn list_lab_leases(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
-    axum::extract::Query(params): axum::extract::Query<ListLeasesParams>,
+    params: Result<
+        axum::extract::Query<ListLeasesParams>,
+        axum::extract::rejection::QueryRejection,
+    >,
 ) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
+    let params = params.map_err(|rejection| {
+        crate::machines::invalid_request(
+            &format!("the leases list query is malformed: {rejection}"),
+            correlation_id,
+        )
+    })?;
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let leases = lab

@@ -2176,7 +2176,6 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     assert!(body["correlationId"].as_str().is_some());
 }
 
-
 #[tokio::test]
 async fn image_build_history_routes_and_schema_are_registered() {
     let (router, _, _) = test_router();
@@ -2233,6 +2232,7 @@ async fn image_build_history_requires_images_read_on_both_endpoints() {
         assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["code"], "denied");
     }
+}
 
 /// The project-linked lab surface over a real store: the router, the
 /// registered project, and one published template version to lease from.
@@ -2375,5 +2375,4 @@ async fn lab_lease_creates_carry_and_filter_their_project() {
     let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}/lab/leases"))).await;
     assert_eq!(parts.status, StatusCode::OK, "{body}");
     assert_eq!(body["items"].as_array().cloned().unwrap().len(), 1);
-
 }

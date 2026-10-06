@@ -6950,6 +6950,11 @@ export type listLabLeasesResponse200 = {
   status: 200
 }
 
+export type listLabLeasesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type listLabLeasesResponse403 = {
   data: ApiError
   status: 403
@@ -6963,7 +6968,7 @@ export type listLabLeasesResponse500 = {
 export type listLabLeasesResponseSuccess = (listLabLeasesResponse200) & {
   headers: Headers;
 };
-export type listLabLeasesResponseError = (listLabLeasesResponse403 | listLabLeasesResponse500) & {
+export type listLabLeasesResponseError = (listLabLeasesResponse400 | listLabLeasesResponse403 | listLabLeasesResponse500) & {
   headers: Headers;
 };
 

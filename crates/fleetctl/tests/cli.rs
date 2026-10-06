@@ -2811,26 +2811,31 @@ fn text_output_renders_lab_leases() {
 #[test]
 fn parsing_walks_the_lease_forms() {
     let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
-    assert!(matches!(
+    assert_eq!(
         fleetctl::parse(&args).unwrap().command,
         fleetctl::Command::LabLeases { project: None }
-    ));
+    );
     let args: Vec<String> = ["lab", "leases", "--project", "proj-1"]
         .iter()
         .map(ToString::to_string)
         .collect();
-    assert!(matches!(
+    assert_eq!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeases { project: Some(_) }
-    ));
+        fleetctl::Command::LabLeases {
+            project: Some("proj-1".to_owned())
+        }
+    );
     let args: Vec<String> = ["lab", "lease", "tpl-1@abc", "--purpose", "the demo"]
         .iter()
         .map(ToString::to_string)
         .collect();
-    assert!(matches!(
-        fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeaseCreate { project: None, .. }
-    ));
+    assert!(
+        matches!(
+            fleetctl::parse(&args).unwrap().command,
+            fleetctl::Command::LabLeaseCreate { project: None, .. }
+        ),
+        "the no-project lease create must parse without one"
+    );
     let args: Vec<String> = [
         "lab",
         "lease",
@@ -2843,13 +2848,18 @@ fn parsing_walks_the_lease_forms() {
     .iter()
     .map(ToString::to_string)
     .collect();
-    assert!(matches!(
-        fleetctl::parse(&args).unwrap().command,
+    match fleetctl::parse(&args).unwrap().command {
         fleetctl::Command::LabLeaseCreate {
-            project: Some(_),
-            ..
+            version_id,
+            purpose,
+            project,
+        } => {
+            assert_eq!(version_id, "tpl-1@abc");
+            assert_eq!(purpose, "the demo");
+            assert_eq!(project, Some("proj-1".to_owned()));
         }
-    ));
+        other => panic!("{other:?}"),
+    }
     let args: Vec<String> = ["lab", "release", "lease-1", "--keep"]
         .iter()
         .map(ToString::to_string)
