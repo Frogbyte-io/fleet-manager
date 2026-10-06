@@ -245,6 +245,21 @@ A two-node cluster has two expected votes, so losing either node leaves the surv
 
 These figures come from one run on one host. FM-613 should re-check them on 8.x and record anything that differs. In particular, the survivor took 30 s to give up on an unreachable node in every slow case. That figure is measured, not taken from PVE's documentation or source. An operation deadline in Fleet shorter than that turns an unreachable node into a Fleet timeout before PVE answers with 595.
 
+## Step 9: the image build suite (FM-704)
+
+`cargo xtask image-acceptance [--target NAME]` ([#255](https://github.com/Frogbyte-io/fleet-manager/issues/255)) reuses the Step 7 targets, gate, and env file unchanged:
+
+```sh
+set -a; . ~/.config/fleet/pve-acceptance.env; set +a
+cargo xtask image-acceptance --target PVE8 > image-acceptance.json
+```
+
+It also needs an operator-installed `packer` inside the FM-S09 pins (`>= 1.15 < 2`) with the Proxmox plugin (`>= 1.2.4 < 2`, `packer plugins install github.com/hashicorp/proxmox`) on the machine that runs it. The suite asks the product's own version gate. Without a usable Packer, only `version-gate` runs (it needs no Packer); every other scenario reports `skipped` with the gate's reason.
+
+Builds are linked clones of `…_TEMPLATE_VMID` into `…_VMID_RANGE`. Each built template is named `fleet-acceptance-image-*` and tagged `fleet-acceptance`. The suite destroys exactly those templates at the start and end of every scenario. The shared Step 7 sweep never destroys a template.
+
+Until [#272](https://github.com/Frogbyte-io/fleet-manager/issues/272) lands, the suite hands Packer the target token through the controller's environment (`PROXMOX_USERNAME`/`PROXMOX_TOKEN`), and its recipes set `insecure_skip_tls_verify`. These are the only credential and TLS paths the product supports today; they are not a recommended operator setup.
+
 ## Evidence for #211
 
 ```sh

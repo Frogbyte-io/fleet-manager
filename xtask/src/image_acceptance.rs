@@ -1,32 +1,35 @@
-//! `cargo xtask pve-acceptance [--target NAME]`: runs the real-cluster
-//! acceptance suite (`crates/fleet-controller/tests/proxmox_live.rs`,
-//! FM-611) through the shared [`crate::acceptance`] runner and prints its
-//! JSON summary on stdout.
+//! `cargo xtask image-acceptance [--target NAME]`: runs the real-host image
+//! build suite (`crates/fleet-controller/tests/images_live.rs`, FM-704)
+//! through the shared [`crate::acceptance`] runner and prints its JSON
+//! summary on stdout. It reads the same `FLEET_PVE_*` target contract as
+//! `pve-acceptance`, and additionally needs an operator-installed `packer`
+//! inside the FM-S09 pins on the machine that runs it.
 
 use std::path::Path;
 
 use crate::acceptance::{self, SuiteSpec, Summary};
 
 /// The marker the suite prints before every result.
-pub const RESULT_MARKER: &str = "FLEET_PVE_ACCEPTANCE_RESULT";
+pub const RESULT_MARKER: &str = "FLEET_IMAGE_ACCEPTANCE_RESULT";
 
 /// The scenarios, in report order. Kept in step with the suite's
 /// `SCENARIOS`.
-pub const SCENARIOS: [&str; 6] = [
-    "trust",
-    "privilege-failure",
-    "task-polling",
-    "destructive-gate",
-    "association",
-    "partial-node-failure",
+pub const SCENARIOS: [&str; 7] = [
+    "version-gate",
+    "validate-failure",
+    "build",
+    "build-record",
+    "promotion",
+    "rebuild-keeps-promotion",
+    "cancel-cleanup",
 ];
 
 /// The suite.
 pub const SPEC: SuiteSpec = SuiteSpec {
-    suite: "pve-acceptance",
+    suite: "image-acceptance",
     marker: RESULT_MARKER,
     scenarios: &SCENARIOS,
-    test_target: "proxmox_live",
+    test_target: "images_live",
 };
 
 /// Parses the subcommand's arguments: `[--target NAME]`.
