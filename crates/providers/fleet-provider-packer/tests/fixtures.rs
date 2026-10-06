@@ -241,7 +241,9 @@ fn fixtures_carry_no_private_hosts_secrets_or_lab_values() {
         "::1",
         "token_id",
         "PVEAPIToken",
-        "BEGIN (OPENSSH|RSA|EC) PRIVATE",
+        "BEGIN OPENSSH PRIVATE",
+        "BEGIN RSA PRIVATE",
+        "BEGIN EC PRIVATE",
         "CHANGEME",
     ];
     for scenario in scenarios {
@@ -259,8 +261,8 @@ fn fixtures_carry_no_private_hosts_secrets_or_lab_values() {
                 .unwrap_or_else(|| panic!("{scenario} line is not an event: {line:?}"));
             let found: Vec<&str> = event
                 .data
-                .split(&[',', ' ', '\"'][..])
-                .filter(|token| looks_like_embedded_address(token))
+                .split(&[',', ' ', '\"', ':', '/', '<', '>', '\\'][..])
+                .filter(|token| looks_like_dotted_quad(token))
                 .collect();
             for address in found {
                 assert!(
@@ -272,17 +274,15 @@ fn fixtures_carry_no_private_hosts_secrets_or_lab_values() {
     }
 }
 
-/// A `-`-separated token whose segments are all decimal numbers.
-fn looks_like_embedded_address(token: &str) -> bool {
-    let mut segments = 0usize;
-    for part in token.split('-') {
-        if part.len() <= 3 && part.chars().all(|c| c.is_ascii_digit()) {
-            if !part.is_empty() {
-                segments += 1;
-            }
-        } else {
-            return false;
-        }
-    }
-    segments >= 3
+/// A dotted quad: four 1–3 digit decimal segments separated by dots, so
+/// the recorded host shapes (`192.0.2.10` and its URL/TCP echoes) are
+/// detected and whitelisted against TEST-NET-1.
+fn looks_like_dotted_quad(token: &str) -> bool {
+    let segments: Vec<&str> = token.split('.').collect();
+    segments.len() == 4
+        && segments.iter().all(|segment| {
+            (1..=3).contains(&segment.len())
+                && !segment.is_empty()
+                && segment.chars().all(|c| c.is_ascii_digit())
+        })
 }

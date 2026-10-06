@@ -2,7 +2,7 @@
 
 Real `packer -machine-readable` transcripts, captured on 2026-10-06 in the
 Fleet development environment against the pinned toolchain from
-[ADR-0005](../../../../../docs/adr/0005-provider-and-external-cli-boundaries.md)
+[ADR-0005](../../../../../../docs/adr/0005-provider-and-external-cli-boundaries.md)
 and `docs/research/ecosystem.md` ("Image building"):
 
 - Packer v1.16.1 (release commit `8d3617fc`, inside the pinned
@@ -68,5 +68,5 @@ Proxmox endpoint; this environment has none (every build shows exactly
 the connect-timeout symptom recorded here, coerced by the capture
 timeout's interrupt). Capturing those two, plus a SIGINT-shaped
 interrupt and re-transcribing them against the integration host from
-[docs/operations/proxmox-test-cluster.md](../../../../../docs/operations/proxmox-test-cluster.md),
+[docs/operations/proxmox-test-cluster.md](../../../../../../docs/operations/proxmox-test-cluster.md),
 is the remaining work of FM-703 and feeds the FM-704 suite.
