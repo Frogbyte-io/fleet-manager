@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use fleet_application::images::{NewRecipe, Recipe, RecipeContent, RecipePort, RecipeVersion};
 use fleet_application::lab::ImageArtifactPort;
-use fleet_core::RecipeSource;
+use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeSource};
 
 /// The image-recipe repository over a pool.
 #[derive(Debug)]
@@ -69,6 +69,114 @@ impl RecipeRepository {
 
 #[async_trait]
 impl RecipePort for RecipeRepository {
+    async fn build_target_account(
+        &self,
+        version: &RecipeVersion,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let content: serde_json::Value = serde_json::from_str(&version.content).unwrap_or_default();
+        let Some(endpoint) = content
+            .get("builders")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|builders| {
+                builders.iter().find_map(|builder| {
+                    builder
+                        .get("proxmox_url")
+                        .and_then(serde_json::Value::as_str)
+                })
+            })
+        else {
+            return Ok(None);
+        };
+        let rows = sqlx::query("SELECT id, host, port FROM proxmox_accounts")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let matching: Vec<String> = rows
+            .iter()
+            .filter_map(|row| {
+                let host: String = row.get("host");
+                let host = if host.contains(':') && !host.starts_with('[') {
+                    format!("[{host}]")
+                } else {
+                    host
+                };
+                let port: u16 = row.get("port");
+                let endpoint = endpoint.trim_end_matches('/');
+                (endpoint == format!("https://{host}:{port}/api2/json")
+                    || (port == 443 && endpoint == format!("https://{host}/api2/json")))
+                .then(|| row.get("id"))
+            })
+            .collect();
+        if let Some(id) = requested {
+            return if matching.iter().any(|found| found == id) {
+                Ok(Some(id.to_owned()))
+            } else {
+                Err("target account does not match the frozen recipe endpoint".to_owned())
+            };
+        }
+        Ok((matching.len() == 1).then(|| matching[0].clone()))
+    }
+
+    async fn start_build(&self, record: &ImageBuildRecord) -> Result<(), String> {
+        if record.outcome != "running"
+            || record.ended_at.is_some()
+            || record.reason.is_some()
+            || record.template.is_some()
+            || record.packer_version.is_some()
+            || record.proxmox_plugin_version.is_some()
+        {
+            return Err("build records must begin with an unprobed running snapshot".to_owned());
+        }
+        sqlx::query("INSERT INTO image_build_records (id, operation_id, recipe_id, version_id, content_digest, asset_digests, account_id, node, storage_pool, started_at, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')")
+            .bind(&record.id).bind(&record.operation_id).bind(&record.recipe_id)
+            .bind(&record.version_id).bind(&record.content_digest)
+            .bind(serde_json::to_string(&record.asset_digests).map_err(|e| e.to_string())?)
+            .bind(&record.account_id).bind(&record.node).bind(&record.storage_pool).bind(record.started_at)
+            .execute(&self.pool).await.map_err(|e| format!("start build failed: {e}"))?;
+        Ok(())
+    }
+
+    async fn finish_build(&self, record: &ImageBuildRecord) -> Result<(), String> {
+        let mut transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| e.to_string())?;
+        let updated = sqlx::query("UPDATE image_build_records SET ended_at = ?2, outcome = ?3, reason = ?4, packer_version = ?5, proxmox_plugin_version = ?6, template_node = ?7, template_vmid = ?8, template_name = ?9 WHERE id = ?1 AND outcome = 'running'")
+            .bind(&record.id).bind(record.ended_at).bind(&record.outcome).bind(&record.reason)
+            .bind(&record.packer_version).bind(&record.proxmox_plugin_version)
+            .bind(record.template.as_ref().map(|t| &t.node))
+            .bind(record.template.as_ref().map(|t| t.vmid))
+            .bind(record.template.as_ref().map(|t| &t.name))
+            .execute(&mut *transaction).await.map_err(|e| format!("complete build failed: {e}"))?;
+        if updated.rows_affected() != 1 {
+            return Err("build is missing or already completed".to_owned());
+        }
+        transaction.commit().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn get_build(&self, id: &str) -> Result<ImageBuildRecord, String> {
+        let row = sqlx::query("SELECT * FROM image_build_records WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("build {id} not found"))?;
+        row_to_build(&row)
+    }
+
+    async fn list_builds(
+        &self,
+        recipe: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Vec<ImageBuildRecord>, String> {
+        sqlx::query("SELECT * FROM image_build_records WHERE (?1 IS NULL OR recipe_id = ?1) AND (?2 IS NULL OR version_id = ?2) ORDER BY started_at DESC, id DESC")
+            .bind(recipe).bind(version).fetch_all(&self.pool).await.map_err(|e| e.to_string())?
+            .iter().map(row_to_build).collect()
+    }
+
     async fn create(&self, recipe: &NewRecipe, now: i64) -> Result<Recipe, String> {
         let id = Uuid::now_v7().to_string();
         let content = &recipe.content;
@@ -236,6 +344,15 @@ impl RecipePort for RecipeRepository {
             .map_err(|error| format!("promote failed: {error}"))?
             .ok_or_else(|| format!("version {version_id} not found"))?;
         let recipe_id: String = version.get("recipe_id");
+        // Recheck under the write transaction: a concurrent new build must
+        // not slip between the application's evidence read and promotion.
+        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.id = (SELECT id FROM image_build_records WHERE version_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1) AND b.outcome = 'succeeded' AND b.content_digest = v.content_digest AND b.template_vmid IS NOT NULL)")
+            .bind(version_id).fetch_one(&mut *transaction).await.map_err(|e| e.to_string())?;
+        if !eligible {
+            return Err(
+                "promotion requires the latest matching successful build record".to_owned(),
+            );
+        }
         sqlx::query(
             "UPDATE image_recipe_versions SET promoted_at = NULL, promoted_by = NULL              WHERE recipe_id = ?1 AND promoted_at IS NOT NULL AND id != ?2",
         )
@@ -337,6 +454,14 @@ fn artifact_vmid(artifact: &str) -> Option<u32> {
 #[async_trait]
 impl ImageArtifactPort for RecipeRepository {
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String> {
+        let records = self.list_builds(None, Some(image_version_id)).await?;
+        if !records.is_empty() {
+            return Ok(records
+                .iter()
+                .find(|record| record.outcome == "succeeded")
+                .and_then(|record| record.template.as_ref().map(|template| template.vmid)));
+        }
+        // Compatibility for artifacts built before first-class records existed.
         // Only the version's latest successful build counts: an older
         // build's artifact is never a fallback.
         let Some((_, result)) = self
@@ -376,6 +501,15 @@ impl ImageArtifactPort for RecipeRepository {
             .filter_map(|(_, result)| recorded_artifact(result.as_deref()))
             .filter_map(|artifact| artifact_vmid(&artifact))
             .collect();
+        vmids.extend(
+            self.list_builds(None, None)
+                .await?
+                .iter()
+                .filter(|record| {
+                    record.outcome == "succeeded" && promoted.contains(&record.version_id)
+                })
+                .filter_map(|record| record.template.as_ref().map(|template| template.vmid)),
+        );
         vmids.sort_unstable();
         vmids.dedup();
         Ok(vmids)
@@ -414,5 +548,231 @@ mod tests {
         ] {
             assert_eq!(artifact_vmid(invalid), None, "{invalid}");
         }
+    }
+}
+
+fn row_to_build(row: &sqlx::sqlite::SqliteRow) -> Result<ImageBuildRecord, String> {
+    let assets: String = row.get("asset_digests");
+    Ok(ImageBuildRecord {
+        id: row.get("id"),
+        operation_id: row.get("operation_id"),
+        recipe_id: row.get("recipe_id"),
+        version_id: row.get("version_id"),
+        content_digest: row.get("content_digest"),
+        asset_digests: serde_json::from_str(&assets).map_err(|e| e.to_string())?,
+        packer_version: row.get("packer_version"),
+        proxmox_plugin_version: row.get("proxmox_plugin_version"),
+        account_id: row.get("account_id"),
+        node: row.get("node"),
+        storage_pool: row.get("storage_pool"),
+        started_at: row.get("started_at"),
+        ended_at: row.get("ended_at"),
+        outcome: row.get("outcome"),
+        reason: row.get("reason"),
+        template: row
+            .get::<Option<u32>, _>("template_vmid")
+            .map(|vmid| ImageBuildTemplate {
+                node: row.get("template_node"),
+                vmid,
+                name: row.get("template_name"),
+            }),
+    })
+}
+
+#[cfg(test)]
+mod build_record_tests {
+    use super::*;
+    use crate::{OperationRepository, Store};
+    use fleet_application::operation::OperationPort as _;
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn snapshots_are_bound_to_versions_and_only_complete_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+        let recipes = RecipeRepository::new(store.pool().clone());
+        let draft = recipes
+            .create(
+                &NewRecipe {
+                    content: RecipeContent {
+                        name: "image".to_owned(),
+                        description: String::new(),
+                        node: "pve".to_owned(),
+                        storage_pool: Some("local-lvm".to_owned()),
+                        source: RecipeSource::Clone,
+                        content: "{}".to_owned(),
+                    },
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+        let version = RecipeVersion {
+            id: "image@digest".to_owned(),
+            recipe_id: draft.id.clone(),
+            name: "image".to_owned(),
+            description: String::new(),
+            content_digest: draft.content.content_digest().unwrap(),
+            content: "{}".to_owned(),
+            source: RecipeSource::Clone,
+            node: "pve".to_owned(),
+            storage_pool: "local-lvm".to_owned(),
+            published_at: 1001,
+            promoted_at: None,
+            promoted_by: None,
+        };
+        recipes.publish(&draft.id, &version).await.unwrap();
+        let operation = OperationRepository::new(store.pool().clone())
+            .create("image.build", None, None, None, None)
+            .await
+            .unwrap();
+        let mut record = ImageBuildRecord {
+            id: operation.id.clone(),
+            operation_id: operation.id.clone(),
+            recipe_id: draft.id,
+            version_id: version.id,
+            content_digest: version.content_digest,
+            asset_digests: vec!["digest".to_owned()],
+            packer_version: None,
+            proxmox_plugin_version: None,
+            account_id: Some("account-1".to_owned()),
+            node: "pve".to_owned(),
+            storage_pool: "local-lvm".to_owned(),
+            started_at: 1002,
+            ended_at: None,
+            outcome: "running".to_owned(),
+            reason: None,
+            template: None,
+        };
+        let mut forged = record.clone();
+        forged.content_digest = "different".to_owned();
+        assert!(recipes.start_build(&forged).await.is_err());
+        recipes.start_build(&record).await.unwrap();
+        assert!(recipes.start_build(&record).await.is_err());
+        assert_eq!(recipes.get_build(&record.id).await.unwrap(), record);
+        assert_eq!(
+            recipes
+                .list_builds(None, Some(&record.version_id))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            recipes
+                .list_builds(Some("another-recipe"), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for sql in [
+            "DELETE FROM image_build_records",
+            "UPDATE image_build_records SET content_digest = 'rewritten'",
+            "UPDATE image_build_records SET outcome = 'failed', ended_at = 1003, node = 'other'",
+            "INSERT OR REPLACE INTO image_build_records SELECT * FROM image_build_records",
+            "UPDATE image_build_records SET outcome = 'succeeded', ended_at = 1003",
+        ] {
+            assert!(
+                sqlx::query(sql).execute(store.pool()).await.is_err(),
+                "{sql}"
+            );
+        }
+        record.outcome = "failed".to_owned();
+        record.ended_at = Some(1003);
+        record.reason = Some("version_gate".to_owned());
+        recipes.finish_build(&record).await.unwrap();
+        assert_eq!(recipes.get_build(&record.id).await.unwrap(), record);
+        assert!(recipes.finish_build(&record).await.is_err());
+        assert!(
+            sqlx::query("UPDATE image_build_records SET reason = 'changed'")
+                .execute(store.pool())
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM image_build_records")
+                .execute(store.pool())
+                .await
+                .is_err()
+        );
+        // A worker recovery completion also closes a live build without
+        // inferring success or an output from generic operation JSON.
+        let operation = OperationRepository::new(store.pool().clone())
+            .create("image.build", None, None, None, None)
+            .await
+            .unwrap();
+        OperationRepository::new(store.pool().clone())
+            .transition(&operation.id, "running")
+            .await
+            .unwrap();
+        record.id = operation.id.clone();
+        record.operation_id = operation.id.clone();
+        record.outcome = "running".to_owned();
+        record.ended_at = None;
+        record.reason = None;
+        recipes.start_build(&record).await.unwrap();
+        OperationRepository::new(store.pool().clone())
+            .complete(&operation.id, "failed", None, None)
+            .await
+            .unwrap();
+        let recovered = recipes.get_build(&record.id).await.unwrap();
+        assert_eq!(recovered.outcome, "failed");
+        assert_eq!(
+            recovered.reason.as_deref(),
+            Some("operation_terminal_without_build_completion")
+        );
+        assert!(recovered.ended_at.is_some());
+        assert!(recovered.template.is_none());
+    }
+}
+
+#[cfg(test)]
+mod target_account_tests {
+    use super::*;
+    #[tokio::test]
+    async fn target_accounts_are_explicit_or_uniquely_matched_and_paths_are_never_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let recipes = RecipeRepository::new(store.pool().clone());
+        sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES ('one', 'one', 'pve.example.test', 8006, 'fixture@pve!builder', 1)")
+            .execute(store.pool()).await.unwrap();
+        let version = RecipeVersion {
+            id: "version".to_owned(), recipe_id: "recipe".to_owned(), name: "image".to_owned(), description: String::new(),
+            content_digest: "digest".to_owned(), content: r#"{"builders":[{"type":"proxmox-clone","proxmox_url":"https://pve.example.test:8006/api2/json/"}]}"#.to_owned(),
+            source: RecipeSource::Clone, node: "pve".to_owned(), storage_pool: "local-lvm".to_owned(), published_at: 1, promoted_at: None, promoted_by: None,
+        };
+        assert_eq!(
+            recipes
+                .build_target_account(&version, None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            recipes
+                .build_target_account(&version, Some("one"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("one")
+        );
+        assert!(
+            recipes
+                .build_target_account(&version, Some("unknown"))
+                .await
+                .is_err()
+        );
+        sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES ('two', 'two', 'pve.example.test', 8006, 'fixture@pve!other', 1)")
+            .execute(store.pool()).await.unwrap();
+        assert!(
+            recipes
+                .build_target_account(&version, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

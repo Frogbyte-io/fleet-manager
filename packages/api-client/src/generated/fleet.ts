@@ -445,6 +445,11 @@ export interface SecretVarDto {
  */
 export interface BuildImageRequest {
   /**
+     * Target account override; otherwise resolved from the recipe endpoint.
+     * @nullable
+     */
+  accountId?: string | null;
+  /**
      * The secret-backed build variables, as name/reference pairs. The
      * values never enter argv, logs, or audit metadata.
      */
@@ -1110,6 +1115,73 @@ export type FrogenvAuthDto = {
   path: string;
   type: 'identityFile';
 };
+
+/**
+ * A concrete output template identity.
+ */
+export interface ImageBuildTemplateDto {
+  /** Template name. */
+  name: string;
+  /** Template node. */
+  node: string;
+  /**
+     * Template VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * Safe build provenance and outcome; credentials and work paths are excluded.
+ */
+export interface ImageBuildDto {
+  /**
+     * Resolved target account; absent when target binding failed.
+     * @nullable
+     */
+  accountId?: string | null;
+  /** Frozen provisioning asset digests. */
+  assetDigests: string[];
+  /** Frozen recipe digest. */
+  contentDigest: string;
+  /**
+     * End time in epoch milliseconds.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /** Build identity. */
+  id: string;
+  /** Frozen target node. */
+  node: string;
+  /** Durable operation identity. */
+  operationId: string;
+  /** Running, succeeded, failed or cancelled. */
+  outcome: string;
+  /**
+     * Probed Packer version, when available.
+     * @nullable
+     */
+  packerVersion?: string | null;
+  /**
+     * Probed Proxmox plugin version, when available.
+     * @nullable
+     */
+  proxmoxPluginVersion?: string | null;
+  /**
+     * Safe terminal reason code.
+     * @nullable
+     */
+  reason?: string | null;
+  /** Recipe identity. */
+  recipeId: string;
+  /** Start time in epoch milliseconds. */
+  startedAt: number;
+  /** Frozen target storage. */
+  storagePool: string;
+  template?: null | ImageBuildTemplateDto;
+  /** Immutable version identity. */
+  versionId: string;
+}
 
 /**
  * The import request: the SSH login user and port for the draft.
@@ -1996,6 +2068,71 @@ export type PageDesiredResourceDtoItemsItem = {
 export interface PageDesiredResourceDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageDesiredResourceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * Safe build provenance and outcome; credentials and work paths are excluded.
+ */
+export type PageImageBuildDtoItemsItem = {
+  /**
+     * Resolved target account; absent when target binding failed.
+     * @nullable
+     */
+  accountId?: string | null;
+  /** Frozen provisioning asset digests. */
+  assetDigests: string[];
+  /** Frozen recipe digest. */
+  contentDigest: string;
+  /**
+     * End time in epoch milliseconds.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /** Build identity. */
+  id: string;
+  /** Frozen target node. */
+  node: string;
+  /** Durable operation identity. */
+  operationId: string;
+  /** Running, succeeded, failed or cancelled. */
+  outcome: string;
+  /**
+     * Probed Packer version, when available.
+     * @nullable
+     */
+  packerVersion?: string | null;
+  /**
+     * Probed Proxmox plugin version, when available.
+     * @nullable
+     */
+  proxmoxPluginVersion?: string | null;
+  /**
+     * Safe terminal reason code.
+     * @nullable
+     */
+  reason?: string | null;
+  /** Recipe identity. */
+  recipeId: string;
+  /** Start time in epoch milliseconds. */
+  startedAt: number;
+  /** Frozen target storage. */
+  storagePool: string;
+  template?: null | ImageBuildTemplateDto;
+  /** Immutable version identity. */
+  versionId: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageImageBuildDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageImageBuildDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -3478,6 +3615,69 @@ export interface ResourceEnrollmentTokenCreatedDto {
      * once; only its hash is stored.
      */
   data: ResourceEnrollmentTokenCreatedDtoData;
+}
+
+/**
+ * Safe build provenance and outcome; credentials and work paths are excluded.
+ */
+export type ResourceImageBuildDtoData = {
+  /**
+     * Resolved target account; absent when target binding failed.
+     * @nullable
+     */
+  accountId?: string | null;
+  /** Frozen provisioning asset digests. */
+  assetDigests: string[];
+  /** Frozen recipe digest. */
+  contentDigest: string;
+  /**
+     * End time in epoch milliseconds.
+     * @nullable
+     */
+  endedAt?: number | null;
+  /** Build identity. */
+  id: string;
+  /** Frozen target node. */
+  node: string;
+  /** Durable operation identity. */
+  operationId: string;
+  /** Running, succeeded, failed or cancelled. */
+  outcome: string;
+  /**
+     * Probed Packer version, when available.
+     * @nullable
+     */
+  packerVersion?: string | null;
+  /**
+     * Probed Proxmox plugin version, when available.
+     * @nullable
+     */
+  proxmoxPluginVersion?: string | null;
+  /**
+     * Safe terminal reason code.
+     * @nullable
+     */
+  reason?: string | null;
+  /** Recipe identity. */
+  recipeId: string;
+  /** Start time in epoch milliseconds. */
+  startedAt: number;
+  /** Frozen target storage. */
+  storagePool: string;
+  template?: null | ImageBuildTemplateDto;
+  /** Immutable version identity. */
+  versionId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceImageBuildDto {
+  /** Safe build provenance and outcome; credentials and work paths are excluded. */
+  data: ResourceImageBuildDtoData;
 }
 
 /**
@@ -5050,6 +5250,19 @@ cursor?: string | null;
 limit?: number | null;
 };
 
+export type ListImageBuildsParams = {
+/**
+ * Filter by recipe identity.
+ * @nullable
+ */
+recipeId?: string | null;
+/**
+ * Filter by immutable version identity.
+ * @nullable
+ */
+versionId?: string | null;
+};
+
 export type ListImageRecipesParams = {
 /**
  * The maximum number of recipes to return.
@@ -5984,6 +6197,65 @@ const res = await fetch(getStoreDesiredSourceCredentialUrl(),
 
 
 
+export type listImageBuildsResponse200 = {
+  data: PageImageBuildDto
+  status: 200
+}
+
+export type listImageBuildsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageBuildsResponseSuccess = (listImageBuildsResponse200) & {
+  headers: Headers;
+};
+export type listImageBuildsResponseError = (listImageBuildsResponse403) & {
+  headers: Headers;
+};
+
+export type listImageBuildsResponse = (listImageBuildsResponseSuccess | listImageBuildsResponseError)
+
+export const getListImageBuildsUrl = (params?: ListImageBuildsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/images/builds?${stringifiedParams}` : `/api/v1/images/builds`
+}
+
+/**
+ * # Errors
+ * Returns the standard error envelope on denial or backend failure.
+ * @summary Lists recorded image builds under images.read.
+ */
+export const listImageBuilds = async (params?: ListImageBuildsParams, options?: RequestInit): Promise<listImageBuildsResponse> => {
+
+  const res = await fetch(getListImageBuildsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageBuildsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageBuildsResponse
+}
+
+
+
 export type startImageBuildResponse202 = {
   data: ResourceOperationDto
   status: 202
@@ -6051,6 +6323,63 @@ const res = await fetch(getStartImageBuildUrl(),
 
   const data: startImageBuildResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as startImageBuildResponse
+}
+
+
+
+export type getImageBuildResponse200 = {
+  data: ResourceImageBuildDto
+  status: 200
+}
+
+export type getImageBuildResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getImageBuildResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getImageBuildResponseSuccess = (getImageBuildResponse200) & {
+  headers: Headers;
+};
+export type getImageBuildResponseError = (getImageBuildResponse403 | getImageBuildResponse404) & {
+  headers: Headers;
+};
+
+export type getImageBuildResponse = (getImageBuildResponseSuccess | getImageBuildResponseError)
+
+export const getGetImageBuildUrl = (buildId: string,) => {
+
+
+
+
+  return `/api/v1/images/builds/${buildId}`
+}
+
+/**
+ * # Errors
+ * Returns the standard error envelope on denial, missing record or backend failure.
+ * @summary Reads one recorded image build under images.read.
+ */
+export const getImageBuild = async (buildId: string, options?: RequestInit): Promise<getImageBuildResponse> => {
+
+  const res = await fetch(getGetImageBuildUrl(buildId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getImageBuildResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getImageBuildResponse
 }
 
 
@@ -6570,8 +6899,8 @@ export const getPromoteImageVersionUrl = (versionId: string,) => {
  * Returns the public error envelope on refusal, an unknown version, or a
  * gate refusal.
  * @summary Promotes one version as the recipe's built image. The gate verifies
-the version's build operation completed successfully with a recorded
-artifact, queried from the operation record — never assumed.
+the latest immutable build record has matching inputs and a successful
+output template.
  */
 export const promoteImageVersion = async (versionId: string, options?: RequestInit): Promise<promoteImageVersionResponse> => {
 

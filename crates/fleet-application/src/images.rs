@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::operation::AuditPort;
-pub use fleet_core::{RecipeContent, RecipeVersion};
+pub use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeContent, RecipeVersion};
 
 /// A stored recipe draft.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -50,6 +50,52 @@ pub struct NewRecipe {
 /// The recipe storage port.
 #[async_trait]
 pub trait RecipePort: fmt::Debug + Send + Sync {
+    /// Resolves a unique target account from an explicit identity or the
+    /// frozen recipe endpoint. Missing/ambiguous targets remain unbound.
+    ///
+    /// # Errors
+    /// Fails on a repository error or an unknown explicit identity.
+    async fn build_target_account(
+        &self,
+        _version: &RecipeVersion,
+        _requested: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        Err("build target resolution is not supported".to_owned())
+    }
+
+    /// Inserts a running build snapshot before invoking the provider.
+    ///
+    /// # Errors
+    /// Fails on duplicate identity or storage failure.
+    async fn start_build(&self, _record: &ImageBuildRecord) -> Result<(), String> {
+        Err("build records are not supported by this repository".to_owned())
+    }
+    /// Completes a running build exactly once, preserving frozen inputs.
+    ///
+    /// # Errors
+    /// Fails when the record is unknown, terminal or storage fails.
+    async fn finish_build(&self, _record: &ImageBuildRecord) -> Result<(), String> {
+        Err("build records are not supported by this repository".to_owned())
+    }
+    /// Reads a build by identity.
+    ///
+    /// # Errors
+    /// Fails when unknown or storage fails.
+    async fn get_build(&self, _id: &str) -> Result<ImageBuildRecord, String> {
+        Err("build record not found".to_owned())
+    }
+    /// Lists builds newest first, optionally filtered by recipe and version.
+    ///
+    /// # Errors
+    /// Fails on storage failure.
+    async fn list_builds(
+        &self,
+        _recipe: Option<&str>,
+        _version: Option<&str>,
+    ) -> Result<Vec<ImageBuildRecord>, String> {
+        Err("build records are not supported by this repository".to_owned())
+    }
+
     /// Creates a draft, minting its identity.
     ///
     /// # Errors
@@ -121,18 +167,6 @@ pub trait RecipePort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String>;
-}
-
-/// The gate's evidence: the terminal state and artifact of a version's
-/// latest build operation, queried by the adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BuildEvidence {
-    /// The version the build built.
-    pub version_id: String,
-    /// The build operation's terminal state.
-    pub state: String,
-    /// The recorded artifact id, when the build produced one.
-    pub artifact_id: Option<String>,
 }
 
 /// A use-case rejection, mapped onto public API errors by the adapter.
@@ -445,15 +479,9 @@ impl Images {
             })
     }
 
-    /// Promotes one version as the recipe's built image, after the gate:
-    /// the version's build operation must have completed successfully
-    /// with a recorded artifact, verified against the operation record —
-    /// never assumed from the version row. At most one promoted version
-    /// per recipe; promoting a second demotes the first explicitly.
-    ///
-    /// `build_outcome` is the gate's evidence: the caller (the adapter)
-    /// queries the operation record for the version's latest build and
-    /// passes its terminal state and artifact id here.
+    /// Promotes a version only when its latest immutable build record has
+    /// matching inputs and a successful output template. Evidence is loaded
+    /// from the repository; callers cannot supply or forge it.
     ///
     /// # Errors
     ///
@@ -464,7 +492,6 @@ impl Images {
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
         version_id: &str,
-        build_outcome: Option<BuildEvidence>,
         now: i64,
     ) -> Result<RecipeVersion, RecipeUseCaseError> {
         authorize(
@@ -492,26 +519,26 @@ impl Images {
                     }
                 }
             })?;
-        // The gate: a build that completed successfully with a recorded
-        // artifact. Without it, promotion refuses with the reason.
-        let Some(evidence) = build_outcome else {
+        let records = self
+            .recipes
+            .list_builds(None, Some(version_id))
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "builds",
+                detail,
+            })?;
+        let Some(record) = records.first() else {
             return Err(RecipeUseCaseError::Invalid {
-                detail: "the version has no build operation; build it before promoting".to_owned(),
+                detail: "the version has no build record; build it before promoting".to_owned(),
             });
         };
-        if evidence.version_id != version_id || evidence.state != "succeeded" {
-            return Err(RecipeUseCaseError::Invalid {
-                detail: format!(
-                    "the version's latest build is {} ({}); only a successful build can be promoted",
-                    evidence.version_id, evidence.state
-                ),
-            });
-        }
-        if evidence.artifact_id.is_none() {
-            return Err(RecipeUseCaseError::Invalid {
-                detail: "the version's build recorded no artifact; promotion requires one"
-                    .to_owned(),
-            });
+        if record.version_id != version_id
+            || record.content_digest != version.content_digest
+            || record.outcome != "succeeded"
+            || record.ended_at.is_none()
+            || record.template.is_none()
+        {
+            return Err(RecipeUseCaseError::Invalid { detail: "promotion requires the latest build record to have matching inputs and a successful template output".to_owned() });
         }
         self.audit_event(
             principal,
@@ -614,6 +641,68 @@ impl Images {
                 context: "versions",
                 detail,
             })
+    }
+
+    /// Reads build history through the centralized images.read permission.
+    ///
+    /// # Errors
+    /// Fails on denial or storage failure.
+    pub async fn list_builds(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        recipe: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Vec<ImageBuildRecord>, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: version.or(recipe),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        self.recipes
+            .list_builds(recipe, version)
+            .await
+            .map_err(|detail| RecipeUseCaseError::Backend {
+                context: "builds",
+                detail,
+            })
+    }
+
+    /// Reads one build through the centralized images.read permission.
+    ///
+    /// # Errors
+    /// Fails on denial, missing record or storage failure.
+    pub async fn get_build(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<ImageBuildRecord, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: Some(id),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        self.recipes.get_build(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                RecipeUseCaseError::NotFound {
+                    what: format!("build {id}"),
+                }
+            } else {
+                RecipeUseCaseError::Backend {
+                    context: "builds",
+                    detail,
+                }
+            }
+        })
     }
 
     async fn require_recipe(&self, id: &str) -> Result<Recipe, RecipeUseCaseError> {

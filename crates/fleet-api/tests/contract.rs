@@ -2174,3 +2174,55 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
     assert_eq!(body["code"], "invalid_request");
     assert!(body["correlationId"].as_str().is_some());
 }
+
+#[tokio::test]
+async fn image_build_history_routes_and_schema_are_registered() {
+    let (router, _, _) = test_router();
+    for path in ["/images/builds", "/images/builds/no-such-build"] {
+        let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}{path}"))).await;
+        assert_eq!(parts.status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["code"], "machine_unavailable");
+    }
+    let document = fleet_api::openapi();
+    let value = serde_json::to_value(document).unwrap();
+    assert!(value["paths"]["/api/v1/images/builds"]["get"].is_object());
+    assert!(value["paths"]["/api/v1/images/builds/{buildId}"]["get"].is_object());
+    let properties = &value["components"]["schemas"]["ImageBuildDto"]["properties"];
+    assert!(properties["contentDigest"].is_object());
+    for key in ["secretVars", "varFile", "token", "payloadJson"] {
+        assert!(properties.get(key).is_none());
+    }
+}
+
+#[tokio::test]
+async fn image_build_history_requires_images_read_on_both_endpoints() {
+    #[derive(Debug)]
+    struct DenyImages;
+    impl fleet_application::authz::Authorizer for DenyImages {
+        fn decide(&self, request: fleet_application::authz::AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::ImagesRead {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let mut state = (*test_state().0).clone();
+    state.authorizer = Arc::new(DenyImages);
+    state.images = Some(Arc::new(fleet_application::images::Images::new(
+        Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+            store.pool().clone(),
+        )),
+        Arc::new(FakeAudit),
+    )));
+    let router = principal_router(Arc::new(state));
+    for path in ["/images/builds", "/images/builds/no-such-build"] {
+        let (parts, body) = call_via(&router, get(&format!("{API_BASE_PATH}{path}"))).await;
+        assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "denied");
+    }
+}

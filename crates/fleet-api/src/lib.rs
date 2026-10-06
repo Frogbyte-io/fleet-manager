@@ -172,6 +172,8 @@ pub const API_BASE_PATH: &str = "/api/v1";
         proxmox::ReviewProxmoxOperationRequest,
         proxmox::StartReviewedProxmoxOperationRequest,
         images::BuildImageRequest,
+        images::ImageBuildDto,
+        images::ImageBuildTemplateDto,
         lab::LabTemplateDto,
         lab::LabTemplateContentDto,
         lab::LabTemplateVersionDto,
@@ -362,7 +364,11 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::delete_image_recipe))
                 .routes(routes!(images::publish_image_recipe))
                 .routes(routes!(images::list_image_recipe_versions))
-                .routes(routes!(images::start_image_build))
+                .routes(routes!(
+                    images::start_image_build,
+                    images::list_image_builds
+                ))
+                .routes(routes!(images::get_image_build))
                 .routes(routes!(images::promote_image_version))
                 .routes(routes!(images::get_image_version))
                 .routes(routes!(lab::list_lab_templates, lab::create_lab_template))

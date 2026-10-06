@@ -41,6 +41,7 @@ struct FakeRecipes {
     recipes: Mutex<Vec<Recipe>>,
     versions: Mutex<Vec<RecipeVersion>>,
     port_calls: Mutex<Vec<&'static str>>,
+    builds: Mutex<Vec<fleet_core::ImageBuildRecord>>,
 }
 
 impl FakeRecipes {
@@ -56,6 +57,33 @@ impl FakeRecipes {
 
 #[async_trait]
 impl RecipePort for FakeRecipes {
+    async fn list_builds(
+        &self,
+        recipe: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Vec<fleet_core::ImageBuildRecord>, String> {
+        Ok(self
+            .builds
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .filter(|b| {
+                recipe.is_none_or(|r| b.recipe_id == r) && version.is_none_or(|v| b.version_id == v)
+            })
+            .cloned()
+            .collect())
+    }
+    async fn get_build(&self, id: &str) -> Result<fleet_core::ImageBuildRecord, String> {
+        self.builds
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
+            .ok_or_else(|| "build not found".to_owned())
+    }
+
     async fn create(&self, recipe: &NewRecipe, now: i64) -> Result<Recipe, String> {
         self.port_calls.lock().unwrap().push("create");
         let mut recipes = self.recipes.lock().unwrap();
@@ -413,11 +441,38 @@ async fn deleting_a_draft_leaves_its_published_versions() {
 
 // ---- FM-701: promotion gate ----
 
-use fleet_application::images::BuildEvidence;
+fn build_record(
+    version: &RecipeVersion,
+    outcome: &str,
+    artifact: bool,
+) -> fleet_core::ImageBuildRecord {
+    fleet_core::ImageBuildRecord {
+        id: "build-1".to_owned(),
+        operation_id: "build-1".to_owned(),
+        recipe_id: version.recipe_id.clone(),
+        version_id: version.id.clone(),
+        content_digest: version.content_digest.clone(),
+        asset_digests: Vec::new(),
+        packer_version: Some("1.16.1".to_owned()),
+        proxmox_plugin_version: Some("1.2.4".to_owned()),
+        account_id: Some("account-1".to_owned()),
+        node: version.node.clone(),
+        storage_pool: version.storage_pool.clone(),
+        started_at: NOW,
+        ended_at: Some(NOW + 1),
+        outcome: outcome.to_owned(),
+        reason: None,
+        template: artifact.then(|| fleet_core::ImageBuildTemplate {
+            node: version.node.clone(),
+            vmid: 102,
+            name: version.name.clone(),
+        }),
+    }
+}
 
 #[tokio::test]
 async fn promotion_requires_a_successful_build_with_an_artifact() {
-    let (images, _recipes, audit) = service();
+    let (images, recipes, audit) = service();
     let recipe = images
         .create(
             &AllowAll,
@@ -436,7 +491,7 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
 
     // No build: refused.
     let error = images
-        .promote(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -444,19 +499,14 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         "{error}"
     );
 
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "failed", false));
     // A failed build: refused.
     let error = images
-        .promote(
-            &AllowAll,
-            &principal(),
-            &version.id,
-            Some(BuildEvidence {
-                version_id: version.id.clone(),
-                state: "failed".to_owned(),
-                artifact_id: None,
-            }),
-            NOW + 2,
-        )
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -464,19 +514,14 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         "{error}"
     );
 
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "succeeded", false));
     // A successful build without an artifact: refused.
     let error = images
-        .promote(
-            &AllowAll,
-            &principal(),
-            &version.id,
-            Some(BuildEvidence {
-                version_id: version.id.clone(),
-                state: "succeeded".to_owned(),
-                artifact_id: None,
-            }),
-            NOW + 2,
-        )
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -484,20 +529,15 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         "{error}"
     );
 
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "succeeded", true));
     // A successful build with an artifact: promoted, with the evidence
     // recorded.
     let promoted = images
-        .promote(
-            &AllowAll,
-            &principal(),
-            &version.id,
-            Some(BuildEvidence {
-                version_id: version.id.clone(),
-                state: "succeeded".to_owned(),
-                artifact_id: Some("pve:102".to_owned()),
-            }),
-            NOW + 2,
-        )
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap();
     assert_eq!(promoted.promoted_at, Some(NOW + 2));
@@ -516,7 +556,7 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
 
 #[tokio::test]
 async fn promoting_a_second_version_demotes_the_first_explicitly() {
-    let (images, _recipes, _audit) = service();
+    let (images, recipes, _audit) = service();
     let recipe = images
         .create(
             &AllowAll,
@@ -532,13 +572,13 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
         .await
         .unwrap();
-    let evidence = || BuildEvidence {
-        version_id: v1.id.clone(),
-        state: "succeeded".to_owned(),
-        artifact_id: Some("pve:102".to_owned()),
-    };
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&v1, "succeeded", true));
     images
-        .promote(&AllowAll, &principal(), &v1.id, Some(evidence()), NOW + 2)
+        .promote(&AllowAll, &principal(), &v1.id, NOW + 2)
         .await
         .unwrap();
 
@@ -558,13 +598,13 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .publish(&AllowAll, &principal(), &recipe.id, NOW + 4)
         .await
         .unwrap();
-    let evidence2 = BuildEvidence {
-        version_id: v2.id.clone(),
-        state: "succeeded".to_owned(),
-        artifact_id: Some("pve:103".to_owned()),
-    };
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&v2, "succeeded", true));
     images
-        .promote(&AllowAll, &principal(), &v2.id, Some(evidence2), NOW + 5)
+        .promote(&AllowAll, &principal(), &v2.id, NOW + 5)
         .await
         .unwrap();
 
@@ -578,4 +618,70 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .await
         .unwrap();
     assert_eq!(promoted.promoted_at, Some(NOW + 5));
+}
+
+#[tokio::test]
+async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_newer_failed_records()
+{
+    let (images, recipes, _audit) = service();
+    let recipe = images
+        .create(
+            &AllowAll,
+            &principal(),
+            NewRecipe {
+                content: recipe_content("image", "{}"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = images
+        .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
+        .await
+        .unwrap();
+    let mut record = build_record(&version, "succeeded", true);
+    record.content_digest = "different-inputs".to_owned();
+    recipes.builds.lock().unwrap().push(record);
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "succeeded", true));
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "failed", false));
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    assert!(matches!(
+        images.list_builds(&DenyAll, &principal(), None, None).await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
+    assert!(matches!(
+        images.get_build(&DenyAll, &principal(), "build-1").await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
+    assert!(matches!(
+        images.get_build(&AllowAll, &principal(), "unknown").await,
+        Err(RecipeUseCaseError::NotFound { .. })
+    ));
+    assert_eq!(
+        images
+            .list_builds(&AllowAll, &principal(), None, Some(&version.id))
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
 }
