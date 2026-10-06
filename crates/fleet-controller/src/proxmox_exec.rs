@@ -1377,6 +1377,7 @@ impl OperationExecutor for LabReadinessExecutor {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             }
+            let parent = steps.parent.clone();
             crate::ready::ReadyExecutor::new(
                 self.machines.clone(),
                 self.operations.clone(),
@@ -1384,6 +1385,7 @@ impl OperationExecutor for LabReadinessExecutor {
                 self.work_dir.clone(),
                 self.limiter.clone(),
             )
+            .with_lab_readiness(deadline, parent, operation.id.clone())
             .execute(operations, operation)
             .await
         } else {
@@ -2528,14 +2530,14 @@ impl ProvisionExecutor {
                     .await;
             }
             let budget = Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
-            let discovery =
-                tokio::time::timeout(budget, self.client.guest_discover(request.clone())).await;
+            let discovery = tokio::time::timeout(
+                budget,
+                self.client
+                    .guest_agent_network(request.clone(), &node, vmid),
+            )
+            .await;
             let ip = match discovery {
-                Ok(Ok(discovery)) => discovery
-                    .guests
-                    .iter()
-                    .find(|guest| guest.resource.vmid == Some(vmid))
-                    .and_then(|guest| guest.agent.as_ref())
+                Ok(agent) => Some(&agent)
                     .filter(|agent| agent.online)
                     .and_then(|agent| {
                         agent

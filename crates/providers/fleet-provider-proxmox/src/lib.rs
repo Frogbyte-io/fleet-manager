@@ -1967,10 +1967,20 @@ fn urlencode(value: &str) -> String {
 }
 
 impl ProxmoxClient {
-    /// Probes one guest's agent surfaces, each independently honest. A
-    /// failed or absent surface is a warning on the guest, never a guest
-    /// failure.
-    async fn probe_agent(
+    /// Probes only one QEMU guest's agent info and network surfaces.
+    /// Reuses discovery normalization without scanning unrelated guests or
+    /// querying OS/config surfaces. Unavailable data stays explicitly unknown.
+    pub async fn guest_agent_network(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> PveGuestAgent {
+        self.probe_agent_network(&request, node, vmid, &mut Vec::new())
+            .await
+    }
+
+    async fn probe_agent_network(
         &self,
         request: &PveHttpRequest,
         node: &str,
@@ -2044,6 +2054,23 @@ impl ProxmoxClient {
                 ));
             }
         }
+        agent
+    }
+
+    async fn probe_agent(
+        &self,
+        request: &PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        warnings: &mut Vec<String>,
+    ) -> PveGuestAgent {
+        let mut agent = self
+            .probe_agent_network(request, node, vmid, warnings)
+            .await;
+        if !agent.online {
+            return agent;
+        }
+        let base = format!("/api2/json/nodes/{}/qemu/{vmid}/agent", urlencode(node));
         // get-osinfo
         let os_request = PveHttpRequest {
             path: format!("{base}/get-osinfo"),
