@@ -63,7 +63,7 @@ pub enum PrivilegeTier {
     Discover,
     /// Guest lifecycle: start, stop, shutdown, reboot.
     Operate,
-    /// Snapshot, rollback, snapshot delete, clone, template, task cancel.
+    /// Snapshot, rollback, snapshot delete, clone, template, destroy, task cancel.
     Destructive,
     /// Lab leases: clone a pinned image, start it, probe readiness.
     Lab,
@@ -1279,6 +1279,7 @@ mod tests {
             for (id, privilege) in [
                 ("proxmox.guest.destroy", "VM.Allocate"),
                 ("proxmox.guest.destroy.list", "VM.Audit"),
+                ("proxmox.guest.destroy.config", "VM.Audit"),
                 ("proxmox.guest.destroy.stop", "VM.PowerMgmt"),
             ] {
                 let row = requirements_for_major(major)

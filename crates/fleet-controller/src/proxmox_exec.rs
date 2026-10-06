@@ -416,7 +416,7 @@ pub const DESTRUCTIVE_KINDS: [&str; 7] = [
 ];
 
 /// The destructive-adjacent executor: snapshot, revert, snapshot-delete,
-/// clone, template conversion, and remote task cancellation. Every kind
+/// clone, template conversion, guest destruction, and remote task cancellation. Every kind
 /// arrived through the reviewed dedicated endpoint (the generic surface
 /// refuses them); the executor re-applies the trust gate and classifies
 /// idempotency before touching anything.
@@ -903,12 +903,20 @@ impl ProxmoxDestructiveExecutor {
         {
             return Err("destroy cancelled before delete".to_owned());
         }
-        // Recheck promotion after waiting; the provider rechecks template config.
+        // Recheck cluster template state and promotion after waiting.
         let image_vmids = artifacts
             .promoted_template_vmids()
             .await
             .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
-        fleet_application::lab::guard_destroy_target(payload.vmid, false, &image_vmids)
+        let resources = self
+            .client
+            .list_guest_resources(request.clone())
+            .await
+            .map_err(|error| format!("the post-stop resource listing failed: {error}"))?;
+        let is_template = resources.iter().any(|resource| {
+            resource.vmid == Some(payload.vmid) && resource.kind == "qemu-template"
+        });
+        fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)
     }
 
     /// The trusted account and its resolved secret: the same explicit-trust
@@ -1910,6 +1918,7 @@ mod destroy_tests {
     #[derive(Debug)]
     struct Transport {
         template: bool,
+        template_after_stop: std::sync::atomic::AtomicBool,
         absent: bool,
         task_error: bool,
         stop_error: bool,
@@ -1931,7 +1940,7 @@ mod destroy_tests {
                 if self.absent {
                     json!({"data":[]})
                 } else {
-                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","status":"running","template":u8::from(self.template)}]})
+                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
                 }
             } else if path.ends_with("/status/stop") {
                 assert_eq!(request.method, PveHttpMethod::Post);
@@ -2046,6 +2055,7 @@ mod destroy_tests {
             let links = Arc::new(ProxmoxTaskLinkRepository::new(pool));
             let transport = Arc::new(Transport {
                 template,
+                template_after_stop: std::sync::atomic::AtomicBool::new(false),
                 absent,
                 task_error,
                 stop_error,
@@ -2227,6 +2237,44 @@ mod destroy_tests {
         );
         let h = Harness::new(false, false, false, true, false, false).await;
         assert_eq!(h.run(30).await.state, "failed");
+    }
+    #[tokio::test]
+    async fn destroy_review_accepts_omitted_options() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        let (status, review) = h.post("review", json!({"node":"pve"}), false).await;
+        assert_eq!(status, 200);
+        let (status, accepted) = h.post("run", json!({"node":"pve","reviewToken":review["data"]["reviewToken"],"timeoutSeconds":300}), false).await;
+        assert_eq!(status, 202);
+        let id = accepted["data"]["id"].as_str().unwrap();
+        h.operations
+            .claim_only_execute(&h.executor, id, "omitted-options-test")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.operations
+                .get(&Policy(false), "anonymous-lan-admin", id)
+                .await
+                .unwrap()
+                .state,
+            "succeeded"
+        );
+    }
+    #[tokio::test]
+    async fn destroy_rechecks_cluster_template_state_after_stop() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        h.transport
+            .template_after_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let operation = h.run(30).await;
+        assert_eq!(operation.state, "failed");
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("?purge="))
+        );
     }
     #[tokio::test]
     async fn destroy_never_deletes_after_failed_or_timed_out_stop() {

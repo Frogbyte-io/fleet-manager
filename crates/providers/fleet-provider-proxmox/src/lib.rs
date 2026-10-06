@@ -1029,7 +1029,10 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
     ) -> Result<(), PveApiError>;
 
     /// Destroys a stopped QEMU guest. Returns its qmdestroy task, or None
-    /// when the guest configuration is already absent. Refuses templates.
+    /// when the guest configuration is already absent. Refuses templates
+    /// observed in a config read immediately before DELETE. PVE has no
+    /// conditional-delete parameter: a concurrent external conversion after
+    /// that read can race the DELETE, so this refusal is best-effort.
     /// Purge removes backup, replication and HA references; locks and
     /// unreferenced disks are never bypassed or removed.
     ///

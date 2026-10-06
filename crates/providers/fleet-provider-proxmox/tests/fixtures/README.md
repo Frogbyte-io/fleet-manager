@@ -209,7 +209,10 @@ The PVE [8.x](https://github.com/proxmox/qemu-server/blob/stable-bookworm/src/PV
 and [9.x](https://github.com/proxmox/qemu-server/blob/master/src/PVE/API2/Qemu.pm)
 `destroy_vm` schema requires `VM.Allocate` on `/vms/{vmid}`, rejects running
 or protected guests, and forks `qmdestroy` with the VMID as its UPID target.
-PVE permits deleting templates; Fleet explicitly refuses them before deletion.
+PVE permits deleting templates; Fleet refuses templates observed in fresh cluster
+and config reads before deletion. PVE exposes no atomic conditional-delete option,
+so an external template conversion between the final config read and DELETE can
+race this best-effort refusal. A repeated GET would not close that final window.
 `purge` removes backup/replication/HA references. `destroy-unreferenced-disks`
 defaults to false; `skiplock` is root-only. Fleet exposes only `purge` and
 preserves both defaults. A missing config is PVE's HTTP 500 with the exact

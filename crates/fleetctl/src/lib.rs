@@ -723,7 +723,7 @@ pub enum Command {
     /// Review then run a destructive-adjacent operation on a guest.
     ProxmoxDestructive {
         /// The action: snapshot, snapshot-revert, snapshot-delete, clone,
-        /// template, or task-cancel.
+        /// template, destroy, or task-cancel.
         action: String,
         /// The account's identity.
         account_id: String,
@@ -731,7 +731,8 @@ pub enum Command {
         node: String,
         /// The guest's VMID.
         vmid: u32,
-        /// The action-specific parameters, as JSON on standard input.
+        /// The action-specific parameters as JSON. Destroy derives these
+        /// from its flags; other actions read them from standard input.
         params: Option<String>,
         /// Wait for the operation to finish.
         wait: bool,
@@ -2104,9 +2105,9 @@ fn parse_proxmox_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
             let vmid = vmid
                 .parse::<u32>()
                 .ok()
-                .filter(|id| *id > 0)
+                .filter(|id| (100..=999_999_999).contains(id))
                 .ok_or_else(|| CliError {
-                    message: "the VMID must be a positive number".to_owned(),
+                    message: "the VMID must be an integer in 100..=999999999".to_owned(),
                 })?;
             let mut wait = false;
             let mut purge = false;
@@ -7423,6 +7424,20 @@ mod proxmox_destroy_tests {
         assert!(seen[2].starts_with("GET /api/v1/operations/op-1 "));
     }
 
+    #[test]
+    fn destroy_validates_pve_vmid_bounds() {
+        for id in ["100", "999999999"] {
+            assert!(
+                parse(&["proxmox", "destroy", "account", "pve", id].map(str::to_owned)).is_ok()
+            );
+        }
+        for id in ["1", "99", "1000000000", "4294967295"] {
+            assert!(
+                parse(&["proxmox", "destroy", "account", "pve", id].map(str::to_owned)).is_err(),
+                "accepted invalid PVE VMID {id}"
+            );
+        }
+    }
     #[test]
     fn destroy_rejects_invalid_target_and_flags() {
         for args in [

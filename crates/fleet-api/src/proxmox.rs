@@ -1258,6 +1258,9 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
             Ok(())
         }
         "destroy" => {
+            if params.is_null() {
+                return Ok(());
+            }
             if !params.is_object()
                 || params
                     .as_object()
