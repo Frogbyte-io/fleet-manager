@@ -56,6 +56,17 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
     }
 }
 
+fn sample_project(id: &str) -> fleet_core::Project {
+    fleet_core::Project {
+        id: id.to_owned(),
+        remote: format!("github.com/example/{id}.git"),
+        name: id.to_owned(),
+        description: String::new(),
+        created_at: NOW,
+        updated_at: NOW,
+    }
+}
+
 #[derive(Debug, Default)]
 struct FakeTemplates {
     templates: Mutex<Vec<fleet_application::lab::LabTemplate>>,
@@ -361,8 +372,21 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         Ok(())
     }
 
-    async fn list(&self) -> Result<Vec<fleet_application::lab::Lease>, String> {
-        Ok(self.leases.lock().unwrap().clone())
+    async fn list(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<fleet_application::lab::Lease>, String> {
+        Ok(self
+            .leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|lease| match project_id {
+                None => true,
+                Some(id) => lease.project_id.as_deref() == Some(id),
+            })
+            .cloned()
+            .collect())
     }
 
     async fn expired(&self, now: i64) -> Result<Vec<fleet_application::lab::Lease>, String> {
@@ -519,13 +543,120 @@ impl AuditPort for FakeAudit {
     }
 }
 
+/// Canned projects: the ids are fixed instances, the default fake has none.
+#[derive(Debug, Default)]
+struct FakeProjects {
+    known: Mutex<Vec<fleet_core::Project>>,
+}
+
+impl FakeProjects {
+    fn with(known: fleet_core::Project) -> Arc<Self> {
+        Arc::new(Self {
+            known: Mutex::new(vec![known]),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl fleet_application::project::ProjectPort for FakeProjects {
+    async fn create(
+        &self,
+        _: &fleet_application::project::NewProject,
+    ) -> Result<fleet_core::Project, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn get(
+        &self,
+        id: &str,
+    ) -> Result<fleet_core::Project, fleet_application::operation::PortFailure> {
+        self.known
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|project| project.id == id)
+            .cloned()
+            .ok_or_else(|| fleet_application::operation::PortFailure::NotFound {
+                what: format!("project {id}"),
+            })
+    }
+
+    async fn list(
+        &self,
+        _: &fleet_application::project::ProjectFilter,
+        _: u32,
+    ) -> Result<Vec<fleet_core::Project>, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn update(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<fleet_core::Project, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn delete(&self, _: &str) -> Result<(), fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn record_checkout(
+        &self,
+        _: &fleet_core::CheckoutFact,
+    ) -> Result<(), fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        _: &str,
+    ) -> Result<Option<fleet_core::Project>, fleet_application::operation::PortFailure> {
+        Ok(None)
+    }
+
+    async fn find_by_remote(
+        &self,
+        _: &str,
+    ) -> Result<Option<fleet_core::Project>, fleet_application::operation::PortFailure> {
+        Ok(None)
+    }
+
+    async fn checkouts(
+        &self,
+        _: &str,
+    ) -> Result<Vec<fleet_core::CheckoutFact>, fleet_application::operation::PortFailure> {
+        Err(fleet_application::operation::PortFailure::Backend {
+            detail: "not needed".to_owned(),
+        })
+    }
+}
+
 fn service(pins: Arc<dyn ImagePinValidator>) -> (Lab, Arc<FakeTemplates>, Arc<FakeAudit>) {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());
     let leases = Arc::new(FakeLeases::default());
     let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
+        Lab::new(
+            templates.clone(),
+            provisions,
+            leases,
+            pins,
+            Arc::new(FakeProjects::default()),
+            audit.clone(),
+        ),
         templates,
         audit,
     )
@@ -537,7 +668,14 @@ fn service_with_pins(pins: Arc<FakePins>) -> (Lab, Arc<FakeTemplates>, Arc<FakeA
     let leases = Arc::new(FakeLeases::default());
     let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
     (
-        Lab::new(templates.clone(), provisions, leases, pins, audit.clone()),
+        Lab::new(
+            templates.clone(),
+            provisions,
+            leases,
+            pins,
+            Arc::new(FakeProjects::default()),
+            audit.clone(),
+        ),
         templates,
         audit,
     )
@@ -802,6 +940,7 @@ async fn lease_extension_authorizes_audits_and_advances_only_a_live_ready_lease(
         provisions,
         leases.clone(),
         FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
         audit.clone(),
     );
     let template = lab
@@ -1022,6 +1161,7 @@ async fn the_sweeper_claims_expired_leases_into_releasing() {
                 provisions,
                 leases.clone(),
                 FakePins::with_promoted("rcp-1@abc"),
+                Arc::new(FakeProjects::default()),
                 audit.clone(),
             ),
             templates,
@@ -1095,6 +1235,7 @@ async fn sweep_reports_each_committed_claim_before_a_later_failure() {
         Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
         leases.clone(),
         FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
         audit,
     );
     let template = lab
@@ -1155,4 +1296,289 @@ async fn sweep_reports_each_committed_claim_before_a_later_failure() {
         .unwrap();
     assert_eq!(first.state, LeaseState::Releasing);
     assert_eq!(second.state, LeaseState::Ready);
+}
+
+#[tokio::test]
+async fn lease_creation_records_an_existent_explicit_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        FakeProjects::with(sample_project("proj-1")),
+        audit.clone(),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: Some("proj-1".to_owned()),
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lease.project_id, Some("proj-1".to_owned()));
+    // The create event itself carries the linkage: both entries must sit
+    // on the same `lab_lease_creating` intent.
+    let intents = audit.intents.lock().unwrap();
+    assert!(
+        intents.iter().any(|intent| {
+            let entries: Vec<(&str, &str)> = intent.metadata.entries().collect();
+            entries
+                .iter()
+                .any(|(k, v)| k == &"event" && v == &"lab_lease_creating")
+                && entries
+                    .iter()
+                    .any(|(k, v)| k == &"projectId" && v == &"proj-1")
+        }),
+        "{intents:?}"
+    );
+}
+
+#[tokio::test]
+async fn lease_creation_inherits_the_template_versions_bootstrap_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        FakeProjects::with(sample_project("proj-1")),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: LabTemplateContent {
+                    bootstrap_project_id: Some("proj-1".to_owned()),
+                    ..content("ubuntu-lab", "rcp-1@abc")
+                },
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(lease.project_id, Some("proj-1".to_owned()));
+}
+
+#[tokio::test]
+async fn lease_creation_refuses_an_unknown_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let error = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: Some("ghost".to_owned()),
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    match error {
+        LabUseCaseError::Invalid { detail } => {
+            assert!(detail.contains("ghost"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        leases.leases.lock().unwrap().is_empty(),
+        "the lease was created for an unknown project"
+    );
+}
+
+#[tokio::test]
+async fn lease_listing_narrows_by_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        FakeProjects::with(sample_project("proj-1")),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    for purpose in ["first", "second"] {
+        lab.create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: purpose.to_owned(),
+                project_id: Some("proj-1".to_owned()),
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    }
+    lab.create_lease(
+        &AllowAll,
+        &principal(),
+        fleet_application::lab::NewLease {
+            template_version_id: version.id.clone(),
+            purpose: "unlinked".to_owned(),
+            project_id: None,
+            cleanup: fleet_core::CleanupStrategy::Destroy,
+            ttl_seconds: 3_600,
+        },
+        NOW + 3,
+    )
+    .await
+    .unwrap();
+    let linked = lab
+        .list_leases(&AllowAll, &principal(), Some("proj-1"))
+        .await
+        .unwrap();
+    assert_eq!(linked.len(), 2);
+    let everything = lab
+        .list_leases(&AllowAll, &principal(), None)
+        .await
+        .unwrap();
+    assert_eq!(everything.len(), 3);
+}
+
+#[tokio::test]
+async fn lease_creation_refuses_a_stale_template_bootstrap_project() {
+    let leases = Arc::new(FakeLeases::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: LabTemplateContent {
+                    bootstrap_project_id: Some("deleted".to_owned()),
+                    ..content("ubuntu-lab", "rcp-1@abc")
+                },
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let error = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap_err();
+    match error {
+        LabUseCaseError::Invalid { detail } => {
+            assert!(detail.contains("deleted"), "{detail}");
+            assert!(detail.contains("explicit project id"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        leases.leases.lock().unwrap().is_empty(),
+        "the lease was created for a stale bootstrap project"
+    );
 }

@@ -5286,6 +5286,13 @@ limit?: number;
 cursor?: string;
 };
 
+export type ListLabLeasesParams = {
+/**
+ * Only leases serving this project.
+ */
+projectId?: string;
+};
+
 export type ListMachinesParams = {
 /**
  * Only machines carrying this tag.
@@ -6943,6 +6950,11 @@ export type listLabLeasesResponse200 = {
   status: 200
 }
 
+export type listLabLeasesResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type listLabLeasesResponse403 = {
   data: ApiError
   status: 403
@@ -6956,29 +6968,36 @@ export type listLabLeasesResponse500 = {
 export type listLabLeasesResponseSuccess = (listLabLeasesResponse200) & {
   headers: Headers;
 };
-export type listLabLeasesResponseError = (listLabLeasesResponse403 | listLabLeasesResponse500) & {
+export type listLabLeasesResponseError = (listLabLeasesResponse400 | listLabLeasesResponse403 | listLabLeasesResponse500) & {
   headers: Headers;
 };
 
 export type listLabLeasesResponse = (listLabLeasesResponseSuccess | listLabLeasesResponseError)
 
-export const getListLabLeasesUrl = () => {
+export const getListLabLeasesUrl = (params?: ListLabLeasesParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/v1/lab/leases`
+  return stringifiedParams.length > 0 ? `/api/v1/lab/leases?${stringifiedParams}` : `/api/v1/lab/leases`
 }
 
 /**
  * # Errors
  *
  * Returns the public error envelope on refusal or backend failure.
- * @summary Lists the leases.
+ * @summary Lists the leases, narrowed by the project when given.
  */
-export const listLabLeases = async ( options?: RequestInit): Promise<listLabLeasesResponse> => {
+export const listLabLeases = async (params?: ListLabLeasesParams, options?: RequestInit): Promise<listLabLeasesResponse> => {
 
-  const res = await fetch(getListLabLeasesUrl(),
+  const res = await fetch(getListLabLeasesUrl(params),
   {
     ...options,
     method: 'GET'
