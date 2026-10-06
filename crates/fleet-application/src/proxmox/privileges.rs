@@ -63,7 +63,7 @@ pub enum PrivilegeTier {
     Discover,
     /// Guest lifecycle: start, stop, shutdown, reboot.
     Operate,
-    /// Snapshot, rollback, snapshot delete, clone, template, task cancel.
+    /// Snapshot, rollback, snapshot delete, clone, template, destroy, task cancel.
     Destructive,
     /// Lab leases: clone a pinned image, start it, probe readiness.
     Lab,
@@ -441,6 +441,54 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         matching: PrivilegeMatch::All,
         required: true,
         note: "Snapshot removal.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "DELETE /nodes/{node}/qemu/{vmid}",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Allocate"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "QEMU destroy; purge is optional. No skiplock or unreferenced-disk deletion.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy.list",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "GET /cluster/resources",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "Live template guard and running-state lookup.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy.config",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "GET /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "Provider template refusal and precise already-absent classification.",
+    },
+    PrivilegeRequirement {
+        id: "proxmox.guest.destroy.stop",
+        capability: "proxmox.guest.destroy",
+        tier: PrivilegeTier::Destructive,
+        endpoint: "POST /nodes/{node}/qemu/{vmid}/status/stop",
+        majors: BOTH,
+        scope: PrivilegeScope::Guest,
+        privileges: &["VM.PowerMgmt"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "A running guest must stop before destroy.",
     },
     PrivilegeRequirement {
         id: "proxmox.guest.clone.list",
@@ -1212,6 +1260,7 @@ mod tests {
             "proxmox.guest.snapshot",
             "proxmox.guest.snapshot-revert",
             "proxmox.guest.snapshot-delete",
+            "proxmox.guest.destroy",
             "proxmox.guest.clone",
             "proxmox.guest.template",
             "proxmox.task-cancel",
@@ -1221,6 +1270,25 @@ mod tests {
                 PROXMOX_PRIVILEGE_TABLE.iter().any(|r| r.capability == kind),
                 "{kind} is missing from the table"
             );
+        }
+    }
+
+    #[test]
+    fn destroy_requires_allocate_audit_and_power_on_both_majors() {
+        for major in [8, 9] {
+            for (id, privilege) in [
+                ("proxmox.guest.destroy", "VM.Allocate"),
+                ("proxmox.guest.destroy.list", "VM.Audit"),
+                ("proxmox.guest.destroy.config", "VM.Audit"),
+                ("proxmox.guest.destroy.stop", "VM.PowerMgmt"),
+            ] {
+                let row = requirements_for_major(major)
+                    .find(|row| row.id == id)
+                    .unwrap();
+                assert_eq!(row.privileges, &[privilege]);
+                assert_eq!(row.tier, PrivilegeTier::Destructive);
+                assert!(row.required);
+            }
         }
     }
 

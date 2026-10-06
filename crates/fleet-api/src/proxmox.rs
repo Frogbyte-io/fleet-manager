@@ -1257,6 +1257,22 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
             }
             Ok(())
         }
+        "destroy" => {
+            if params.is_null() {
+                return Ok(());
+            }
+            if !params.is_object()
+                || params
+                    .as_object()
+                    .is_some_and(|params| params.keys().any(|key| key != "purge"))
+            {
+                return Err("destroy parameters must be an object containing only purge".to_owned());
+            }
+            if params.get("purge").is_some_and(|value| !value.is_boolean()) {
+                return Err("destroy purge must be a boolean".to_owned());
+            }
+            Ok(())
+        }
         // `template` carries no parameters.
         _ => Ok(()),
     }
@@ -1276,7 +1292,7 @@ fn validate_destructive_params(action: &str, params: &serde_json::Value) -> Resu
     params(
         ("accountId" = String, Path, description = "The account's identity."),
         ("vmid" = u32, Path, description = "The guest's VMID."),
-        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, or task-cancel.")
+        ("action" = String, Path, description = "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.")
     ),
     request_body = ReviewProxmoxOperationRequest,
     responses(
@@ -1307,7 +1323,13 @@ pub async fn review_proxmox_operation(
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     if !matches!(
         action.as_str(),
-        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template" | "task-cancel"
+        "snapshot"
+            | "snapshot-revert"
+            | "snapshot-delete"
+            | "clone"
+            | "template"
+            | "destroy"
+            | "task-cancel"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),
@@ -1425,7 +1447,13 @@ pub async fn start_reviewed_proxmox_operation(
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     if !matches!(
         action.as_str(),
-        "snapshot" | "snapshot-revert" | "snapshot-delete" | "clone" | "template" | "task-cancel"
+        "snapshot"
+            | "snapshot-revert"
+            | "snapshot-delete"
+            | "clone"
+            | "template"
+            | "destroy"
+            | "task-cancel"
     ) {
         return Err(crate::machines::invalid_request(
             &format!("unrecognized destructive action {action:?}"),

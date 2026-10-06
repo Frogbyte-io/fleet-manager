@@ -5220,7 +5220,7 @@
           {
             "name": "action",
             "in": "path",
-            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, or task-cancel.",
+            "description": "The destructive action: snapshot, snapshot-revert, snapshot-delete, clone, template, destroy, or task-cancel.",
             "required": true,
             "schema": {
               "type": "string"
