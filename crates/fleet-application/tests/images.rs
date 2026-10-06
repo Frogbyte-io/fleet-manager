@@ -41,6 +41,9 @@ struct FakeRecipes {
     recipes: Mutex<Vec<Recipe>>,
     versions: Mutex<Vec<RecipeVersion>>,
     port_calls: Mutex<Vec<&'static str>>,
+    builds: Mutex<Vec<fleet_core::ImageBuildRecord>>,
+    reject_promotion: Mutex<bool>,
+    build_page_limits: Mutex<Vec<u32>>,
 }
 
 impl FakeRecipes {
@@ -56,6 +59,71 @@ impl FakeRecipes {
 
 #[async_trait]
 impl RecipePort for FakeRecipes {
+    async fn list_builds(
+        &self,
+        recipe: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<Vec<fleet_core::ImageBuildRecord>, String> {
+        let mut records: Vec<_> = self
+            .builds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| {
+                recipe.is_none_or(|r| b.recipe_id == r) && version.is_none_or(|v| b.version_id == v)
+            })
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(records)
+    }
+    async fn list_build_page(
+        &self,
+        query: &fleet_application::images::BuildPageRequest,
+    ) -> Result<fleet_application::images::BuildPage, String> {
+        self.build_page_limits.lock().unwrap().push(query.limit);
+        let mut items = self
+            .list_builds(query.recipe.as_deref(), query.version.as_deref())
+            .await?;
+        if let Some(cursor) = query.cursor.as_deref() {
+            let position = items
+                .iter()
+                .position(|item| item.id == cursor)
+                .ok_or_else(|| fleet_application::images::BUILD_CURSOR_INVALID.to_owned())?;
+            items = items.split_off(position + 1);
+        }
+        let limit = if query.limit == 0 {
+            50
+        } else {
+            query.limit.min(200)
+        };
+        let more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        let next_cursor = if more {
+            items.last().map(|item| item.id.clone())
+        } else {
+            None
+        };
+        Ok(fleet_application::images::BuildPage {
+            items,
+            next_cursor,
+            limit,
+        })
+    }
+    async fn get_build(&self, id: &str) -> Result<fleet_core::ImageBuildRecord, String> {
+        self.builds
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
+            .ok_or_else(|| "build not found".to_owned())
+    }
+
     async fn create(&self, recipe: &NewRecipe, now: i64) -> Result<Recipe, String> {
         self.port_calls.lock().unwrap().push("create");
         let mut recipes = self.recipes.lock().unwrap();
@@ -145,6 +213,9 @@ impl RecipePort for FakeRecipes {
         promoted_by: &str,
         promoted_at: i64,
     ) -> Result<RecipeVersion, String> {
+        if *self.reject_promotion.lock().unwrap() {
+            return Err(fleet_application::images::PROMOTION_BUILD_REJECTED.to_owned());
+        }
         let mut versions = self.versions.lock().unwrap();
         let recipe_id = versions
             .iter()
@@ -413,11 +484,39 @@ async fn deleting_a_draft_leaves_its_published_versions() {
 
 // ---- FM-701: promotion gate ----
 
-use fleet_application::images::BuildEvidence;
+fn build_record(
+    version: &RecipeVersion,
+    outcome: &str,
+    artifact: bool,
+    started_at: i64,
+) -> fleet_core::ImageBuildRecord {
+    fleet_core::ImageBuildRecord {
+        id: format!("{}-{started_at}-{outcome}", version.id),
+        operation_id: format!("{}-{started_at}-{outcome}", version.id),
+        recipe_id: version.recipe_id.clone(),
+        version_id: version.id.clone(),
+        content_digest: version.content_digest.clone(),
+        asset_digests: Vec::new(),
+        packer_version: Some("1.16.1".to_owned()),
+        proxmox_plugin_version: Some("1.2.4".to_owned()),
+        account_id: Some("account-1".to_owned()),
+        node: version.node.clone(),
+        storage_pool: version.storage_pool.clone(),
+        started_at,
+        ended_at: Some(started_at + 1),
+        outcome: outcome.to_owned(),
+        reason: None,
+        template: artifact.then(|| fleet_core::ImageBuildTemplate {
+            node: version.node.clone(),
+            vmid: 102,
+            name: version.name.clone(),
+        }),
+    }
+}
 
 #[tokio::test]
 async fn promotion_requires_a_successful_build_with_an_artifact() {
-    let (images, _recipes, audit) = service();
+    let (images, recipes, audit) = service();
     let recipe = images
         .create(
             &AllowAll,
@@ -436,7 +535,7 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
 
     // No build: refused.
     let error = images
-        .promote(&AllowAll, &principal(), &version.id, None, NOW + 2)
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -444,19 +543,14 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         "{error}"
     );
 
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "failed", false, NOW + 10));
     // A failed build: refused.
     let error = images
-        .promote(
-            &AllowAll,
-            &principal(),
-            &version.id,
-            Some(BuildEvidence {
-                version_id: version.id.clone(),
-                state: "failed".to_owned(),
-                artifact_id: None,
-            }),
-            NOW + 2,
-        )
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -464,19 +558,14 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         "{error}"
     );
 
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "succeeded", false, NOW + 11));
     // A successful build without an artifact: refused.
     let error = images
-        .promote(
-            &AllowAll,
-            &principal(),
-            &version.id,
-            Some(BuildEvidence {
-                version_id: version.id.clone(),
-                state: "succeeded".to_owned(),
-                artifact_id: None,
-            }),
-            NOW + 2,
-        )
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap_err();
     assert!(
@@ -484,23 +573,35 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         "{error}"
     );
 
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "succeeded", true, NOW + 12));
     // A successful build with an artifact: promoted, with the evidence
     // recorded.
+    *recipes.reject_promotion.lock().unwrap() = true;
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    *recipes.reject_promotion.lock().unwrap() = false;
     let promoted = images
-        .promote(
-            &AllowAll,
-            &principal(),
-            &version.id,
-            Some(BuildEvidence {
-                version_id: version.id.clone(),
-                state: "succeeded".to_owned(),
-                artifact_id: Some("pve:102".to_owned()),
-            }),
-            NOW + 2,
-        )
+        .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
         .unwrap();
     assert_eq!(promoted.promoted_at, Some(NOW + 2));
+    assert!(
+        recipes
+            .build_page_limits
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|limit| *limit == 1)
+    );
+
     assert_eq!(promoted.promoted_by.as_deref(), Some("anonymous-lan-admin"));
 
     // The promotion is audited twice (intent + completion).
@@ -516,7 +617,7 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
 
 #[tokio::test]
 async fn promoting_a_second_version_demotes_the_first_explicitly() {
-    let (images, _recipes, _audit) = service();
+    let (images, recipes, _audit) = service();
     let recipe = images
         .create(
             &AllowAll,
@@ -532,13 +633,13 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
         .await
         .unwrap();
-    let evidence = || BuildEvidence {
-        version_id: v1.id.clone(),
-        state: "succeeded".to_owned(),
-        artifact_id: Some("pve:102".to_owned()),
-    };
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&v1, "succeeded", true, NOW + 13));
     images
-        .promote(&AllowAll, &principal(), &v1.id, Some(evidence()), NOW + 2)
+        .promote(&AllowAll, &principal(), &v1.id, NOW + 2)
         .await
         .unwrap();
 
@@ -558,13 +659,13 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .publish(&AllowAll, &principal(), &recipe.id, NOW + 4)
         .await
         .unwrap();
-    let evidence2 = BuildEvidence {
-        version_id: v2.id.clone(),
-        state: "succeeded".to_owned(),
-        artifact_id: Some("pve:103".to_owned()),
-    };
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&v2, "succeeded", true, NOW + 14));
     images
-        .promote(&AllowAll, &principal(), &v2.id, Some(evidence2), NOW + 5)
+        .promote(&AllowAll, &principal(), &v2.id, NOW + 5)
         .await
         .unwrap();
 
@@ -578,4 +679,158 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .await
         .unwrap();
     assert_eq!(promoted.promoted_at, Some(NOW + 5));
+}
+
+#[tokio::test]
+async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_newer_failed_records()
+{
+    let (images, recipes, _audit) = service();
+    let recipe = images
+        .create(
+            &AllowAll,
+            &principal(),
+            NewRecipe {
+                content: recipe_content("image", "{}"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = images
+        .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
+        .await
+        .unwrap();
+    let mut record = build_record(&version, "succeeded", true, NOW + 15);
+    record.content_digest = "different-inputs".to_owned();
+    recipes.builds.lock().unwrap().push(record);
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "succeeded", true, NOW + 16));
+    recipes
+        .builds
+        .lock()
+        .unwrap()
+        .push(build_record(&version, "failed", false, NOW + 17));
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    recipes.builds.lock().unwrap().reverse();
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    // At equal timestamps the lexically greater identity wins, not insertion order.
+    {
+        let mut builds = recipes.builds.lock().unwrap();
+        let latest = builds.iter().map(|b| b.started_at).max().unwrap();
+        for build in builds.iter_mut() {
+            build.started_at = latest;
+            build.ended_at = Some(latest + 1);
+            build.id = if build.outcome == "failed" {
+                "z-failed"
+            } else {
+                "a-success"
+            }
+            .to_owned();
+            build.operation_id.clone_from(&build.id);
+        }
+        builds.retain(|b| b.content_digest == version.content_digest);
+    }
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    assert_fake_build_pagination(&images, &version).await;
+    assert!(matches!(
+        images.list_builds(&DenyAll, &principal(), None, None).await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
+    assert!(matches!(
+        images.get_build(&DenyAll, &principal(), "build-1").await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
+    assert!(matches!(
+        images.get_build(&AllowAll, &principal(), "unknown").await,
+        Err(RecipeUseCaseError::NotFound { .. })
+    ));
+    assert_eq!(
+        images
+            .list_builds(&AllowAll, &principal(), None, Some(&version.id))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+async fn assert_fake_build_pagination(images: &Images, version: &RecipeVersion) {
+    let first = images
+        .list_build_page(
+            &AllowAll,
+            &principal(),
+            fleet_application::images::BuildPageRequest {
+                version: Some(version.id.clone()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.items[0].id, "z-failed");
+    let second = images
+        .list_build_page(
+            &AllowAll,
+            &principal(),
+            fleet_application::images::BuildPageRequest {
+                version: Some(version.id.clone()),
+                cursor: first.next_cursor,
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.items[0].id, "a-success");
+    assert!(second.next_cursor.is_none());
+    for query in [
+        fleet_application::images::BuildPageRequest {
+            cursor: Some("unknown".to_owned()),
+            ..Default::default()
+        },
+        fleet_application::images::BuildPageRequest {
+            version: Some("other-version".to_owned()),
+            cursor: Some("z-failed".to_owned()),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            images.list_build_page(&AllowAll, &principal(), query).await,
+            Err(RecipeUseCaseError::Invalid { .. })
+        ));
+    }
+    assert!(matches!(
+        images
+            .list_build_page(
+                &DenyAll,
+                &principal(),
+                fleet_application::images::BuildPageRequest::default()
+            )
+            .await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
 }

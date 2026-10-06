@@ -839,6 +839,98 @@
       }
     },
     "/api/v1/images/builds": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Lists recorded image builds under images.read.",
+        "description": "# Errors\nReturns the standard error envelope on denial or backend failure.",
+        "operationId": "listImageBuilds",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum records per page (default 50, maximum 200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Last build identity returned by the preceding page.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "recipeId",
+            "in": "query",
+            "description": "Filter by recipe identity.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "versionId",
+            "in": "query",
+            "description": "Filter by immutable version identity.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Build records, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ImageBuildDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid build cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Images read permission is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "images"
@@ -889,6 +981,59 @@
           },
           "404": {
             "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/builds/{buildId}": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Reads one recorded image build under images.read.",
+        "description": "# Errors\nReturns the standard error envelope on denial, missing record or backend failure.",
+        "operationId": "getImageBuild",
+        "parameters": [
+          {
+            "name": "buildId",
+            "in": "path",
+            "description": "Build identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Safe build provenance and outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ImageBuildDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Images read permission is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Build record not found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1306,7 +1451,7 @@
         "tags": [
           "images"
         ],
-        "summary": "Promotes one version as the recipe's built image. The gate verifies\nthe version's build operation completed successfully with a recorded\nartifact, queried from the operation record — never assumed.",
+        "summary": "Promotes one version as the recipe's built image. The gate verifies\nthe latest immutable build record has matching inputs and a successful\noutput template.",
         "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown version, or a\ngate refusal.",
         "operationId": "promoteImageVersion",
         "parameters": [
@@ -6721,6 +6866,13 @@
           "timeoutSeconds"
         ],
         "properties": {
+          "accountId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target account override; otherwise resolved from the recipe endpoint."
+          },
           "secretVars": {
             "type": "array",
             "items": {
@@ -8070,6 +8222,140 @@
             "type": "integer",
             "format": "int32",
             "description": "Proxmox VMID.",
+            "minimum": 0
+          }
+        }
+      },
+      "ImageBuildDto": {
+        "type": "object",
+        "description": "Safe build provenance and outcome; credentials and work paths are excluded.",
+        "required": [
+          "id",
+          "operationId",
+          "recipeId",
+          "versionId",
+          "contentDigest",
+          "assetDigests",
+          "node",
+          "storagePool",
+          "startedAt",
+          "outcome"
+        ],
+        "properties": {
+          "accountId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resolved target account; absent when target binding failed."
+          },
+          "assetDigests": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Frozen provisioning asset digests."
+          },
+          "contentDigest": {
+            "type": "string",
+            "description": "Frozen recipe digest."
+          },
+          "endedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "End time in epoch milliseconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "Build identity."
+          },
+          "node": {
+            "type": "string",
+            "description": "Frozen target node."
+          },
+          "operationId": {
+            "type": "string",
+            "description": "Durable operation identity."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "Running, succeeded, failed or cancelled."
+          },
+          "packerVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Probed Packer version, when available."
+          },
+          "proxmoxPluginVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Probed Proxmox plugin version, when available."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Safe terminal reason code."
+          },
+          "recipeId": {
+            "type": "string",
+            "description": "Recipe identity."
+          },
+          "startedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Start time in epoch milliseconds."
+          },
+          "storagePool": {
+            "type": "string",
+            "description": "Frozen target storage."
+          },
+          "template": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageBuildTemplateDto",
+                "description": "Output template identity."
+              }
+            ]
+          },
+          "versionId": {
+            "type": "string",
+            "description": "Immutable version identity."
+          }
+        }
+      },
+      "ImageBuildTemplateDto": {
+        "type": "object",
+        "description": "A concrete output template identity.",
+        "required": [
+          "node",
+          "vmid",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Template name."
+          },
+          "node": {
+            "type": "string",
+            "description": "Template node."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Template VMID.",
             "minimum": 0
           }
         }
@@ -9803,6 +10089,133 @@
                 },
                 "spec": {
                   "description": "The kind-specific non-secret spec."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_ImageBuildDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Safe build provenance and outcome; credentials and work paths are excluded.",
+              "required": [
+                "id",
+                "operationId",
+                "recipeId",
+                "versionId",
+                "contentDigest",
+                "assetDigests",
+                "node",
+                "storagePool",
+                "startedAt",
+                "outcome"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Resolved target account; absent when target binding failed."
+                },
+                "assetDigests": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Frozen provisioning asset digests."
+                },
+                "contentDigest": {
+                  "type": "string",
+                  "description": "Frozen recipe digest."
+                },
+                "endedAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "End time in epoch milliseconds."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Build identity."
+                },
+                "node": {
+                  "type": "string",
+                  "description": "Frozen target node."
+                },
+                "operationId": {
+                  "type": "string",
+                  "description": "Durable operation identity."
+                },
+                "outcome": {
+                  "type": "string",
+                  "description": "Running, succeeded, failed or cancelled."
+                },
+                "packerVersion": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Probed Packer version, when available."
+                },
+                "proxmoxPluginVersion": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Probed Proxmox plugin version, when available."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Safe terminal reason code."
+                },
+                "recipeId": {
+                  "type": "string",
+                  "description": "Recipe identity."
+                },
+                "startedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Start time in epoch milliseconds."
+                },
+                "storagePool": {
+                  "type": "string",
+                  "description": "Frozen target storage."
+                },
+                "template": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ImageBuildTemplateDto",
+                      "description": "Output template identity."
+                    }
+                  ]
+                },
+                "versionId": {
+                  "type": "string",
+                  "description": "Immutable version identity."
                 }
               }
             },
@@ -12462,6 +12875,124 @@
               "token": {
                 "type": "string",
                 "description": "The token value. Shown once."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ImageBuildDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Safe build provenance and outcome; credentials and work paths are excluded.",
+            "required": [
+              "id",
+              "operationId",
+              "recipeId",
+              "versionId",
+              "contentDigest",
+              "assetDigests",
+              "node",
+              "storagePool",
+              "startedAt",
+              "outcome"
+            ],
+            "properties": {
+              "accountId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Resolved target account; absent when target binding failed."
+              },
+              "assetDigests": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Frozen provisioning asset digests."
+              },
+              "contentDigest": {
+                "type": "string",
+                "description": "Frozen recipe digest."
+              },
+              "endedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "End time in epoch milliseconds."
+              },
+              "id": {
+                "type": "string",
+                "description": "Build identity."
+              },
+              "node": {
+                "type": "string",
+                "description": "Frozen target node."
+              },
+              "operationId": {
+                "type": "string",
+                "description": "Durable operation identity."
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Running, succeeded, failed or cancelled."
+              },
+              "packerVersion": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Probed Packer version, when available."
+              },
+              "proxmoxPluginVersion": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Probed Proxmox plugin version, when available."
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Safe terminal reason code."
+              },
+              "recipeId": {
+                "type": "string",
+                "description": "Recipe identity."
+              },
+              "startedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Start time in epoch milliseconds."
+              },
+              "storagePool": {
+                "type": "string",
+                "description": "Frozen target storage."
+              },
+              "template": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ImageBuildTemplateDto",
+                    "description": "Output template identity."
+                  }
+                ]
+              },
+              "versionId": {
+                "type": "string",
+                "description": "Immutable version identity."
               }
             }
           }

@@ -8,10 +8,10 @@
 //! array; the recipe travels as a file path; secrets ride `-var-file`
 //! resolved just in time — never argv, logs, or audit metadata.
 //!
-//! On a failed or deadline-killed build the executor reports the
-//! plugin's cleanup outcome honestly: the plugin self-cleans its VM, and
-//! Fleet records what the machine-readable stream said rather than
-//! assuming.
+//! FM-702 records a safe immutable input snapshot before any CLI call,
+//! probes both pinned versions, and completes the build on every terminal
+//! executor path. A kill or cancellation cannot prove remote cleanup; its
+//! reason code preserves that uncertainty without retaining provider output.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,8 +19,10 @@ use std::time::Duration;
 
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
-use fleet_provider_packer::{BuildStream, PackerClient, PackerCommand, PackerTransport};
+use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeVersion};
+use fleet_provider_packer::{BuildStream, PackerCommand, PackerTransport};
 use serde::Deserialize;
+use sha2::Digest as _;
 
 /// The maximum build timeout the executor accepts from a payload.
 pub const MAX_BUILD_TIMEOUT: u64 = 4 * 60 * 60;
@@ -35,6 +37,9 @@ pub struct BuildPayload {
     pub version_id: String,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
+    /// The explicitly selected Fleet target account, when supplied.
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// The secret references whose resolved values ride `-var-file`,
     /// as `name = reference` pairs. The values never enter argv, logs,
     /// or audit metadata; the var file is deleted with the work dir.
@@ -95,20 +100,6 @@ impl ImagesExecutor {
                     .to_owned(),
             );
         };
-        let mut content = String::new();
-        for var in vars {
-            let value = secrets
-                .resolve(&var.reference)
-                .await
-                .map_err(|error| format!("the secret {} is unreadable: {error}", var.name))?;
-            let text = String::from_utf8(value.expose().to_vec())
-                .map_err(|_| format!("the secret {} is not UTF-8", var.name))?;
-            content.push_str(&format!(
-                "{}={}
-",
-                var.name, text
-            ));
-        }
         let dir = self.work_root.join(operation_id);
         let path = dir.join("vars.auto.pkrvars.json");
         // The JSON shape keeps the values out of argv entirely.
@@ -128,7 +119,6 @@ impl ImagesExecutor {
                 .map_err(|error| format!("the var file cannot be serialized: {error}"))?,
         )
         .map_err(|error| format!("the var file cannot be written: {error}"))?;
-        let _ = content;
         Ok(Some(path))
     }
 
@@ -169,32 +159,173 @@ impl OperationExecutor for ImagesExecutor {
             .await
             .map_err(|detail| format!("the recipe version is unreadable: {detail}"))?;
 
-        // The work root must exist before the version probe: the probe
-        // runs with it as the working directory.
-        std::fs::create_dir_all(&self.work_root)
-            .map_err(|error| format!("the work directory cannot be prepared: {error}"))?;
-        // The version gate: the CLI must be installed and inside the
-        // pinned range. Absent is an honest degradation, not a crash.
-        let version_gate = PackerClient::new(self.transport.clone())
-            .version(self.work_root.clone())
+        let target_account = self
+            .versions
+            .build_target_account(&version, payload.account_id.as_deref())
             .await;
-        if let Err(gate) = &version_gate {
-            return complete_failure(operations, &operation.id, "version_gate", &gate.to_string())
-                .await;
+        let target_resolution_failed = target_account.is_err();
+        let mut record = ImageBuildRecord {
+            id: operation.id.clone(),
+            operation_id: operation.id.clone(),
+            recipe_id: version.recipe_id.clone(),
+            version_id: version.id.clone(),
+            content_digest: version.content_digest.clone(),
+            asset_digests: provisioning_digests(&version.content),
+            packer_version: None,
+            proxmox_plugin_version: None,
+            account_id: target_account.unwrap_or_default(),
+            node: version.node.clone(),
+            storage_pool: version.storage_pool.clone(),
+            started_at: fleet_core::SystemClock::now_unix_millis(),
+            ended_at: None,
+            outcome: "running".to_owned(),
+            reason: None,
+            template: None,
+        };
+        // No provider invocation is allowed until the immutable input snapshot
+        // commits. A duplicate delivery cannot silently overwrite old evidence.
+        self.versions.start_build(&record).await?;
+        let result = if target_resolution_failed {
+            Err("target_account_resolution_failed")
+        } else if operations
+            .get_state(&operation.id)
+            .await
+            .is_ok_and(|state| state == "cancelling")
+        {
+            Err("cancelled")
+        } else {
+            let work = self.run_build(operations, operation, &payload, &version, &mut record);
+            tokio::pin!(work);
+            tokio::select! {
+                result = &mut work => result,
+                result = wait_for_cancel(operations, &operation.id) => {
+                    Err(if result.is_ok() { "cancelled" } else { "cancel_poll_failed" })
+                }
+            }
+        };
+        record.ended_at = Some(fleet_core::SystemClock::now_unix_millis().max(record.started_at));
+        match result {
+            Ok(template) => {
+                record.outcome = "succeeded".to_owned();
+                record.template = Some(template);
+            }
+            Err(reason) => {
+                record.outcome = if reason == "cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                }
+                .to_owned();
+                record.reason = Some(reason.to_owned());
+            }
         }
+        cleanup_work_dir(&self.work_root, &operation.id);
+        // Persist the terminal build before completing the generic operation.
+        // No arbitrary provider output enters this record or its audit outcome.
+        self.versions.finish_build(&record).await?;
+        let result_json = record.template.as_ref().map(|template| {
+            serde_json::json!({
+                "artifactId": format!("{}:{}", template.node, template.vmid),
+                "recipeVersion": record.version_id,
+                "buildId": record.id,
+            })
+            .to_string()
+        });
+        let error_json = record
+            .reason
+            .as_ref()
+            .map(|reason| serde_json::json!({ "reason": reason }).to_string());
+        operations
+            .complete(
+                &operation.id,
+                &record.outcome,
+                result_json.as_deref(),
+                error_json.as_deref(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
 
-        // The recipe travels as a file inside the operation's private
-        // work directory.
+impl ImagesExecutor {
+    async fn run_build(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &BuildPayload,
+        version: &RecipeVersion,
+        record: &mut ImageBuildRecord,
+    ) -> Result<ImageBuildTemplate, &'static str> {
+        if record.account_id.as_deref().is_none_or(str::is_empty) {
+            return Err("target_account_missing");
+        }
+        if !version.has_frozen_build_target() {
+            return Err("target_snapshot_mismatch");
+        }
+        // Recipe versions currently store embedded assets only. Refuse
+        // mutable external file inputs instead of claiming their path digest
+        // proves the bytes Packer would execute.
+        if has_external_assets(&version.content) {
+            return Err("asset_snapshot_missing");
+        }
+        std::fs::create_dir_all(&self.work_root).map_err(|_| "work_directory_failed")?;
+        let probe = self
+            .transport
+            .run(
+                &PackerCommand {
+                    args: vec!["-machine-readable".to_owned(), "version".to_owned()],
+                    work_dir: self.work_root.clone(),
+                },
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|_| "version_gate")?;
+        record.packer_version = probe.stdout.lines().find_map(|line| {
+            let event = fleet_provider_packer::parse_machine_readable_line(line)?;
+            (event.event_type == "version" && numeric_version(&event.data).is_some())
+                .then_some(event.data)
+        });
+        let supported = record
+            .packer_version
+            .as_deref()
+            .and_then(numeric_version)
+            .is_some_and(|(major, minor, _)| major == 1 && minor >= 15);
+        if probe.exit_code != Some(0) || probe.killed_by_deadline || !supported {
+            return Err("version_gate");
+        }
+        let plugins = self
+            .transport
+            .run(
+                &PackerCommand {
+                    args: vec!["plugins".to_owned(), "installed".to_owned()],
+                    work_dir: self.work_root.clone(),
+                },
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|_| "plugin_version_gate")?;
+        // `plugins installed` is the documented discovery surface. Retain
+        // only the version from its binary name, never the installation path.
+        record.proxmox_plugin_version = plugin_version(&plugins.stdout);
+        let supported = record
+            .proxmox_plugin_version
+            .as_deref()
+            .and_then(numeric_version)
+            .is_some_and(|(major, minor, patch)| {
+                major == 1 && (minor > 2 || (minor == 2 && patch >= 4))
+            });
+        if plugins.exit_code != Some(0) || plugins.killed_by_deadline || !supported {
+            return Err("plugin_version_gate");
+        }
         let recipe_path = self
             .write_recipe(&operation.id, &version.content)
-            .map_err(|detail| detail.clone())?;
-        let work_dir = recipe_path
-            .parent()
-            .map(PathBuf::from)
-            .ok_or("the recipe path carries no parent")?;
-
-        // The validate pre-flight: read-only, before any build is queued
-        // into the host.
+            .map_err(|_| "recipe_write_failed")?;
+        let work_dir = recipe_path.parent().ok_or("recipe_write_failed")?;
+        let var_file = self
+            .write_var_file(&operation.id, &payload.secret_vars)
+            .await
+            .map_err(|_| "secret_resolution_failed")?;
         operations
             .record_progress(
                 &operation.id,
@@ -203,115 +334,46 @@ impl OperationExecutor for ImagesExecutor {
                 Some("validating the recipe"),
             )
             .await
-            .map_err(|error| error.to_string())?;
-        // The var file is written before validate: a recipe referencing
-        // variables cannot validate without them.
-        let var_file = self
-            .write_var_file(&operation.id, &payload.secret_vars)
-            .await?;
-        let mut validate_args = vec!["validate".to_owned()];
-        if let Some(var_file) = &var_file {
-            validate_args.push("-var-file".to_owned());
-            validate_args.push(var_file.display().to_string());
-        }
-        validate_args.push(recipe_path.display().to_string());
-        let validate = self
-            .packer_version_aware_call(&validate_args, &work_dir, VALIDATE_DEADLINE)
-            .await;
-        match validate {
-            Ok(outcome) if outcome.exit_code == Some(0) => {}
-            Ok(outcome) => {
-                let detail = bounded(&outcome.stderr)
-                    .unwrap_or_else(|| bounded(&outcome.stdout).unwrap_or_default());
-                return complete_failure(
-                    operations,
-                    &operation.id,
-                    "validate_failed",
-                    &format!("packer validate refused the recipe: {detail}"),
-                )
-                .await;
+            .map_err(|_| "progress_failed")?;
+        let args = |prefix: &[&str]| {
+            let mut args: Vec<String> = prefix.iter().map(|s| (*s).to_owned()).collect();
+            if let Some(path) = &var_file {
+                args.extend(["-var-file".to_owned(), path.display().to_string()]);
             }
-            Err(detail) => {
-                return complete_failure(operations, &operation.id, "validate_failed", &detail)
-                    .await;
-            }
+            args.push(recipe_path.display().to_string());
+            args
+        };
+        let validated = self
+            .packer_version_aware_call(&args(&["validate"]), work_dir, VALIDATE_DEADLINE)
+            .await
+            .map_err(|_| "validate_failed")?;
+        if validated.killed_by_deadline {
+            return Err("deadline_killed");
         }
-
-        // The build: bounded by the reviewed deadline.
+        if validated.exit_code != Some(0) {
+            return Err("validate_failed");
+        }
         operations
             .record_progress(&operation.id, Some(1), Some(2), Some("building the image"))
             .await
-            .map_err(|error| error.to_string())?;
-        let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_BUILD_TIMEOUT));
-        let mut build_args = vec!["-machine-readable".to_owned(), "build".to_owned()];
-        if let Some(var_file) = &var_file {
-            build_args.push("-var-file".to_owned());
-            build_args.push(var_file.display().to_string());
+            .map_err(|_| "progress_failed")?;
+        let built = self
+            .packer_version_aware_call(
+                &args(&["-machine-readable", "build"]),
+                work_dir,
+                Duration::from_secs(payload.timeout_seconds.min(MAX_BUILD_TIMEOUT)),
+            )
+            .await
+            .map_err(|_| "build_failed")?;
+        if built.killed_by_deadline {
+            return Err("deadline_killed");
         }
-        build_args.push(recipe_path.display().to_string());
-        let build = self
-            .packer_version_aware_call(&build_args, &work_dir, deadline)
-            .await;
-        match build {
-            Ok(outcome) if outcome.killed_by_deadline => {
-                let failed = complete_failure(
-                    operations,
-                    &operation.id,
-                    "deadline_killed",
-                    "the build was killed at its deadline; the process was killed so the plugin's cleanup could not run — the host's state must be verified",
-                )
-                .await;
-                cleanup_work_dir(&self.work_root, &operation.id);
-                failed
-            }
-            Ok(outcome) if outcome.exit_code == Some(0) => {
-                let stream = BuildStream::parse(&outcome.stdout);
-                // A zero exit without a parseable artifact record is
-                // indeterminate, not success: the bound could have
-                // truncated the stream or the plugin changed shape.
-                let Some(artifact_id) = stream.artifact_id() else {
-                    return complete_failure(
-                        operations,
-                        &operation.id,
-                        "artifact_missing",
-                        "the build exited zero but no artifact record was parsed; the outcome is indeterminate and the host must be verified",
-                    )
-                    .await;
-                };
-                let result = serde_json::json!({
-                    "artifactId": artifact_id,
-                    "recipeVersion": payload.version_id,
-                    "says": bounded_list(&stream.says),
-                })
-                .to_string();
-                let completed = operations
-                    .complete(&operation.id, "succeeded", Some(&result), None)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string());
-                cleanup_work_dir(&self.work_root, &operation.id);
-                completed
-            }
-            Ok(outcome) => {
-                let stream = BuildStream::parse(&outcome.stdout);
-                let detail = stream
-                    .errors
-                    .last()
-                    .cloned()
-                    .or_else(|| bounded(&outcome.stderr))
-                    .unwrap_or_else(|| "the build failed without a detail".to_owned());
-                let failed =
-                    complete_failure(operations, &operation.id, "build_failed", &detail).await;
-                cleanup_work_dir(&self.work_root, &operation.id);
-                failed
-            }
-            Err(detail) => {
-                let failed =
-                    complete_failure(operations, &operation.id, "build_failed", &detail).await;
-                cleanup_work_dir(&self.work_root, &operation.id);
-                failed
-            }
+        if built.exit_code != Some(0) {
+            return Err("build_failed");
         }
+        let stream = BuildStream::parse(&built.stdout);
+        let id = stream.artifact_id().ok_or("artifact_missing")?;
+        output_template(id, version).ok_or("artifact_missing")
     }
 }
 
@@ -343,37 +405,183 @@ fn cleanup_work_dir(work_root: &std::path::Path, operation_id: &str) {
     }
 }
 
-/// Bounds a string to the output cap.
-fn bounded(value: &str) -> Option<String> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.chars().take(2048).collect())
-    }
+// Only validated numeric version strings may enter public provenance.
+fn numeric_version(value: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = value.split('.');
+    let result = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next().map_or(Some(0), |part| part.parse().ok())?,
+    );
+    parts.next().is_none().then_some(result)
 }
 
-/// Bounds a list, keeping the last entries (the freshest detail).
-fn bounded_list(values: &[String]) -> Vec<String> {
-    let start = values.len().saturating_sub(20);
-    values[start..]
-        .iter()
-        .map(|value| value.chars().take(512).collect())
+fn plugin_version(output: &str) -> Option<String> {
+    let versions: Vec<_> = output
+        .lines()
+        .filter_map(|line| {
+            let name = std::path::Path::new(line.trim()).file_name()?.to_str()?;
+            let suffix = name.strip_prefix("packer-plugin-proxmox_v")?;
+            let version = suffix.split('_').next()?;
+            numeric_version(version)?;
+            Some(version.to_owned())
+        })
+        .collect();
+    // Multiple installations make the selected legacy builder ambiguous;
+    // refuse instead of claiming a version we cannot prove was executed.
+    (versions.len() == 1).then(|| versions[0].clone())
+}
+
+fn provisioning_digests(content: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    value
+        .get("provisioners")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|asset| {
+            if let Some(inline) = asset.get("inline").and_then(serde_json::Value::as_array) {
+                let lines: Option<Vec<&str>> =
+                    inline.iter().map(serde_json::Value::as_str).collect();
+                return lines.map(|lines| lines.join("\n"));
+            }
+            asset
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes.as_bytes())))
         .collect()
 }
 
-/// Completes an operation as a failure with a redacted detail.
-async fn complete_failure(
-    operations: &Operations,
-    operation_id: &str,
-    reason: &str,
-    detail: &str,
-) -> Result<(), String> {
-    let error_json = serde_json::json!({ "reason": reason, "detail": detail }).to_string();
-    operations
-        .complete(operation_id, "failed", None, Some(&error_json))
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+fn has_external_assets(content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return true;
+    };
+    let Some(assets) = value.get("provisioners") else {
+        return false;
+    };
+    let Some(assets) = assets.as_array() else {
+        return true;
+    };
+    // Fail closed: only the documented embedded shell/file forms are supported.
+    // Unknown plugins and fields may read host files that cannot be snapshotted.
+    assets.iter().any(|asset| {
+        let Some(fields) = asset.as_object() else {
+            return true;
+        };
+        let allowed: &[&str] = match asset.get("type").and_then(serde_json::Value::as_str) {
+            Some("shell")
+                if asset
+                    .get("inline")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|lines| lines.iter().all(serde_json::Value::is_string)) =>
+            {
+                &[
+                    "type",
+                    "inline",
+                    "inline_shebang",
+                    "execute_command",
+                    "environment_vars",
+                    "env",
+                    "use_env_var_file",
+                    "remote_folder",
+                    "remote_file",
+                    "remote_path",
+                    "start_retry_timeout",
+                    "expect_disconnect",
+                    "skip_clean",
+                    "valid_exit_codes",
+                    "pause_before",
+                    "pause_after",
+                    "timeout",
+                    "max_retries",
+                    "only",
+                    "except",
+                ]
+            }
+            Some("file")
+                if asset
+                    .get("content")
+                    .is_some_and(serde_json::Value::is_string)
+                    && asset
+                        .get("destination")
+                        .is_some_and(serde_json::Value::is_string) =>
+            {
+                &[
+                    "type",
+                    "content",
+                    "destination",
+                    "generated",
+                    "pause_before",
+                    "pause_after",
+                    "timeout",
+                    "max_retries",
+                    "only",
+                    "except",
+                ]
+            }
+            _ => return true,
+        };
+        fields.keys().any(|key| !allowed.contains(&key.as_str()))
+    })
+}
+
+fn output_template(artifact: &str, version: &RecipeVersion) -> Option<ImageBuildTemplate> {
+    let (node, vmid) = artifact
+        .rsplit_once(':')
+        .unwrap_or((&version.node, artifact));
+    if node != version.node || !vmid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let vmid: u32 = vmid.parse().ok()?;
+    if !(100..=999_999_999).contains(&vmid) {
+        return None;
+    }
+    let parsed = fleet_core::StructuredRecipe::from_raw(&version.content)?;
+    if parsed.node != node {
+        return None;
+    }
+    let content: serde_json::Value = serde_json::from_str(&version.content).ok()?;
+    let builder = content.get("builders")?.as_array()?.iter().find(|b| {
+        b.get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|t| t == "proxmox-iso" || t == "proxmox-clone")
+    })?;
+    let name = builder
+        .get("template_name")
+        .or_else(|| builder.get("vm_name"))?
+        .as_str()?
+        .to_owned();
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    {
+        return None;
+    }
+    Some(ImageBuildTemplate {
+        node: node.to_owned(),
+        vmid,
+        name,
+    })
+}
+
+async fn wait_for_cancel(operations: &Operations, id: &str) -> Result<(), String> {
+    loop {
+        if operations
+            .cancel_requested(id)
+            .await
+            .map_err(|e| e.to_string())?
+            && operations.get_state(id).await.map_err(|e| e.to_string())? == "cancelling"
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The kind-dispatching images executor: `image.build` routes to the
@@ -401,5 +609,498 @@ impl OperationExecutor for ImagesDispatch {
         } else {
             self.fallback.execute(operations, operation).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_application::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision};
+    use fleet_application::images::{Images, NewRecipe, RecipePort as _};
+    use fleet_application::operation::NewOperation;
+    use fleet_core::{RecipeContent, RecipeSource};
+    use fleet_storage_sqlite::{AuditSink, OperationRepository, RecipeRepository, Store};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct Allow;
+    impl Authorizer for Allow {
+        fn decide(&self, _: AccessRequest<'_>) -> Decision {
+            Decision::allow()
+        }
+    }
+
+    #[derive(Debug)]
+    struct Script {
+        repository: Arc<RecipeRepository>,
+        operation_id: String,
+        replies: Mutex<VecDeque<Result<fleet_provider_packer::CliOutcome, String>>>,
+        wait_build: bool,
+        building: tokio::sync::Notify,
+        saw_var_file: Mutex<Option<String>>,
+    }
+    #[async_trait::async_trait]
+    impl PackerTransport for Script {
+        async fn run(
+            &self,
+            command: &PackerCommand,
+            _: Duration,
+        ) -> Result<fleet_provider_packer::CliOutcome, String> {
+            let record = self.repository.get_build(&self.operation_id).await.unwrap();
+            assert_eq!(
+                record.outcome, "running",
+                "snapshot must exist before every provider invocation"
+            );
+            assert!(
+                command
+                    .args
+                    .iter()
+                    .all(|a| !a.contains("fixture-secret-token"))
+            );
+            if let Some(index) = command.args.iter().position(|a| a == "-var-file") {
+                let path = &command.args[index + 1];
+                let contents = std::fs::read_to_string(path).unwrap();
+                assert!(contents.contains("fixture-secret-token"));
+                *self.saw_var_file.lock().unwrap() = Some(path.clone());
+            }
+            if self.wait_build && command.args.iter().any(|a| a == "build") {
+                self.building.notify_one();
+                std::future::pending::<()>().await;
+            }
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected Packer command")
+        }
+    }
+
+    fn reply(
+        stdout: &str,
+        exit_code: Option<i32>,
+        killed: bool,
+    ) -> Result<fleet_provider_packer::CliOutcome, String> {
+        Ok(fleet_provider_packer::CliOutcome {
+            stdout: stdout.to_owned(),
+            stderr: "fixture-secret-token".to_owned(),
+            exit_code,
+            killed_by_deadline: killed,
+        })
+    }
+
+    const CONTENT: &str = r#"{"builders":[{"type":"proxmox-clone","node":"pve","vm_storage_pool":"local-lvm","vm_name":"ubuntu-base","proxmox_url":"https://pve.example.test:8006/api2/json"}],"provisioners":[{"type":"shell","inline":["echo ready"]}]}"#;
+
+    async fn setup(
+        content: &str,
+        payload_extra: serde_json::Value,
+        replies: Vec<Result<fleet_provider_packer::CliOutcome, String>>,
+        wait_build: bool,
+    ) -> (
+        tempfile::TempDir,
+        Store,
+        Arc<RecipeRepository>,
+        Arc<Operations>,
+        Operation,
+        Arc<Script>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+        sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES ('account-1', 'fixture', 'pve.example.test', 8006, 'fixture@pve!builder', 1000)")
+            .execute(store.pool()).await.unwrap();
+        let repository = Arc::new(RecipeRepository::new(store.pool().clone()));
+        let audit = Arc::new(AuditSink::new(store.pool().clone()));
+        let images = Images::new(repository.clone(), audit.clone());
+        let principal = ActingPrincipal {
+            id: "anonymous-lan-admin".to_owned(),
+        };
+        let recipe = images
+            .create(
+                &Allow,
+                &principal,
+                NewRecipe {
+                    content: RecipeContent {
+                        name: "ubuntu-base".to_owned(),
+                        description: String::new(),
+                        node: "pve".to_owned(),
+                        storage_pool: Some("local-lvm".to_owned()),
+                        source: RecipeSource::Clone,
+                        content: content.to_owned(),
+                    },
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+        let version = images
+            .publish(&Allow, &principal, &recipe.id, 1001)
+            .await
+            .unwrap();
+        let operations = Arc::new(Operations::new(
+            Arc::new(OperationRepository::new(store.pool().clone())),
+            audit,
+        ));
+        let mut payload = serde_json::json!({"versionId": version.id, "timeoutSeconds": 5, "accountId": "account-1"});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(payload_extra.as_object().unwrap().clone());
+        let pending = operations
+            .create(
+                &Allow,
+                &principal.id,
+                &NewOperation {
+                    kind: "image.build".to_owned(),
+                    payload_json: Some(payload.to_string()),
+                    idempotency_key: None,
+                    deadline_at: None,
+                    correlation_id: None,
+                    review_token: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut report = fleet_application::worker::TickReport::default();
+        let operation = operations
+            .claim_only(
+                "images-test",
+                fleet_core::SystemClock::now_unix_millis(),
+                &mut report,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.id, operation.id);
+        let script = Arc::new(Script {
+            repository: repository.clone(),
+            operation_id: operation.id.clone(),
+            replies: Mutex::new(replies.into()),
+            wait_build,
+            building: tokio::sync::Notify::new(),
+            saw_var_file: Mutex::new(None),
+        });
+        (dir, store, repository, operations, operation, script)
+    }
+
+    fn probes() -> Vec<Result<fleet_provider_packer::CliOutcome, String>> {
+        vec![
+            reply("1,,version,1.16.1", Some(0), false),
+            reply(
+                "/operator/plugins/packer-plugin-proxmox_v1.2.4_x5.0_linux_amd64",
+                Some(0),
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn numeric_versions_accept_the_existing_two_component_contract() {
+        assert_eq!(numeric_version("1.15"), Some((1, 15, 0)));
+        assert_eq!(numeric_version("1.16.1"), Some((1, 16, 1)));
+        for invalid in ["1", "1.15.", "1.15.0.1", "1.15.secret", "1.15-beta"] {
+            assert_eq!(numeric_version(invalid), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn two_component_packer_versions_build_and_pve_names_remain_dns_names() {
+        let mut replies = probes();
+        replies[0] = reply("1,,version,1.15", Some(0), false);
+        replies.extend([
+            reply("", Some(0), false),
+            reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+        ]);
+        let (dir, _store, repository, operations, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, false).await;
+        let executor =
+            ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded");
+        assert_eq!(record.packer_version.as_deref(), Some("1.15"));
+        let mut version = repository.get_version(&record.version_id).await.unwrap();
+        version.content = CONTENT.replace("ubuntu-base", "ubuntu_base");
+        assert!(output_template("120", &version).is_none());
+    }
+
+    #[tokio::test]
+    async fn build_records_complete_on_every_provider_terminal_path() {
+        let mut cases = vec![
+            (
+                vec![reply("1,,version,0.9.0", Some(0), false)],
+                "version_gate",
+            ),
+            (vec![Err("fixture-secret-token".to_owned())], "version_gate"),
+            (
+                vec![
+                    reply("1,,version,1.16.1", Some(0), false),
+                    reply("", Some(0), false),
+                ],
+                "plugin_version_gate",
+            ),
+        ];
+        for (outcome, reason) in [
+            (reply("", Some(1), false), "build_failed"),
+            (Err("fixture-secret-token".to_owned()), "build_failed"),
+            (reply("", None, true), "deadline_killed"),
+            (reply("", Some(0), false), "artifact_missing"),
+            (
+                reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+                "succeeded",
+            ),
+        ] {
+            let mut replies = probes();
+            replies.extend([reply("", Some(0), false), outcome]);
+            cases.push((replies, reason));
+        }
+        let mut validate_failed = probes();
+        validate_failed.push(reply("", Some(1), false));
+        cases.push((validate_failed, "validate_failed"));
+        for (outcome, reason) in [
+            (Err("fixture-secret-token".to_owned()), "validate_failed"),
+            (reply("", None, true), "deadline_killed"),
+        ] {
+            let mut replies = probes();
+            replies.push(outcome);
+            cases.push((replies, reason));
+        }
+
+        for (replies, reason) in cases {
+            let (dir, store, repository, operations, operation, transport) =
+                setup(CONTENT, serde_json::json!({}), replies, false).await;
+            let executor =
+                ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+            assert!(
+                operations
+                    .execute_claimed(&executor, operation.clone())
+                    .await
+            );
+            let record = repository.get_build(&operation.id).await.unwrap();
+            assert!(record.ended_at.is_some());
+            assert_eq!(record.reason.as_deref().unwrap_or(&record.outcome), reason);
+            assert_eq!(
+                operations.get_state(&operation.id).await.unwrap(),
+                record.outcome
+            );
+            assert_eq!(record.asset_digests.len(), 1);
+            assert_eq!(
+                record.template.as_ref().map(|t| t.vmid),
+                (reason == "succeeded").then_some(120)
+            );
+            assert!(!dir.path().join("work").join(&operation.id).exists());
+            let public =
+                serde_json::to_string(&fleet_api::images::ImageBuildDto::from(record)).unwrap();
+            assert!(!public.contains("fixture-secret-token"));
+            let audit: Vec<String> = sqlx::query_scalar("SELECT metadata_json FROM audit_events")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+            assert!(
+                audit
+                    .iter()
+                    .all(|row| !row.contains("fixture-secret-token"))
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_inputs_fail_closed_for_unknown_provisioners_and_fields() {
+        for provisioner in [
+            serde_json::json!({"type":"ansible-local", "playbook_paths":["mutable.yml"], "role_paths":["roles"]}),
+            serde_json::json!({"type":"salt-masterless", "local_state_tree":"states"}),
+            serde_json::json!({"type":"chef-solo", "config_template":"chef.rb"}),
+            serde_json::json!({"type":"shell", "inline":["echo ready"], "scripts":["local.sh"]}),
+            serde_json::json!({"type":"shell", "inline":["echo ready"], "override":{"builder":{"script":"local.sh"}}}),
+            serde_json::json!({"type":"file", "content":"bytes", "destination":"/tmp/file", "source":"mutable"}),
+            serde_json::json!({"type":"future-plugin", "inline":["unknown"]}),
+        ] {
+            assert!(has_external_assets(
+                &serde_json::json!({"provisioners":[provisioner]}).to_string()
+            ));
+        }
+        let embedded = serde_json::json!({"provisioners":[
+            {"type":"shell", "inline":["echo ready"]},
+            {"type":"file", "content":"embedded bytes", "destination":"/tmp/file"}
+        ]})
+        .to_string();
+        assert!(!has_external_assets(&embedded));
+        assert_eq!(provisioning_digests(&embedded).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn refusals_before_provider_execution_still_complete_records() {
+        let unbound = CONTENT.replace(
+            r#","proxmox_url":"https://pve.example.test:8006/api2/json""#,
+            "",
+        );
+        let external = CONTENT.replace(r#""inline":["echo ready"]"#, r#""script":"external.sh""#);
+        let mismatch = CONTENT.replace(r#""node":"pve""#, r#""node":"other""#);
+        for (content, payload, replies, reason) in [
+            (
+                unbound.as_str(),
+                serde_json::json!({"accountId": null}),
+                Vec::new(),
+                "target_account_missing",
+            ),
+            (
+                CONTENT,
+                serde_json::json!({"accountId": "unknown"}),
+                Vec::new(),
+                "target_account_resolution_failed",
+            ),
+            (
+                external.as_str(),
+                serde_json::json!({}),
+                Vec::new(),
+                "asset_snapshot_missing",
+            ),
+            (
+                mismatch.as_str(),
+                serde_json::json!({}),
+                Vec::new(),
+                "target_snapshot_mismatch",
+            ),
+            (
+                CONTENT,
+                serde_json::json!({"secretVars": [{"name": "token", "reference": "unavailable"}]}),
+                probes(),
+                "secret_resolution_failed",
+            ),
+        ] {
+            let (dir, _store, repository, operations, operation, transport) =
+                setup(content, payload, replies, false).await;
+            let executor =
+                ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+            assert!(
+                operations
+                    .execute_claimed(&executor, operation.clone())
+                    .await
+            );
+            let record = repository.get_build(&operation.id).await.unwrap();
+            assert_eq!(record.outcome, "failed");
+            assert_eq!(record.reason.as_deref(), Some(reason));
+            assert!(record.ended_at.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_finishes_the_record_and_drops_the_build() {
+        let mut replies = probes();
+        replies.push(reply("", Some(0), false));
+        let (dir, _store, repository, operations, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, true).await;
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            None,
+            dir.path().join("work"),
+        );
+        let running = operations.execute_claimed(&executor, operation.clone());
+        let cancel = async {
+            transport.building.notified().await;
+            operations
+                .cancel(&Allow, "anonymous-lan-admin", &operation.id)
+                .await
+                .unwrap();
+        };
+        let (completed, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(running, cancel)
+        })
+        .await
+        .unwrap();
+        assert!(completed);
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "cancelled");
+        assert_eq!(record.reason.as_deref(), Some("cancelled"));
+        assert_eq!(
+            operations.get_state(&operation.id).await.unwrap(),
+            "cancelled"
+        );
+        assert!(!dir.path().join("work").join(&operation.id).exists());
+    }
+
+    #[tokio::test]
+    async fn secret_variables_and_var_file_paths_never_enter_build_or_audit_records() {
+        let mut replies = probes();
+        replies.extend([
+            reply("", Some(0), false),
+            reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+        ]);
+        let (dir, store, repository, operations, mut operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, false).await;
+        let key = dir.path().join("master.key");
+        std::fs::write(
+            &key,
+            "1 0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let secrets =
+            Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
+        let secret = secrets
+            .create("build-token", "fixture-secret-token".into())
+            .await
+            .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        payload["secretVars"] = serde_json::json!([{"name": "token", "reference": secret.id}]);
+        operation.payload_json = Some(payload.to_string());
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            Some(secrets),
+            dir.path().join("work"),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let path = transport
+            .saw_var_file
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the secret must be delivered through a var file");
+        assert!(!std::path::Path::new(&path).exists());
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded");
+        let public =
+            serde_json::to_string(&fleet_api::images::ImageBuildDto::from(record)).unwrap();
+        let audit: Vec<String> = sqlx::query_scalar("SELECT metadata_json FROM audit_events")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        for text in std::iter::once(&public).chain(audit.iter()) {
+            assert!(!text.contains("fixture-secret-token"));
+            assert!(!text.contains(&path));
+            assert!(!text.contains("vars.auto.pkrvars.json"));
+        }
+    }
+
+    #[test]
+    fn plugin_probe_refuses_ambiguous_and_untrusted_version_strings() {
+        assert_eq!(
+            plugin_version("/private/packer-plugin-proxmox_v1.2.4_x5.0_linux_amd64"),
+            Some("1.2.4".to_owned())
+        );
+        assert_eq!(
+            plugin_version("/private/packer-plugin-proxmox_vtoken_x5.0_linux_amd64"),
+            None
+        );
+        assert_eq!(
+            plugin_version(
+                "packer-plugin-proxmox_v1.2.4_x5.0_linux_amd64\npacker-plugin-proxmox_v1.3.0_x5.0_linux_amd64"
+            ),
+            None
+        );
     }
 }

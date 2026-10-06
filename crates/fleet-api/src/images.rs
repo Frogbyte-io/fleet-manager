@@ -562,6 +562,8 @@ pub struct BuildImageRequest {
     pub version_id: String,
     /// The deadline, in seconds. Bounded by the executor.
     pub timeout_seconds: u64,
+    /// Target account override; otherwise resolved from the recipe endpoint.
+    pub account_id: Option<String>,
     /// The secret-backed build variables, as name/reference pairs. The
     /// values never enter argv, logs, or audit metadata.
     #[serde(default)]
@@ -633,6 +635,7 @@ pub async fn start_image_build(
     let payload = serde_json::json!({
         "versionId": request.version_id,
         "timeoutSeconds": request.timeout_seconds,
+        "accountId": request.account_id,
         "secretVars": request.secret_vars,
     });
     let idempotency_key = headers
@@ -664,8 +667,8 @@ pub async fn start_image_build(
 }
 
 /// Promotes one version as the recipe's built image. The gate verifies
-/// the version's build operation completed successfully with a recorded
-/// artifact, queried from the operation record — never assumed.
+/// the latest immutable build record has matching inputs and a successful
+/// output template.
 ///
 /// # Errors
 ///
@@ -692,81 +695,16 @@ pub async fn promote_image_version(
 ) -> Result<Json<Resource<RecipeVersionDto>>, ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    // The gate's evidence: the version's latest build operation, queried
-    // through the operation list by kind and payload, under the caller's
-    // own policy.
-    let build_outcome =
-        latest_build_evidence(&state, &principal.id, &version_id, correlation_id).await?;
     let version = images
         .promote(
             state.authorizer.as_ref(),
             &principal,
             &version_id,
-            build_outcome,
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
     Ok(Json(Resource::new(version.into())))
-}
-
-/// Queries the operation record for the version's latest `image.build`:
-/// the gate's evidence. The operations are queried newest-first with
-/// pagination until the version's build is found or the list is
-/// exhausted, so a busy controller cannot hide a valid build behind a
-/// page boundary. Authorization and backend errors propagate.
-async fn latest_build_evidence(
-    state: &crate::operations::ApiState,
-    principal_id: &str,
-    version_id: &str,
-    correlation_id: CorrelationId,
-) -> Result<Option<fleet_application::images::BuildEvidence>, ApiErrorResponse> {
-    const PAGE_LIMIT: u32 = 100;
-    const MAX_PAGES: u32 = 20;
-    let mut offset = 0u32;
-    for _ in 0..MAX_PAGES {
-        let all = state
-            .operations
-            .list(state.authorizer.as_ref(), principal_id, PAGE_LIMIT)
-            .await
-            .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
-        if all.is_empty() {
-            break;
-        }
-        let relevant: Vec<_> = all
-            .iter()
-            .skip(usize::try_from(offset).unwrap_or(all.len()))
-            .filter(|operation| operation.kind == "image.build")
-            .filter(|operation| {
-                operation
-                    .payload_json
-                    .as_deref()
-                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
-                    .is_some_and(|payload| payload["versionId"].as_str() == Some(version_id))
-            })
-            .collect();
-        if let Some(build) = relevant.first() {
-            let artifact_id = build
-                .result_json
-                .as_deref()
-                .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok())
-                .and_then(|result| {
-                    result["artifactId"]
-                        .as_str()
-                        .map(std::borrow::ToOwned::to_owned)
-                });
-            return Ok(Some(fleet_application::images::BuildEvidence {
-                version_id: version_id.to_owned(),
-                state: build.state.clone(),
-                artifact_id,
-            }));
-        }
-        if all.len() < usize::try_from(PAGE_LIMIT).unwrap_or(all.len()) {
-            break;
-        }
-        offset = offset.saturating_add(PAGE_LIMIT);
-    }
-    Ok(None)
 }
 
 /// Reads one published version with its structured view.
@@ -799,4 +737,161 @@ pub async fn get_image_version(
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
     Ok(Json(Resource::new(version.into())))
+}
+
+/// Safe build provenance and outcome; credentials and work paths are excluded.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBuildDto {
+    /// Build identity.
+    pub id: String,
+    /// Durable operation identity.
+    pub operation_id: String,
+    /// Recipe identity.
+    pub recipe_id: String,
+    /// Immutable version identity.
+    pub version_id: String,
+    /// Frozen recipe digest.
+    pub content_digest: String,
+    /// Frozen provisioning asset digests.
+    pub asset_digests: Vec<String>,
+    /// Probed Packer version, when available.
+    pub packer_version: Option<String>,
+    /// Probed Proxmox plugin version, when available.
+    pub proxmox_plugin_version: Option<String>,
+    /// Resolved target account; absent when target binding failed.
+    pub account_id: Option<String>,
+    /// Frozen target node.
+    pub node: String,
+    /// Frozen target storage.
+    pub storage_pool: String,
+    /// Start time in epoch milliseconds.
+    pub started_at: i64,
+    /// End time in epoch milliseconds.
+    pub ended_at: Option<i64>,
+    /// Running, succeeded, failed or cancelled.
+    pub outcome: String,
+    /// Safe terminal reason code.
+    pub reason: Option<String>,
+    /// Output template identity.
+    pub template: Option<ImageBuildTemplateDto>,
+}
+
+/// A concrete output template identity.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBuildTemplateDto {
+    /// Template node.
+    pub node: String,
+    /// Template VMID.
+    pub vmid: u32,
+    /// Template name.
+    pub name: String,
+}
+
+impl From<fleet_core::ImageBuildRecord> for ImageBuildDto {
+    fn from(record: fleet_core::ImageBuildRecord) -> Self {
+        Self {
+            id: record.id,
+            operation_id: record.operation_id,
+            recipe_id: record.recipe_id,
+            version_id: record.version_id,
+            content_digest: record.content_digest,
+            asset_digests: record.asset_digests,
+            packer_version: record.packer_version,
+            proxmox_plugin_version: record.proxmox_plugin_version,
+            account_id: record.account_id,
+            node: record.node,
+            storage_pool: record.storage_pool,
+            started_at: record.started_at,
+            ended_at: record.ended_at,
+            outcome: record.outcome,
+            reason: record.reason,
+            template: record.template.map(|template| ImageBuildTemplateDto {
+                node: template.node,
+                vmid: template.vmid,
+                name: template.name,
+            }),
+        }
+    }
+}
+
+/// Build history filters.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildQuery {
+    /// Maximum records per page (default 50, maximum 200).
+    pub limit: Option<u32>,
+    /// Last build identity returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Filter by recipe identity.
+    pub recipe_id: Option<String>,
+    /// Filter by immutable version identity.
+    pub version_id: Option<String>,
+}
+
+/// Lists recorded image builds under images.read.
+///
+/// # Errors
+/// Returns the standard error envelope on denial or backend failure.
+#[utoipa::path(get, path = "/images/builds", tag = "images", operation_id = "listImageBuilds",
+    params(BuildQuery), responses(
+        (status = 400, description = "Invalid build cursor.", body = crate::error::ApiError),
+        (status = 200, description = "Build records, newest first.", body = Page<ImageBuildDto>),
+        (status = 403, description = "Images read permission is required.", body = crate::error::ApiError)
+    ))]
+pub async fn list_image_builds(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Query(query): Query<BuildQuery>,
+) -> Result<Json<Page<ImageBuildDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let records = images
+        .list_build_page(
+            state.authorizer.as_ref(),
+            &principal,
+            fleet_application::images::BuildPageRequest {
+                recipe: query.recipe_id,
+                version: query.version_id,
+                cursor: query.cursor,
+                limit: query.limit.unwrap_or_default(),
+            },
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    let items: Vec<ImageBuildDto> = records.items.into_iter().map(Into::into).collect();
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: records.next_cursor,
+            limit: records.limit,
+        },
+        items,
+    }))
+}
+
+/// Reads one recorded image build under images.read.
+///
+/// # Errors
+/// Returns the standard error envelope on denial, missing record or backend failure.
+#[utoipa::path(get, path = "/images/builds/{buildId}", tag = "images", operation_id = "getImageBuild",
+    params(("buildId" = String, Path, description = "Build identity.")), responses(
+        (status = 200, description = "Safe build provenance and outcome.", body = Resource<ImageBuildDto>),
+        (status = 403, description = "Images read permission is required.", body = crate::error::ApiError),
+        (status = 404, description = "Build record not found.", body = crate::error::ApiError)
+    ))]
+pub async fn get_image_build(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(id): Path<String>,
+) -> Result<Json<Resource<ImageBuildDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let record = images
+        .get_build(state.authorizer.as_ref(), &principal, &id)
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(record.into())))
 }

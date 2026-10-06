@@ -33,7 +33,8 @@ pub const TAILSCALE_IDENTITY_HEADER_NAMES: [&str; 3] = [
     "tailscale-user-profile-pic",
 ];
 pub use image::{
-    MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource, RecipeVersion, StructuredRecipe,
+    ImageBuildRecord, ImageBuildTemplate, MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource,
+    RecipeVersion, StructuredRecipe,
 };
 pub use lab::{
     CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState,
