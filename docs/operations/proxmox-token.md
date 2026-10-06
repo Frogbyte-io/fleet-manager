@@ -209,7 +209,7 @@ FleetLab's `VM.Allocate` on the template's path would also let the token delete 
 qm set $TEMPLATE --protection 1
 ```
 
-Clones inherit the flag: PVE copies `protection` into the new guest's config. Clearing it needs `VM.Config.Options` on the guest, which no Fleet role grants, so the token can neither unprotect the template nor delete a clone. Fleet does not delete VMs today; to remove a Lab clone by hand, run `qm set <vmid> --protection 0` first. Lab `destroy` cleanup, when it lands, has to clear the flag on its own clones (and so needs `VM.Config.Options` on `/vms/{newid}`).
+Clones inherit the flag: PVE copies `protection` into the new guest's config. Clearing it needs `VM.Config.Options` on the guest, which no Fleet role grants, so the token can neither unprotect the template nor delete a clone. Fleet does not yet clean up protected Lab clones; to remove one by hand, run `qm set <vmid> --protection 0` first. Lab `destroy` cleanup, when it lands, has to clear the flag on its own clones (and so needs `VM.Config.Options` on `/vms/{newid}`).
 
 On 8.x, if you opt into agent reads for the pool:
 
@@ -442,7 +442,7 @@ These are all the PVE endpoints `crates/providers/fleet-provider-proxmox/src/lib
 | 2 | `GET /cluster/resources` | discover, lab (template lookup), destructive (idempotency) | `user => 'all'`, **filtered**: a VM appears only with `VM.Audit` on `/vms/{vmid}`, a storage only with `Datastore.Audit` on `/storage/{id}`, a pool only with `Pool.Audit` on `/pool/{id}`. Node rows always appear, but their stats are stripped without `Sys.Audit` on `/nodes/{node}` | pve-manager `PVE/API2/Cluster.pm` (`resources`) |
 | 3 | `GET /nodes/{node}/status` | discover (capacity) | `perm /nodes/{node} [Sys.Audit]` | pve-manager `PVE/API2/Nodes.pm` (`status`) |
 | 4 | `GET /nodes/{node}/storage` | discover (capacity) | `user => 'all'`, lists only storages with `Datastore.Audit` or `Datastore.AllocateSpace` on `/storage/{storage}` | pve-storage `PVE/API2/Storage/Status.pm` (`index`) |
-| 5 | `GET /nodes/{node}/qemu/{vmid}/config` | discover | `perm /vms/{vmid} [VM.Audit]` | qemu-server `PVE/API2/Qemu.pm` (`vm_config`) |
+| 5 | `GET /nodes/{node}/qemu/{vmid}/config` | discover, destructive (`destroy`) | `perm /vms/{vmid} [VM.Audit]` | qemu-server `PVE/API2/Qemu.pm` (`vm_config`) |
 | 6 | `GET /nodes/{node}/lxc/{vmid}/config` | discover | `perm /vms/{vmid} [VM.Audit]` | pve-container `PVE/API2/LXC/Config.pm` (`vm_config`) |
 | 7 | `GET /nodes/{node}/qemu/{vmid}/agent/info` | discover, lab readiness | **9.x:** `perm /vms/{vmid} [VM.GuestAgent.Audit, VM.GuestAgent.Unrestricted] any`; **8.x:** `perm /vms/{vmid} [VM.Monitor]` | qemu-server `PVE/API2/Qemu/Agent.pm` (`register_command`) |
 | 8 | `GET /nodes/{node}/qemu/{vmid}/agent/network-get-interfaces` | discover | same as #7 | same |
