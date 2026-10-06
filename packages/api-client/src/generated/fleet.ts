@@ -2700,10 +2700,29 @@ export interface PageRecipeDto {
 
 /**
  * The structured view: exactly the supported Proxmox field subset.
+ *
+ * The `firstDisk*`, `networkBridge`, and `bootIso*` fields follow the
+ * Packer Proxmox plugin's schema (#278). The older fields keep their
+ * published `/api/v1` meaning: they read top-level builder keys, most of
+ * which the plugin does not accept, and are deprecated in favour of the
+ * new ones (the compatibility policy in this crate's README).
  */
 export interface StructuredRecipeDto {
   /**
-     * The first network adapter's bridge (`network_adapters[0].bridge`).
+     * The boot ISO (`boot_iso.iso_file`, or the deprecated top-level key).
+     * @nullable
+     */
+  bootIsoFile?: string | null;
+  /**
+     * The boot ISO's storage pool (`boot_iso.iso_storage_pool`, or the
+     * deprecated top-level key).
+     * @nullable
+     */
+  bootIsoStoragePool?: string | null;
+  /**
+     * Deprecated: the top-level `bridge`, which the plugin refuses. Use
+     * `networkBridge`.
+     * @deprecated
      * @nullable
      */
   bridge?: string | null;
@@ -2713,23 +2732,44 @@ export interface StructuredRecipeDto {
      */
   cloneVm?: string | null;
   /**
+     * Deprecated: the top-level `ciuser`; the plugin has no such key.
+     * @deprecated
+     * @nullable
+     */
+  cloudInitUser?: string | null;
+  /**
      * The vCPU count.
      * @minimum 0
      * @nullable
      */
   cores?: number | null;
   /**
-     * The first disk's size (`disks[0].disk_size`).
+     * Deprecated: the top-level `disk_size`, which the plugin refuses. Use
+     * `firstDiskSize`.
+     * @deprecated
      * @nullable
      */
   diskSize?: string | null;
   /**
-     * The ISO file path, for the iso source.
+     * The first disk's size (`disks[0].disk_size`).
+     * @nullable
+     */
+  firstDiskSize?: string | null;
+  /**
+     * The first disk's storage pool (`disks[0].storage_pool`). Absent when
+     * the builder declares no disk: a clone then keeps its source's storage.
+     * @nullable
+     */
+  firstDiskStoragePool?: string | null;
+  /**
+     * Deprecated: the top-level `iso_file`. Use `bootIsoFile`.
+     * @deprecated
      * @nullable
      */
   isoFile?: string | null;
   /**
-     * The ISO's storage pool, for the iso source.
+     * Deprecated: the top-level `iso_storage_pool`. Use `bootIsoStoragePool`.
+     * @deprecated
      * @nullable
      */
   isoStoragePool?: string | null;
@@ -2739,13 +2779,25 @@ export interface StructuredRecipeDto {
      * @nullable
      */
   memory?: number | null;
+  /**
+     * The first network adapter's bridge (`network_adapters[0].bridge`).
+     * @nullable
+     */
+  networkBridge?: string | null;
   /** The PVE node the recipe builds on. */
   node: string;
   /** What the recipe builds from: `iso` or `clone`. */
   source: string;
   /**
-     * The first disk's storage pool (`disks[0].storage_pool`). Empty when
-     * the builder declares no disk: a clone then keeps its source's storage.
+     * Deprecated: the top-level `sshkeys`; the plugin has no such key.
+     * @deprecated
+     * @nullable
+     */
+  sshKeys?: string | null;
+  /**
+     * Deprecated: the builder's top-level `vm_storage_pool`/`storage_pool`,
+     * which the plugin refuses. Use `firstDiskStoragePool`.
+     * @deprecated
      */
   storagePool: string;
 }

@@ -142,6 +142,25 @@ describe('round-trip', () => {
     expect(built).not.toHaveProperty('vm_storage_pool')
   })
 
+  it('lets an explicit empty boot_iso value win over the deprecated key, as fleet-core does', () => {
+    expect(fields('{"builders":[{"type":"proxmox-iso","node":"p","boot_iso":{"iso_file":""},"iso_file":"local:iso/old.iso"}]}'))
+      .toMatchObject({ isoFile: '' })
+  })
+
+  it('clears a leftover top-level ISO key when the nested shape is in use', () => {
+    const both = '{"builders":[{"type":"proxmox-iso","node":"p","boot_iso":{"iso_file":"local:iso/new.iso"},"iso_file":"local:iso/old.iso"}]}'
+    const edited = applyFields(both, { ...fields(both), isoFile: '' })
+    expect(JSON.parse(edited).builders[0]).toEqual({ type: 'proxmox-iso', node: 'p' })
+    expect(fields(edited).isoFile).toBe('')
+  })
+
+  it('seeds an empty disk or adapter list', () => {
+    const empty = '{"builders":[{"type":"proxmox-iso","node":"p","disks":[],"network_adapters":[]}]}'
+    const built = JSON.parse(applyFields(empty, { ...fields(empty), storagePool: 'local-lvm', bridge: 'vmbr0' })).builders[0]
+    expect(built.disks).toEqual([{ type: 'scsi', storage_pool: 'local-lvm' }])
+    expect(built.network_adapters).toEqual([{ model: 'virtio', bridge: 'vmbr0' }])
+  })
+
   it('writes the ISO into boot_iso unless the template uses the deprecated keys', () => {
     const iso = '{"builders":[{"type":"proxmox-iso","node":"p"}]}'
     expect(JSON.parse(applyFields(iso, { ...fields(iso), isoFile: 'local:iso/u.iso' })).builders[0].boot_iso)

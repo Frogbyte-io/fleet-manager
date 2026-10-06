@@ -151,19 +151,28 @@ pub struct RecipeVersionDto {
 }
 
 /// The structured view: exactly the supported Proxmox field subset.
+///
+/// The `firstDisk*`, `networkBridge`, and `bootIso*` fields follow the
+/// Packer Proxmox plugin's schema (#278). The older fields keep their
+/// published `/api/v1` meaning: they read top-level builder keys, most of
+/// which the plugin does not accept, and are deprecated in favour of the
+/// new ones (the compatibility policy in this crate's README).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredRecipeDto {
     /// The PVE node the recipe builds on.
     pub node: String,
-    /// The first disk's storage pool (`disks[0].storage_pool`). Empty when
-    /// the builder declares no disk: a clone then keeps its source's storage.
+    /// Deprecated: the builder's top-level `vm_storage_pool`/`storage_pool`,
+    /// which the plugin refuses. Use `firstDiskStoragePool`.
+    #[schema(deprecated)]
     pub storage_pool: String,
     /// What the recipe builds from: `iso` or `clone`.
     pub source: String,
-    /// The ISO file path, for the iso source.
+    /// Deprecated: the top-level `iso_file`. Use `bootIsoFile`.
+    #[schema(deprecated)]
     pub iso_file: Option<String>,
-    /// The ISO's storage pool, for the iso source.
+    /// Deprecated: the top-level `iso_storage_pool`. Use `bootIsoStoragePool`.
+    #[schema(deprecated)]
     pub iso_storage_pool: Option<String>,
     /// The guest to clone, for the clone source.
     pub clone_vm: Option<String>,
@@ -171,32 +180,85 @@ pub struct StructuredRecipeDto {
     pub cores: Option<u32>,
     /// The memory in MiB.
     pub memory: Option<u32>,
-    /// The first disk's size (`disks[0].disk_size`).
+    /// Deprecated: the top-level `disk_size`, which the plugin refuses. Use
+    /// `firstDiskSize`.
+    #[schema(deprecated)]
     pub disk_size: Option<String>,
-    /// The first network adapter's bridge (`network_adapters[0].bridge`).
+    /// Deprecated: the top-level `bridge`, which the plugin refuses. Use
+    /// `networkBridge`.
+    #[schema(deprecated)]
     pub bridge: Option<String>,
+    /// Deprecated: the top-level `ciuser`; the plugin has no such key.
+    #[schema(deprecated)]
+    pub cloud_init_user: Option<String>,
+    /// Deprecated: the top-level `sshkeys`; the plugin has no such key.
+    #[schema(deprecated)]
+    pub ssh_keys: Option<String>,
+    /// The first disk's storage pool (`disks[0].storage_pool`). Absent when
+    /// the builder declares no disk: a clone then keeps its source's storage.
+    pub first_disk_storage_pool: Option<String>,
+    /// The first disk's size (`disks[0].disk_size`).
+    pub first_disk_size: Option<String>,
+    /// The first network adapter's bridge (`network_adapters[0].bridge`).
+    pub network_bridge: Option<String>,
+    /// The boot ISO (`boot_iso.iso_file`, or the deprecated top-level key).
+    pub boot_iso_file: Option<String>,
+    /// The boot ISO's storage pool (`boot_iso.iso_storage_pool`, or the
+    /// deprecated top-level key).
+    pub boot_iso_storage_pool: Option<String>,
 }
 
-impl From<fleet_core::StructuredRecipe> for StructuredRecipeDto {
-    fn from(structured: fleet_core::StructuredRecipe) -> Self {
-        Self {
+impl StructuredRecipeDto {
+    /// The view of `content`, when it has one: the plugin-schema fields from
+    /// fleet-core, and the deprecated fields read as `/api/v1` published them.
+    fn of(content: &str) -> Option<Self> {
+        let structured = fleet_core::StructuredRecipe::from_raw(content)?;
+        // The same builder fleet-core chose: the first proxmox-iso/clone.
+        let document: serde_json::Value = serde_json::from_str(content).ok()?;
+        let builder = document
+            .get("builders")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .find(|builder| {
+                matches!(
+                    builder.get("type").and_then(serde_json::Value::as_str),
+                    Some("proxmox-iso" | "proxmox-clone")
+                )
+            })?
+            .clone();
+        let legacy = |key: &str| {
+            builder
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        Some(Self {
             node: structured.node,
-            storage_pool: structured.storage_pool.unwrap_or_default(),
+            storage_pool: legacy("vm_storage_pool")
+                .or_else(|| legacy("storage_pool"))
+                .unwrap_or_default(),
             source: structured.source.id().to_owned(),
-            iso_file: structured.iso_file,
-            iso_storage_pool: structured.iso_storage_pool,
+            iso_file: legacy("iso_file"),
+            iso_storage_pool: legacy("iso_storage_pool"),
             clone_vm: structured.clone_vm,
             cores: structured.cores,
             memory: structured.memory,
-            disk_size: structured.disk_size,
-            bridge: structured.bridge,
-        }
+            disk_size: legacy("disk_size"),
+            bridge: legacy("bridge"),
+            cloud_init_user: legacy("ciuser"),
+            ssh_keys: legacy("sshkeys"),
+            first_disk_storage_pool: structured.storage_pool,
+            first_disk_size: structured.disk_size,
+            network_bridge: structured.bridge,
+            boot_iso_file: structured.iso_file,
+            boot_iso_storage_pool: structured.iso_storage_pool,
+        })
     }
 }
 
 impl From<RecipeVersion> for RecipeVersionDto {
     fn from(version: RecipeVersion) -> Self {
-        let structured = fleet_core::StructuredRecipe::from_raw(&version.content).map(Into::into);
+        let structured = StructuredRecipeDto::of(&version.content);
         Self {
             id: version.id,
             recipe_id: version.recipe_id,
@@ -889,4 +951,36 @@ pub async fn get_image_build(
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
     Ok(Json(Resource::new(record.into())))
+}
+
+#[cfg(test)]
+mod structured_dto_tests {
+    use super::StructuredRecipeDto;
+
+    #[test]
+    fn the_v1_fields_keep_their_published_meaning_beside_the_plugin_fields() {
+        let content = r#"{"builders": [{
+            "type": "proxmox-iso", "node": "pve",
+            "vm_storage_pool": "legacy-pool", "disk_size": "9G", "bridge": "vmbr9",
+            "ciuser": "dev", "sshkeys": "ssh-ed25519%20AAA", "iso_file": "local:iso/old.iso",
+            "boot_iso": {"iso_file": "local:iso/new.iso", "iso_storage_pool": "local"},
+            "disks": [{"type": "scsi", "storage_pool": "local-lvm", "disk_size": "20G"}],
+            "network_adapters": [{"model": "virtio", "bridge": "vmbr0"}]
+        }]}"#;
+        let dto = StructuredRecipeDto::of(content).expect("a structured view");
+        // /api/v1 (deprecated): top-level keys, as published.
+        assert_eq!(dto.storage_pool, "legacy-pool");
+        assert_eq!(dto.disk_size.as_deref(), Some("9G"));
+        assert_eq!(dto.bridge.as_deref(), Some("vmbr9"));
+        assert_eq!(dto.cloud_init_user.as_deref(), Some("dev"));
+        assert_eq!(dto.ssh_keys.as_deref(), Some("ssh-ed25519%20AAA"));
+        assert_eq!(dto.iso_file.as_deref(), Some("local:iso/old.iso"));
+        // The plugin schema (#278).
+        assert_eq!(dto.first_disk_storage_pool.as_deref(), Some("local-lvm"));
+        assert_eq!(dto.first_disk_size.as_deref(), Some("20G"));
+        assert_eq!(dto.network_bridge.as_deref(), Some("vmbr0"));
+        assert_eq!(dto.boot_iso_file.as_deref(), Some("local:iso/new.iso"));
+        assert_eq!(dto.boot_iso_storage_pool.as_deref(), Some("local"));
+        assert!(StructuredRecipeDto::of("source \"proxmox-iso\" \"x\" {}").is_none());
+    }
 }

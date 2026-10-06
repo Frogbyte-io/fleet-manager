@@ -15619,19 +15619,34 @@
       },
       "StructuredRecipeDto": {
         "type": "object",
-        "description": "The structured view: exactly the supported Proxmox field subset.",
+        "description": "The structured view: exactly the supported Proxmox field subset.\n\nThe `firstDisk*`, `networkBridge`, and `bootIso*` fields follow the\nPacker Proxmox plugin's schema (#278). The older fields keep their\npublished `/api/v1` meaning: they read top-level builder keys, most of\nwhich the plugin does not accept, and are deprecated in favour of the\nnew ones (the compatibility policy in this crate's README).",
         "required": [
           "node",
           "storagePool",
           "source"
         ],
         "properties": {
+          "bootIsoFile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The boot ISO (`boot_iso.iso_file`, or the deprecated top-level key)."
+          },
+          "bootIsoStoragePool": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The boot ISO's storage pool (`boot_iso.iso_storage_pool`, or the\ndeprecated top-level key)."
+          },
           "bridge": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The first network adapter's bridge (`network_adapters[0].bridge`)."
+            "description": "Deprecated: the top-level `bridge`, which the plugin refuses. Use\n`networkBridge`.",
+            "deprecated": true
           },
           "cloneVm": {
             "type": [
@@ -15639,6 +15654,14 @@
               "null"
             ],
             "description": "The guest to clone, for the clone source."
+          },
+          "cloudInitUser": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Deprecated: the top-level `ciuser`; the plugin has no such key.",
+            "deprecated": true
           },
           "cores": {
             "type": [
@@ -15654,21 +15677,38 @@
               "string",
               "null"
             ],
+            "description": "Deprecated: the top-level `disk_size`, which the plugin refuses. Use\n`firstDiskSize`.",
+            "deprecated": true
+          },
+          "firstDiskSize": {
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "The first disk's size (`disks[0].disk_size`)."
+          },
+          "firstDiskStoragePool": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first disk's storage pool (`disks[0].storage_pool`). Absent when\nthe builder declares no disk: a clone then keeps its source's storage."
           },
           "isoFile": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The ISO file path, for the iso source."
+            "description": "Deprecated: the top-level `iso_file`. Use `bootIsoFile`.",
+            "deprecated": true
           },
           "isoStoragePool": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The ISO's storage pool, for the iso source."
+            "description": "Deprecated: the top-level `iso_storage_pool`. Use `bootIsoStoragePool`.",
+            "deprecated": true
           },
           "memory": {
             "type": [
@@ -15679,6 +15719,13 @@
             "description": "The memory in MiB.",
             "minimum": 0
           },
+          "networkBridge": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first network adapter's bridge (`network_adapters[0].bridge`)."
+          },
           "node": {
             "type": "string",
             "description": "The PVE node the recipe builds on."
@@ -15687,9 +15734,18 @@
             "type": "string",
             "description": "What the recipe builds from: `iso` or `clone`."
           },
+          "sshKeys": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Deprecated: the top-level `sshkeys`; the plugin has no such key.",
+            "deprecated": true
+          },
           "storagePool": {
             "type": "string",
-            "description": "The first disk's storage pool (`disks[0].storage_pool`). Empty when\nthe builder declares no disk: a clone then keeps its source's storage."
+            "description": "Deprecated: the builder's top-level `vm_storage_pool`/`storage_pool`,\nwhich the plugin refuses. Use `firstDiskStoragePool`.",
+            "deprecated": true
           }
         }
       },

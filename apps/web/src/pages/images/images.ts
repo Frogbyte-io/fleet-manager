@@ -97,10 +97,16 @@ function firstEntry(builder: JsonObject, list: string): JsonObject | undefined {
   return isObject(first) ? first : undefined
 }
 
-/** A `boot_iso` field, falling back to the deprecated top-level key. */
+/**
+ * A `boot_iso` field, falling back to the deprecated top-level key only
+ * when the nested key is not a string, as fleet-core reads it (an explicit
+ * empty nested value wins).
+ */
 function bootIso(builder: JsonObject, key: string): string {
   const iso = builder.boot_iso
-  return (isObject(iso) ? str(iso[key]) : '') || str(builder[key])
+  if (isObject(iso) && typeof iso[key] === 'string')
+    return iso[key] as string
+  return str(builder[key])
 }
 
 /** fleet-core reads cores and memory as `u32`; anything outside that is absent. */
@@ -163,17 +169,25 @@ function setOnFirst(builder: JsonObject, list: string, key: string, value: strin
     setOrDelete(existing, key, value)
     return
   }
-  if (value === '' || !seed || builder[list] !== undefined)
+  const current = builder[list]
+  // An absent or empty list can be seeded; anything else is left alone.
+  if (value === '' || !seed || (current !== undefined && !(Array.isArray(current) && current.length === 0)))
     return
   builder[list] = [{ ...seed, [key]: value }]
 }
 
-/** Sets an ISO key where the template keeps it: `boot_iso`, unless the deprecated top-level key is already in use. */
+/**
+ * Sets an ISO key where the template keeps it: the deprecated top-level key
+ * when the template uses only that shape, otherwise `boot_iso`. Writing the
+ * nested shape also removes a leftover top-level key, so a cleared field
+ * cannot fall back to (and build with) the stale value.
+ */
 function setIso(builder: JsonObject, key: string, value: string) {
   if (builder[key] !== undefined && !isObject(builder.boot_iso)) {
     setOrDelete(builder, key, value)
     return
   }
+  delete builder[key]
   const iso = isObject(builder.boot_iso) ? builder.boot_iso : {}
   setOrDelete(iso, key, value)
   if (Object.keys(iso).length)
