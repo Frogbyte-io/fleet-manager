@@ -3001,6 +3001,28 @@ async fn image_build_history_round_trips_through_the_real_api_and_json_cli() {
             .await
             .unwrap()
     };
+    let page: serde_json::Value = serde_json::from_str(
+        &run(vec![
+            "builds".to_owned(),
+            "--limit".to_owned(),
+            "1".to_owned(),
+        ])
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["page"]["limit"], 1);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page["page"]["nextCursor"].is_null());
+    assert!(
+        run(vec![
+            "builds".to_owned(),
+            "--cursor".to_owned(),
+            "unknown".to_owned()
+        ])
+        .await
+        .is_err()
+    );
     let list: serde_json::Value = serde_json::from_str(
         &run(vec![
             "builds".to_owned(),
@@ -3055,6 +3077,9 @@ async fn image_build_history_round_trips_through_the_real_api_and_json_cli() {
 #[test]
 fn image_build_history_commands_refuse_missing_and_extra_arguments() {
     for words in [
+        vec!["images", "build", "version", "--account", "--wait"],
+        vec!["images", "build", "version", "--account", "--timeout", "10"],
+        vec!["images", "build", "version", "--account", ""],
         vec!["images", "builds", "--version"],
         vec!["images", "build-show"],
         vec!["images", "build-show", "one", "two"],

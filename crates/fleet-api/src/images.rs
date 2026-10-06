@@ -820,6 +820,10 @@ impl From<fleet_core::ImageBuildRecord> for ImageBuildDto {
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildQuery {
+    /// Maximum records per page (default 50, maximum 200).
+    pub limit: Option<u32>,
+    /// Last build identity returned by the preceding page.
+    pub cursor: Option<String>,
     /// Filter by recipe identity.
     pub recipe_id: Option<String>,
     /// Filter by immutable version identity.
@@ -832,6 +836,7 @@ pub struct BuildQuery {
 /// Returns the standard error envelope on denial or backend failure.
 #[utoipa::path(get, path = "/images/builds", tag = "images", operation_id = "listImageBuilds",
     params(BuildQuery), responses(
+        (status = 400, description = "Invalid build cursor.", body = crate::error::ApiError),
         (status = 200, description = "Build records, newest first.", body = Page<ImageBuildDto>),
         (status = 403, description = "Images read permission is required.", body = crate::error::ApiError)
     ))]
@@ -844,19 +849,23 @@ pub async fn list_image_builds(
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     let records = images
-        .list_builds(
+        .list_build_page(
             state.authorizer.as_ref(),
             &principal,
-            query.recipe_id.as_deref(),
-            query.version_id.as_deref(),
+            fleet_application::images::BuildPageRequest {
+                recipe: query.recipe_id,
+                version: query.version_id,
+                cursor: query.cursor,
+                limit: query.limit.unwrap_or_default(),
+            },
         )
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;
-    let items: Vec<ImageBuildDto> = records.into_iter().map(Into::into).collect();
+    let items: Vec<ImageBuildDto> = records.items.into_iter().map(Into::into).collect();
     Ok(Json(Page {
         page: PageInfo {
-            next_cursor: None,
-            limit: items.len().try_into().unwrap_or(u32::MAX),
+            next_cursor: records.next_cursor,
+            limit: records.limit,
         },
         items,
     }))

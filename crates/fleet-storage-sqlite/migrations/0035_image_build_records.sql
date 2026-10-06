@@ -25,6 +25,7 @@ CREATE TABLE image_build_records (
             AND packer_version IS NOT NULL AND proxmox_plugin_version IS NOT NULL AND account_id IS NOT NULL) OR
            (outcome != 'succeeded' AND template_node IS NULL AND template_vmid IS NULL AND template_name IS NULL))
 ) STRICT;
+CREATE INDEX image_build_records_history ON image_build_records(started_at DESC, id DESC);
 CREATE INDEX image_build_records_version ON image_build_records(version_id, started_at DESC, id DESC);
 CREATE INDEX image_build_records_recipe ON image_build_records(recipe_id, started_at DESC, id DESC);
 CREATE TRIGGER image_build_records_insert BEFORE INSERT ON image_build_records

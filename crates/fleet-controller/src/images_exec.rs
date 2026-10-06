@@ -458,26 +458,75 @@ fn provisioning_digests(content: &str) -> Vec<String> {
 
 fn has_external_assets(content: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return true;
+    };
+    let Some(assets) = value.get("provisioners") else {
         return false;
     };
-    value
-        .get("provisioners")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|asset| {
-            [
-                "script",
-                "scripts",
-                "source",
-                "sources",
-                "playbook_file",
-                "cookbook_paths",
-                "manifest_file",
-            ]
-            .iter()
-            .any(|key| asset.get(key).is_some())
-        })
+    let Some(assets) = assets.as_array() else {
+        return true;
+    };
+    // Fail closed: only the documented embedded shell/file forms are supported.
+    // Unknown plugins and fields may read host files that cannot be snapshotted.
+    assets.iter().any(|asset| {
+        let Some(fields) = asset.as_object() else {
+            return true;
+        };
+        let allowed: &[&str] = match asset.get("type").and_then(serde_json::Value::as_str) {
+            Some("shell")
+                if asset
+                    .get("inline")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|lines| lines.iter().all(serde_json::Value::is_string)) =>
+            {
+                &[
+                    "type",
+                    "inline",
+                    "inline_shebang",
+                    "execute_command",
+                    "environment_vars",
+                    "env",
+                    "use_env_var_file",
+                    "remote_folder",
+                    "remote_file",
+                    "remote_path",
+                    "start_retry_timeout",
+                    "expect_disconnect",
+                    "skip_clean",
+                    "valid_exit_codes",
+                    "pause_before",
+                    "pause_after",
+                    "timeout",
+                    "max_retries",
+                    "only",
+                    "except",
+                ]
+            }
+            Some("file")
+                if asset
+                    .get("content")
+                    .is_some_and(serde_json::Value::is_string)
+                    && asset
+                        .get("destination")
+                        .is_some_and(serde_json::Value::is_string) =>
+            {
+                &[
+                    "type",
+                    "content",
+                    "destination",
+                    "generated",
+                    "pause_before",
+                    "pause_after",
+                    "timeout",
+                    "max_retries",
+                    "only",
+                    "except",
+                ]
+            }
+            _ => return true,
+        };
+        fields.keys().any(|key| !allowed.contains(&key.as_str()))
+    })
 }
 
 fn output_template(artifact: &str, version: &RecipeVersion) -> Option<ImageBuildTemplate> {
@@ -822,6 +871,30 @@ mod tests {
                     .all(|row| !row.contains("fixture-secret-token"))
             );
         }
+    }
+
+    #[test]
+    fn embedded_inputs_fail_closed_for_unknown_provisioners_and_fields() {
+        for provisioner in [
+            serde_json::json!({"type":"ansible-local", "playbook_paths":["mutable.yml"], "role_paths":["roles"]}),
+            serde_json::json!({"type":"salt-masterless", "local_state_tree":"states"}),
+            serde_json::json!({"type":"chef-solo", "config_template":"chef.rb"}),
+            serde_json::json!({"type":"shell", "inline":["echo ready"], "scripts":["local.sh"]}),
+            serde_json::json!({"type":"shell", "inline":["echo ready"], "override":{"builder":{"script":"local.sh"}}}),
+            serde_json::json!({"type":"file", "content":"bytes", "destination":"/tmp/file", "source":"mutable"}),
+            serde_json::json!({"type":"future-plugin", "inline":["unknown"]}),
+        ] {
+            assert!(has_external_assets(
+                &serde_json::json!({"provisioners":[provisioner]}).to_string()
+            ));
+        }
+        let embedded = serde_json::json!({"provisioners":[
+            {"type":"shell", "inline":["echo ready"]},
+            {"type":"file", "content":"embedded bytes", "destination":"/tmp/file"}
+        ]})
+        .to_string();
+        assert!(!has_external_assets(&embedded));
+        assert_eq!(provisioning_digests(&embedded).len(), 2);
     }
 
     #[tokio::test]

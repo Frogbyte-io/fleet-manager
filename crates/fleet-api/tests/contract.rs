@@ -2186,6 +2186,12 @@ async fn image_build_history_routes_and_schema_are_registered() {
     let document = fleet_api::openapi();
     let value = serde_json::to_value(document).unwrap();
     assert!(value["paths"]["/api/v1/images/builds"]["get"].is_object());
+    let params = value["paths"]["/api/v1/images/builds"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    for name in ["limit", "cursor"] {
+        assert!(params.iter().any(|param| param["name"] == name));
+    }
     assert!(value["paths"]["/api/v1/images/builds/{buildId}"]["get"].is_object());
     let properties = &value["components"]["schemas"]["ImageBuildDto"]["properties"];
     assert!(properties["contentDigest"].is_object());

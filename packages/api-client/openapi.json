@@ -848,6 +848,32 @@
         "operationId": "listImageBuilds",
         "parameters": [
           {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum records per page (default 50, maximum 200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Last build identity returned by the preceding page.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "recipeId",
             "in": "query",
             "description": "Filter by recipe identity.",
@@ -879,6 +905,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Page_ImageBuildDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid build cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }

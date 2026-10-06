@@ -42,6 +42,7 @@ struct FakeRecipes {
     versions: Mutex<Vec<RecipeVersion>>,
     port_calls: Mutex<Vec<&'static str>>,
     builds: Mutex<Vec<fleet_core::ImageBuildRecord>>,
+    reject_promotion: Mutex<bool>,
 }
 
 impl FakeRecipes {
@@ -62,17 +63,22 @@ impl RecipePort for FakeRecipes {
         recipe: Option<&str>,
         version: Option<&str>,
     ) -> Result<Vec<fleet_core::ImageBuildRecord>, String> {
-        Ok(self
+        let mut records: Vec<_> = self
             .builds
             .lock()
             .unwrap()
             .iter()
-            .rev()
             .filter(|b| {
                 recipe.is_none_or(|r| b.recipe_id == r) && version.is_none_or(|v| b.version_id == v)
             })
             .cloned()
-            .collect())
+            .collect();
+        records.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(records)
     }
     async fn get_build(&self, id: &str) -> Result<fleet_core::ImageBuildRecord, String> {
         self.builds
@@ -173,6 +179,9 @@ impl RecipePort for FakeRecipes {
         promoted_by: &str,
         promoted_at: i64,
     ) -> Result<RecipeVersion, String> {
+        if *self.reject_promotion.lock().unwrap() {
+            return Err(fleet_application::images::PROMOTION_BUILD_REJECTED.to_owned());
+        }
         let mut versions = self.versions.lock().unwrap();
         let recipe_id = versions
             .iter()
@@ -445,10 +454,11 @@ fn build_record(
     version: &RecipeVersion,
     outcome: &str,
     artifact: bool,
+    started_at: i64,
 ) -> fleet_core::ImageBuildRecord {
     fleet_core::ImageBuildRecord {
-        id: "build-1".to_owned(),
-        operation_id: "build-1".to_owned(),
+        id: format!("{}-{started_at}-{outcome}", version.id),
+        operation_id: format!("{}-{started_at}-{outcome}", version.id),
         recipe_id: version.recipe_id.clone(),
         version_id: version.id.clone(),
         content_digest: version.content_digest.clone(),
@@ -458,8 +468,8 @@ fn build_record(
         account_id: Some("account-1".to_owned()),
         node: version.node.clone(),
         storage_pool: version.storage_pool.clone(),
-        started_at: NOW,
-        ended_at: Some(NOW + 1),
+        started_at,
+        ended_at: Some(started_at + 1),
         outcome: outcome.to_owned(),
         reason: None,
         template: artifact.then(|| fleet_core::ImageBuildTemplate {
@@ -503,7 +513,7 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&version, "failed", false));
+        .push(build_record(&version, "failed", false, NOW + 10));
     // A failed build: refused.
     let error = images
         .promote(&AllowAll, &principal(), &version.id, NOW + 2)
@@ -518,7 +528,7 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&version, "succeeded", false));
+        .push(build_record(&version, "succeeded", false, NOW + 11));
     // A successful build without an artifact: refused.
     let error = images
         .promote(&AllowAll, &principal(), &version.id, NOW + 2)
@@ -533,9 +543,17 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&version, "succeeded", true));
+        .push(build_record(&version, "succeeded", true, NOW + 12));
     // A successful build with an artifact: promoted, with the evidence
     // recorded.
+    *recipes.reject_promotion.lock().unwrap() = true;
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    *recipes.reject_promotion.lock().unwrap() = false;
     let promoted = images
         .promote(&AllowAll, &principal(), &version.id, NOW + 2)
         .await
@@ -576,7 +594,7 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&v1, "succeeded", true));
+        .push(build_record(&v1, "succeeded", true, NOW + 13));
     images
         .promote(&AllowAll, &principal(), &v1.id, NOW + 2)
         .await
@@ -602,7 +620,7 @@ async fn promoting_a_second_version_demotes_the_first_explicitly() {
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&v2, "succeeded", true));
+        .push(build_record(&v2, "succeeded", true, NOW + 14));
     images
         .promote(&AllowAll, &principal(), &v2.id, NOW + 5)
         .await
@@ -639,7 +657,7 @@ async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_new
         .publish(&AllowAll, &principal(), &recipe.id, NOW + 1)
         .await
         .unwrap();
-    let mut record = build_record(&version, "succeeded", true);
+    let mut record = build_record(&version, "succeeded", true, NOW + 15);
     record.content_digest = "different-inputs".to_owned();
     recipes.builds.lock().unwrap().push(record);
     assert!(matches!(
@@ -652,12 +670,42 @@ async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_new
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&version, "succeeded", true));
+        .push(build_record(&version, "succeeded", true, NOW + 16));
     recipes
         .builds
         .lock()
         .unwrap()
-        .push(build_record(&version, "failed", false));
+        .push(build_record(&version, "failed", false, NOW + 17));
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    recipes.builds.lock().unwrap().reverse();
+    assert!(matches!(
+        images
+            .promote(&AllowAll, &principal(), &version.id, NOW + 2)
+            .await,
+        Err(RecipeUseCaseError::Invalid { .. })
+    ));
+    // At equal timestamps the lexically greater identity wins, not insertion order.
+    {
+        let mut builds = recipes.builds.lock().unwrap();
+        let latest = builds.iter().map(|b| b.started_at).max().unwrap();
+        for build in builds.iter_mut() {
+            build.started_at = latest;
+            build.ended_at = Some(latest + 1);
+            build.id = if build.outcome == "failed" {
+                "z-failed"
+            } else {
+                "a-success"
+            }
+            .to_owned();
+            build.operation_id.clone_from(&build.id);
+        }
+        builds.retain(|b| b.content_digest == version.content_digest);
+    }
     assert!(matches!(
         images
             .promote(&AllowAll, &principal(), &version.id, NOW + 2)
@@ -682,6 +730,6 @@ async fn build_reads_require_images_read_and_promotion_refuses_mismatched_or_new
             .await
             .unwrap()
             .len(),
-        3
+        2
     );
 }

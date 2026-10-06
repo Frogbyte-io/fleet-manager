@@ -5252,6 +5252,17 @@ limit?: number | null;
 
 export type ListImageBuildsParams = {
 /**
+ * Maximum records per page (default 50, maximum 200).
+ * @minimum 0
+ * @nullable
+ */
+limit?: number | null;
+/**
+ * Last build identity returned by the preceding page.
+ * @nullable
+ */
+cursor?: string | null;
+/**
  * Filter by recipe identity.
  * @nullable
  */
@@ -6202,6 +6213,11 @@ export type listImageBuildsResponse200 = {
   status: 200
 }
 
+export type listImageBuildsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type listImageBuildsResponse403 = {
   data: ApiError
   status: 403
@@ -6210,7 +6226,7 @@ export type listImageBuildsResponse403 = {
 export type listImageBuildsResponseSuccess = (listImageBuildsResponse200) & {
   headers: Headers;
 };
-export type listImageBuildsResponseError = (listImageBuildsResponse403) & {
+export type listImageBuildsResponseError = (listImageBuildsResponse400 | listImageBuildsResponse403) & {
   headers: Headers;
 };
 

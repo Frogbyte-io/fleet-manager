@@ -9,8 +9,9 @@
 //! reproducible.
 //!
 //! The content is stored verbatim and Fleet never re-validates Packer's
-//! own fields: `packer validate` is the authority, and unknown fields pass
-//! through untouched. Secrets never enter recipes — variables that would
+//! own syntax: `packer validate` is the authority. Build execution additionally
+//! restricts provisioning to supported embedded inputs so local files cannot
+//! bypass the immutable snapshot. Secrets never enter recipes — variables that would
 //! carry them ride `-var-file` from secret references at build time.
 #![warn(missing_docs)]
 
@@ -23,6 +24,36 @@ use serde::{Deserialize, Serialize};
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
 use crate::operation::AuditPort;
 pub use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeContent, RecipeVersion};
+
+/// A concurrent build invalidated promotion evidence at the transactional gate.
+pub const PROMOTION_BUILD_REJECTED: &str =
+    "promotion requires the latest matching successful build record";
+/// A build cursor does not belong to the requested history.
+pub const BUILD_CURSOR_INVALID: &str = "the cursor names no build in this history";
+
+/// A bounded build-history request.
+#[derive(Debug, Default)]
+pub struct BuildPageRequest {
+    /// Optional recipe filter.
+    pub recipe: Option<String>,
+    /// Optional immutable version filter.
+    pub version: Option<String>,
+    /// Last build identity from the preceding page.
+    pub cursor: Option<String>,
+    /// Requested page size; zero uses the default and values are capped at 200.
+    pub limit: u32,
+}
+
+/// A page of build records in descending timestamp and identity order.
+#[derive(Debug)]
+pub struct BuildPage {
+    /// Matching records.
+    pub items: Vec<ImageBuildRecord>,
+    /// Continuation identity when additional records exist.
+    pub next_cursor: Option<String>,
+    /// Effective page size.
+    pub limit: u32,
+}
 
 /// A stored recipe draft.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,6 +125,14 @@ pub trait RecipePort: fmt::Debug + Send + Sync {
         _version: Option<&str>,
     ) -> Result<Vec<ImageBuildRecord>, String> {
         Err("build records are not supported by this repository".to_owned())
+    }
+
+    /// Queries at most the requested page plus one continuation record.
+    ///
+    /// # Errors
+    /// Fails on an invalid cursor or storage failure.
+    async fn list_build_page(&self, _query: &BuildPageRequest) -> Result<BuildPage, String> {
+        Err("build pagination is not supported by this repository".to_owned())
     }
 
     /// Creates a draft, minting its identity.
@@ -552,9 +591,15 @@ impl Images {
             .recipes
             .promote(version_id, &principal.id, now)
             .await
-            .map_err(|detail| RecipeUseCaseError::Backend {
-                context: "versions",
-                detail,
+            .map_err(|detail| {
+                if detail == PROMOTION_BUILD_REJECTED {
+                    RecipeUseCaseError::Invalid { detail }
+                } else {
+                    RecipeUseCaseError::Backend {
+                        context: "versions",
+                        detail,
+                    }
+                }
             })?;
         // The completion audit follows the committed promotion: an audit
         // failure here is surfaced as a backend error naming the committed
@@ -669,6 +714,45 @@ impl Images {
             .map_err(|detail| RecipeUseCaseError::Backend {
                 context: "builds",
                 detail,
+            })
+    }
+
+    /// Reads a bounded build page through centralized authorization.
+    ///
+    /// # Errors
+    /// Fails on denial, an invalid cursor or storage failure.
+    pub async fn list_build_page(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        mut query: BuildPageRequest,
+    ) -> Result<BuildPage, RecipeUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::ImagesRead,
+                resource: query.version.as_deref().or(query.recipe.as_deref()),
+            },
+        )
+        .map_err(RecipeUseCaseError::Denied)?;
+        query.limit = if query.limit == 0 {
+            50
+        } else {
+            query.limit.min(200)
+        };
+        self.recipes
+            .list_build_page(&query)
+            .await
+            .map_err(|detail| {
+                if detail == BUILD_CURSOR_INVALID {
+                    RecipeUseCaseError::Invalid { detail }
+                } else {
+                    RecipeUseCaseError::Backend {
+                        context: "builds",
+                        detail,
+                    }
+                }
             })
     }
 

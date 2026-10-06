@@ -10,7 +10,10 @@ use sqlx::Row as _;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use fleet_application::images::{NewRecipe, Recipe, RecipeContent, RecipePort, RecipeVersion};
+use fleet_application::images::{
+    BUILD_CURSOR_INVALID, BuildPage, BuildPageRequest, NewRecipe, PROMOTION_BUILD_REJECTED, Recipe,
+    RecipeContent, RecipePort, RecipeVersion,
+};
 use fleet_application::lab::ImageArtifactPort;
 use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeSource};
 
@@ -175,6 +178,58 @@ impl RecipePort for RecipeRepository {
         sqlx::query("SELECT * FROM image_build_records WHERE (?1 IS NULL OR recipe_id = ?1) AND (?2 IS NULL OR version_id = ?2) ORDER BY started_at DESC, id DESC")
             .bind(recipe).bind(version).fetch_all(&self.pool).await.map_err(|e| e.to_string())?
             .iter().map(row_to_build).collect()
+    }
+
+    async fn list_build_page(&self, query: &BuildPageRequest) -> Result<BuildPage, String> {
+        let cursor = if let Some(id) = query.cursor.as_deref() {
+            Some(sqlx::query("SELECT started_at, id FROM image_build_records WHERE id = ?1 AND (?2 IS NULL OR recipe_id = ?2) AND (?3 IS NULL OR version_id = ?3)")
+                .bind(id).bind(query.recipe.as_deref()).bind(query.version.as_deref())
+                .fetch_optional(&self.pool).await.map_err(|e| e.to_string())?
+                .ok_or_else(|| BUILD_CURSOR_INVALID.to_owned())?)
+        } else {
+            None
+        };
+        let limit = if query.limit == 0 {
+            50
+        } else {
+            query.limit.min(200)
+        };
+        let mut sql =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT * FROM image_build_records WHERE 1=1");
+        if let Some(recipe) = query.recipe.as_deref() {
+            sql.push(" AND recipe_id = ").push_bind(recipe);
+        }
+        if let Some(version) = query.version.as_deref() {
+            sql.push(" AND version_id = ").push_bind(version);
+        }
+        if let Some(cursor) = cursor.as_ref() {
+            sql.push(" AND (started_at, id) < (")
+                .push_bind(cursor.get::<i64, _>("started_at"))
+                .push(", ")
+                .push_bind(cursor.get::<String, _>("id"))
+                .push(")");
+        }
+        sql.push(" ORDER BY started_at DESC, id DESC LIMIT ")
+            .push_bind(i64::from(limit) + 1);
+        let rows = sql
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut items: Vec<ImageBuildRecord> =
+            rows.iter().map(row_to_build).collect::<Result<_, _>>()?;
+        let more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        let next_cursor = if more {
+            items.last().map(|item| item.id.clone())
+        } else {
+            None
+        };
+        Ok(BuildPage {
+            items,
+            next_cursor,
+            limit,
+        })
     }
 
     async fn create(&self, recipe: &NewRecipe, now: i64) -> Result<Recipe, String> {
@@ -349,9 +404,7 @@ impl RecipePort for RecipeRepository {
         let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.id = (SELECT id FROM image_build_records WHERE version_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1) AND b.outcome = 'succeeded' AND b.content_digest = v.content_digest AND b.template_vmid IS NOT NULL)")
             .bind(version_id).fetch_one(&mut *transaction).await.map_err(|e| e.to_string())?;
         if !eligible {
-            return Err(
-                "promotion requires the latest matching successful build record".to_owned(),
-            );
+            return Err(PROMOTION_BUILD_REJECTED.to_owned());
         }
         sqlx::query(
             "UPDATE image_recipe_versions SET promoted_at = NULL, promoted_by = NULL              WHERE recipe_id = ?1 AND promoted_at IS NOT NULL AND id != ?2",
@@ -455,11 +508,8 @@ fn artifact_vmid(artifact: &str) -> Option<u32> {
 impl ImageArtifactPort for RecipeRepository {
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String> {
         let records = self.list_builds(None, Some(image_version_id)).await?;
-        if !records.is_empty() {
-            return Ok(records
-                .iter()
-                .find(|record| record.outcome == "succeeded")
-                .and_then(|record| record.template.as_ref().map(|template| template.vmid)));
+        if let Some(record) = records.iter().find(|record| record.outcome == "succeeded") {
+            return Ok(record.template.as_ref().map(|template| template.vmid));
         }
         // Compatibility for artifacts built before first-class records existed.
         // Only the version's latest successful build counts: an older
@@ -723,6 +773,92 @@ mod build_record_tests {
         );
         assert!(recovered.ended_at.is_some());
         assert!(recovered.template.is_none());
+        let first = recipes
+            .list_build_page(&BuildPageRequest {
+                version: Some(record.version_id.clone()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        let cursor = first.next_cursor.unwrap();
+        let second = recipes
+            .list_build_page(&BuildPageRequest {
+                version: Some(record.version_id.clone()),
+                cursor: Some(cursor.clone()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_ne!(first.items[0].id, second.items[0].id);
+        assert!(first.items[0].id > second.items[0].id); // equal timestamps, deterministic tie break
+        assert!(second.next_cursor.is_none());
+        for query in [
+            BuildPageRequest {
+                cursor: Some("unknown".to_owned()),
+                ..Default::default()
+            },
+            BuildPageRequest {
+                recipe: Some("another-recipe".to_owned()),
+                cursor: Some(cursor),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                recipes.list_build_page(&query).await.unwrap_err(),
+                BUILD_CURSOR_INVALID
+            );
+        }
+        assert_eq!(
+            recipes
+                .list_build_page(&BuildPageRequest {
+                    limit: u32::MAX,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .limit,
+            200
+        );
+        assert_eq!(
+            recipes
+                .list_build_page(&BuildPageRequest::default())
+                .await
+                .unwrap()
+                .limit,
+            50
+        );
+        // A newly failed build does not hide an artifact created before migration.
+        let legacy = OperationRepository::new(store.pool().clone())
+            .create(
+                "image.build",
+                None,
+                None,
+                None,
+                Some(&serde_json::json!({"versionId": record.version_id}).to_string()),
+            )
+            .await
+            .unwrap();
+        OperationRepository::new(store.pool().clone())
+            .transition(&legacy.id, "running")
+            .await
+            .unwrap();
+        OperationRepository::new(store.pool().clone())
+            .complete(
+                &legacy.id,
+                "succeeded",
+                Some(r#"{"artifactId":"pve:123"}"#),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recipes.template_vmid(&record.version_id).await.unwrap(),
+            Some(123)
+        );
     }
 }
 
