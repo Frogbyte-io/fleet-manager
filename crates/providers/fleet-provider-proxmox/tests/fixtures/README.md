@@ -201,3 +201,22 @@ Per major: the 8.x guest 201 is Windows Server 2022 Standard (build 20348,
 qemu-ga 8.1.2), and the 9.x guest 201 is Windows 11 Pro (build 26100,
 qemu-ga 9.2.0). The agent version follows the virtio-win release, not the
 PVE major. The interface shapes are the same on both.
+
+### QEMU destroy (FM-712)
+
+The destroy contract tests in `../destroy.rs` use synthetic, sanitized responses.
+The PVE [8.x](https://github.com/proxmox/qemu-server/blob/stable-bookworm/src/PVE/API2/Qemu.pm)
+and [9.x](https://github.com/proxmox/qemu-server/blob/master/src/PVE/API2/Qemu.pm)
+`destroy_vm` schema requires `VM.Allocate` on `/vms/{vmid}`, rejects running
+or protected guests, and forks `qmdestroy` with the VMID as its UPID target.
+PVE permits deleting templates; Fleet refuses templates observed in fresh cluster
+and config reads before deletion. PVE exposes no atomic conditional-delete option,
+so an external template conversion between the final config read and DELETE can
+race this best-effort refusal. A repeated GET would not close that final window.
+`purge` removes backup/replication/HA references. `destroy-unreferenced-disks`
+defaults to false; `skiplock` is root-only. Fleet exposes only `purge` and
+preserves both defaults. A missing config is PVE's HTTP 500 with the exact
+`nodes/{node}/qemu-server/{vmid}.conf` missing-file message, including when a
+concurrent delete wins. Generic HTTP 404/500 failures are not absence.
+The upstream [license](https://github.com/proxmox/qemu-server/blob/master/debian/copyright)
+is AGPL-3+; this integration calls the public API and copies no upstream code.

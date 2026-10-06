@@ -1028,6 +1028,24 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
         snapshot: &str,
     ) -> Result<(), PveApiError>;
 
+    /// Destroys a stopped QEMU guest. Returns its qmdestroy task, or None
+    /// when the guest configuration is already absent. Refuses templates
+    /// observed in a config read immediately before DELETE. PVE has no
+    /// conditional-delete parameter: a concurrent external conversion after
+    /// that read can race the DELETE, so this refusal is best-effort.
+    /// Purge removes backup, replication and HA references; locks and
+    /// unreferenced disks are never bypassed or removed.
+    ///
+    /// # Errors
+    /// Returns API/transport failures, including permission refusals.
+    async fn guest_destroy(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        purge: bool,
+    ) -> Result<Option<Upid>, PveApiError>;
+
     /// Clones one guest to a new VMID with the requested name. The caller
     /// classifies idempotency; the provider refuses only transport/API
     /// failures.
@@ -1671,6 +1689,70 @@ impl ProxmoxSource for ProxmoxClient {
             ),
         )
         .await
+    }
+
+    async fn guest_destroy(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        purge: bool,
+    ) -> Result<Option<Upid>, PveApiError> {
+        let config = self
+            .call(PveHttpRequest {
+                path: format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+                method: PveHttpMethod::Get,
+                ..request.clone()
+            })
+            .await;
+        let config = match config {
+            Ok(config) => config,
+            Err(error) if destroy_already_absent(&error, node, vmid) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if !config.is_object()
+            || config
+                .get("template")
+                .is_some_and(|_| loose_number(&config, "template").is_none())
+        {
+            return Err(PveApiError::InvalidPayload {
+                detail: "the destroy configuration is unreadable".to_owned(),
+            });
+        }
+        if loose_number(&config, "template") == Some(1) {
+            return Err(PveApiError::InvalidPayload {
+                detail: "refusing to destroy a QEMU template".to_owned(),
+            });
+        }
+        let result = self
+            .call(PveHttpRequest {
+                path: format!(
+                    "/api2/json/nodes/{}/qemu/{vmid}?purge={}",
+                    urlencode(node),
+                    u8::from(purge)
+                ),
+                method: PveHttpMethod::Delete,
+                ..request
+            })
+            .await;
+        match result {
+            Ok(data) => {
+                let upid = upid_from_data(&data)?.ok_or_else(|| PveApiError::InvalidPayload {
+                    detail: "the destroy answer carries no UPID".to_owned(),
+                })?;
+                if upid.task_type != "qmdestroy"
+                    || upid.node != node
+                    || upid.target != vmid.to_string()
+                {
+                    return Err(PveApiError::InvalidPayload {
+                        detail: "the destroy UPID does not match the target".to_owned(),
+                    });
+                }
+                Ok(Some(upid))
+            }
+            Err(error) if destroy_already_absent(&error, node, vmid) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn guest_clone(
@@ -2339,6 +2421,30 @@ fn normalize_storage(entry: &serde_json::Value) -> Result<PveStorageCapacity, St
         used_bytes,
         total_bytes,
     })
+}
+
+// PVE reports a missing config as HTTP 500, rather than 404. Match the
+// exact reviewed config path so routing errors and other failures remain errors.
+fn destroy_already_absent(error: &PveApiError, node: &str, vmid: u32) -> bool {
+    let PveApiError::Http {
+        status: 404 | 500,
+        detail,
+    } = error
+    else {
+        return false;
+    };
+    let body: serde_json::Value = match serde_json::from_str(detail) {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    body.get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|message| {
+            message.trim()
+                == format!(
+                    "Configuration file 'nodes/{node}/qemu-server/{vmid}.conf' does not exist"
+                )
+        })
 }
 
 #[cfg(test)]

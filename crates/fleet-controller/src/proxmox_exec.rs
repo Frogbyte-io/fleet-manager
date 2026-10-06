@@ -405,17 +405,18 @@ impl OperationExecutor for ProxmoxDispatch {
 }
 
 /// The destructive-adjacent kinds; they route to their own executor.
-pub const DESTRUCTIVE_KINDS: [&str; 6] = [
+pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
+    "proxmox.guest.destroy",
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
 ];
 
 /// The destructive-adjacent executor: snapshot, revert, snapshot-delete,
-/// clone, template conversion, and remote task cancellation. Every kind
+/// clone, template conversion, guest destruction, and remote task cancellation. Every kind
 /// arrived through the reviewed dedicated endpoint (the generic surface
 /// refuses them); the executor re-applies the trust gate and classifies
 /// idempotency before touching anything.
@@ -425,6 +426,7 @@ pub struct ProxmoxDestructiveExecutor {
     credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
     client: fleet_provider_proxmox::ProxmoxClient,
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
+    artifacts: Option<Arc<dyn fleet_application::lab::ImageArtifactPort>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -440,6 +442,7 @@ impl ProxmoxDestructiveExecutor {
             credentials,
             client,
             links: None,
+            artifacts: None,
         }
     }
 
@@ -448,6 +451,15 @@ impl ProxmoxDestructiveExecutor {
     #[must_use]
     pub fn with_task_links(mut self, links: Arc<dyn ProxmoxTaskLinkPort>) -> Self {
         self.links = Some(links);
+        self
+    }
+    /// Supplies the promoted-image guard. Destroy fails closed without it.
+    #[must_use]
+    pub fn with_image_artifacts(
+        mut self,
+        artifacts: Arc<dyn fleet_application::lab::ImageArtifactPort>,
+    ) -> Self {
+        self.artifacts = Some(artifacts);
         self
     }
 }
@@ -462,6 +474,42 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
         let kind = operation.kind.as_str();
         let outcome: Result<(), String> = match kind {
+            "proxmox.guest.destroy" => {
+                let started = std::time::Instant::now();
+                tokio::time::timeout(
+                    deadline,
+                    self.prepare_destroy(operations, operation, &payload, &request),
+                )
+                .await
+                .map_err(|_| {
+                    "the destroy stop/guard deadline expired; no delete was submitted".to_owned()
+                })??;
+                let remaining = deadline
+                    .checked_sub(started.elapsed())
+                    .ok_or("the destroy deadline expired")?;
+                let node = payload.node.clone();
+                let vmid = payload.vmid;
+                let purge = payload
+                    .params
+                    .get("purge")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                self.run_to_terminal(
+                    operations,
+                    &operation.id,
+                    &payload.account_id,
+                    &request,
+                    &payload.node,
+                    vmid,
+                    remaining,
+                    move |client, request| {
+                        Box::pin(
+                            async move { client.guest_destroy(request, &node, vmid, purge).await },
+                        )
+                    },
+                )
+                .await
+            }
             "proxmox.guest.snapshot" => {
                 let name = payload
                     .params
@@ -760,6 +808,124 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
 }
 
 impl ProxmoxDestructiveExecutor {
+    // Stop is a prerequisite task, never the terminal outcome of destroy.
+    async fn prepare_destroy(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<(), String> {
+        let artifacts = self
+            .artifacts
+            .as_ref()
+            .ok_or("the destroy image guard is not configured")?;
+        let image_vmids = artifacts
+            .promoted_template_vmids()
+            .await
+            .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+        let resources = self
+            .client
+            .list_guest_resources(request.clone())
+            .await
+            .map_err(|error| format!("the resource listing failed: {error}"))?;
+        let resource = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(payload.vmid));
+        fleet_application::lab::guard_destroy_target(
+            payload.vmid,
+            resource.is_some_and(|resource| resource.kind == "qemu-template"),
+            &image_vmids,
+        )?;
+        if let Some(resource) = resource {
+            if resource.kind != "qemu" || resource.node.as_deref() != Some(payload.node.as_str()) {
+                return Err(
+                    "the destroy target is not a QEMU guest on the reviewed node".to_owned(),
+                );
+            }
+            if resource.status.as_deref() == Some("running") {
+                if operations
+                    .cancel_requested(&operation.id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err("destroy cancelled before stop".to_owned());
+                }
+                let upid = self
+                    .client
+                    .guest_lifecycle(
+                        request.clone(),
+                        &payload.node,
+                        payload.vmid,
+                        LifecycleAction::Stop,
+                    )
+                    .await
+                    .map_err(|error| format!("the pre-destroy stop failed: {error}"))?;
+                record_task_link(
+                    self.links.as_ref(),
+                    &payload.account_id,
+                    &upid,
+                    &operation.id,
+                )
+                .await;
+                loop {
+                    if operations
+                        .cancel_requested(&operation.id)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Err(
+                            "destroy cancelled while waiting for stop; no delete was submitted"
+                                .to_owned(),
+                        );
+                    }
+                    match self
+                        .client
+                        .task_status(request.clone(), &upid)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        TaskStatus::Ok => break,
+                        TaskStatus::Running => tokio::time::sleep(POLL_INTERVAL).await,
+                        status => {
+                            return Err(format!(
+                                "the pre-destroy stop did not succeed: {status:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("destroy cancelled before delete".to_owned());
+        }
+        // Recheck cluster template state and promotion after waiting.
+        let image_vmids = artifacts
+            .promoted_template_vmids()
+            .await
+            .map_err(|detail| format!("the image artifacts are unreadable: {detail}"))?;
+        let resources = self
+            .client
+            .list_guest_resources(request.clone())
+            .await
+            .map_err(|error| format!("the post-stop resource listing failed: {error}"))?;
+        let is_template = resources.iter().any(|resource| {
+            resource.vmid == Some(payload.vmid) && resource.kind == "qemu-template"
+        });
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err("destroy cancelled before delete".to_owned());
+        }
+        fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)
+    }
+
     /// The trusted account and its resolved secret: the same explicit-trust
     /// gate the other surfaces apply.
     async fn bound(
@@ -2584,6 +2750,445 @@ impl OperationExecutor for LabDispatch {
             self.provision.execute(operations, operation).await
         } else {
             self.fallback.execute(operations, operation).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod destroy_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
+    use fleet_application::proxmox::{CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort};
+    use fleet_provider_proxmox::{
+        PveHttpMethod, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
+    };
+    use fleet_storage_sqlite::{
+        AuditSink, OperationRepository, ProxmoxAccountRepository, ProxmoxTaskLinkRepository, Store,
+    };
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    const STOP: &str = "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmstop:101:fleet@pve!test:";
+    const DESTROY: &str = "UPID:pve:0015523F:0C6DF532:6AAFE1EC:qmdestroy:101:fleet@pve!test:";
+    #[derive(Debug)]
+    struct Transport {
+        template: bool,
+        template_after_stop: std::sync::atomic::AtomicBool,
+        absent: bool,
+        task_error: bool,
+        stop_error: bool,
+        stop_running: bool,
+        seen: Mutex<Vec<String>>,
+        cancel_on_recheck: Mutex<Option<(Arc<Operations>, String)>>,
+    }
+    #[async_trait::async_trait]
+    impl PveTransport for Transport {
+        async fn execute(
+            &self,
+            request: PveHttpRequest,
+        ) -> Result<PveHttpResponse, PveTransportError> {
+            let path = request.path;
+            self.seen.lock().unwrap().push(path.clone());
+            let recheck = path == "/api2/json/cluster/resources"
+                && self
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|path| path.as_str() == "/api2/json/cluster/resources")
+                    .count()
+                    == 2;
+            if recheck {
+                let cancellation = self.cancel_on_recheck.lock().unwrap().take();
+                if let Some((operations, id)) = cancellation {
+                    operations
+                        .cancel(&Policy(false), "anonymous-lan-admin", &id)
+                        .await
+                        .unwrap();
+                }
+            }
+            let mut status = 200;
+            let body = if path == "/api2/json/version" {
+                json!({"data":{"version":"9.0.3"}})
+            } else if path == "/api2/json/cluster/resources" {
+                if self.absent {
+                    json!({"data":[]})
+                } else {
+                    json!({"data":[{"id":"qemu/101","type":"qemu","vmid":101,"node":"pve","status":"running","template":u8::from(self.template || (self.template_after_stop.load(std::sync::atomic::Ordering::Relaxed) && self.seen.lock().unwrap().iter().any(|path| path.ends_with("/status/stop"))))}]})
+                }
+            } else if path.ends_with("/status/stop") {
+                assert_eq!(request.method, PveHttpMethod::Post);
+                json!({"data":STOP})
+            } else if path.ends_with("/config") {
+                if self.absent {
+                    status = 500;
+                    json!({"message":"Configuration file 'nodes/pve/qemu-server/101.conf' does not exist\n"})
+                } else {
+                    json!({"data":{"template":0}})
+                }
+            } else if request.method == PveHttpMethod::Delete {
+                assert_eq!(path, "/api2/json/nodes/pve/qemu/101?purge=0");
+                json!({"data":DESTROY})
+            } else if path.contains("/tasks/") {
+                let stop = path.contains("qmstop");
+                if stop && self.stop_running {
+                    json!({"data":{"status":"running"}})
+                } else {
+                    json!({"data":{"status":"stopped","exitstatus":if (stop && self.stop_error) || (!stop && self.task_error) {"ERROR: disk locked"} else {"OK"}}})
+                }
+            } else {
+                panic!("unexpected path {path}")
+            };
+            Ok(PveHttpResponse {
+                status,
+                body: body.to_string().into_bytes(),
+            })
+        }
+        async fn execute_with_body(
+            &self,
+            request: PveHttpRequest,
+            _: Vec<u8>,
+        ) -> Result<PveHttpResponse, PveTransportError> {
+            self.execute(request).await
+        }
+    }
+    #[derive(Debug)]
+    struct Secret;
+    #[async_trait::async_trait]
+    impl ProxmoxCredentialStore for Secret {
+        async fn load(&self, _: &str) -> Result<Option<String>, CredentialStoreError> {
+            Ok(Some("fixture-secret".into()))
+        }
+        async fn store(&self, _: &str, _: &str) -> Result<(), CredentialStoreError> {
+            unreachable!()
+        }
+        async fn clear(&self, _: &str) -> Result<(), CredentialStoreError> {
+            unreachable!()
+        }
+    }
+    #[derive(Debug)]
+    struct Artifacts(bool);
+    #[async_trait::async_trait]
+    impl fleet_application::lab::ImageArtifactPort for Artifacts {
+        async fn template_vmid(&self, _: &str) -> Result<Option<u32>, String> {
+            unreachable!()
+        }
+        async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
+            Ok(if self.0 { vec![101] } else { vec![] })
+        }
+    }
+    #[derive(Debug)]
+    struct Policy(bool);
+    impl Authorizer for Policy {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if self.0 && request.action == Permission::ProxmoxDestructive {
+                Decision::deny(ReasonId::UnknownAction)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    struct Harness {
+        _dir: tempfile::TempDir,
+        operations: Arc<Operations>,
+        account: String,
+        executor: ProxmoxDestructiveExecutor,
+        links: Arc<ProxmoxTaskLinkRepository>,
+        transport: Arc<Transport>,
+    }
+    impl Harness {
+        async fn new(
+            template: bool,
+            promoted: bool,
+            absent: bool,
+            task_error: bool,
+            stop_error: bool,
+            stop_running: bool,
+        ) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+            let pool = store.pool().clone();
+            let accounts = Arc::new(ProxmoxAccountRepository::new(pool.clone()));
+            let account = accounts
+                .create(&NewProxmoxAccount {
+                    name: "fixture".into(),
+                    host: "pve.test".into(),
+                    port: None,
+                    token_id: "fleet@pve!test".into(),
+                })
+                .await
+                .unwrap();
+            accounts
+                .set_fingerprint(&account.id, Some("fixture-pin".into()))
+                .await
+                .unwrap();
+            let operations = Arc::new(Operations::new(
+                Arc::new(OperationRepository::new(pool.clone())),
+                Arc::new(AuditSink::new(pool.clone())),
+            ));
+            let links = Arc::new(ProxmoxTaskLinkRepository::new(pool));
+            let transport = Arc::new(Transport {
+                template,
+                template_after_stop: std::sync::atomic::AtomicBool::new(false),
+                absent,
+                task_error,
+                stop_error,
+                stop_running,
+                seen: Mutex::new(vec![]),
+                cancel_on_recheck: Mutex::new(None),
+            });
+            let executor = ProxmoxDestructiveExecutor::new(
+                accounts,
+                Arc::new(Secret),
+                fleet_provider_proxmox::ProxmoxClient::new(transport.clone()),
+            )
+            .with_image_artifacts(Arc::new(Artifacts(promoted)))
+            .with_task_links(links.clone());
+            Self {
+                _dir: dir,
+                operations,
+                account: account.id,
+                executor,
+                links,
+                transport,
+            }
+        }
+        fn app(&self, deny: bool) -> axum::Router {
+            let mut state = fleet_api::operations::ApiState::for_document();
+            state.operations = self.operations.clone();
+            state.authorizer = Arc::new(Policy(deny));
+            fleet_api::router(Arc::new(state)).layer(axum::Extension(fleet_api::ActingPrincipal {
+                id: "anonymous-lan-admin".into(),
+            }))
+        }
+        async fn post(&self, suffix: &str, body: Value, deny: bool) -> (u16, Value) {
+            let request = Request::post(format!(
+                "/api/v1/proxmox/accounts/{}/guests/101/destroy/{suffix}",
+                self.account
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+            let response = self.app(deny).oneshot(request).await.unwrap();
+            let status = response.status().as_u16();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        async fn create_operation(&self, timeout: u64) -> Operation {
+            let payload = json!({"accountId":self.account,"node":"pve","vmid":101,"timeoutSeconds":timeout,"params":{"purge":false}}).to_string();
+            let new = fleet_application::operation::NewOperation {
+                kind: "proxmox.guest.destroy".into(),
+                payload_json: Some(payload.clone()),
+                review_token: Some(fleet_application::operation::review_token_for(
+                    "proxmox.guest.destroy",
+                    &payload,
+                )),
+                idempotency_key: None,
+                deadline_at: None,
+                correlation_id: None,
+            };
+            self.operations
+                .create(&Policy(false), "anonymous-lan-admin", &new)
+                .await
+                .unwrap()
+        }
+        async fn run(&self, timeout: u64) -> Operation {
+            let operation = self.create_operation(timeout).await;
+            self.operations
+                .claim_only_execute(&self.executor, &operation.id, "destroy-test")
+                .await
+                .unwrap();
+            self.operations
+                .get(&Policy(false), "anonymous-lan-admin", &operation.id)
+                .await
+                .unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn destroy_review_gate_permission_and_changed_params() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let generic = Request::post("/api/v1/operations")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"kind":"proxmox.guest.destroy","payloadJson":"{}"}).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            h.app(false)
+                .oneshot(generic)
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            400
+        );
+        let body = json!({"node":"pve","params":{"purge":false}});
+        assert_eq!(h.post("review", body.clone(), true).await.0, 403);
+        assert_eq!(
+            h.post(
+                "review",
+                json!({"node":"pve","params":{"skiplock":true}}),
+                false
+            )
+            .await
+            .0,
+            400
+        );
+        let (status, review) = h.post("review", body, false).await;
+        assert_eq!(status, 200);
+        let run = json!({"node":"pve","params":{"purge":false},"timeoutSeconds":300,"reviewToken":review["data"]["reviewToken"]});
+        let mut bad = run.clone();
+        bad["reviewToken"] = json!("wrong");
+        assert_eq!(h.post("run", bad, false).await.0, 400);
+        let mut changed = run.clone();
+        changed["params"]["purge"] = json!(true);
+        assert_eq!(h.post("run", changed, false).await.0, 400);
+        assert_eq!(h.post("run", run.clone(), true).await.0, 403);
+        let (status, accepted) = h.post("run", run, false).await;
+        assert_eq!(status, 202);
+        assert!(h.transport.seen.lock().unwrap().is_empty());
+        let id = accepted["data"]["id"].as_str().unwrap();
+        h.operations
+            .claim_only_execute(&h.executor, id, "api-test")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.operations
+                .get(&Policy(false), "anonymous-lan-admin", id)
+                .await
+                .unwrap()
+                .state,
+            "succeeded"
+        );
+    }
+    #[tokio::test]
+    async fn destroy_stops_first_and_links_both_tasks() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let operation = h.run(30).await;
+        assert_eq!(operation.state, "succeeded");
+        {
+            let seen = h.transport.seen.lock().unwrap();
+            assert!(
+                seen.iter()
+                    .position(|p| p.ends_with("/status/stop"))
+                    .unwrap()
+                    < seen.iter().position(|p| p.contains("?purge=")).unwrap()
+            );
+        }
+        let links = h
+            .links
+            .operations_for(&h.account, &[STOP.into(), DESTROY.into()])
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links.values().all(|id| id == &operation.id));
+    }
+    #[tokio::test]
+    async fn destroy_refuses_templates_and_promoted_artifacts_before_stop() {
+        for (template, promoted) in [(true, false), (false, true)] {
+            let h = Harness::new(template, promoted, false, false, false, false).await;
+            assert_eq!(h.run(30).await.state, "failed");
+            assert!(
+                !h.transport
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.ends_with("/status/stop") || p.contains("?purge="))
+            );
+        }
+    }
+    #[tokio::test]
+    async fn destroy_absence_succeeds_and_task_error_fails() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        assert_eq!(h.run(30).await.state, "succeeded");
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("?purge="))
+        );
+        let h = Harness::new(false, false, false, true, false, false).await;
+        assert_eq!(h.run(30).await.state, "failed");
+    }
+    #[tokio::test]
+    async fn destroy_review_accepts_omitted_options() {
+        let h = Harness::new(false, false, true, false, false, false).await;
+        let (status, review) = h.post("review", json!({"node":"pve"}), false).await;
+        assert_eq!(status, 200);
+        let (status, accepted) = h.post("run", json!({"node":"pve","reviewToken":review["data"]["reviewToken"],"timeoutSeconds":300}), false).await;
+        assert_eq!(status, 202);
+        let id = accepted["data"]["id"].as_str().unwrap();
+        h.operations
+            .claim_only_execute(&h.executor, id, "omitted-options-test")
+            .await
+            .unwrap();
+        assert_eq!(
+            h.operations
+                .get(&Policy(false), "anonymous-lan-admin", id)
+                .await
+                .unwrap()
+                .state,
+            "succeeded"
+        );
+    }
+    #[tokio::test]
+    async fn destroy_rechecks_cluster_template_state_after_stop() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        h.transport
+            .template_after_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let operation = h.run(30).await;
+        assert_eq!(operation.state, "failed");
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("?purge="))
+        );
+    }
+    #[tokio::test]
+    async fn destroy_honors_cancellation_during_post_stop_lookup() {
+        let h = Harness::new(false, false, false, false, false, false).await;
+        let operation = h.create_operation(30).await;
+        *h.transport.cancel_on_recheck.lock().unwrap() =
+            Some((h.operations.clone(), operation.id.clone()));
+        h.operations
+            .claim_only_execute(&h.executor, &operation.id, "cancel-test")
+            .await
+            .unwrap();
+        assert!(
+            !h.transport
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("?purge=")),
+            "a cancellation during the final resource lookup must prevent DELETE"
+        );
+        assert!(h.operations.cancel_requested(&operation.id).await.unwrap());
+    }
+    #[tokio::test]
+    async fn destroy_never_deletes_after_failed_or_timed_out_stop() {
+        for (error, running) in [(true, false), (false, true)] {
+            let h = Harness::new(false, false, false, false, error, running).await;
+            assert_eq!(h.run(1).await.state, "failed");
+            assert!(
+                !h.transport
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.contains("?purge="))
+            );
         }
     }
 }

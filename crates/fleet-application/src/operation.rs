@@ -45,7 +45,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 58] = [
+pub const CREATABLE_KINDS: [&str; 59] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -99,6 +99,7 @@ pub const CREATABLE_KINDS: [&str; 58] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
+    "proxmox.guest.destroy",
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
@@ -131,6 +132,7 @@ fn catalog_scoped_kind_permission(kind: &str) -> Option<Permission> {
         "proxmox.guest.snapshot"
         | "proxmox.guest.snapshot-revert"
         | "proxmox.guest.snapshot-delete"
+        | "proxmox.guest.destroy"
         | "proxmox.guest.clone"
         | "proxmox.guest.template"
         | "proxmox.task-cancel" => Some(Permission::ProxmoxDestructive),
@@ -193,10 +195,11 @@ pub const MAX_PAYLOAD_JSON: usize = 128 * 1024;
 
 /// The destructive-adjacent kinds: their creation requires a review token
 /// computed over exactly the payload being created.
-pub const DESTRUCTIVE_KINDS: [&str; 6] = [
+pub const DESTRUCTIVE_KINDS: [&str; 7] = [
     "proxmox.guest.snapshot",
     "proxmox.guest.snapshot-revert",
     "proxmox.guest.snapshot-delete",
+    "proxmox.guest.destroy",
     "proxmox.guest.clone",
     "proxmox.guest.template",
     "proxmox.task-cancel",
