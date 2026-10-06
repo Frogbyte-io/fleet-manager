@@ -92,6 +92,7 @@ pub struct ReadyExecutor {
     inner: Arc<dyn OperationExecutor>,
     limiter: Arc<ExecutionLimiter>,
     work_dir: std::path::PathBuf,
+    lab_readiness: Option<(i64, String, String)>,
 }
 
 impl ReadyExecutor {
@@ -113,7 +114,57 @@ impl ReadyExecutor {
             inner,
             limiter,
             work_dir,
+            lab_readiness: None,
         }
+    }
+    /// Bounds Lab checkout observation and checks both parent and workflow
+    /// cancellation before starting and while waiting for the scan.
+    #[must_use]
+    pub fn with_lab_readiness(mut self, deadline: i64, parent: String, workflow: String) -> Self {
+        self.lab_readiness = Some((deadline, parent, workflow));
+        self
+    }
+
+    async fn wait_for_discovery<T>(
+        &self,
+        mut scan: tokio::task::JoinHandle<T>,
+    ) -> Result<T, String> {
+        loop {
+            tokio::select! {
+                result = &mut scan => return result.map_err(|_| "the discovery thread failed".to_owned()),
+                () = tokio::time::sleep(Duration::from_millis(50)), if self.lab_readiness.is_some() => {
+                    self.check_lab_readiness().await?;
+                }
+            }
+        }
+    }
+
+    async fn check_lab_readiness(&self) -> Result<Duration, String> {
+        let Some((deadline, parent, workflow)) = &self.lab_readiness else {
+            return Ok(fleet_provider_ssh::DISCOVERY_DEADLINE);
+        };
+        let millis = deadline.saturating_sub(fleet_core::SystemClock::now_unix_millis());
+        if millis <= 0 {
+            return Err("Lab readiness deadline expired".to_owned());
+        }
+        for id in [parent, workflow] {
+            let operation = self
+                .operations
+                .get(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    id,
+                )
+                .await
+                .map_err(|_| "Lab parent unavailable")?;
+            if operation.cancel_requested
+                || !matches!(operation.state.as_str(), "pending" | "running")
+            {
+                return Err("Lab readiness was stopped".to_owned());
+            }
+        }
+        Ok(Duration::from_millis(u64::try_from(millis).unwrap_or(0))
+            .min(fleet_provider_ssh::DISCOVERY_DEADLINE))
     }
 }
 
@@ -284,22 +335,18 @@ impl ReadyExecutor {
         &self,
         payload: &ReadyPayload,
     ) -> Result<Vec<DiscoveredCheckout>, String> {
+        self.check_lab_readiness().await?;
         let spec = self
             .resolve(&payload.machine_id, &payload.endpoint_id, &payload.auth)
             .await?;
         let provider = fleet_provider_ssh::SshProvider::new(self.work_dir.clone())
             .map_err(|error| error.to_string())?;
         let limiter = self.limiter.clone();
-        let discovery = tokio::task::spawn_blocking(move || {
-            fleet_provider_ssh::discover(
-                &provider,
-                &limiter,
-                &spec,
-                fleet_provider_ssh::DISCOVERY_DEADLINE,
-            )
-        })
-        .await
-        .map_err(|join_error| format!("the discovery thread failed: {join_error}"))?;
+        let budget = self.check_lab_readiness().await?;
+        let scan = tokio::task::spawn_blocking(move || {
+            fleet_provider_ssh::discover(&provider, &limiter, &spec, budget)
+        });
+        let discovery = self.wait_for_discovery(scan).await?;
         let checkouts = discovery.map_err(|error| error.to_string())?;
         Ok(checkouts
             .into_iter()
@@ -667,5 +714,113 @@ impl OperationExecutor for ReadyDispatch {
             "ready.workflow" => self.ready.execute(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod lab_discovery_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Noop;
+    #[async_trait::async_trait]
+    impl OperationExecutor for Noop {
+        async fn execute(&self, _: &Operations, _: &Operation) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_remaining_budget_and_stops_for_either_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+        ));
+        for cancel_workflow in [false, true] {
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                ids.push(
+                    operations
+                        .create(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &fleet_application::operation::NewOperation {
+                                kind: "noop".to_owned(),
+                                idempotency_key: None,
+                                deadline_at: None,
+                                correlation_id: None,
+                                payload_json: None,
+                                review_token: None,
+                            },
+                        )
+                        .await
+                        .unwrap()
+                        .id,
+                );
+            }
+            let executor = ReadyExecutor::new(
+                Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                )),
+                operations.clone(),
+                Arc::new(Noop),
+                dir.path().join("ssh"),
+                ExecutionLimiter::new(1),
+            )
+            .with_lab_readiness(
+                fleet_core::SystemClock::now_unix_millis() + 2_000,
+                ids[0].clone(),
+                ids[1].clone(),
+            );
+            let budget = executor.check_lab_readiness().await.unwrap();
+            assert!(budget <= Duration::from_secs(2));
+            assert!(budget > Duration::ZERO);
+            let release = Arc::new(tokio::sync::Notify::new());
+            let worker_release = release.clone();
+            let scan = tokio::spawn(async move { worker_release.notified().await });
+            let cancel_id = ids[usize::from(cancel_workflow)].clone();
+            let cancel_operations = operations.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                cancel_operations
+                    .cancel(
+                        &fleet_auth::LanAllowAllAuthorizer,
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &cancel_id,
+                    )
+                    .await
+                    .unwrap();
+            });
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), executor.wait_for_discovery(scan))
+                    .await
+                    .unwrap();
+            assert!(result.unwrap_err().contains("stopped"));
+            release.notify_one();
+            assert!(executor.check_lab_readiness().await.is_err());
+        }
+        let expired = ReadyExecutor::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            operations,
+            Arc::new(Noop),
+            dir.path().join("ssh"),
+            ExecutionLimiter::new(1),
+        )
+        .with_lab_readiness(0, "absent".to_owned(), "absent".to_owned());
+        assert!(
+            expired
+                .check_lab_readiness()
+                .await
+                .unwrap_err()
+                .contains("expired")
+        );
     }
 }

@@ -95,6 +95,14 @@ pub struct LabTemplateDto {
     pub readiness_probe: String,
     /// The SSH probe command, when pinned.
     pub readiness_command: Option<String>,
+    /// The SSH account preconfigured in the image.
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    pub ssh_port: u16,
+    /// Host-key trust: tofu or pinned.
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint for pinned trust.
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds, beginning at ready.
@@ -122,6 +130,10 @@ impl From<LabTemplate> for LabTemplateDto {
             bootstrap_project_id: template.content.bootstrap_project_id,
             readiness_probe: template.content.readiness_probe.id().to_owned(),
             readiness_command: template.content.readiness_command,
+            ssh_user: template.content.ssh_user,
+            ssh_port: template.content.ssh_port,
+            ssh_trust_mode: template.content.ssh_trust_mode,
+            ssh_fingerprint: template.content.ssh_fingerprint,
             readiness_deadline_seconds: template.content.readiness_deadline_seconds,
             ttl_seconds: template.content.ttl_seconds,
             cleanup: template.content.cleanup.id().to_owned(),
@@ -174,6 +186,14 @@ pub struct LabTemplateContentDto {
     pub readiness_probe: String,
     /// The SSH probe command, when pinned.
     pub readiness_command: Option<String>,
+    /// The SSH account preconfigured in the image.
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    pub ssh_port: u16,
+    /// Host-key trust: tofu or pinned.
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint for pinned trust.
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds.
@@ -198,6 +218,10 @@ impl From<LabTemplateVersion> for LabTemplateVersionDto {
                 bootstrap_project_id: version.content.bootstrap_project_id,
                 readiness_probe: version.content.readiness_probe.id().to_owned(),
                 readiness_command: version.content.readiness_command,
+                ssh_user: version.content.ssh_user,
+                ssh_port: version.content.ssh_port,
+                ssh_trust_mode: version.content.ssh_trust_mode,
+                ssh_fingerprint: version.content.ssh_fingerprint,
                 readiness_deadline_seconds: version.content.readiness_deadline_seconds,
                 ttl_seconds: version.content.ttl_seconds,
                 cleanup: version.content.cleanup.id().to_owned(),
@@ -274,12 +298,34 @@ pub struct SaveLabTemplateRequest {
     pub readiness_probe: String,
     /// The SSH probe command, when pinned.
     pub readiness_command: Option<String>,
+    /// The SSH account preconfigured in the image.
+    #[serde(default = "default_lab_ssh_user")]
+    pub ssh_user: String,
+    /// The guest SSH listener port.
+    #[serde(default = "default_lab_ssh_port")]
+    pub ssh_port: u16,
+    /// Host-key trust: tofu or pinned.
+    #[serde(default = "default_lab_ssh_trust_mode")]
+    pub ssh_trust_mode: String,
+    /// Public OpenSSH SHA256 fingerprint for pinned trust.
+    #[serde(default)]
+    pub ssh_fingerprint: Option<String>,
     /// The readiness deadline in seconds.
     pub readiness_deadline_seconds: u32,
     /// The default TTL in seconds.
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+}
+
+fn default_lab_ssh_user() -> String {
+    fleet_core::LabTemplateContent::default().ssh_user
+}
+fn default_lab_ssh_port() -> u16 {
+    fleet_core::LabTemplateContent::default().ssh_port
+}
+fn default_lab_ssh_trust_mode() -> String {
+    fleet_core::LabTemplateContent::default().ssh_trust_mode
 }
 
 impl SaveLabTemplateRequest {
@@ -301,6 +347,10 @@ impl SaveLabTemplateRequest {
             bootstrap_project_id: self.bootstrap_project_id,
             readiness_probe: probe,
             readiness_command: self.readiness_command,
+            ssh_user: self.ssh_user,
+            ssh_port: self.ssh_port,
+            ssh_trust_mode: self.ssh_trust_mode,
+            ssh_fingerprint: self.ssh_fingerprint,
             readiness_deadline_seconds: self.readiness_deadline_seconds,
             ttl_seconds: self.ttl_seconds,
             cleanup,
@@ -1053,4 +1103,55 @@ pub async fn sweep_lab_leases(
         },
         items,
     }))
+}
+
+#[cfg(test)]
+mod template_mapping_tests {
+    use super::*;
+    use fleet_core::IdGenerator as _;
+
+    #[test]
+    fn template_ssh_settings_default_and_round_trip() {
+        let base = serde_json::json!({
+            "name":"lab", "description":"", "imageVersionId":"image-1", "cores":2,
+            "memoryMib":2048, "diskGib":20, "readinessProbe":"guest_agent",
+            "readinessDeadlineSeconds":120, "ttlSeconds":3600, "cleanup":"destroy"
+        });
+        let request: SaveLabTemplateRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(
+            (
+                request.ssh_user.as_str(),
+                request.ssh_port,
+                request.ssh_trust_mode.as_str()
+            ),
+            ("root", 22, "tofu")
+        );
+        let mut configured = base;
+        configured["sshUser"] = serde_json::json!("developer");
+        configured["sshPort"] = serde_json::json!(2222);
+        configured["sshTrustMode"] = serde_json::json!("pinned");
+        configured["sshFingerprint"] =
+            serde_json::json!("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let request: SaveLabTemplateRequest = serde_json::from_value(configured).unwrap();
+        let content = request
+            .into_content(fleet_core::UuidV7Generator.next_correlation_id())
+            .unwrap();
+        let dto = LabTemplateVersionDto::from(LabTemplateVersion {
+            id: "version".to_owned(),
+            template_id: "template".to_owned(),
+            name: "lab".to_owned(),
+            content,
+            image_digest: "digest".to_owned(),
+            published_by: "tester".to_owned(),
+            published_at: 0,
+        })
+        .content;
+        assert_eq!(dto.ssh_user, "developer");
+        assert_eq!(dto.ssh_port, 2222);
+        assert_eq!(dto.ssh_trust_mode, "pinned");
+        assert_eq!(
+            dto.ssh_fingerprint.as_deref(),
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        );
+    }
 }

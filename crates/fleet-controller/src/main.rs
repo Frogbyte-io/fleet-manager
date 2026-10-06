@@ -288,16 +288,29 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                         store.pool().clone(),
                     ));
-                std::sync::Arc::new(fleet_controller::ready::ReadyDispatch::new(
+                let fallback = std::sync::Arc::new(fleet_controller::ready::ReadyDispatch::new(
                     with_mise.clone(),
                     std::sync::Arc::new(fleet_controller::ready::ReadyExecutor::new(
-                        machines,
+                        machines.clone(),
                         worker_operations.clone(),
                         with_mise.clone(),
                         config.data_dir.join("ssh"),
                         limiter.clone(),
                     )),
-                ))
+                ));
+                std::sync::Arc::new(
+                    fleet_controller::proxmox_exec::LabReadinessExecutor::new(
+                        fallback,
+                        with_mise.clone(),
+                        machines,
+                        worker_operations.clone(),
+                        config.data_dir.join("ssh"),
+                        limiter.clone(),
+                    )
+                    .with_provisions(std::sync::Arc::new(
+                        fleet_storage_sqlite::LabRepository::new(store.pool().clone()),
+                    )),
+                )
             };
             // The apply executor composes the FM-402 workflow over the
             // same operation queue and chain.
@@ -455,6 +468,31 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                                 store.pool().clone(),
                             )),
                             fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                        )
+                        .with_readiness(
+                            std::sync::Arc::new(
+                                fleet_controller::proxmox_exec::ProvisionReadiness::new(
+                                    std::sync::Arc::new(
+                                        fleet_storage_sqlite::MachineRepository::new(
+                                            store.pool().clone(),
+                                        ),
+                                    ),
+                                    std::sync::Arc::new(
+                                        fleet_storage_sqlite::ProjectRepository::new(
+                                            store.pool().clone(),
+                                        ),
+                                    ),
+                                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                        store.pool().clone(),
+                                    )),
+                                    with_ready.clone(),
+                                    worker_operations.clone(),
+                                    config.data_dir.join("ssh"),
+                                ),
+                            ),
+                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                store.pool().clone(),
+                            )),
                         )
                         .with_task_links(std::sync::Arc::new(
                             fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(

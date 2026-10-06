@@ -1242,6 +1242,20 @@ export interface LabTemplateContentDto {
   /** The readiness probe. */
   readinessProbe: string;
   /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
+  /**
      * The default TTL in seconds.
      * @minimum 0
      */
@@ -1301,6 +1315,20 @@ export interface LabTemplateDto {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
   /**
      * The default TTL in seconds, beginning at ready.
      * @minimum 0
@@ -2190,6 +2218,20 @@ export type PageLabTemplateDtoItemsItem = {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
   /**
      * The default TTL in seconds, beginning at ready.
      * @minimum 0
@@ -3734,6 +3776,20 @@ export type ResourceLabTemplateDtoData = {
   /** The readiness probe. */
   readinessProbe: string;
   /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser: string;
+  /**
      * The default TTL in seconds, beginning at ready.
      * @minimum 0
      */
@@ -4763,6 +4819,20 @@ export interface SaveLabTemplateRequest {
   readinessDeadlineSeconds: number;
   /** The readiness probe. */
   readinessProbe: string;
+  /**
+     * Public OpenSSH SHA256 fingerprint for pinned trust.
+     * @nullable
+     */
+  sshFingerprint?: string | null;
+  /**
+     * The guest SSH listener port.
+     * @minimum 0
+     */
+  sshPort?: number;
+  /** Host-key trust: tofu or pinned. */
+  sshTrustMode?: string;
+  /** The SSH account preconfigured in the image. */
+  sshUser?: string;
   /**
      * The default TTL in seconds.
      * @minimum 0
