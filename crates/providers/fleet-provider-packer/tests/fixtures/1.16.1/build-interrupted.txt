@@ -1,0 +1,4 @@
+1791542400,,ui,error,Cancelling build after receiving terminated
+1791542407,,ui,error,Build 'proxmox-clone.debian-12' errored after 6 minutes 46 seconds: Could not retrieve VM: Get "https://192.0.2.10:8006/api2/json/cluster/resources?type=vm": dial tcp 192.0.2.10:8006: connect: connection timed out
+1791542407,,ui,say,\n==> Wait completed after 6 minutes 46 seconds
+1791542407,,ui,say,Cleanly cancelled builds after being interrupted.
