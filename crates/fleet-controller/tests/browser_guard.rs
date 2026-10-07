@@ -306,6 +306,18 @@ async fn responses_without_the_placeholder_keep_the_static_policy() {
             "{uri}"
         );
     }
+
+    // The placeholder-less shell is passed through byte for byte, with the
+    // static service's length and validators intact.
+    let (parts, body) = get_shell(router, "/").await;
+    assert_eq!(body, "<html>fleet</html>");
+    assert_eq!(
+        parts.headers.get("content-length").unwrap(),
+        &body.len().to_string()
+    );
+    assert!(parts.headers.get("cache-control").is_none());
+    assert!(parts.headers.get("etag").is_some());
+    assert!(parts.headers.get("last-modified").is_some());
 }
 
 #[tokio::test]
