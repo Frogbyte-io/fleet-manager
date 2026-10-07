@@ -5,11 +5,17 @@ import type { OperationDto } from '@frogbyte-io/fleet-api-client'
 import {
   analyze,
   applyFields,
+  buildRunning,
+  buildSeconds,
+  buildTone,
   latestBuilds,
+  latestSucceeded,
   lineage,
   metadataFrom,
   pinState,
+  promotionBuild,
   recipeErrors,
+  shortDigest,
   templateOfVersion,
   versionNumbers,
   type StructuredFields,
@@ -277,5 +283,47 @@ describe('pins and builds', () => {
     // Attributed through this tab, and newer than the result-attributed build.
     expect(builds.get('r1@bbbb')?.id).toBe('by-tab')
     expect(builds.size).toBe(2)
+  })
+})
+
+describe('build records', () => {
+  const rec = (id: string, startedAt: number, outcome: string, endedAt: number | null = startedAt + 60_000, template = outcome === 'succeeded') =>
+    ({ id, startedAt, endedAt, outcome, template: template ? { name: 'tpl', node: 'pve1', vmid: 9000 } : null })
+
+  it('maps outcomes onto the status vocabulary and leaves unknown words neutral', () => {
+    expect(buildTone('running')).toBe('info')
+    expect(buildTone('succeeded')).toBe('ok')
+    expect(buildTone('failed')).toBe('err')
+    expect(buildTone('cancelled')).toBe('muted')
+    expect(buildTone('something_new')).toBe('faint')
+  })
+
+  it('reports a duration only once the build has ended', () => {
+    expect(buildSeconds({ startedAt: 1_000, endedAt: 91_400 })).toBe(90)
+    expect(buildSeconds({ startedAt: 1_000, endedAt: null })).toBeNull()
+    expect(buildRunning({ outcome: 'running', endedAt: null })).toBe(true)
+    expect(buildRunning({ outcome: 'failed', endedAt: 5 })).toBe(false)
+  })
+
+  it('truncates digests but keeps the algorithm prefix', () => {
+    expect(shortDigest(`sha256:${'ab'.repeat(32)}`)).toBe('sha256:abababababab…')
+    expect(shortDigest('cd'.repeat(32), 8)).toBe('cdcdcdcd…')
+    expect(shortDigest('sha256:short')).toBe('sha256:short')
+  })
+
+  it('finds the build record a promotion stood on', () => {
+    const builds = [rec('b3', 300_000, 'running', null), rec('b2', 200_000, 'succeeded'), rec('b1', 100_000, 'failed')]
+    expect(promotionBuild({ promotedAt: 290_000 }, builds)).toBe('b2')
+    // Only records started before the promotion count; here that is a failure.
+    expect(promotionBuild({ promotedAt: 150_000 }, builds)).toBeNull()
+    expect(promotionBuild({ promotedAt: null }, builds)).toBeNull()
+    // The newest record before the promotion is not a finished success: unknown.
+    expect(promotionBuild({ promotedAt: 250_000 }, [rec('b2', 200_000, 'succeeded', 260_000)])).toBeNull()
+    expect(promotionBuild({ promotedAt: 250_000 }, [])).toBeNull()
+  })
+
+  it('names the newest succeeded build', () => {
+    expect(latestSucceeded([rec('b1', 1, 'succeeded'), rec('b3', 3, 'failed'), rec('b2', 2, 'succeeded')])).toBe('b2')
+    expect(latestSucceeded([rec('b1', 1, 'failed')])).toBeNull()
   })
 })

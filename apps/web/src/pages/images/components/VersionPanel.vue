@@ -15,7 +15,8 @@ import { errorMessage, isTerminal, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
 import { buildCommand, buildResult, promoteCommand } from '../images'
-import { BUILD_OPERATIONS_KEY, trackBuild, versionsKey } from '../useImages'
+import { BUILD_OPERATIONS_KEY, BUILD_RECORDS_KEY, trackBuild, versionsKey } from '../useImages'
+import BuildHistory from './BuildHistory.vue'
 
 // One published version: build it through the operator-installed Packer
 // CLI, follow the build, and promote it on the evidence of a successful
@@ -77,7 +78,10 @@ async function startBuild() {
     }), [202])
     trackBuild(operation.id, props.version.id)
     startedId.value = operation.id
-    await queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY }),
+      queryClient.invalidateQueries({ queryKey: BUILD_RECORDS_KEY }),
+    ])
   }
   catch (caught) {
     error.value = errorMessage(caught)
@@ -89,6 +93,7 @@ async function startBuild() {
 
 function onBuildSettled() {
   void queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY })
+  void queryClient.invalidateQueries({ queryKey: BUILD_RECORDS_KEY })
 }
 
 // The operation followed on screen: this tab's latest start, else the
@@ -269,6 +274,8 @@ const structured = computed(() => props.version.structured ?? null)
         missing="fleetctl images build always sends the 4h deadline and no secret variables; this build has to start here."
       />
     </section>
+
+    <BuildHistory :version="version" />
 
     <section class="space-y-2">
       <h4 class="fc-kicker border-b border-fc-line pb-1">
