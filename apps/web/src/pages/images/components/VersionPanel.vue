@@ -160,7 +160,7 @@ const structured = computed(() => props.version.structured ?? null)
     >
       <dt class="text-fc-faint">
         node / pool
-      </dt><dd>{{ structured.node }} · {{ structured.firstDiskStoragePool ?? 'source storage' }}</dd>
+      </dt><dd>{{ structured.node }} · {{ structured.firstDiskStoragePool ?? (structured.source === 'clone' ? 'source storage' : '—') }}</dd>
       <dt class="text-fc-faint">
         {{ structured.source === 'clone' ? 'clone from' : 'iso' }}
       </dt><dd>{{ structured.source === 'clone' ? structured.cloneVm ?? '—' : structured.bootIsoFile ?? '—' }}</dd>
