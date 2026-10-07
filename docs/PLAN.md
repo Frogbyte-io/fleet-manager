@@ -290,6 +290,8 @@ M6 can start after M2 and the M1 operation/security kernel, but Lab waits for M3
 
 Outcome: humans and agents can obtain, use, and release disposable Linux development/test environments without leaked VMs.
 
+Operator runbook: [`docs/operations/lab.md`](operations/lab.md).
+
 - Packer image-build provider using its documented CLI, with version probing, bounded/redacted output, contract fixtures, and a license/distribution review before Fleet bundles any Packer binary.
 - Image recipes stored as modern `.pkr.json` plus versioned provisioning assets and Fleet metadata. The web app provides a structured editor for the supported Proxmox subset and an advanced raw-JSON editor that preserves unknown fields.
 - Editable drafts and immutable recipe/image versions. Editing any existing recipe creates a new draft/version; a successful build never replaces an existing image version or becomes the default automatically.

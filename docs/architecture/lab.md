@@ -2,6 +2,8 @@
 
 Status: proposed
 
+To enable and run Fleet Lab, see the [operator runbook](../operations/lab.md).
+
 ## Responsibility boundary
 
 Fleet Lab owns image-recipe/version lifecycle, infrastructure selection, provisioning, readiness, project/tool setup, resource leasing, command dispatch, expiry, and cleanup. Proxmox runs VMs, while Packer is the first external image builder. External browser/desktop/hardware test frameworks perform tests.
