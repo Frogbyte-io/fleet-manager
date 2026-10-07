@@ -31,8 +31,14 @@ pub const CLI_NAME: &str = "packer";
 pub const MIN_CLI_MAJOR: u64 = 1;
 /// The minimum supported CLI minor version.
 pub const MIN_CLI_MINOR: u16 = 15;
-/// The maximum response/output bound per stream.
+/// The bound on the head of each output stream. A stoppable run keeps, past
+/// it, the last [`OUTPUT_TAIL_BYTES`] joined by a short truncation line, so
+/// one stream is at most [`MAX_STREAM_BYTES`]; a plain run keeps the head
+/// only.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// The most one stream of a stoppable run can hold: the head, the
+/// truncation line, and the tail.
+pub const MAX_STREAM_BYTES: usize = MAX_OUTPUT_BYTES + 64 + OUTPUT_TAIL_BYTES;
 
 /// One CLI invocation: an argument array, never a shell string.
 #[derive(Clone, Debug)]
@@ -68,6 +74,70 @@ pub trait PackerTransport: fmt::Debug + Send + Sync {
     /// command that runs and fails by its own contract is a
     /// [`CliOutcome`], not an error.
     async fn run(&self, command: &PackerCommand, deadline: Duration) -> Result<CliOutcome, String>;
+
+    /// Runs one command that can be stopped gracefully (#271): when `stop`
+    /// turns true, or the deadline passes, the CLI is interrupted the way
+    /// Ctrl-C interrupts it, so the Proxmox plugin can remove its
+    /// in-progress VM, and is killed only if it outlives [`STOP_GRACE`].
+    ///
+    /// The default implementation ignores `stop` (scripted transports).
+    ///
+    /// # Errors
+    ///
+    /// As [`PackerTransport::run`].
+    async fn run_stoppable(
+        &self,
+        command: &PackerCommand,
+        deadline: Duration,
+        stop: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<StoppableOutcome, String> {
+        let _ = stop;
+        self.run(command, deadline)
+            .await
+            .map(|outcome| StoppableOutcome {
+                stopped: outcome.killed_by_deadline.then_some(Stopped::Killed),
+                cleanly_cancelled: false,
+                outcome,
+            })
+    }
+}
+
+/// How long an interrupted CLI may take to clean up before it is killed.
+/// The plugin stops and deletes its VM in this window.
+pub const STOP_GRACE: Duration = Duration::from_secs(180);
+
+/// How long the output pipes may stay open after the CLI exits (a plugin
+/// process still holding them) before the CLI's process group is killed.
+pub const PIPE_DRAIN: Duration = Duration::from_secs(5);
+
+/// What Packer prints (`ui,say`) when an interrupt cancelled its builds and
+/// their cleanup completed.
+pub const CLEAN_CANCEL_MESSAGE: &str = "Cleanly cancelled builds after being interrupted";
+
+/// How a stoppable run was stopped, when it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// Interrupted, and the CLI exited on its own within the grace period.
+    /// That gave the plugin its chance to clean up; whether it did is
+    /// [`StoppableOutcome::cleanly_cancelled`], not this.
+    Interrupted,
+    /// Killed after the grace period (or by a transport without graceful
+    /// stop): any remote cleanup is unknown.
+    Killed,
+}
+
+/// A stoppable run's outcome.
+#[derive(Clone, Debug)]
+pub struct StoppableOutcome {
+    /// What the CLI produced. `killed_by_deadline` is set when the deadline,
+    /// rather than a stop request, ended the run.
+    pub outcome: CliOutcome,
+    /// Whether, and how, the run was stopped early.
+    pub stopped: Option<Stopped>,
+    /// Whether Packer itself reported that the interrupt cancelled its
+    /// builds cleanly ([`CLEAN_CANCEL_MESSAGE`]). The remote host is not
+    /// re-checked here.
+    pub cleanly_cancelled: bool,
 }
 
 /// The CLI's version answer, parsed from the machine-readable stream.
@@ -394,6 +464,8 @@ mod tests {
 pub struct ProcessTransport {
     /// The binary path; the default is the PATH lookup for `packer`.
     binary: PathBuf,
+    /// How long an interrupted CLI may clean up before it is killed.
+    stop_grace: Duration,
 }
 
 impl ProcessTransport {
@@ -402,6 +474,7 @@ impl ProcessTransport {
     pub fn new() -> Self {
         Self {
             binary: PathBuf::from(CLI_NAME),
+            stop_grace: STOP_GRACE,
         }
     }
 
@@ -409,7 +482,17 @@ impl ProcessTransport {
     /// operators with a non-PATH install).
     #[must_use]
     pub fn with_binary(binary: PathBuf) -> Self {
-        Self { binary }
+        Self {
+            binary,
+            stop_grace: STOP_GRACE,
+        }
+    }
+
+    /// Overrides the cleanup grace period after an interrupt (tests).
+    #[must_use]
+    pub fn with_stop_grace(mut self, stop_grace: Duration) -> Self {
+        self.stop_grace = stop_grace;
+        self
     }
 }
 
@@ -419,8 +502,166 @@ impl Default for ProcessTransport {
     }
 }
 
+/// Waits until the stop flag is true; never returns when its sender is gone
+/// while the flag is still false.
+async fn stop_requested(stop: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow_and_update() {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Sends `signal` to the CLI's whole process group (the CLI and its plugin
+/// processes), as a terminal's Ctrl-C does. Best effort.
+#[cfg(unix)]
+async fn signal_group(pgid: u32, signal: &str) {
+    let _ = tokio::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg("--")
+        .arg(format!("-{pgid}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
+/// How much of the end of an over-limit stream is kept: Packer reports its
+/// final outcome (including [`CLEAN_CANCEL_MESSAGE`]) last.
+pub const OUTPUT_TAIL_BYTES: usize = 64 * 1024;
+
+/// Drains one pipe to its end, so a verbose CLI never blocks on a full
+/// pipe, keeping the first [`MAX_OUTPUT_BYTES`] and, past that, the last
+/// [`OUTPUT_TAIL_BYTES`] joined by a truncation line. Memory stays bounded.
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> String {
+    use tokio::io::AsyncReadExt as _;
+    let mut head = Vec::new();
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut truncated = false;
+    if let Some(mut pipe) = pipe {
+        let mut chunk = [0_u8; 8192];
+        while let Ok(read) = pipe.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            let room = MAX_OUTPUT_BYTES.saturating_sub(head.len());
+            head.extend_from_slice(&chunk[..read.min(room)]);
+            if read > room {
+                truncated = true;
+                tail.extend(&chunk[room..read]);
+                while tail.len() > OUTPUT_TAIL_BYTES {
+                    tail.pop_front();
+                }
+            }
+        }
+    }
+    let mut text = String::from_utf8_lossy(&head).into_owned();
+    if truncated {
+        let tail: Vec<u8> = tail.into_iter().collect();
+        text.push_str("\n[... output truncated ...]\n");
+        text.push_str(&String::from_utf8_lossy(&tail));
+    }
+    text
+}
+
 #[async_trait]
 impl PackerTransport for ProcessTransport {
+    #[cfg(unix)]
+    async fn run_stoppable(
+        &self,
+        command: &PackerCommand,
+        deadline: Duration,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<StoppableOutcome, String> {
+        let mut cmd = tokio::process::Command::new(&self.binary);
+        cmd.kill_on_drop(true)
+            // Its own process group, so an interrupt reaches the plugin
+            // processes too, exactly as Ctrl-C would.
+            .process_group(0)
+            .args(&command.args)
+            .current_dir(&command.work_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
+        let mut child = cmd
+            .spawn()
+            .map_err(|error| format!("the packer CLI cannot be started: {error}"))?;
+        let pgid = child
+            .id()
+            .ok_or("the packer CLI exited before it could be tracked")?;
+        let stdout = tokio::spawn(read_bounded(child.stdout.take()));
+        let stderr = tokio::spawn(read_bounded(child.stderr.take()));
+        let deadline_sleep = tokio::time::sleep(deadline);
+        tokio::pin!(deadline_sleep);
+        // `Some(true)`: the deadline ended the run; `Some(false)`: a stop
+        // request did. An exit that is ready at the same moment wins: a
+        // finished build is never reported as interrupted.
+        let (mut status, mut by_deadline) = tokio::select! {
+            biased;
+            status = child.wait() => (status.ok(), None),
+            () = &mut deadline_sleep => (None, Some(true)),
+            () = stop_requested(&mut stop) => (None, Some(false)),
+        };
+        if by_deadline.is_some()
+            && let Ok(Some(exit)) = child.try_wait()
+        {
+            status = Some(exit);
+            by_deadline = None;
+        }
+        let mut stopped = None;
+        if by_deadline.is_some() {
+            signal_group(pgid, "INT").await;
+            if let Ok(Ok(exit)) = tokio::time::timeout(self.stop_grace, child.wait()).await {
+                status = Some(exit);
+                stopped = Some(Stopped::Interrupted);
+            } else {
+                signal_group(pgid, "KILL").await;
+                let _ = child.kill().await;
+                stopped = Some(Stopped::Killed);
+            }
+        }
+        // A plugin process that outlives the CLI can hold the pipes open:
+        // give the readers a moment, then kill whatever is left of the group
+        // so the reads end.
+        let mut readers = tokio::spawn(async move {
+            (
+                stdout.await.unwrap_or_default(),
+                stderr.await.unwrap_or_default(),
+            )
+        });
+        let (stdout, stderr) =
+            if let Ok(output) = tokio::time::timeout(PIPE_DRAIN, &mut readers).await {
+                output.unwrap_or_default()
+            } else {
+                signal_group(pgid, "KILL").await;
+                tokio::time::timeout(PIPE_DRAIN, readers)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default()
+            };
+        let cleanly_cancelled =
+            stopped == Some(Stopped::Interrupted) && stdout.contains(CLEAN_CANCEL_MESSAGE);
+        Ok(StoppableOutcome {
+            cleanly_cancelled,
+            outcome: CliOutcome {
+                stdout,
+                stderr,
+                exit_code: if stopped == Some(Stopped::Killed) {
+                    None
+                } else {
+                    status.and_then(|exit| exit.code())
+                },
+                killed_by_deadline: by_deadline == Some(true),
+            },
+            stopped,
+        })
+    }
+
     async fn run(&self, command: &PackerCommand, deadline: Duration) -> Result<CliOutcome, String> {
         let mut cmd = tokio::process::Command::new(&self.binary);
         // kill_on_drop: a deadline kill must actually kill the packer

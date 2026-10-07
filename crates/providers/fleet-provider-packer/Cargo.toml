@@ -8,11 +8,12 @@ publish.workspace = true
 
 [dependencies]
 async-trait = "0.1.92"
-tokio = { version = "1", features = ["process", "time", "rt"] }
+tokio = { version = "1", features = ["process", "time", "rt", "sync", "io-util", "macros"] }
 fleet-core = { path = "../../fleet-core" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
