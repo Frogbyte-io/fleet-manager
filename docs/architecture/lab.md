@@ -73,11 +73,11 @@ Release queues one `lab.cleanup` operation per attempt (FM-713). It destroys the
 
 The controller's Lab sweeper (FM-716, every `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, default 60) keeps this converging without an operator:
 - it expires `ready` leases past their TTL;
+- it compensates leases stuck past their readiness deadline (plus a ten-minute grace) or their maximum lifetime, and `failed` leases whose record still holds a guest (a crash between the failure and its compensation). The transition is a compare-and-set on the observed state and provision link, so a provision that completes concurrently wins;
 - it queues the cleanup of every `releasing` lease whose next attempt is due, which also repairs a release or compensation whose enqueue was lost;
-- it compensates leases stuck past their readiness deadline (plus a ten-minute grace) or their maximum lifetime;
-- it compares the `fm-lab-*` guests on every trusted account with the Lab records, and reports, once per controller run, any guest that no live lease, standalone provision, or `keep` release owns. It never deletes a guest it cannot attribute.
+- it compares the `fm-lab-*` guests on every trusted account with the Lab records, and reports, once per controller run, any guest that no live lease, standalone provision, or `keep` release owns. A guest is owned only through the account and VMID its record names, the ones cleanup destroys through. It never deletes a guest it cannot attribute, and a store failure fails the pass rather than reading as a missing record.
 
-Every deadline and attempt lives in the rows, so a restarted controller continues where the last one stopped.
+The rules live in `fleet_application::lab` (`stuck_compensation`, `cleanup_due`, `guest_owned`); the sweeper is an adapter. Each committed change publishes `lease.changed` immediately. A failure confined to one lease is logged and retried next tick without stalling the others. Shutdown cancels an in-flight tick; every step commits on its own. Every deadline and attempt lives in the rows, so a restarted controller continues where the last one stopped.
 
 Cleanup strategies:
 

@@ -169,6 +169,7 @@ impl Harness {
             .unwrap();
         record.vmid = vmid;
         record.node = vmid.map(|_| "pve-b".to_owned());
+        record.account_id = vmid.map(|_| "account-1".to_owned());
         ProvisionPort::update(self.labs.as_ref(), &record)
             .await
             .unwrap();
@@ -299,12 +300,13 @@ async fn unowned_lab_guests_are_reported_once_and_never_touched() {
     kept_lease.cleanup = CleanupStrategy::Keep;
     harness.leases.update(&kept_lease).await.unwrap();
     let (_, released_record) = harness.lease(LeaseState::Released, Some(9007)).await;
-    let guest = |record: &str, vmid: u32| LabGuest {
-        account_id: "account-1".to_owned(),
+    let on = |account: &str, record: &str, vmid: u32| LabGuest {
+        account_id: account.to_owned(),
         node: "pve-b".to_owned(),
         vmid,
         name: format!("fm-lab-{record}"),
     };
+    let guest = |record: &str, vmid: u32| on("account-1", record, vmid);
     *harness.guests.0.lock().unwrap() = vec![
         guest(&owned_record, 9005),
         guest(&kept_record, 9006),
@@ -312,11 +314,25 @@ async fn unowned_lab_guests_are_reported_once_and_never_touched() {
         guest(&released_record, 9007),
         // No record at all.
         guest("00000000-0000-0000-0000-000000000000", 9008),
+        // The live record's name and VMID, but on another account: not the
+        // guest its cleanup would destroy.
+        on("account-2", &owned_record, 9005),
     ];
     let sweeper = harness.sweeper();
     let report = sweeper.tick(NOW).await.unwrap();
-    let vmids: Vec<u32> = report.orphans.iter().map(|guest| guest.vmid).collect();
-    assert_eq!(vmids, vec![9007, 9008]);
+    let found: Vec<(&str, u32)> = report
+        .orphans
+        .iter()
+        .map(|guest| (guest.account_id.as_str(), guest.vmid))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("account-1", 9007),
+            ("account-1", 9008),
+            ("account-2", 9005)
+        ]
+    );
     // Reported once per controller run.
     assert!(sweeper.tick(NOW + 1).await.unwrap().orphans.is_empty());
     // Nothing was queued for the unowned guests: they are reported only.
@@ -337,5 +353,147 @@ async fn the_loop_stops_promptly_on_shutdown() {
     tokio::time::timeout(std::time::Duration::from_secs(2), handle)
         .await
         .expect("the sweeper stops without waiting for its interval")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_lease_still_holding_a_guest_is_moved_to_cleanup() {
+    // A provision failed, and the controller stopped before compensating.
+    let harness = Harness::new().await;
+    let (with_guest, _) = harness.lease(LeaseState::Failed, Some(9010)).await;
+    let (without_guest, _) = harness.lease(LeaseState::Failed, None).await;
+    let report = harness.sweeper().tick(NOW).await.unwrap();
+    assert_eq!(report.compensated, 1);
+    assert_eq!(
+        harness.leases.get(&with_guest).await.unwrap().state,
+        LeaseState::Releasing
+    );
+    assert_eq!(harness.cleanups(&with_guest).await, 1);
+    assert_eq!(
+        harness.leases.get(&without_guest).await.unwrap().state,
+        LeaseState::Failed
+    );
+}
+
+#[tokio::test]
+async fn compensation_never_overwrites_a_lease_that_moved_on() {
+    // The sweeper's snapshot said provisioning; the provision completed
+    // before the write. The compare-and-set loses, and the lease stays ready.
+    let harness = Harness::new().await;
+    let (lease, record) = harness.lease(LeaseState::Provisioning, Some(9011)).await;
+    let mut ready = harness.leases.get(&lease).await.unwrap();
+    ready.state = LeaseState::Ready;
+    harness.leases.update(&ready).await.unwrap();
+    assert!(
+        !harness
+            .leases
+            .transition(
+                &lease,
+                LeaseState::Provisioning,
+                Some(&record),
+                LeaseState::Releasing
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        harness.leases.get(&lease).await.unwrap().state,
+        LeaseState::Ready
+    );
+    // A different provision link also loses.
+    assert!(
+        !harness
+            .leases
+            .transition(
+                &lease,
+                LeaseState::Ready,
+                Some("other"),
+                LeaseState::Releasing
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_enqueue_is_reported_and_the_tick_goes_on() {
+    let harness = Harness::new().await;
+    let (lease, record) = harness.lease(LeaseState::Releasing, Some(9012)).await;
+    sqlx::query("DROP TABLE operations")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    // An unowned guest is still reported after the failed enqueue.
+    *harness.guests.0.lock().unwrap() = vec![LabGuest {
+        account_id: "account-1".to_owned(),
+        node: "pve-b".to_owned(),
+        vmid: 9099,
+        name: format!("fm-lab-{record}"),
+    }];
+    let report = harness.sweeper().tick(NOW).await.unwrap();
+    assert_eq!(report.cleanups_queued, 0);
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert!(report.failures[0].contains(&lease));
+    assert_eq!(report.orphans.len(), 1);
+}
+
+#[tokio::test]
+async fn each_committed_change_is_announced() {
+    let harness = Harness::new().await;
+    let events = Arc::new(fleet_application::events::EventHub::new(16));
+    let before = events.current_id();
+    // Nothing to do: nothing announced.
+    harness
+        .sweeper()
+        .with_events(events.clone())
+        .tick(NOW)
+        .await
+        .unwrap();
+    assert_eq!(events.current_id(), before);
+    let (lease, _) = harness.lease(LeaseState::Ready, Some(9013)).await;
+    let mut stored = harness.leases.get(&lease).await.unwrap();
+    stored.expires_at = Some(NOW - 1);
+    harness.leases.update(&stored).await.unwrap();
+    harness
+        .sweeper()
+        .with_events(events.clone())
+        .tick(NOW)
+        .await
+        .unwrap();
+    assert_ne!(events.current_id(), before);
+}
+
+/// An inventory whose Proxmox host never answers.
+#[derive(Debug, Default)]
+struct Hanging(tokio::sync::Notify);
+
+#[async_trait]
+impl LabGuestInventory for Hanging {
+    async fn lab_guests(&self) -> Vec<LabGuest> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn shutdown_cancels_a_tick_stuck_on_proxmox() {
+    let harness = Harness::new().await;
+    let hanging = Arc::new(Hanging::default());
+    let sweeper = harness.sweeper().with_inventory(hanging.clone());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(Arc::new(sweeper).run(
+        std::time::Duration::from_millis(1),
+        async move {
+            let _ = stopped.await;
+        },
+    ));
+    // Wait until the tick is inside the unreachable host's listing.
+    tokio::time::timeout(std::time::Duration::from_secs(5), hanging.0.notified())
+        .await
+        .expect("the tick reaches the inventory");
+    stop.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("shutdown does not wait for the stuck tick")
         .unwrap();
 }

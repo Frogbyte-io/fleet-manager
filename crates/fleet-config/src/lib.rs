@@ -12,7 +12,13 @@
 //! 1. Built-in defaults — deliberately the safe ones: loopback listener.
 //! 2. The configuration file, selected with `--config <path>` (TOML).
 //! 3. Environment variables (`FLEET_LISTEN`, `FLEET_TAILSCALE_SERVE_LISTEN`,
-//!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`).
+//!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`,
+//!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`).
+//!
+//! `FLEET_LAB_SWEEP_INTERVAL_SECONDS` (TOML `lab_sweep_interval_seconds`,
+//! default 60) is the Lab sweeper's interval; `0` disables the background
+//! sweeper and leaves the manual sweep. A value that is not a whole number
+//! of seconds fails configuration loading.
 //!
 //! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
 //! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid

@@ -394,4 +394,19 @@ fn the_lab_sweep_interval_defaults_and_layers() {
         invalid,
         Err(fleet_config::ConfigError::LabSweepIntervalInvalid { .. })
     ));
+
+    // The file layer applies, and the environment overrides it.
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}lab_sweep_interval_seconds = 300\n"),
+    );
+    let from_file = fleet_config::load(Some(&file), &none_env).unwrap();
+    assert_eq!(from_file.lab_sweep_interval_seconds, 300);
+    let overridden = fleet_config::load(
+        Some(&file),
+        &env_of(&[(fleet_config::LAB_SWEEP_INTERVAL_VAR, "15")]),
+    )
+    .unwrap();
+    assert_eq!(overridden.lab_sweep_interval_seconds, 15);
 }
