@@ -581,11 +581,21 @@ impl ImagePinValidator for FakePins {
 #[derive(Debug, Default)]
 struct FakeAudit {
     intents: Mutex<Vec<AuditIntent>>,
+    /// Refuses the intents carrying this `event`.
+    refuse_event: Mutex<Option<String>>,
 }
 
 #[async_trait]
 impl AuditPort for FakeAudit {
     async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+        if let Some(refused) = self.refuse_event.lock().unwrap().as_deref()
+            && intent
+                .metadata
+                .entries()
+                .any(|entry| entry == ("event", refused))
+        {
+            return Err("simulated audit refusal".to_owned());
+        }
         self.intents.lock().unwrap().push(intent.clone());
         Ok(())
     }
@@ -1973,4 +1983,19 @@ async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited
     assert_eq!(stored.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
     let intents = audit.intents.lock().unwrap().clone();
     assert_eq!(events(&intents[2..]), ["lab_lease_cleanup_rearm_requested"]);
+
+    // A refused completion record does not fail a committed re-arm: the
+    // caller still gets the lease back and queues the cleanup it owes.
+    lease.state = LeaseState::CleanupFailed;
+    leases.update(&lease).await.unwrap();
+    *audit.refuse_event.lock().unwrap() = Some("lab_lease_cleanup_rearmed".to_owned());
+    let rearmed = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(
+        leases.get(&lease.id).await.unwrap().state,
+        LeaseState::Releasing
+    );
 }

@@ -1293,14 +1293,19 @@ impl Lab {
                 detail: "the lease changed before its cleanup could be re-armed".to_owned(),
             });
         }
-        self.audit_event(
-            principal,
-            Permission::LabLease,
-            Some(id),
-            "lab_lease_cleanup_rearmed",
-            Some(("failedAttempts", &failed_attempts)),
-        )
-        .await?;
+        // The required audit is the intent above, recorded before the
+        // change. The completion record is best effort: the re-arm is
+        // committed, and failing here would return before the caller
+        // queues the cleanup the lease now owes.
+        let _ = self
+            .audit_event(
+                principal,
+                Permission::LabLease,
+                Some(id),
+                "lab_lease_cleanup_rearmed",
+                Some(("failedAttempts", &failed_attempts)),
+            )
+            .await;
         Ok(rearmed)
     }
 
