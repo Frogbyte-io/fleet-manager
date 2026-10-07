@@ -166,10 +166,5 @@ async fn the_clean_cancel_report_survives_output_past_the_bound() {
     assert_eq!(result.stopped, Some(Stopped::Interrupted));
     assert!(result.cleanly_cancelled, "the trailing report was lost");
     assert!(result.outcome.stdout.contains("[... output truncated ...]"));
-    assert!(
-        result.outcome.stdout.len()
-            <= fleet_provider_packer::MAX_OUTPUT_BYTES
-                + fleet_provider_packer::OUTPUT_TAIL_BYTES
-                + 64
-    );
+    assert!(result.outcome.stdout.len() <= fleet_provider_packer::MAX_STREAM_BYTES);
 }

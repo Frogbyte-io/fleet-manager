@@ -223,7 +223,10 @@ impl OperationExecutor for ImagesExecutor {
                 (_, Ok(template)) => Ok(template),
                 // The build's own account of the interrupt is the more
                 // precise one (verified or not).
-                (Some(_), Err(reason @ ("cancelled" | "cancelled_unverified"))) => Err(reason),
+                // A poll failure (`cancel_poll_failed`) stays a failure.
+                (Some("cancelled"), Err(reason @ ("cancelled" | "cancelled_unverified"))) => {
+                    Err(reason)
+                }
                 (Some(reason), Err(_)) => Err(reason),
                 (None, Err(reason)) => Err(reason),
             }

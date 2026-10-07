@@ -31,8 +31,14 @@ pub const CLI_NAME: &str = "packer";
 pub const MIN_CLI_MAJOR: u64 = 1;
 /// The minimum supported CLI minor version.
 pub const MIN_CLI_MINOR: u16 = 15;
-/// The maximum response/output bound per stream.
+/// The bound on the head of each output stream. A stoppable run keeps, past
+/// it, the last [`OUTPUT_TAIL_BYTES`] joined by a short truncation line, so
+/// one stream is at most [`MAX_STREAM_BYTES`]; a plain run keeps the head
+/// only.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// The most one stream of a stoppable run can hold: the head, the
+/// truncation line, and the tail.
+pub const MAX_STREAM_BYTES: usize = MAX_OUTPUT_BYTES + 64 + OUTPUT_TAIL_BYTES;
 
 /// One CLI invocation: an argument array, never a shell string.
 #[derive(Clone, Debug)]
