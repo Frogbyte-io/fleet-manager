@@ -47,6 +47,60 @@ pub struct PackerCommand {
     pub args: Vec<String>,
     /// The working directory the command runs in.
     pub work_dir: PathBuf,
+    /// Credentials for this invocation's child process only (#272): never
+    /// argv, files, or logs. `Debug` prints the names, not the values.
+    pub env: SecretEnv,
+}
+
+/// Variables set on one CLI child process. When any are given, the
+/// controller's own ambient `PROXMOX_*` variables are removed from the
+/// child, so a build never silently uses a credential other than the one
+/// it was handed.
+#[derive(Clone, Default)]
+pub struct SecretEnv(std::sync::Arc<Vec<(String, fleet_core::SensitiveString)>>);
+
+impl SecretEnv {
+    /// The given variables.
+    #[must_use]
+    pub fn new(vars: Vec<(String, fleet_core::SensitiveString)>) -> Self {
+        Self(std::sync::Arc::new(vars))
+    }
+
+    /// The variable names, for assertions and diagnostics.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        self.0.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    /// The exposed value of one variable (the trusted child boundary).
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.expose())
+    }
+
+    /// Applies the variables to a child process.
+    fn apply(&self, command: &mut tokio::process::Command) {
+        if self.0.is_empty() {
+            return;
+        }
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("PROXMOX_") {
+                command.env_remove(key);
+            }
+        }
+        for (key, value) in self.0.iter() {
+            command.env(key, value.expose());
+        }
+    }
+}
+
+impl fmt::Debug for SecretEnv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.names()).finish()
+    }
 }
 
 /// A CLI outcome: bounded stdout/stderr and the exit code.
@@ -345,6 +399,7 @@ impl PackerClient {
                 &PackerCommand {
                     args: vec!["-machine-readable".to_owned(), "version".to_owned()],
                     work_dir,
+                    env: SecretEnv::default(),
                 },
                 Duration::from_secs(30),
             )
@@ -587,6 +642,7 @@ impl PackerTransport for ProcessTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .stdin(std::process::Stdio::null());
+        command.env.apply(&mut cmd);
         let mut child = cmd
             .spawn()
             .map_err(|error| format!("the packer CLI cannot be started: {error}"))?;
@@ -667,6 +723,7 @@ impl PackerTransport for ProcessTransport {
         // kill_on_drop: a deadline kill must actually kill the packer
         // process, not orphan it while the caller records the kill.
         cmd.kill_on_drop(true);
+        command.env.apply(&mut cmd);
         cmd.args(&command.args)
             .current_dir(&command.work_dir)
             .stdout(std::process::Stdio::piped())

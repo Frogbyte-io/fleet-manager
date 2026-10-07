@@ -20,7 +20,7 @@ use std::time::Duration;
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_core::{ImageBuildRecord, ImageBuildTemplate, RecipeVersion};
-use fleet_provider_packer::{BuildStream, PackerCommand, PackerTransport};
+use fleet_provider_packer::{BuildStream, PackerCommand, PackerTransport, SecretEnv};
 use serde::Deserialize;
 use sha2::Digest as _;
 
@@ -64,6 +64,8 @@ pub struct ImagesExecutor {
     transport: Arc<dyn PackerTransport>,
     secrets: Option<Arc<fleet_secrets::SecretStore>>,
     work_root: PathBuf,
+    accounts: Option<Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>>,
+    credentials: Option<Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>>,
 }
 
 impl ImagesExecutor {
@@ -80,7 +82,55 @@ impl ImagesExecutor {
             transport,
             secrets,
             work_root,
+            accounts: None,
+            credentials: None,
         }
+    }
+
+    /// Hands each build its target account's token (#272): resolved just in
+    /// time, behind the account's explicit-trust gate, into Packer's child
+    /// environment only. Without this the CLI inherits the controller's
+    /// environment, as before.
+    #[must_use]
+    pub fn with_account_credentials(
+        mut self,
+        accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
+        credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
+    ) -> Self {
+        self.accounts = Some(accounts);
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// The Proxmox plugin's credentials for the build's account. A token is
+    /// never handed out for an account whose host trust is unconfirmed.
+    async fn account_env(&self, account_id: Option<&str>) -> Result<SecretEnv, &'static str> {
+        let (Some(accounts), Some(credentials)) = (&self.accounts, &self.credentials) else {
+            return Ok(SecretEnv::default());
+        };
+        let account_id = account_id.ok_or("target_account_missing")?;
+        let account = accounts
+            .get(account_id)
+            .await
+            .map_err(|_| "target_account_unreadable")?;
+        if account.fingerprint.is_none() {
+            return Err("target_account_untrusted");
+        }
+        let secret = credentials
+            .load(account_id)
+            .await
+            .map_err(|_| "account_credential_unreadable")?
+            .ok_or("account_credential_missing")?;
+        Ok(SecretEnv::new(vec![
+            (
+                "PROXMOX_USERNAME".to_owned(),
+                fleet_core::SensitiveString::new(account.token_id),
+            ),
+            (
+                "PROXMOX_TOKEN".to_owned(),
+                fleet_core::SensitiveString::new(secret),
+            ),
+        ]))
     }
 
     /// Writes the secret var file, resolving the references just in time.
@@ -293,6 +343,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: vec!["-machine-readable".to_owned(), "version".to_owned()],
                     work_dir: self.work_root.clone(),
+                    env: SecretEnv::default(),
                 },
                 Duration::from_secs(30),
             )
@@ -317,6 +368,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: vec!["plugins".to_owned(), "installed".to_owned()],
                     work_dir: self.work_root.clone(),
+                    env: SecretEnv::default(),
                 },
                 Duration::from_secs(30),
             )
@@ -343,6 +395,7 @@ impl ImagesExecutor {
             .write_var_file(&operation.id, &payload.secret_vars)
             .await
             .map_err(|_| "secret_resolution_failed")?;
+        let env = self.account_env(record.account_id.as_deref()).await?;
         operations
             .record_progress(
                 &operation.id,
@@ -371,6 +424,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: args(&["validate"]),
                     work_dir: work_dir.to_path_buf(),
+                    env: env.clone(),
                 },
                 VALIDATE_DEADLINE,
                 stop.clone(),
@@ -397,6 +451,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: args(&["-machine-readable", "build"]),
                     work_dir: work_dir.to_path_buf(),
+                    env,
                 },
                 Duration::from_secs(payload.timeout_seconds.min(MAX_BUILD_TIMEOUT)),
                 stop,
@@ -701,6 +756,8 @@ mod tests {
         interrupted: std::sync::atomic::AtomicBool,
         /// Whether an interrupted build reports Packer's clean cancel.
         clean_cancel: std::sync::atomic::AtomicBool,
+        /// Per command: its args joined, and the child's PROXMOX_TOKEN.
+        saw_env: Mutex<Vec<(String, Option<String>)>>,
     }
     #[async_trait::async_trait]
     impl PackerTransport for Script {
@@ -709,6 +766,10 @@ mod tests {
             command: &PackerCommand,
             _: Duration,
         ) -> Result<fleet_provider_packer::CliOutcome, String> {
+            self.saw_env.lock().unwrap().push((
+                command.args.join(" "),
+                command.env.get("PROXMOX_TOKEN").map(str::to_owned),
+            ));
             let record = self.repository.get_build(&self.operation_id).await.unwrap();
             assert_eq!(
                 record.outcome, "running",
@@ -884,6 +945,7 @@ mod tests {
             saw_var_file: Mutex::new(None),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             clean_cancel: std::sync::atomic::AtomicBool::new(true),
+            saw_env: Mutex::new(Vec::new()),
         });
         (dir, store, repository, operations, operation, script)
     }
@@ -897,6 +959,119 @@ mod tests {
                 false,
             ),
         ]
+    }
+
+    /// A credential store holding one token for `account-1`.
+    #[derive(Debug)]
+    struct OneToken(Option<&'static str>);
+
+    #[async_trait::async_trait]
+    impl fleet_application::proxmox::ProxmoxCredentialStore for OneToken {
+        async fn load(
+            &self,
+            _: &str,
+        ) -> Result<Option<String>, fleet_application::proxmox::CredentialStoreError> {
+            Ok(self.0.map(str::to_owned))
+        }
+        async fn store(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), fleet_application::proxmox::CredentialStoreError> {
+            Ok(())
+        }
+        async fn clear(
+            &self,
+            _: &str,
+        ) -> Result<(), fleet_application::proxmox::CredentialStoreError> {
+            Ok(())
+        }
+    }
+
+    /// Runs one build with account credentials wired; answers the record,
+    /// what the transport saw, and every stored operation/audit text.
+    async fn credential_build(
+        trusted: bool,
+        token: Option<&'static str>,
+    ) -> (
+        fleet_core::ImageBuildRecord,
+        Vec<(String, Option<String>)>,
+        String,
+    ) {
+        let mut replies = probes();
+        replies.extend([
+            reply("", Some(0), false),
+            reply("1,proxmox-clone,artifact,0,id,pve:120", Some(0), false),
+        ]);
+        let (dir, store, repository, operations, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, false).await;
+        if trusted {
+            sqlx::query("UPDATE proxmox_accounts SET fingerprint = 'AB' WHERE id = 'account-1'")
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            None,
+            dir.path().join("work"),
+        )
+        .with_account_credentials(
+            Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(OneToken(token)),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        let stored: Vec<String> = sqlx::query_scalar(
+            "SELECT COALESCE(payload_json,'') || COALESCE(result_json,'') || COALESCE(error_json,'') FROM operations \
+             UNION ALL SELECT metadata_json FROM audit_events",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        let seen = transport.saw_env.lock().unwrap().clone();
+        (record, seen, stored.join("\n"))
+    }
+
+    #[tokio::test]
+    async fn a_build_gets_its_trusted_accounts_token_in_the_child_environment_only() {
+        let (record, seen, stored) = credential_build(true, Some("fixture-account-token")).await;
+        assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
+        // validate and build carry the token; the version probes do not.
+        for (args, token) in &seen {
+            let wants = args.starts_with("validate") || args.contains(" build ");
+            assert_eq!(
+                token.as_deref(),
+                wants.then_some("fixture-account-token"),
+                "{args}"
+            );
+            assert!(!args.contains("fixture-account-token"));
+        }
+        assert!(seen.iter().any(|(args, _)| args.contains(" build ")));
+        let record_text = serde_json::to_string(&record).unwrap();
+        assert!(!record_text.contains("fixture-account-token"));
+        assert!(!stored.contains("fixture-account-token"));
+    }
+
+    #[tokio::test]
+    async fn no_token_leaves_for_an_untrusted_account_or_without_a_stored_token() {
+        let (record, seen, _) = credential_build(false, Some("fixture-account-token")).await;
+        assert_eq!(record.reason.as_deref(), Some("target_account_untrusted"));
+        assert!(
+            seen.iter()
+                .all(|(args, token)| token.is_none() && !args.starts_with("validate"))
+        );
+
+        let (record, seen, _) = credential_build(true, None).await;
+        assert_eq!(record.reason.as_deref(), Some("account_credential_missing"));
+        assert!(seen.iter().all(|(args, _)| !args.starts_with("validate")));
     }
 
     #[test]

@@ -28,6 +28,7 @@ fn command(dir: &std::path::Path) -> PackerCommand {
     PackerCommand {
         args: vec![dir.join("packer.sh").display().to_string()],
         work_dir: dir.to_path_buf(),
+        env: fleet_provider_packer::SecretEnv::default(),
     }
 }
 
@@ -167,4 +168,45 @@ async fn the_clean_cancel_report_survives_output_past_the_bound() {
     assert!(result.cleanly_cancelled, "the trailing report was lost");
     assert!(result.outcome.stdout.contains("[... output truncated ...]"));
     assert!(result.outcome.stdout.len() <= fleet_provider_packer::MAX_STREAM_BYTES);
+}
+
+#[tokio::test]
+async fn credentials_reach_only_the_child_environment() {
+    let (dir, transport) = fake(
+        "echo \"user=$PROXMOX_USERNAME token=$PROXMOX_TOKEN\"",
+        Duration::from_secs(1),
+    );
+    let env = fleet_provider_packer::SecretEnv::new(vec![
+        (
+            "PROXMOX_USERNAME".to_owned(),
+            fleet_core::SensitiveString::new("fleet@pve!build"),
+        ),
+        (
+            "PROXMOX_TOKEN".to_owned(),
+            fleet_core::SensitiveString::new("s3cret"),
+        ),
+    ]);
+    // Debug never prints a value.
+    assert!(!format!("{env:?}").contains("s3cret"));
+    let mut command = command(dir.path());
+    command.env = env;
+    assert!(!command.args.iter().any(|arg| arg.contains("s3cret")));
+    let (_stop, stop_rx) = tokio::sync::watch::channel(false);
+    let result = transport
+        .run_stoppable(&command, Duration::from_secs(10), stop_rx)
+        .await
+        .unwrap();
+    assert!(
+        result
+            .outcome
+            .stdout
+            .contains("user=fleet@pve!build token=s3cret"),
+        "{:?}",
+        result.outcome.stdout
+    );
+    let plain = transport
+        .run(&command, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert!(plain.stdout.contains("token=s3cret"));
 }

@@ -415,12 +415,31 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     ));
                 std::sync::Arc::new(fleet_controller::images_exec::ImagesDispatch::new(
                     with_proxmox.clone(),
-                    std::sync::Arc::new(fleet_controller::images_exec::ImagesExecutor::new(
-                        versions,
-                        std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
-                        secrets.clone(),
-                        config.data_dir.join("image-builds"),
-                    )),
+                    std::sync::Arc::new(
+                        fleet_controller::images_exec::ImagesExecutor::new(
+                            versions,
+                            std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
+                            secrets.clone(),
+                            config.data_dir.join("image-builds"),
+                        )
+                        // #272: each build gets its own account's token, in
+                        // Packer's child environment only.
+                        .with_account_credentials(
+                            std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                                store.pool().clone(),
+                            )),
+                            match &secrets {
+                                Some(secrets) => std::sync::Arc::new(
+                                    fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                        secrets.clone(),
+                                    ),
+                                ),
+                                None => std::sync::Arc::new(
+                                    fleet_controller::proxmox_store::AbsentProxmoxCredentials,
+                                ),
+                            },
+                        ),
+                    ),
                 ))
             };
             // The Lab provision executor drives the FM-710 saga's external
