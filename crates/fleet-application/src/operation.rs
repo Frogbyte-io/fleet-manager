@@ -742,6 +742,36 @@ impl Operations {
         self.create_inner(authorizer, principal_id, new, true).await
     }
 
+    /// Checks, before a release or sweep changes any lease, that the caller
+    /// may also queue the cleanup that change owes: otherwise the lease
+    /// would commit to `releasing` with no cleanup queued.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial.
+    pub fn authorize_lab_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: Option<&str>,
+    ) -> Result<(), OperationUseCaseError> {
+        for (action, resource) in [
+            (Permission::OperationCreate, None),
+            (Permission::LabLease, lease_id),
+        ] {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action,
+                    resource,
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+        }
+        Ok(())
+    }
+
     /// Queues the `lab.cleanup` operation for one releasing lease. Like
     /// `lab.provision`, the kind is created only through this dedicated
     /// path (the release and sweep routes), never the generic surface: the

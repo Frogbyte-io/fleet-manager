@@ -433,3 +433,89 @@ async fn lab_cleanup_is_only_created_for_its_own_lease() {
         .unwrap();
     assert_eq!(first.id, again.id);
 }
+
+impl Harness {
+    /// Registers a Lab-owned machine and links it to the lease's record.
+    async fn link_machine(&self, lease_id: &str) -> String {
+        use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
+        let machine = MachineRepository::new(self.pool.clone())
+            .register(&RegisterMachine {
+                name: format!("lab-{lease_id}"),
+                description: String::new(),
+                endpoints: vec![NewEndpoint {
+                    kind: fleet_core::EndpointKind::Ssh,
+                    reference: "root@192.0.2.10:22".to_owned(),
+                }],
+                tags: vec!["lab".to_owned()],
+                groups: vec![],
+            })
+            .await
+            .unwrap();
+        let lease = self.leases.get(lease_id).await.unwrap();
+        let mut record =
+            ProvisionPort::get(self.labs.as_ref(), lease.provision_id.as_deref().unwrap())
+                .await
+                .unwrap();
+        record.machine_id = Some(machine.id.clone());
+        ProvisionPort::update(self.labs.as_ref(), &record)
+            .await
+            .unwrap();
+        machine.id
+    }
+
+    async fn machine_exists(&self, id: &str) -> bool {
+        use fleet_application::machine::MachinePort as _;
+        MachineRepository::new(self.pool.clone())
+            .get(id)
+            .await
+            .is_ok()
+    }
+}
+
+#[tokio::test]
+async fn the_lab_owned_machine_goes_with_a_destroyed_guest_and_stays_otherwise() {
+    let harness = Harness::new().await;
+
+    let destroyed = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9010, Some("account-1"))),
+        )
+        .await;
+    let machine = harness.link_machine(&destroyed).await;
+    let (state, _, _) = harness
+        .run(&destroyed, &Arc::new(Destroyer::default()))
+        .await;
+    assert_eq!(state, "succeeded");
+    assert!(!harness.machine_exists(&machine).await);
+
+    let kept = harness
+        .releasing(
+            CleanupStrategy::Keep,
+            Some(("pve-b", 9011, Some("account-1"))),
+        )
+        .await;
+    let machine = harness.link_machine(&kept).await;
+    harness.run(&kept, &Arc::new(Destroyer::default())).await;
+    assert!(
+        harness.machine_exists(&machine).await,
+        "keep keeps the machine"
+    );
+
+    let failing = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9012, Some("account-1"))),
+        )
+        .await;
+    let machine = harness.link_machine(&failing).await;
+    let destroyer = Arc::new(Destroyer {
+        fail: true,
+        ..Destroyer::default()
+    });
+    harness.run(&failing, &destroyer).await;
+    assert!(
+        harness.machine_exists(&machine).await,
+        "a failed destroy keeps the machine of the guest that still exists"
+    );
+}

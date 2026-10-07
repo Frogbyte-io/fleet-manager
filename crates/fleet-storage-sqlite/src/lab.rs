@@ -94,8 +94,7 @@ impl LabRepository {
             ready_project_operation_id: row.get("ready_project_operation_id"),
             readiness_deadline_at: row.get("readiness_deadline_at"),
             failed_step: row.get("failed_step"),
-            // Absent before migration 0038 (FM-713).
-            account_id: row.try_get("account_id").ok().flatten(),
+            account_id: optional_column(row, "account_id")?,
             ready_at: row.get("ready_at"),
             idempotency_key: row.get("idempotency_key"),
             created_at: row.get("created_at"),
@@ -634,7 +633,7 @@ impl LeaseRepository {
             ready_at: row.get("ready_at"),
             expires_at: row.get("expires_at"),
             cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
-            cleanup_next_at: row.try_get("cleanup_next_at").ok().flatten(),
+            cleanup_next_at: optional_column(row, "cleanup_next_at")?,
         })
     }
 }
@@ -811,5 +810,19 @@ impl LeasePort for LeaseRepository {
         .await
         .map_err(|error| format!("claim failed: {error}"))?;
         Ok(claimed.rows_affected() == 1)
+    }
+}
+
+/// A nullable column added by a later migration: absent (a database not yet
+/// migrated, as some storage tests build) reads as `None`, while a decode
+/// failure is reported rather than hidden.
+fn optional_column<T>(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<T>, String>
+where
+    for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+{
+    match row.try_get::<Option<T>, _>(column) {
+        Ok(value) => Ok(value),
+        Err(sqlx::Error::ColumnNotFound(_)) => Ok(None),
+        Err(error) => Err(format!("the {column} column is unreadable: {error}")),
     }
 }

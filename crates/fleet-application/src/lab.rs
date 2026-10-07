@@ -1950,6 +1950,13 @@ pub fn provision_compensation(state: LeaseState, allocated: bool) -> Option<Leas
     }
 }
 
+/// Whether a releasing lease's next cleanup attempt may be queued at `now`:
+/// not before the backoff after a failed attempt has passed.
+#[must_use]
+pub fn cleanup_due(lease: &Lease, now: i64) -> bool {
+    lease.state == LeaseState::Releasing && lease.cleanup_next_at.is_none_or(|due| due <= now)
+}
+
 /// The `lab.cleanup` operation for a releasing lease's next attempt. The
 /// idempotency key names the attempt, so a repeated release or sweep never
 /// queues a second cleanup for the same attempt, while a retry after a
@@ -2030,6 +2037,12 @@ mod tests {
         super::record_cleanup_failure(&mut lease, 2_000);
         assert_eq!(lease.state, fleet_core::LeaseState::CleanupFailed);
         assert_eq!(lease.cleanup_next_at, None);
+        // Not due again until the backoff passes.
+        lease.state = fleet_core::LeaseState::Releasing;
+        lease.cleanup_next_at = Some(5_000);
+        assert!(!super::cleanup_due(&lease, 4_999));
+        assert!(super::cleanup_due(&lease, 5_000));
+        lease.state = fleet_core::LeaseState::CleanupFailed;
         // Each attempt gets its own idempotency key.
         let key = super::cleanup_operation(&lease, None).idempotency_key;
         assert_eq!(key.as_deref(), Some("lab-cleanup:l1:5"));
