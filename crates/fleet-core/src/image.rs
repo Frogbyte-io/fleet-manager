@@ -165,6 +165,12 @@ pub struct RecipeVersion {
     pub promoted_at: Option<i64>,
     /// Who promoted the version.
     pub promoted_by: Option<String>,
+    /// The build record the version's latest promotion pinned: Lab clones
+    /// this build's template, and a later rebuild never changes it (issue
+    /// #281). Kept after a demotion so earlier leases keep their source.
+    /// `None` when the version was never promoted, or was promoted before
+    /// the pin existed and not since.
+    pub promoted_build_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -573,7 +579,7 @@ mod frozen_target_tests {
                 description: String::new(), content_digest: "digest".to_owned(),
                 content: serde_json::json!({"builders":[{"type":"proxmox-clone", "node":node, "disks":[{"type":"scsi", "storage_pool":storage_pool, "disk_size":"8G"}]}]}).to_string(),
                 source: RecipeSource::Clone, node: node.to_owned(), storage_pool: storage_pool.to_owned(),
-                published_at: 1, promoted_at: None, promoted_by: None,
+                published_at: 1, promoted_at: None, promoted_by: None, promoted_build_id: None,
             };
             assert_eq!(version.has_frozen_build_target(), expected);
         }
@@ -593,6 +599,7 @@ mod frozen_target_tests {
             published_at: 1,
             promoted_at: None,
             promoted_by: None,
+            promoted_build_id: None,
         }
     }
 

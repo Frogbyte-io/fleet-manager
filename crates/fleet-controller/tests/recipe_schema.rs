@@ -92,6 +92,7 @@ fn version(source: RecipeSource, content: String) -> RecipeVersion {
         published_at: 1,
         promoted_at: None,
         promoted_by: None,
+        promoted_build_id: None,
     }
 }
 

@@ -144,6 +144,11 @@ pub struct RecipeVersionDto {
     pub promoted_at: Option<i64>,
     /// Who promoted the version, when any.
     pub promoted_by: Option<String>,
+    /// The build record the version's latest promotion pinned. Lab clones
+    /// that build's template; a later rebuild of the version does not change
+    /// it. Kept after a demotion. Null for a version never promoted, or
+    /// promoted before pins were recorded and not since.
+    pub promoted_build_id: Option<String>,
     /// The structured view of the version's content, when it carries a
     /// Proxmox builder block. `None` for non-JSON templates or builders
     /// outside the Proxmox family.
@@ -272,6 +277,7 @@ impl From<RecipeVersion> for RecipeVersionDto {
             published_at: version.published_at,
             promoted_at: version.promoted_at,
             promoted_by: version.promoted_by,
+            promoted_build_id: version.promoted_build_id,
             structured,
         }
     }

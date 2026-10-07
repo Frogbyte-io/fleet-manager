@@ -2846,6 +2846,14 @@ export type PageRecipeVersionDtoItemsItem = {
      */
   promotedAt?: number | null;
   /**
+     * The build record the version's latest promotion pinned. Lab clones
+     * that build's template; a later rebuild of the version does not change
+     * it. Kept after a demotion. Null for a version never promoted, or
+     * promoted before pins were recorded and not since.
+     * @nullable
+     */
+  promotedBuildId?: string | null;
+  /**
      * Who promoted the version, when any.
      * @nullable
      */
@@ -3495,6 +3503,14 @@ export interface RecipeVersionDto {
      * @nullable
      */
   promotedAt?: number | null;
+  /**
+     * The build record the version's latest promotion pinned. Lab clones
+     * that build's template; a later rebuild of the version does not change
+     * it. Kept after a demotion. Null for a version never promoted, or
+     * promoted before pins were recorded and not since.
+     * @nullable
+     */
+  promotedBuildId?: string | null;
   /**
      * Who promoted the version, when any.
      * @nullable
@@ -4712,6 +4728,14 @@ export type ResourceRecipeVersionDtoData = {
      * @nullable
      */
   promotedAt?: number | null;
+  /**
+     * The build record the version's latest promotion pinned. Lab clones
+     * that build's template; a later rebuild of the version does not change
+     * it. Kept after a demotion. Null for a version never promoted, or
+     * promoted before pins were recorded and not since.
+     * @nullable
+     */
+  promotedBuildId?: string | null;
   /**
      * Who promoted the version, when any.
      * @nullable

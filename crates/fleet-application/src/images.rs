@@ -189,14 +189,20 @@ pub trait RecipePort: fmt::Debug + Send + Sync {
     /// Fails when the backend errors.
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String>;
     /// Records the promotion, demoting the recipe's other promoted
-    /// version explicitly (the demotion is part of the same commit).
+    /// version explicitly (the demotion is part of the same commit), and
+    /// pins `build_id`, the build record that justified it, as the
+    /// version's clone source. The backend refuses with
+    /// [`PROMOTION_BUILD_REJECTED`] when that build is no longer the
+    /// version's latest successful, matching record.
     ///
     /// # Errors
     ///
-    /// Fails when the version is unknown or the backend errors.
+    /// Fails when the version is unknown, the build is rejected, or the
+    /// backend errors.
     async fn promote(
         &self,
         version_id: &str,
+        build_id: &str,
         promoted_by: &str,
         promoted_at: i64,
     ) -> Result<RecipeVersion, String>;
@@ -325,7 +331,7 @@ impl Images {
             Permission::ImagesConfig,
             None,
             "image_recipe_creating",
-            Some(("name", new.content.name.as_str())),
+            &[("name", new.content.name.as_str())],
         )
         .await?;
         self.recipes.create(&new, now).await.map_err(|detail| {
@@ -395,7 +401,7 @@ impl Images {
             Permission::ImagesConfig,
             Some(id),
             "image_recipe_updating",
-            None,
+            &[],
         )
         .await?;
         self.recipes
@@ -442,7 +448,7 @@ impl Images {
             Permission::ImagesConfig,
             Some(id),
             "image_recipe_deleting",
-            None,
+            &[],
         )
         .await?;
         self.recipes.delete(id).await.map_err(|detail| {
@@ -500,13 +506,14 @@ impl Images {
             published_at: now,
             promoted_at: None,
             promoted_by: None,
+            promoted_build_id: None,
         };
         self.audit_event(
             principal,
             Permission::ImagesConfig,
             Some(recipe_id),
             "image_recipe_publishing",
-            Some(("digest", version.content_digest.as_str())),
+            &[("digest", version.content_digest.as_str())],
         )
         .await?;
         self.recipes
@@ -588,12 +595,15 @@ impl Images {
             Permission::ImagesConfig,
             Some(version_id),
             "image_version_promoting",
-            Some(("digest", version.content_digest.as_str())),
+            &[
+                ("digest", version.content_digest.as_str()),
+                ("build", record.id.as_str()),
+            ],
         )
         .await?;
         let promoted = self
             .recipes
-            .promote(version_id, &principal.id, now)
+            .promote(version_id, &record.id, &principal.id, now)
             .await
             .map_err(|detail| {
                 if detail == PROMOTION_BUILD_REJECTED {
@@ -613,7 +623,10 @@ impl Images {
             Permission::ImagesConfig,
             Some(version_id),
             "image_version_promoted",
-            Some(("digest", version.content_digest.as_str())),
+            &[
+                ("digest", version.content_digest.as_str()),
+                ("build", record.id.as_str()),
+            ],
         )
         .await
         .map_err(|error| match error {
@@ -814,7 +827,7 @@ impl Images {
         action: Permission,
         recipe_id: Option<&str>,
         event: &str,
-        fact: Option<(&str, &str)>,
+        facts: &[(&str, &str)],
     ) -> Result<(), RecipeUseCaseError> {
         let mut metadata = crate::audit::AuditMetadata::default();
         metadata
@@ -823,7 +836,7 @@ impl Images {
                 context: "audit",
                 detail: error.to_string(),
             })?;
-        if let Some((key, value)) = fact {
+        for (key, value) in facts {
             metadata
                 .insert(key, value)
                 .map_err(|error| RecipeUseCaseError::Backend {

@@ -584,9 +584,11 @@ pub enum CloneTargetReservation {
 /// the cluster it clones in.
 #[async_trait]
 pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
-    /// The template VMID recorded by the image version's latest successful
-    /// build. `None` when the version has no successful build, or when
-    /// that latest build recorded no artifact: an older build is never a
+    /// The template VMID of the build the image version's promotion pinned
+    /// (issue #281): a later rebuild never moves it. A version without a
+    /// pin (promoted before pins were recorded) falls back to its latest
+    /// successful build. `None` when there is no such build, or when that
+    /// latest build recorded no artifact: an older build is never a
     /// fallback.
     ///
     /// # Errors

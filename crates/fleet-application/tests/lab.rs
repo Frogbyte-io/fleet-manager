@@ -529,6 +529,7 @@ impl ImagePinValidator for FakePins {
                 published_at: NOW,
                 promoted_at: Some(NOW),
                 promoted_by: Some("tester".to_owned()),
+                promoted_build_id: Some("build-1".to_owned()),
             }))
     }
 }
