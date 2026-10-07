@@ -1536,15 +1536,37 @@ mod tests {
                 "{major}.x"
             );
 
-            // VM.Audit on the template itself makes it visible.
-            let tiers = evaluate_tiers(
-                major,
-                &map(&[("/", &without_audit), ("/vms/9000", &[("VM.Audit", false)])]),
+            // The template (120, existing) and the reserved clone target
+            // (9000, free) are distinct VMIDs. VM.Audit on the template
+            // alone makes it visible, but the post-clone config read still
+            // lacks VM.Audit on the clone target.
+            let in_use = BTreeMap::from([(120, true), (9000, false)]);
+            let template_only = map(&[("/", &without_audit), ("/vms/120", &[("VM.Audit", false)])]);
+            let tiers = evaluate_tiers_with_vmids(major, &template_only, Some(&in_use));
+            let lab = tier(&tiers, PrivilegeTier::Lab);
+            assert_eq!(lab.status, PrivilegeStatus::Missing, "{major}.x");
+            assert_eq!(
+                check(lab, "lab.provision.template-lookup").granted_on,
+                ["/vms/120"]
             );
+            assert!(
+                check(lab, "lab.provision.clone-config")
+                    .granted_on
+                    .is_empty(),
+                "{major}.x"
+            );
+
+            // VM.Audit on the clone target as well grants the tier.
+            let both = map(&[
+                ("/", &without_audit),
+                ("/vms/120", &[("VM.Audit", false)]),
+                ("/vms/9000", &[("VM.Audit", false)]),
+            ]);
+            let tiers = evaluate_tiers_with_vmids(major, &both, Some(&in_use));
             let lab = tier(&tiers, PrivilegeTier::Lab);
             assert_eq!(lab.status, PrivilegeStatus::Granted, "{major}.x");
             assert_eq!(
-                check(lab, "lab.provision.template-lookup").granted_on,
+                check(lab, "lab.provision.clone-config").granted_on,
                 ["/vms/9000"]
             );
         }

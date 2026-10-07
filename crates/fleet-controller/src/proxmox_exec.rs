@@ -2335,12 +2335,22 @@ impl ProvisionExecutor {
                 .await
             {
                 Ok(()) => return Ok(Ok(())),
-                Err(fleet_provider_proxmox::PveApiError::Http { .. }) if attempt < 2 => {}
+                Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                    if (500..600).contains(&status) && attempt < 2 => {}
                 Err(error) => {
+                    let cause = match &error {
+                        fleet_provider_proxmox::PveApiError::Auth
+                        | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                            format!("the token needs VM.Config.Options on /vms/{vmid} ({error})")
+                        }
+                        _ => format!(
+                            "PVE refused the update; the config may still be locked or changing ({error})"
+                        ),
+                    };
                     return Ok(Err(Refusal::new(
                         "unprotect_failed",
                         format!(
-                            "the clone {node}/qemu/{vmid} inherited the template's protection flag, which could not be cleared ({error}); the token needs VM.Config.Options on /vms/{vmid}. Until the flag is cleared, PVE refuses to destroy the guest"
+                            "the clone {node}/qemu/{vmid} inherited the template's protection flag, which could not be cleared: {cause}. Until the flag is cleared, PVE refuses to destroy the guest"
                         ),
                     )));
                 }
@@ -2620,8 +2630,24 @@ impl ProvisionExecutor {
                 "clone"
             };
             self.persist_failure(&record.id, step).await?;
-            return complete_failure(operations, &operation.id, refusal.reason, &refusal.detail)
-                .await;
+            // The same {reason, step, detail} shape as `fail`.
+            return operations
+                .complete(
+                    &operation.id,
+                    "failed",
+                    None,
+                    Some(
+                        &serde_json::json!({
+                            "reason": refusal.reason,
+                            "step": step,
+                            "detail": refusal.detail,
+                        })
+                        .to_string(),
+                    ),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
         }
 
         let mut record = record;

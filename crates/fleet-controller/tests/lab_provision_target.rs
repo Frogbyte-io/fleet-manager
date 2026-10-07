@@ -79,6 +79,7 @@ struct CloneConfig {
     forbid_read: bool,
     no_digest: bool,
     stale_puts: usize,
+    update_status: Option<u16>,
     cloned: Option<(u32, String)>,
 }
 
@@ -119,6 +120,12 @@ impl Pve {
     /// writes it inside the forked qmclone worker).
     fn missing_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
         self.clone_config.lock().unwrap().missing_reads = reads;
+        self
+    }
+
+    /// PVE answers every update with this HTTP status.
+    fn update_status(self: Arc<Self>, status: u16) -> Arc<Self> {
+        self.clone_config.lock().unwrap().update_status = Some(status);
         self
     }
 
@@ -184,6 +191,9 @@ impl Pve {
                         r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.Options)\n"}}"#
                     ),
                 );
+            }
+            if let Some(status) = config.update_status {
+                return (status, r#"{"data":null}"#.to_owned());
             }
             if config.stale_puts > 0 {
                 config.stale_puts -= 1;
@@ -1768,6 +1778,10 @@ async fn a_refused_unprotect_fails_the_provision_before_the_start() {
         detail.contains("VM.Config.Options on /vms/9000"),
         "{detail}"
     );
+    assert_eq!(
+        step_of(&harness, &record.id).await.as_deref(),
+        Some("unprotect")
+    );
     assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
     // The guest stays recorded, so cleanup still owns it.
     assert_eq!(stored.state, GuestState::NeverReady);
@@ -1910,8 +1924,44 @@ async fn a_stale_digest_is_reread_and_retried_once() {
     let (_, error, stored) = harness
         .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
         .await;
-    assert_eq!(error.unwrap().0, "unprotect_failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "unprotect_failed");
+    // A server-side refusal, not a missing privilege.
+    assert!(!detail.contains("VM.Config.Options"), "{detail}");
+    assert!(detail.contains("locked or changing"), "{detail}");
     assert_eq!(pve.config_updates().len(), 2, "{:?}", pve.paths());
     assert!(first(&pve, "/status/start").is_none());
     assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
+}
+
+/// The `step` of the latest failed `lab.provision` operation for a record.
+async fn step_of(harness: &Harness, record_id: &str) -> Option<String> {
+    let error: String = sqlx::query_scalar(
+        "SELECT error_json FROM operations WHERE kind = 'lab.provision' AND payload_json LIKE ? ORDER BY rowid DESC LIMIT 1",
+    )
+    .bind(format!("%{record_id}%"))
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    serde_json::from_str::<serde_json::Value>(&error).unwrap()["step"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn a_permanent_client_error_on_the_update_is_not_retried() {
+    // A 404 (the guest went away between the read and the update) is not a
+    // stale digest: no re-read, no second update.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().update_status(404);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "unprotect_failed");
+    assert_eq!(pve.config_updates().len(), 1, "{:?}", pve.paths());
+    assert_eq!(
+        step_of(&harness, &record.id).await.as_deref(),
+        Some("unprotect")
+    );
 }
