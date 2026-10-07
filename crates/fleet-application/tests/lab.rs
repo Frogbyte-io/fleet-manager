@@ -331,6 +331,9 @@ struct FakeLeases {
     leases: Arc<Mutex<Vec<fleet_application::lab::Lease>>>,
     fail_claim_on_call: Mutex<Option<usize>>,
     claim_calls: Mutex<usize>,
+    /// Releases the lease inside the next re-arm, as a concurrent winner
+    /// would between the use case's read and its compare-and-set.
+    race_rearm: Mutex<bool>,
 }
 
 #[async_trait]
@@ -515,6 +518,9 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
             return Ok(false);
         };
+        if std::mem::take(&mut *self.race_rearm.lock().unwrap()) {
+            stored.state = LeaseState::Released;
+        }
         if stored.state != LeaseState::CleanupFailed || stored.cleanup_attempts != observed_attempts
         {
             return Ok(false);
@@ -1820,6 +1826,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited() {
     use fleet_application::lab::MAX_CLEANUP_ATTEMPTS;
 
@@ -1912,12 +1919,34 @@ async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited
     assert_eq!(stored.state, LeaseState::Releasing);
     assert_eq!(stored.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
     let intents = audit.intents.lock().unwrap().clone();
-    assert_eq!(intents.len(), 1);
+    assert_eq!(intents.len(), 2);
     assert_eq!(intents[0].action, "lab.lease");
     assert_eq!(intents[0].resource.as_deref(), Some(lease.id.as_str()));
-    let entries: Vec<(&str, &str)> = intents[0].metadata.entries().collect();
-    assert!(entries.contains(&("event", "lab_lease_cleanup_rearmed")));
-    assert!(entries.contains(&("failedAttempts", "5")));
+    let events = |intents: &[AuditIntent]| -> Vec<String> {
+        intents
+            .iter()
+            .filter_map(|intent| {
+                intent
+                    .metadata
+                    .entries()
+                    .find(|(key, _)| *key == "event")
+                    .map(|(_, value)| value.to_owned())
+            })
+            .collect()
+    };
+    assert_eq!(
+        events(&intents),
+        [
+            "lab_lease_cleanup_rearm_requested",
+            "lab_lease_cleanup_rearmed"
+        ]
+    );
+    assert!(
+        intents[1]
+            .metadata
+            .entries()
+            .any(|entry| entry == ("failedAttempts", "5"))
+    );
 
     // A second re-arm finds a releasing lease and changes nothing.
     assert!(matches!(
@@ -1926,4 +1955,22 @@ async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited
             .unwrap_err(),
         LabUseCaseError::Invalid { .. }
     ));
+
+    // A lease that changes between the read and the compare-and-set: the
+    // re-arm loses with a conflict, the newer state stands, and only the
+    // request is audited.
+    lease.state = LeaseState::CleanupFailed;
+    lease.cleanup_attempts = MAX_CLEANUP_ATTEMPTS;
+    leases.update(&lease).await.unwrap();
+    *leases.race_rearm.lock().unwrap() = true;
+    let error = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Conflict { .. }), "{error}");
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Released);
+    assert_eq!(stored.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
+    let intents = audit.intents.lock().unwrap().clone();
+    assert_eq!(events(&intents[2..]), ["lab_lease_cleanup_rearm_requested"]);
 }

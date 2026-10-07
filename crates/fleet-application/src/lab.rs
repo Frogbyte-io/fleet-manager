@@ -1268,12 +1268,16 @@ impl Lab {
         }
         let mut rearmed = lease.clone();
         rearm_cleanup(&mut rearmed);
+        let failed_attempts = lease.cleanup_attempts.to_string();
+        // The intent precedes the mutation; the completion is recorded only
+        // once this caller's compare-and-set won, so a concurrent loser
+        // leaves a request, never a re-arm that did not happen.
         self.audit_event(
             principal,
             Permission::LabLease,
             Some(id),
-            "lab_lease_cleanup_rearmed",
-            Some(("failedAttempts", &lease.cleanup_attempts.to_string())),
+            "lab_lease_cleanup_rearm_requested",
+            Some(("failedAttempts", &failed_attempts)),
         )
         .await?;
         let won = self
@@ -1289,6 +1293,14 @@ impl Lab {
                 detail: "the lease changed before its cleanup could be re-armed".to_owned(),
             });
         }
+        self.audit_event(
+            principal,
+            Permission::LabLease,
+            Some(id),
+            "lab_lease_cleanup_rearmed",
+            Some(("failedAttempts", &failed_attempts)),
+        )
+        .await?;
         Ok(rearmed)
     }
 
@@ -2154,9 +2166,11 @@ pub fn record_cleanup_failure(lease: &mut Lease, now: i64) {
 /// What an operator re-arm does to a `cleanup_failed` lease (#292): it is
 /// `releasing` again with a fresh round of [`MAX_CLEANUP_ATTEMPTS`]
 /// attempts and its next attempt due at once. The failed-attempt count is
-/// kept (rounded up to the round boundary, which it already is unless the
-/// limit changed), so the next attempt's idempotency key is one no earlier
-/// attempt used.
+/// kept, so the next attempt's idempotency key is one no earlier attempt
+/// used. Fleet only ever raises the count, and a `cleanup_failed` lease
+/// ends on a round boundary; a count off it (after a change of the limit)
+/// is rounded up, never down onto an earlier key. A count lowered by
+/// editing the database by hand is outside that guarantee.
 pub fn rearm_cleanup(lease: &mut Lease) {
     lease.state = LeaseState::Releasing;
     lease.cleanup_attempts = lease
@@ -2563,8 +2577,8 @@ mod tests {
         assert_eq!(lease.state, CleanupFailed);
         assert_eq!(lease.cleanup_attempts, 2 * max);
 
-        // A count off the round boundary (a changed limit, a hand-edited
-        // row) is rounded up, never back onto a used key.
+        // A count off the round boundary (after a change of the limit) is
+        // rounded up, never back onto a used key.
         lease.cleanup_attempts = 0;
         super::rearm_cleanup(&mut lease);
         assert_eq!(lease.cleanup_attempts, max);
