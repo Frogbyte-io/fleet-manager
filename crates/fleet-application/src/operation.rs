@@ -24,6 +24,16 @@ use serde::{Deserialize, Serialize};
 use crate::audit::{AuditMetadata, AuditOutcome};
 use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, authorize};
 
+/// Which surface is creating an operation: the generic `POST /operations`,
+/// or a kind's own dedicated route (the Lab kinds are created only there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreateRoute {
+    /// The generic surface.
+    Generic,
+    /// The kind's dedicated route, which already validated and authorized it.
+    Dedicated,
+}
+
 /// The kinds of operation the public API accepts. Until providers and nodes
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
 /// an unknown kind is refused rather than accepted as an unspecified promise.
@@ -45,7 +55,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 60] = [
+pub const CREATABLE_KINDS: [&str; 61] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -106,6 +116,7 @@ pub const CREATABLE_KINDS: [&str; 60] = [
     "image.build",
     "lab.provision",
     "lab.cleanup",
+    "lab.exec",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -707,7 +718,7 @@ impl Operations {
         principal_id: &str,
         new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
-        self.create_inner(authorizer, principal_id, new, false)
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Generic)
             .await
     }
 
@@ -739,7 +750,8 @@ impl Operations {
                 detail: "the lab.provision payload must match its dedicated lease route".to_owned(),
             });
         }
-        self.create_inner(authorizer, principal_id, new, true).await
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
     }
 
     /// Checks, before a release or sweep changes any lease, that the caller
@@ -772,11 +784,32 @@ impl Operations {
         Ok(())
     }
 
-    /// Queues the `lab.cleanup` operation for one releasing lease. Like
-    /// `lab.provision`, the kind is created only through this dedicated
-    /// path (the release and sweep routes), never the generic surface: the
-    /// payload must carry exactly this lease, and the caller must be
-    /// allowed to lease Lab guests.
+    /// Queues a `lab.exec` that `Lab::exec_lease` validated (FM-720), by a
+    /// caller allowed to exec on that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_exec(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.exec",
+            Permission::LabExec,
+        )
+        .await
+    }
+
+    /// Queues the `lab.cleanup` operation for one releasing lease (the
+    /// release and sweep routes), by a caller allowed to lease Lab guests.
     ///
     /// # Errors
     ///
@@ -788,26 +821,50 @@ impl Operations {
         lease_id: &str,
         new: &NewOperation,
     ) -> Result<Operation, OperationUseCaseError> {
-        let linked_lease_id = new
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.cleanup",
+            Permission::LabLease,
+        )
+        .await
+    }
+
+    /// The shared path of the lease-scoped Lab kinds: never the generic
+    /// surface; the payload must name exactly this lease; the caller must
+    /// hold `permission` on it.
+    async fn create_for_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+        kind: &str,
+        permission: Permission,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked = new
             .payload_json
             .as_deref()
             .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
             .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned));
-        if new.kind != "lab.cleanup" || linked_lease_id.as_deref() != Some(lease_id) {
+        if new.kind != kind || linked.as_deref() != Some(lease_id) {
             return Err(OperationUseCaseError::Invalid {
-                detail: "the lab.cleanup payload must match its lease".to_owned(),
+                detail: format!("the {kind} payload must match its lease"),
             });
         }
         authorize(
             authorizer,
             AccessRequest {
                 principal_id,
-                action: Permission::LabLease,
+                action: permission,
                 resource: Some(lease_id),
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        self.create_inner(authorizer, principal_id, new, true).await
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -816,7 +873,7 @@ impl Operations {
         authorizer: &dyn Authorizer,
         principal_id: &str,
         new: &NewOperation,
-        allow_lab_provision: bool,
+        route: CreateRoute,
     ) -> Result<Operation, OperationUseCaseError> {
         authorize(
             authorizer,
@@ -1002,16 +1059,23 @@ impl Operations {
                     });
                 }
             }
+        } else if new.kind == "lab.exec" {
+            // Authorized by `create_lab_exec` against its lease.
+            if route == CreateRoute::Generic {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.exec runs through the lease exec route".to_owned(),
+                });
+            }
         } else if new.kind == "lab.cleanup" {
             // Authorized by `create_lab_cleanup` against its lease.
-            if !allow_lab_provision {
+            if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.cleanup is queued by releasing a lease, not created directly"
                         .to_owned(),
                 });
             }
         } else if new.kind == "lab.provision" {
-            if !allow_lab_provision {
+            if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.provision must use the dedicated lease provisioning route"
                         .to_owned(),

@@ -2775,6 +2775,75 @@ impl LabDispatch {
         self
     }
 
+    /// Runs a `lab.exec` (FM-720): re-checks that the lease is still ready
+    /// and unexpired, then runs the command on its Lab-owned machine
+    /// through the SSH exec path (same output bounds and redaction as
+    /// machine exec). The operation keeps its `lab.exec` identity; only the
+    /// payload handed to the SSH executor is resolved here.
+    async fn exec(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
+        let refuse = |reason: &str, detail: String| {
+            let error = serde_json::json!({ "reason": reason, "detail": detail }).to_string();
+            async move {
+                operations
+                    .complete(&operation.id, "failed", None, Some(&error))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        };
+        let (Some(leases), Some(provisions)) = (&self.leases, &self.provisions) else {
+            return refuse(
+                "lab_unavailable",
+                "the Lab stores are not configured".to_owned(),
+            )
+            .await;
+        };
+        let payload: serde_json::Value = serde_json::from_str(
+            operation
+                .payload_json
+                .as_deref()
+                .ok_or("the operation carries no payload")?,
+        )
+        .map_err(|error| format!("the payload is not a Lab exec: {error}"))?;
+        let lease_id = payload["leaseId"].as_str().unwrap_or_default();
+        let lease = leases.get(lease_id).await?;
+        if let Err(detail) = fleet_application::lab::lease_exec_ready(
+            &lease,
+            fleet_core::SystemClock::now_unix_millis(),
+        ) {
+            return refuse("lease_not_ready", detail).await;
+        }
+        let record = match &lease.provision_id {
+            Some(id) => Some(provisions.get(id).await?),
+            None => None,
+        };
+        let Some((machine_id, endpoint_id)) =
+            record.and_then(|record| record.machine_id.zip(record.endpoint_id))
+        else {
+            return refuse(
+                "no_lab_machine",
+                "the lease's guest has no registered Lab machine".to_owned(),
+            )
+            .await;
+        };
+        let mut ssh = operation.clone();
+        ssh.kind = "ssh.exec".to_owned();
+        ssh.payload_json = Some(
+            serde_json::json!({
+                "machineId": machine_id,
+                "endpointId": endpoint_id,
+                "auth": {"type": "agent"},
+                "script": payload["script"],
+                "timeoutSeconds": payload["timeoutSeconds"]
+                    .as_u64()
+                    .unwrap_or(60)
+                    .min(fleet_application::lab::MAX_LAB_EXEC_TIMEOUT_SECONDS),
+            })
+            .to_string(),
+        );
+        self.fallback.execute(operations, &ssh).await
+    }
+
     /// After a provision ends failed or cancelled, a lease that owns a guest
     /// moves to `releasing` with its cleanup queued, even when the readiness
     /// failure already made it `failed` (terminal, so it could never be
@@ -2851,6 +2920,7 @@ impl OperationExecutor for LabDispatch {
                 result
             }
             ("lab.cleanup", Some(cleanup)) => cleanup.execute(operations, operation).await,
+            ("lab.exec", _) => self.exec(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
         }
     }

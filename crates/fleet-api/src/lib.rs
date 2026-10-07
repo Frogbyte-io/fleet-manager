@@ -383,6 +383,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::list_lab_leases))
                 .routes(routes!(lab::release_lab_lease))
                 .routes(routes!(lab::extend_lab_lease))
+                .routes(routes!(lab::get_lab_lease))
+                .routes(routes!(lab::exec_lab_lease))
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),

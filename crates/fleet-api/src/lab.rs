@@ -1154,6 +1154,158 @@ pub async fn sweep_lab_leases(
     }))
 }
 
+/// One lease with its guest's connection details (FM-720).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseDetailDto {
+    /// The lease.
+    #[serde(flatten)]
+    pub lease: LeaseDto,
+    /// The guest's provision state, once provisioning started.
+    pub provision_state: Option<String>,
+    /// The PVE node the guest runs on.
+    pub node: Option<String>,
+    /// The guest's VMID.
+    pub vmid: Option<u32>,
+    /// The guest's IPv4 address, once its agent reported one.
+    pub address: Option<String>,
+    /// The Lab-owned Fleet machine the guest was registered as.
+    pub machine_id: Option<String>,
+    /// That machine's SSH endpoint.
+    pub endpoint_id: Option<String>,
+    /// The saga step that failed, when provisioning failed.
+    pub failed_step: Option<String>,
+}
+
+/// Reads one lease with its guest's connection details.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or an unknown lease.
+#[utoipa::path(
+    get,
+    path = "/lab/leases/{leaseId}",
+    tag = "lab",
+    operation_id = "getLabLease",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    responses(
+        (status = 200, description = "The lease and, once provisioned, its guest.", body = Resource<LeaseDetailDto>),
+        (status = 403, description = "The caller may not read Lab leases.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn get_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+) -> Result<Json<Resource<LeaseDetailDto>>, ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let lease = lab
+        .get_lease(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    let record = match &lease.provision_id {
+        Some(id) => Some(
+            lab.get_provision(state.authorizer.as_ref(), &principal, id)
+                .await
+                .map_err(|error| map_lab_error(&error, correlation_id))?,
+        ),
+        None => None,
+    };
+    Ok(Json(Resource::new(LeaseDetailDto {
+        lease: lease.into(),
+        provision_state: record.as_ref().map(|record| record.state.id().to_owned()),
+        node: record.as_ref().and_then(|record| record.node.clone()),
+        vmid: record.as_ref().and_then(|record| record.vmid),
+        address: record.as_ref().and_then(|record| record.guest_ipv4.clone()),
+        machine_id: record.as_ref().and_then(|record| record.machine_id.clone()),
+        endpoint_id: record
+            .as_ref()
+            .and_then(|record| record.endpoint_id.clone()),
+        failed_step: record.and_then(|record| record.failed_step),
+    })))
+}
+
+/// A command to run on a ready lease's guest.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecLeaseRequest {
+    /// The shell script to run (at most 64 KiB). It is never audited.
+    pub script: String,
+    /// The deadline, in seconds (1–900; default 60).
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+/// Runs a command on a ready lease's guest as a `lab.exec` operation. The
+/// result carries the exit code and bounded, redacted stdout and stderr,
+/// as machine exec does.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown lease, a lease
+/// that is not ready, or an invalid command.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/exec",
+    tag = "lab",
+    operation_id = "execLabLease",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    request_body = ExecLeaseRequest,
+    responses(
+        (status = 202, description = "The command is queued as a `lab.exec` operation.", body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The lease is not ready or has expired, its guest has no Lab machine, or the command is invalid.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not run commands on Lab leases.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn exec_lab_lease(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<ExecLeaseRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let Json(request) = request.map_err(|_| {
+        map_lab_error(
+            &LabUseCaseError::Invalid {
+                detail: "the request body must be valid JSON with a script".to_owned(),
+            },
+            correlation_id,
+        )
+    })?;
+    let mut new = lab
+        .exec_lease(
+            state.authorizer.as_ref(),
+            &principal,
+            &lease_id,
+            &request.script,
+            request.timeout_seconds.unwrap_or(60),
+            // A retried request with the same key returns the original
+            // command operation instead of running the script again.
+            headers
+                .get(crate::IDEMPOTENCY_KEY_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    new.correlation_id = Some(correlation_id.to_string());
+    let operation = state
+        .operations
+        .create_lab_exec(state.authorizer.as_ref(), &principal.id, &lease_id, &new)
+        .await
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    Ok((StatusCode::ACCEPTED, Json(Resource::new(operation.into()))))
+}
+
 #[cfg(test)]
 mod template_mapping_tests {
     use super::*;

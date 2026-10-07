@@ -839,6 +839,49 @@ pub enum Command {
         /// The project the lease serves, when given.
         project: Option<String>,
     },
+    /// Create a lease and provision it in one step (FM-720), optionally
+    /// waiting until it is ready.
+    LabNew {
+        /// The published template version.
+        version_id: String,
+        /// What the lease is for.
+        purpose: String,
+        /// The project it serves, when any.
+        project: Option<String>,
+        /// The Proxmox account; the only trusted account when omitted.
+        account: Option<String>,
+        /// Wait until the lease is ready (or failed).
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
+    /// One lease with its guest's connection details.
+    LabStatus {
+        /// The lease's identity.
+        lease_id: String,
+    },
+    /// Run a command on a ready lease's guest.
+    LabExec {
+        /// The lease's identity.
+        lease_id: String,
+        /// The command, shell-quoted from the words after `--`.
+        script: String,
+        /// The command's deadline, in seconds.
+        timeout: Option<u64>,
+        /// Wait for the result and exit with the command's exit code.
+        wait: bool,
+    },
+    /// Release a lease and optionally wait until its cleanup finished.
+    LabDestroy {
+        /// The lease's identity.
+        lease_id: String,
+        /// Keep the VM out of automatic cleanup (elevated).
+        keep: bool,
+        /// Wait until the lease is released (or `cleanup_failed`).
+        wait: bool,
+        /// How long to wait, in seconds.
+        timeout: Option<u64>,
+    },
     /// Release a lease (or keep its VM with the elevated permission).
     LabLeaseRelease {
         /// The lease's identity.
@@ -1672,13 +1715,156 @@ fn parse_tailnet_command(verb: &str, rest: &[&str]) -> Result<Command, CliError>
 
 /// Parses one `fleetctl lab` subcommand.
 #[allow(clippy::too_many_lines)]
+/// Parses a numeric flag value.
+fn lab_number(name: &str, value: Option<&str>) -> Result<u64, CliError> {
+    let value = value.ok_or_else(|| CliError {
+        message: format!("--{name} requires a value"),
+    })?;
+    value.parse().map_err(|_| CliError {
+        message: format!("--{name} must be a number, not {value:?}"),
+    })
+}
+
+fn unknown_lab_flag(flag: &str) -> CliError {
+    CliError {
+        message: format!("unknown flag {flag:?}; see the usage below\n\n{}", usage()),
+    }
+}
+
+/// `lab create <template-version> --purpose <text> [--project <id>]
+/// [--account <id>] [--wait] [--timeout <s>]`.
+fn parse_lab_new(rest: &[&str]) -> Result<Command, CliError> {
+    let (version_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut purpose, mut project, mut account, mut wait, mut timeout) =
+        (None, None, None, false, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        let mut value = |name: &str| {
+            flags.next().map(str::to_owned).ok_or_else(|| CliError {
+                message: format!("--{name} requires a value"),
+            })
+        };
+        match flag {
+            "--purpose" => purpose = Some(value("purpose")?),
+            "--project" => project = Some(value("project")?),
+            "--account" => account = Some(value("account")?),
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabNew {
+        version_id: (*version_id).to_owned(),
+        purpose: purpose.ok_or_else(|| CliError {
+            message: "--purpose is required: record what the lease is for".to_owned(),
+        })?,
+        project,
+        account,
+        wait,
+        timeout,
+    })
+}
+
+/// `lab exec <lease> [--timeout <s>] [--wait] -- <command> [args...]`.
+fn parse_lab_exec(rest: &[&str]) -> Result<Command, CliError> {
+    let (lease_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut timeout, mut wait, mut words) = (None, false, Vec::new());
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            "--" => {
+                words = flags.by_ref().collect();
+                break;
+            }
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    if words.is_empty() {
+        return Err(CliError {
+            message: "a command must follow `--`".to_owned(),
+        });
+    }
+    Ok(Command::LabExec {
+        lease_id: (*lease_id).to_owned(),
+        script: shell_join(&words),
+        timeout,
+        wait,
+    })
+}
+
+/// `lab destroy <lease> [--keep] [--wait] [--timeout <s>]`.
+fn parse_lab_destroy(rest: &[&str]) -> Result<Command, CliError> {
+    let (lease_id, flags) = rest
+        .split_first()
+        .ok_or_else(|| CliError { message: usage() })?;
+    let (mut keep, mut wait, mut timeout) = (false, false, None);
+    let mut flags = flags.iter().copied();
+    while let Some(flag) = flags.next() {
+        match flag {
+            "--keep" => keep = true,
+            "--wait" => wait = true,
+            "--timeout" => timeout = Some(lab_number("timeout", flags.next())?),
+            other => return Err(unknown_lab_flag(other)),
+        }
+    }
+    Ok(Command::LabDestroy {
+        lease_id: (*lease_id).to_owned(),
+        keep,
+        wait,
+        timeout,
+    })
+}
+
+/// Joins words into one POSIX shell command, single-quoting every word
+/// that is not plainly safe, so `lab exec <lease> -- echo "a b"` runs
+/// exactly those two words remotely.
+#[must_use]
+pub fn shell_join(words: &[&str]) -> String {
+    words
+        .iter()
+        .map(|word| {
+            if !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_./=:,@%+".contains(&b))
+            {
+                (*word).to_owned()
+            } else {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[allow(clippy::too_many_lines)]
 fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
     match verb {
         "templates" => match rest {
             [] => Ok(Command::LabTemplates),
             _ => Err(CliError { message: usage() }),
         },
-        "create" => {
+        // `lab create <template-version>` creates a lease (FM-720); the
+        // template form, recognised by its flags, is the deprecated alias of
+        // `lab template-create`.
+        "create" if rest.first().is_some_and(|first| !first.starts_with("--")) => {
+            parse_lab_new(rest)
+        }
+        "status" => match rest {
+            [lease_id] => Ok(Command::LabStatus {
+                lease_id: (*lease_id).to_owned(),
+            }),
+            _ => Err(CliError { message: usage() }),
+        },
+        "exec" => parse_lab_exec(rest),
+        "destroy" => parse_lab_destroy(rest),
+        "create" | "template-create" => {
             let mut name = None;
             let mut description = None;
             let mut image_version_id = None;
@@ -2425,7 +2611,7 @@ fn parse_skills_catalog(rest: &[&str]) -> Result<Command, CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases [--project <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id>\n  images versions <recipe-id>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--timeout <s>] [--wait] -- <command> [args...]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> --account <account-id>\n  lab provisions\n  lab leases [--project <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
     )
 }
 
@@ -2708,9 +2894,21 @@ fn parse_onboard_stage(id: &str, rest: &[&str], discover: bool) -> Result<Comman
 /// error's envelope code, when the controller produced one, is included so
 /// scripts can branch on it.
 pub fn run(invocation: &Invocation) -> Result<String, CliError> {
+    run_with_exit(invocation).map(|(text, _)| text)
+}
+
+/// [`run`], with the process exit code the result implies: `lab exec
+/// --wait` mirrors the remote command's exit code, and `lab create --wait`
+/// and `lab destroy --wait` fail when the lease did not reach the state
+/// they waited for. Everything else is 0.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> {
     if invocation.command == Command::Events {
         stream_events(invocation)?;
-        return Ok(String::new());
+        return Ok((String::new(), 0));
     }
     if invocation.command == Command::Status && !invocation.url_explicit {
         // The local route: the daemon's constrained status surface, reached
@@ -2724,7 +2922,7 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
                 message: "the node's local surface is only available on Unix platforms".to_owned(),
             });
         };
-        return render_routed(invocation, &body, "local");
+        return render_routed(invocation, &body, "local").map(|text| (text, 0));
     }
     if invocation.command == Command::Status {
         // The explicit direct-controller override.
@@ -2747,12 +2945,22 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
                 message: format!("the controller refused ({status}, {code}): {message}"),
             });
         }
-        return render_routed(invocation, &body, "controller");
+        return render_routed(invocation, &body, "controller").map(|text| (text, 0));
     }
 
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
+    // `lab create` without --account resolves the account before the
+    // lease exists, so a refusal leaves no orphaned requested lease.
+    let lab_account = match &invocation.command {
+        Command::LabNew { account: None, .. } => Some(only_trusted_account(&client, invocation)?),
+        Command::LabNew {
+            account: Some(account),
+            ..
+        } => Some(account.clone()),
+        _ => None,
+    };
     let (method, path, query, request_body) = request_for(&invocation.command)?;
 
     let body = send(
@@ -2769,12 +2977,200 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
     let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
     let body = follow_checkout_wait(&client, invocation, body)?;
+    let body = follow_lab(&client, invocation, body, lab_account.as_deref())?;
     let payload = if body.get("items").is_some() {
         body
     } else {
         body.get("data").cloned().unwrap_or(body)
     };
-    Ok(render(invocation, &payload))
+    let exit = lab_exit_code(&invocation.command, &payload);
+    Ok((render(invocation, &payload), exit))
+}
+
+/// The exit code a Lab command's result implies (see [`run_with_exit`]).
+fn lab_exit_code(command: &Command, payload: &Value) -> u8 {
+    match command {
+        Command::LabExec { wait: true, .. } => payload["exitCode"]
+            .as_i64()
+            .map_or(1, |code| u8::try_from(code.clamp(0, 255)).unwrap_or(1)),
+        Command::LabNew { wait: true, .. } => u8::from(payload["state"] != "ready"),
+        Command::LabDestroy { wait: true, .. } => u8::from(payload["state"] != "released"),
+        _ => 0,
+    }
+}
+
+fn get_lease(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    lease_id: &str,
+) -> Result<Value, CliError> {
+    send(
+        client,
+        invocation,
+        reqwest::Method::GET,
+        &format!("/api/v1/lab/leases/{lease_id}"),
+        &[],
+        None,
+        uuid::Uuid::now_v7().to_string(),
+    )
+}
+
+/// Polls one lease until its state is one of `done` or the timeout passes;
+/// answers the lease detail body.
+fn wait_for_lease(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    lease_id: &str,
+    done: &[&str],
+    timeout_secs: u64,
+) -> Result<Value, CliError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let body = get_lease(client, invocation, lease_id)?;
+        let state = body["data"]["state"].as_str().unwrap_or_default();
+        if done.contains(&state) {
+            return Ok(body);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError {
+                message: format!(
+                    "the lease {lease_id} is still {state} after {timeout_secs}s; check `fleetctl lab status {lease_id}`"
+                ),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// The follow-up steps of the one-command Lab flow (FM-720).
+fn follow_lab(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    body: Value,
+    account: Option<&str>,
+) -> Result<Value, CliError> {
+    match &invocation.command {
+        Command::LabNew { wait, timeout, .. } => {
+            let lease_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let account = account.unwrap_or_default();
+            send(
+                client,
+                invocation,
+                reqwest::Method::POST,
+                &format!("/api/v1/lab/leases/{lease_id}/provision"),
+                &[],
+                Some(&serde_json::json!({ "accountId": account })),
+                uuid::Uuid::now_v7().to_string(),
+            )?;
+            if *wait {
+                wait_for_lease(
+                    client,
+                    invocation,
+                    &lease_id,
+                    &["ready", "failed", "releasing", "released", "cleanup_failed"],
+                    timeout.unwrap_or(900),
+                )
+            } else {
+                get_lease(client, invocation, &lease_id)
+            }
+        }
+        Command::LabExec {
+            wait: true,
+            timeout,
+            ..
+        } => {
+            let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
+            let finished = wait_for_operation(
+                client,
+                invocation,
+                &operation_id,
+                timeout.unwrap_or(60).saturating_add(60),
+            )?;
+            let data = &finished["data"];
+            let parse = |field: &str| {
+                data[field]
+                    .as_str()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            };
+            let output = parse("resultJson")
+                .or_else(|| parse("errorJson"))
+                .unwrap_or(Value::Null);
+            Ok(serde_json::json!({ "data": {
+                "operationId": operation_id,
+                "state": data["state"],
+                "exitCode": output["exitCode"],
+                "stdout": output["stdout"],
+                "stderr": output["stderr"],
+                "truncatedStdout": output["truncatedStdout"],
+                "truncatedStderr": output["truncatedStderr"],
+                "reason": output["reason"],
+                "detail": output["detail"],
+            }}))
+        }
+        Command::LabDestroy {
+            lease_id,
+            wait: true,
+            timeout,
+            ..
+        } => wait_for_lease(
+            client,
+            invocation,
+            lease_id,
+            &["released", "cleanup_failed"],
+            timeout.unwrap_or(900),
+        ),
+        _ => Ok(body),
+    }
+}
+
+/// The single trusted Proxmox account, when exactly one exists; otherwise
+/// the caller must pass `--account`.
+fn only_trusted_account(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+) -> Result<String, CliError> {
+    // Every page: a trusted account on a later page must count.
+    let mut trusted: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query: Vec<(&str, String)> = cursor
+            .iter()
+            .map(|cursor| ("cursor", cursor.clone()))
+            .collect();
+        let body = send(
+            client,
+            invocation,
+            reqwest::Method::GET,
+            "/api/v1/proxmox/accounts",
+            &query,
+            None,
+            uuid::Uuid::now_v7().to_string(),
+        )?;
+        trusted.extend(
+            body["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|account| account["fingerprint"].is_string())
+                .filter_map(|account| account["id"].as_str().map(str::to_owned)),
+        );
+        match body["page"]["nextCursor"].as_str() {
+            Some(next) if Some(next) != cursor.as_deref() => cursor = Some(next.to_owned()),
+            _ => break,
+        }
+    }
+    match trusted.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(CliError {
+            message: "no trusted Proxmox account exists; add and confirm one first".to_owned(),
+        }),
+        _ => Err(CliError {
+            message: format!(
+                "{} trusted Proxmox accounts exist; pass --account <id>",
+                trusted.len()
+            ),
+        }),
+    }
 }
 
 fn follow_skills_matrix_pages(
@@ -5099,7 +5495,43 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 Some(body),
             )
         }
-        Command::LabLeaseRelease { lease_id, keep } => (
+        Command::LabNew {
+            version_id,
+            purpose,
+            project,
+            ..
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/lab/leases".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "templateVersionId": version_id,
+                "purpose": purpose,
+                "projectId": project,
+            })),
+        ),
+        Command::LabStatus { lease_id } => (
+            reqwest::Method::GET,
+            format!("/api/v1/lab/leases/{lease_id}"),
+            Vec::new(),
+            None,
+        ),
+        Command::LabExec {
+            lease_id,
+            script,
+            timeout,
+            ..
+        } => (
+            reqwest::Method::POST,
+            format!("/api/v1/lab/leases/{lease_id}/exec"),
+            Vec::new(),
+            Some(serde_json::json!({
+                "script": script,
+                "timeoutSeconds": timeout.unwrap_or(60),
+            })),
+        ),
+        Command::LabDestroy { lease_id, keep, .. }
+        | Command::LabLeaseRelease { lease_id, keep } => (
             reqwest::Method::POST,
             format!("/api/v1/lab/leases/{lease_id}/release"),
             Vec::new(),

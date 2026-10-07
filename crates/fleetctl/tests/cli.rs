@@ -3126,3 +3126,265 @@ fn image_build_history_commands_refuse_missing_and_extra_arguments() {
         assert!(fleetctl::parse(&args).is_err());
     }
 }
+
+fn lab_parse(words: &[&str]) -> Result<fleetctl::Command, String> {
+    let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+    fleetctl::parse(&args)
+        .map(|invocation| invocation.command)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn the_one_command_lab_flow_parses() {
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "create",
+            "tv-1",
+            "--purpose",
+            "flaky test",
+            "--project",
+            "p1",
+            "--wait",
+            "--timeout",
+            "600",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabNew {
+            version_id: "tv-1".to_owned(),
+            purpose: "flaky test".to_owned(),
+            project: Some("p1".to_owned()),
+            account: None,
+            wait: true,
+            timeout: Some(600),
+        }
+    );
+    assert!(
+        lab_parse(&["lab", "create", "tv-1"])
+            .unwrap_err()
+            .contains("--purpose")
+    );
+    assert_eq!(
+        lab_parse(&["lab", "status", "lease-1"]).unwrap(),
+        fleetctl::Command::LabStatus {
+            lease_id: "lease-1".to_owned()
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "exec",
+            "lease-1",
+            "--timeout",
+            "120",
+            "--wait",
+            "--",
+            "echo",
+            "a b",
+            "it's",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabExec {
+            lease_id: "lease-1".to_owned(),
+            script: "echo 'a b' 'it'\\''s'".to_owned(),
+            timeout: Some(120),
+            wait: true,
+        }
+    );
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1"])
+            .unwrap_err()
+            .contains("`--`")
+    );
+    assert!(matches!(
+        lab_parse(&["lab", "destroy", "lease-1", "--keep", "--wait"]).unwrap(),
+        fleetctl::Command::LabDestroy {
+            keep: true,
+            wait: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn the_template_form_of_lab_create_still_parses_and_has_a_new_name() {
+    let template = [
+        "--name",
+        "t",
+        "--description",
+        "d",
+        "--image-version",
+        "iv",
+        "--cores",
+        "2",
+        "--memory",
+        "2048",
+        "--disk",
+        "20",
+        "--probe",
+        "guest_agent",
+        "--readiness-deadline",
+        "300",
+        "--ttl",
+        "3600",
+        "--cleanup",
+        "destroy",
+    ];
+    for verb in ["create", "template-create"] {
+        let mut words = vec!["lab", verb];
+        words.extend(template);
+        assert!(
+            matches!(
+                lab_parse(&words).unwrap(),
+                fleetctl::Command::LabCreate { .. }
+            ),
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn shell_join_quotes_only_what_needs_it() {
+    assert_eq!(fleetctl::shell_join(&["make", "test"]), "make test");
+    assert_eq!(
+        fleetctl::shell_join(&["printf", "%s\n", "$HOME"]),
+        "printf '%s\n' '$HOME'"
+    );
+    assert_eq!(fleetctl::shell_join(&[""]), "''");
+}
+
+/// A stub controller for `lab create`: the trusted-account lookup spans two
+/// pages, and every request is recorded so a test can prove what was (and
+/// was not) sent.
+fn lab_create_stub(
+    pages: [serde_json::Value; 2],
+) -> (
+    tokio::runtime::Runtime,
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = seen.clone();
+    let address = runtime.block_on(async move {
+        let handler = move |request: axum::extract::Request| {
+            let recorded = recorded.clone();
+            let pages = pages.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_owned();
+                let query = request.uri().query().unwrap_or_default().to_owned();
+                let body = axum::body::to_bytes(request.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                recorded.lock().unwrap().push(format!(
+                    "{method} {path}?{query} {}",
+                    String::from_utf8_lossy(&body)
+                ));
+                let answer = match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/v1/proxmox/accounts") if query.contains("cursor=c2") => {
+                        pages[1].clone()
+                    }
+                    ("GET", "/api/v1/proxmox/accounts") => pages[0].clone(),
+                    ("POST", "/api/v1/lab/leases") => json!({"data": {"id": "lease-1"}}),
+                    ("POST", "/api/v1/lab/leases/lease-1/provision") => {
+                        json!({"data": {"id": "prov-1"}})
+                    }
+                    ("GET", "/api/v1/lab/leases/lease-1") => {
+                        json!({"data": {"id": "lease-1", "state": "provisioning"}})
+                    }
+                    _ => json!({"code": "not_found", "message": path}),
+                };
+                axum::Json(answer)
+            }
+        };
+        let router = axum::Router::new().fallback(handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        address
+    });
+    (runtime, format!("http://{address}"), seen)
+}
+
+fn lab_create(base_url: &str) -> Result<String, String> {
+    let args: Vec<String> = [
+        "--url",
+        base_url,
+        "--output",
+        "json",
+        "lab",
+        "create",
+        "tv-1",
+        "--purpose",
+        "demo",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let invocation = fleetctl::parse(&args).unwrap();
+    fleetctl::run(&invocation).map_err(|error| error.message)
+}
+
+#[test]
+fn lab_create_finds_the_trusted_account_on_a_later_page() {
+    let (_runtime, base_url, seen) = lab_create_stub([
+        json!({"items": [{"id": "untrusted", "fingerprint": null}],
+               "page": {"nextCursor": "c2"}}),
+        json!({"items": [{"id": "pve-2", "fingerprint": "AA:BB"}],
+               "page": {"nextCursor": null}}),
+    ]);
+    lab_create(&base_url).unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen[0].starts_with("GET /api/v1/proxmox/accounts? "),
+        "{seen:?}"
+    );
+    assert!(seen[1].contains("cursor=c2"), "{seen:?}");
+    assert!(seen[2].starts_with("POST /api/v1/lab/leases? "), "{seen:?}");
+    assert!(
+        seen[3].starts_with("POST /api/v1/lab/leases/lease-1/provision")
+            && seen[3].contains(r#""accountId":"pve-2""#),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn lab_create_refuses_an_ambiguous_account_before_creating_a_lease() {
+    // One trusted account per page: two in total, so the CLI must refuse,
+    // and must do so before any lease exists.
+    let (_runtime, base_url, seen) = lab_create_stub([
+        json!({"items": [{"id": "pve-1", "fingerprint": "AA:BB"}],
+               "page": {"nextCursor": "c2"}}),
+        json!({"items": [{"id": "pve-2", "fingerprint": "CC:DD"}],
+               "page": {"nextCursor": null}}),
+    ]);
+    let error = lab_create(&base_url).unwrap_err();
+    assert!(error.contains("2 trusted Proxmox accounts"), "{error}");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|line| line.starts_with("GET /api/v1/proxmox/accounts"))
+    );
+
+    // No trusted account at all: refused, still with no lease request.
+    let (_runtime, base_url, seen) = lab_create_stub([
+        json!({"items": [], "page": {"nextCursor": null}}),
+        json!({"items": [], "page": {"nextCursor": null}}),
+    ]);
+    let error = lab_create(&base_url).unwrap_err();
+    assert!(error.contains("no trusted Proxmox account"), "{error}");
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("POST")),
+    );
+}
