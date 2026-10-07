@@ -210,6 +210,7 @@ impl RecipePort for FakeRecipes {
     async fn promote(
         &self,
         version_id: &str,
+        build_id: &str,
         promoted_by: &str,
         promoted_at: i64,
     ) -> Result<RecipeVersion, String> {
@@ -235,6 +236,7 @@ impl RecipePort for FakeRecipes {
             .ok_or_else(|| format!("version {version_id} not found"))?;
         version.promoted_at = Some(promoted_at);
         version.promoted_by = Some(promoted_by.to_owned());
+        version.promoted_build_id = Some(build_id.to_owned());
         Ok(version.clone())
     }
 
@@ -603,16 +605,22 @@ async fn promotion_requires_a_successful_build_with_an_artifact() {
     );
 
     assert_eq!(promoted.promoted_by.as_deref(), Some("anonymous-lan-admin"));
+    // The promotion pins the build record the gate read (issue #281).
+    let pinned = build_record(&version, "succeeded", true, NOW + 12).id;
+    assert_eq!(promoted.promoted_build_id.as_deref(), Some(pinned.as_str()));
 
-    // The promotion is audited twice (intent + completion).
+    // The promotion is audited twice (intent + completion), naming the
+    // pinned build.
     let intents = audit.intents.lock().unwrap();
-    assert!(
-        intents.iter().any(|intent| intent
-            .metadata
-            .entries()
-            .any(|(k, v)| k == "event" && v == "image_version_promoted")),
-        "{intents:?}"
-    );
+    for event in ["image_version_promoting", "image_version_promoted"] {
+        assert!(
+            intents.iter().any(|intent| {
+                let entries: Vec<_> = intent.metadata.entries().collect();
+                entries.contains(&("event", event)) && entries.contains(&("build", pinned.as_str()))
+            }),
+            "{intents:?}"
+        );
+    }
 }
 
 #[tokio::test]

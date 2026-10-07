@@ -584,9 +584,11 @@ pub enum CloneTargetReservation {
 /// the cluster it clones in.
 #[async_trait]
 pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
-    /// The template VMID recorded by the image version's latest successful
-    /// build. `None` when the version has no successful build, or when
-    /// that latest build recorded no artifact: an older build is never a
+    /// The template VMID of the build the image version's promotion pinned
+    /// (issue #281): a later rebuild never moves it. A version without a
+    /// pin (promoted before pins were recorded) falls back to its latest
+    /// successful build. `None` when there is no such build, or when that
+    /// latest build recorded no artifact: an older build is never a
     /// fallback.
     ///
     /// # Errors
@@ -595,7 +597,8 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
     /// a VMID.
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String>;
     /// The template VMIDs recorded by the successful builds of every
-    /// currently promoted image version.
+    /// currently promoted image version, plus every build a promotion
+    /// pinned, including a demoted version's (the pin outlives demotion).
     ///
     /// # Errors
     ///
@@ -604,8 +607,11 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
 }
 
 /// The Lab cleanup guard (issue #220): a VMID that is a template, or that
-/// matches a promoted image version's recorded build artifact, is never
-/// destroyed by Lab cleanup, whatever a provision record claims. Fleet has
+/// matches a protected image build artifact, is never destroyed by Lab
+/// cleanup, whatever a provision record claims. The protected artifacts are
+/// [`ImageArtifactPort::promoted_template_vmids`]: every successful build of
+/// a promoted image version, plus every build a promotion pinned, including
+/// a demoted version's (issue #281). Fleet has
 /// no Lab destroy path yet; the cleanup that FM-711 adds must call this
 /// with the cluster's live truth before it deletes anything. The
 /// provision executor already applies it before it resumes a record.
@@ -625,7 +631,7 @@ pub fn guard_destroy_target(
     }
     if promoted_template_vmids.contains(&vmid) {
         return Err(format!(
-            "VMID {vmid} is a promoted image's recorded build artifact; Lab cleanup never destroys an image template"
+            "VMID {vmid} is a protected image build artifact (a promoted version's build or a promotion's pinned build); Lab cleanup never destroys an image template"
         ));
     }
     Ok(())

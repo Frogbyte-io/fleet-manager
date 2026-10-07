@@ -2944,6 +2944,7 @@ async fn image_build_history_round_trips_through_the_real_api_and_json_cli() {
         published_at: 1001,
         promoted_at: None,
         promoted_by: None,
+        promoted_build_id: None,
     };
     recipes.publish(&draft.id, &version).await.unwrap();
     let operations = OperationRepository::new(store.pool().clone());

@@ -66,6 +66,7 @@ impl RecipeRepository {
             published_at: row.get("published_at"),
             promoted_at: row.get::<Option<i64>, _>("promoted_at"),
             promoted_by: row.get::<Option<String>, _>("promoted_by"),
+            promoted_build_id: row.get::<Option<String>, _>("promoted_build_id"),
         })
     }
 }
@@ -360,7 +361,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn get_version(&self, id: &str) -> Result<RecipeVersion, String> {
-        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE id = ?1")
+        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE id = ?1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -371,7 +372,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String> {
-        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
+        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
             .bind(recipe_id)
             .fetch_all(&self.pool)
             .await
@@ -382,6 +383,7 @@ impl RecipePort for RecipeRepository {
     async fn promote(
         &self,
         version_id: &str,
+        build_id: &str,
         promoted_by: &str,
         promoted_at: i64,
     ) -> Result<RecipeVersion, String> {
@@ -400,9 +402,10 @@ impl RecipePort for RecipeRepository {
             .ok_or_else(|| format!("version {version_id} not found"))?;
         let recipe_id: String = version.get("recipe_id");
         // Recheck under the write transaction: a concurrent new build must
-        // not slip between the application's evidence read and promotion.
-        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.id = (SELECT id FROM image_build_records WHERE version_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1) AND b.outcome = 'succeeded' AND b.content_digest = v.content_digest AND b.template_vmid IS NOT NULL)")
-            .bind(version_id).fetch_one(&mut *transaction).await.map_err(|e| e.to_string())?;
+        // not slip between the application's evidence read and promotion,
+        // and the build the application read is the one the promotion pins.
+        let eligible: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.id = ?2 AND b.id = (SELECT id FROM image_build_records WHERE version_id = ?1 ORDER BY started_at DESC, id DESC LIMIT 1) AND b.outcome = 'succeeded' AND b.content_digest = v.content_digest AND b.template_vmid IS NOT NULL)")
+            .bind(version_id).bind(build_id).fetch_one(&mut *transaction).await.map_err(|e| e.to_string())?;
         if !eligible {
             return Err(PROMOTION_BUILD_REJECTED.to_owned());
         }
@@ -415,15 +418,16 @@ impl RecipePort for RecipeRepository {
         .await
         .map_err(|error| format!("promote failed: {error}"))?;
         sqlx::query(
-            "UPDATE image_recipe_versions SET promoted_at = ?3, promoted_by = ?2 WHERE id = ?1",
+            "UPDATE image_recipe_versions SET promoted_at = ?3, promoted_by = ?2, promoted_build_id = ?4 WHERE id = ?1",
         )
         .bind(version_id)
         .bind(promoted_by)
         .bind(promoted_at)
+        .bind(build_id)
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("promote failed: {error}"))?;
-        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE id = ?1")
+        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE id = ?1")
             .bind(version_id)
             .fetch_one(&mut *transaction)
             .await
@@ -437,7 +441,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String> {
-        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by FROM image_recipe_versions WHERE recipe_id = ?1 AND promoted_at IS NOT NULL LIMIT 1")
+        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE recipe_id = ?1 AND promoted_at IS NOT NULL LIMIT 1")
             .bind(recipe_id)
             .fetch_optional(&self.pool)
             .await
@@ -507,6 +511,17 @@ fn artifact_vmid(artifact: &str) -> Option<u32> {
 #[async_trait]
 impl ImageArtifactPort for RecipeRepository {
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String> {
+        // A promotion pins the build that justified it (issue #281): a later
+        // rebuild of the version is evidence only and never moves the clone
+        // source. The pin survives a demotion, so a lease pinned earlier keeps
+        // its source.
+        let pinned: Option<Option<u32>> = sqlx::query_scalar("SELECT b.template_vmid FROM image_recipe_versions v JOIN image_build_records b ON b.id = v.promoted_build_id WHERE v.id = ?1")
+            .bind(image_version_id).fetch_optional(&self.pool).await.map_err(|e| e.to_string())?;
+        if let Some(vmid) = pinned {
+            return Ok(vmid);
+        }
+        // No pin: a version promoted before migration 0039 and not promoted
+        // since. It keeps the pre-#281 rule, its newest successful build.
         if let Some(vmid) = sqlx::query_scalar::<_, u32>("SELECT template_vmid FROM image_build_records WHERE version_id = ?1 AND outcome = 'succeeded' ORDER BY started_at DESC, id DESC LIMIT 1")
             .bind(image_version_id).fetch_optional(&self.pool).await.map_err(|e| e.to_string())? {
             return Ok(Some(vmid));
@@ -537,7 +552,13 @@ impl ImageArtifactPort for RecipeRepository {
     async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
         // Fetch only the artifact columns of successful builds whose versions
         // are promoted. Build provenance and failed history never enter memory.
-        let mut vmids: Vec<u32> = sqlx::query_scalar("SELECT DISTINCT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.outcome = 'succeeded' AND v.promoted_at IS NOT NULL")
+        // Every successful build of a promoted version is protected,
+        // including any rebuild: a rebuild's template is not the clone source
+        // (issue #281), but cleanup still never destroys it. Every pinned
+        // build is protected too, even after its version was demoted: the
+        // pin survives demotion and stays the clone source for leases pinned
+        // to that version.
+        let mut vmids: Vec<u32> = sqlx::query_scalar("SELECT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.outcome = 'succeeded' AND v.promoted_at IS NOT NULL UNION SELECT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.promoted_build_id = b.id")
             .fetch_all(&self.pool).await.map_err(|error| format!("promoted image build artifacts failed: {error}"))?;
         let legacy: Vec<Option<String>> = sqlx::query_scalar("SELECT o.result_json FROM operations o JOIN image_recipe_versions v ON v.id = json_extract(CASE WHEN json_valid(o.payload_json) THEN o.payload_json ELSE '{}' END, '$.versionId') WHERE o.kind = 'image.build' AND o.state = 'succeeded' AND v.promoted_at IS NOT NULL")
             .fetch_all(&self.pool).await.map_err(|error| format!("promoted legacy artifacts failed: {error}"))?;
@@ -657,6 +678,7 @@ mod build_record_tests {
             published_at: 1001,
             promoted_at: None,
             promoted_by: None,
+            promoted_build_id: None,
         };
         recipes.publish(&draft.id, &version).await.unwrap();
         let operation = OperationRepository::new(store.pool().clone())
@@ -869,10 +891,43 @@ mod build_record_tests {
         });
         recipes.finish_build(&record).await.unwrap();
         assert!(recipes.promoted_template_vmids().await.unwrap().is_empty());
-        recipes
-            .promote(&record.version_id, "fixture", 1006)
+        // A version promoted before migration 0039 carries no pin: its
+        // newest successful build stays the clone source (legacy fallback).
+        sqlx::query("UPDATE image_recipe_versions SET promoted_at = 1005, promoted_by = 'legacy' WHERE id = ?1")
+            .bind(&record.version_id)
+            .execute(store.pool())
             .await
             .unwrap();
+        assert_eq!(
+            recipes
+                .get_version(&record.version_id)
+                .await
+                .unwrap()
+                .promoted_build_id,
+            None
+        );
+        assert_eq!(
+            recipes.template_vmid(&record.version_id).await.unwrap(),
+            Some(124)
+        );
+        assert_eq!(
+            recipes.promoted_template_vmids().await.unwrap(),
+            vec![123, 124]
+        );
+        let build_a = record.id.clone();
+        recipes
+            .promote(&record.version_id, &build_a, "fixture", 1006)
+            .await
+            .unwrap();
+        assert_eq!(
+            recipes
+                .get_version(&record.version_id)
+                .await
+                .unwrap()
+                .promoted_build_id
+                .as_deref(),
+            Some(build_a.as_str())
+        );
         assert_eq!(
             recipes.promoted_template_vmids().await.unwrap(),
             vec![123, 124]
@@ -880,6 +935,99 @@ mod build_record_tests {
         assert_eq!(
             recipes.template_vmid(&record.version_id).await.unwrap(),
             Some(124)
+        );
+
+        // Issue #281: a later successful rebuild into a new template is
+        // evidence only. Lab keeps cloning the promoted build, and cleanup
+        // protects both templates.
+        let rebuild = OperationRepository::new(store.pool().clone())
+            .create("image.build", None, None, None, None)
+            .await
+            .unwrap();
+        record.id = rebuild.id.clone();
+        record.operation_id = rebuild.id;
+        record.started_at = 1007;
+        record.outcome = "running".to_owned();
+        record.ended_at = None;
+        record.packer_version = None;
+        record.proxmox_plugin_version = None;
+        record.template = None;
+        recipes.start_build(&record).await.unwrap();
+        record.packer_version = Some("1.15".to_owned());
+        record.proxmox_plugin_version = Some("1.2.4".to_owned());
+        record.outcome = "succeeded".to_owned();
+        record.ended_at = Some(1008);
+        record.template = Some(ImageBuildTemplate {
+            node: "pve".to_owned(),
+            vmid: 125,
+            name: "image".to_owned(),
+        });
+        recipes.finish_build(&record).await.unwrap();
+        let build_b = record.id.clone();
+        assert_eq!(
+            recipes.template_vmid(&record.version_id).await.unwrap(),
+            Some(124),
+            "a rebuild must not move the promoted clone source"
+        );
+        assert_eq!(
+            recipes.promoted_template_vmids().await.unwrap(),
+            vec![123, 124, 125]
+        );
+        // A promotion can only pin the build the gate read: the stale build
+        // is refused, and another version's or a failed build cannot be
+        // pinned by any SQL writer.
+        assert_eq!(
+            recipes
+                .promote(&record.version_id, &build_a, "fixture", 1009)
+                .await
+                .unwrap_err(),
+            PROMOTION_BUILD_REJECTED
+        );
+        assert!(
+            sqlx::query("UPDATE image_recipe_versions SET promoted_build_id = ?1 WHERE id = ?2")
+                .bind(&operation.id)
+                .bind(&record.version_id)
+                .execute(store.pool())
+                .await
+                .is_err(),
+            "a failed build cannot be pinned"
+        );
+        // Changing the clone source takes a new promotion.
+        recipes
+            .promote(&record.version_id, &build_b, "fixture", 1010)
+            .await
+            .unwrap();
+        assert_eq!(
+            recipes.template_vmid(&record.version_id).await.unwrap(),
+            Some(125)
+        );
+        // A demotion (the statement `promote` runs for the recipe's other
+        // versions) keeps the pin, so a lease pinned to the version before
+        // the demotion keeps its clone source, and cleanup keeps protecting
+        // it. The demoted version's other builds lose that protection.
+        sqlx::query(
+            "UPDATE image_recipe_versions SET promoted_at = NULL, promoted_by = NULL WHERE id = ?1",
+        )
+        .bind(&record.version_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            recipes.template_vmid(&record.version_id).await.unwrap(),
+            Some(125)
+        );
+        assert_eq!(recipes.promoted_template_vmids().await.unwrap(), vec![125]);
+        // A version row cannot be inserted already pinning a build.
+        assert!(
+            sqlx::query("INSERT INTO image_recipe_versions (id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_build_id) VALUES ('other@digest', 'other', 'other', '', ?2, '{}', 'clone', 'pve', 'local-lvm', 1, ?1)")
+                .bind(&build_b)
+                .bind(&record.content_digest)
+                .execute(store.pool())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("a promotion pins a successful build of the same version"),
+            "an inserted version cannot pin another version's build"
         );
     }
 }
@@ -899,7 +1047,7 @@ mod target_account_tests {
         let version = RecipeVersion {
             id: "version".to_owned(), recipe_id: "recipe".to_owned(), name: "image".to_owned(), description: String::new(),
             content_digest: "digest".to_owned(), content: r#"{"builders":[{"type":"proxmox-clone","proxmox_url":"https://pve.example.test:8006/api2/json/"}]}"#.to_owned(),
-            source: RecipeSource::Clone, node: "pve".to_owned(), storage_pool: "local-lvm".to_owned(), published_at: 1, promoted_at: None, promoted_by: None,
+            source: RecipeSource::Clone, node: "pve".to_owned(), storage_pool: "local-lvm".to_owned(), published_at: 1, promoted_at: None, promoted_by: None, promoted_build_id: None,
         };
         assert_eq!(
             recipes
