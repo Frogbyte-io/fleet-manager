@@ -15,7 +15,8 @@ import { errorMessage, isTerminal, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
 import { buildCommand, buildResult, promoteCommand } from '../images'
-import { BUILD_OPERATIONS_KEY, trackBuild, versionsKey } from '../useImages'
+import { BUILD_OPERATIONS_KEY, BUILD_RECORDS_KEY, trackBuild, versionsKey } from '../useImages'
+import BuildHistory from './BuildHistory.vue'
 
 // One published version: build it through the operator-installed Packer
 // CLI, follow the build, and promote it on the evidence of a successful
@@ -76,8 +77,12 @@ async function startBuild() {
       secretVars: secretVars.value.map(v => ({ name: v.name.trim(), reference: v.reference.trim() })),
     }), [202])
     trackBuild(operation.id, props.version.id)
+    followedSettled.value = false
     startedId.value = operation.id
-    await queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY }),
+      queryClient.invalidateQueries({ queryKey: BUILD_RECORDS_KEY }),
+    ])
   }
   catch (caught) {
     error.value = errorMessage(caught)
@@ -87,8 +92,15 @@ async function startBuild() {
   }
 }
 
+// The followed build's record may be written after the start returns, so
+// the history keeps refreshing until that operation settles.
+const followedSettled = ref(false)
+const recordsLive = computed(() => buildRunning.value || (!!startedId.value && !followedSettled.value))
+
 function onBuildSettled() {
+  followedSettled.value = true
   void queryClient.invalidateQueries({ queryKey: BUILD_OPERATIONS_KEY })
+  void queryClient.invalidateQueries({ queryKey: BUILD_RECORDS_KEY })
 }
 
 // The operation followed on screen: this tab's latest start, else the
@@ -269,6 +281,11 @@ const structured = computed(() => props.version.structured ?? null)
         missing="fleetctl images build always sends the 4h deadline and no secret variables; this build has to start here."
       />
     </section>
+
+    <BuildHistory
+      :version="version"
+      :live="recordsLive"
+    />
 
     <section class="space-y-2">
       <h4 class="fc-kicker border-b border-fc-line pb-1">

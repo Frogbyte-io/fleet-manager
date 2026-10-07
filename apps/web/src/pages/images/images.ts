@@ -4,7 +4,7 @@
 // unknown field, recipe → version → template → lease lineage, stale pins,
 // build attribution, and the `fleetctl images …` equivalents.
 
-import type { LabTemplateDto, LeaseDto, OperationDto, RecipeVersionDto } from '@frogbyte-io/fleet-api-client'
+import type { ImageBuildDto, LabTemplateDto, LeaseDto, OperationDto, RecipeVersionDto } from '@frogbyte-io/fleet-api-client'
 
 import { shellQuote } from '../machine/fleetctl'
 
@@ -472,6 +472,74 @@ export function latestBuilds(operations: OperationDto[], started: Record<string,
 }
 
 // ---------------------------------------------------------------------------
+// Build records (FM-702): immutable provenance per build
+
+type Tone = 'ok' | 'info' | 'warn' | 'err' | 'muted' | 'faint'
+
+/** The chip tone of a build record's `outcome` (DESIGN.md §3 operation vocabulary). */
+export function buildTone(outcome: string): Tone {
+  switch (outcome) {
+    case 'running':
+      return 'info'
+    case 'succeeded':
+      return 'ok'
+    case 'failed':
+      return 'err'
+    case 'cancelled':
+      return 'muted'
+    default:
+      return 'faint'
+  }
+}
+
+/** Whether a build record is still open (no end time reported yet). */
+export function buildRunning(build: Pick<ImageBuildDto, 'outcome' | 'endedAt'>): boolean {
+  return build.outcome === 'running' || build.endedAt == null
+}
+
+/** Seconds between start and end, or null while the build has no end time. */
+export function buildSeconds(build: Pick<ImageBuildDto, 'startedAt' | 'endedAt'>): number | null {
+  return build.endedAt == null ? null : Math.max(0, Math.round((build.endedAt - build.startedAt) / 1000))
+}
+
+/** `sha256:0123456789ab…` — the algorithm prefix kept, the hex cut to 12. */
+export function shortDigest(digest: string, keep = 12): string {
+  const colon = digest.indexOf(':')
+  const algo = colon >= 0 ? digest.slice(0, colon + 1) : ''
+  const hex = colon >= 0 ? digest.slice(colon + 1) : digest
+  return hex.length > keep ? `${algo}${hex.slice(0, keep)}…` : digest
+}
+
+/** `2026-10-07 12:34Z` */
+export function utcMinute(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')}Z`
+}
+
+/**
+ * The build record a promotion stood on. The controller promotes a version
+ * only when its newest build record (by start time) succeeded with a
+ * template (fleet-storage-sqlite `ImageRepository::promote`), so for a promoted
+ * version that is the newest record started before `promotedAt`. Null when
+ * the version is not promoted or that record is not a finished success
+ * (for example, the records were listed only partially).
+ */
+export function promotionBuild(
+  version: Pick<RecipeVersionDto, 'promotedAt'>,
+  builds: Pick<ImageBuildDto, 'id' | 'startedAt' | 'endedAt' | 'outcome' | 'template'>[],
+): string | null {
+  const at = version.promotedAt
+  if (at == null)
+    return null
+  const before = builds.filter(b => b.startedAt <= at).sort((a, b) => b.startedAt - a.startedAt || b.id.localeCompare(a.id))[0]
+  return before && before.outcome === 'succeeded' && before.template && before.endedAt != null && before.endedAt <= at ? before.id : null
+}
+
+/** The newest succeeded build record, if any (records come newest first). */
+export function latestSucceeded(builds: Pick<ImageBuildDto, 'id' | 'outcome' | 'startedAt'>[]): string | null {
+  return [...builds].sort((a, b) => b.startedAt - a.startedAt || b.id.localeCompare(a.id)).find(b => b.outcome === 'succeeded')?.id ?? null
+}
+
+// ---------------------------------------------------------------------------
 // fleetctl
 
 function join(words: string[]): string {
@@ -492,4 +560,12 @@ export function buildCommand(versionId: string): string {
 
 export function promoteCommand(versionId: string): string {
   return join(['fleetctl', 'images', 'promote', versionId])
+}
+
+export function buildsCommand(versionId: string): string {
+  return join(['fleetctl', '--output', 'json', 'images', 'builds', '--version', versionId])
+}
+
+export function buildShowCommand(buildId: string): string {
+  return join(['fleetctl', '--output', 'json', 'images', 'build-show', buildId])
 }

@@ -17,6 +17,8 @@ const publishImageRecipe = vi.fn()
 const startImageBuild = vi.fn()
 const promoteImageVersion = vi.fn()
 const getOperation = vi.fn()
+const listImageBuilds = vi.fn()
+const getImageBuild = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listImageRecipes: (...args: unknown[]) => listImageRecipes(...args),
@@ -30,6 +32,8 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   startImageBuild: (...args: unknown[]) => startImageBuild(...args),
   promoteImageVersion: (...args: unknown[]) => promoteImageVersion(...args),
   getOperation: (...args: unknown[]) => getOperation(...args),
+  listImageBuilds: (...args: unknown[]) => listImageBuilds(...args),
+  getImageBuild: (...args: unknown[]) => getImageBuild(...args),
   cancelOperation: vi.fn(),
 }))
 
@@ -87,7 +91,7 @@ enableAutoUnmount(afterEach)
 
 beforeEach(() => {
   sessionStorage.clear()
-  for (const mock of [listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, listOperations, createImageRecipe, updateImageRecipe, publishImageRecipe, startImageBuild, promoteImageVersion, getOperation])
+  for (const mock of [listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, listOperations, createImageRecipe, updateImageRecipe, publishImageRecipe, startImageBuild, promoteImageVersion, getOperation, listImageBuilds, getImageBuild])
     mock.mockReset()
   operations = []
   listImageRecipes.mockResolvedValue(ok(page([recipe()])))
@@ -96,6 +100,8 @@ beforeEach(() => {
   listLabLeases.mockResolvedValue(ok(page([lease()])))
   listOperations.mockImplementation(async () => ok(page(operations)))
   getOperation.mockImplementation(async (id: string) => ok({ data: operations.find(o => o.id === id) }))
+  listImageBuilds.mockResolvedValue(ok(page([])))
+  getImageBuild.mockResolvedValue({ status: 404, data: { code: 'not_found', message: 'no such build' }, headers: new Headers() })
 })
 
 describe('pipeline', () => {
@@ -167,6 +173,10 @@ describe('e2e: edit → publish → build → promote', () => {
     expect(wrapper.get('[data-testid="version-r1@bbbb"]').text()).toContain('building')
 
     // The build succeeds with an artifact: the evidence appears and promotion unlocks.
+    listImageBuilds.mockResolvedValue(ok(page([{
+      id: 'op-build', operationId: 'op-build', recipeId: 'r1', versionId: 'r1@bbbb', contentDigest: 'sha256:bbbb', assetDigests: [], packerVersion: '1.11.2', proxmoxPluginVersion: '1.2.2',
+      accountId: 'acct-1', node: 'pve-01', storagePool: 'local-lvm', startedAt: 10, endedAt: 70_010, outcome: 'succeeded', reason: 'succeeded', template: { name: 'ubuntu-24-dev', node: 'pve-01', vmid: 9001 },
+    }])))
     operations = [{ id: 'op-build', kind: 'image.build', state: 'succeeded', createdAt: 10, resultJson: JSON.stringify({ artifactId: '9001', recipeVersion: 'r1@bbbb', says: ['proxmox-clone: template 9001 created'] }) } as OperationDto]
     // The page polls while a build runs; refetch now instead of waiting for the timers.
     await queryClient.invalidateQueries({ queryKey: ['images', 'build-operations'] })
@@ -174,6 +184,8 @@ describe('e2e: edit → publish → build → promote', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid="promotion-evidence"]').text()).toContain('9001')
     expect(wrapper.get('[data-testid="promotion-evidence"]').text()).toContain('template 9001 created')
+    // The settled build's immutable record joins the version's history.
+    expect(wrapper.get('[data-testid="build-row-op-build"]').text()).toContain('vmid 9001')
 
     promoteImageVersion.mockImplementation(async () => {
       const promoted = { ...v2, promotedAt: 20, promotedBy: 'me' }

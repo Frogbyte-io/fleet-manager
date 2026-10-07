@@ -1,12 +1,15 @@
 import { useQueries, useQuery } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, ref, toValue, type MaybeRefOrGetter } from 'vue'
 
 import {
+  getImageBuild,
+  listImageBuilds,
   listImageRecipes,
   listImageRecipeVersions,
   listLabLeases,
   listLabTemplates,
   listOperations,
+  type ImageBuildDto,
   type LabTemplateDto,
   type LeaseDto,
   type OperationDto,
@@ -17,13 +20,15 @@ import {
 import { LEASES_KEY, TEMPLATES_KEY } from '../lab/useLab'
 import { isTerminal, retryTransient, unwrap } from '../machine/api'
 
-import { latestBuilds } from './images'
+import { buildRunning, latestBuilds } from './images'
 
 // Server state for the Images pipeline. Lab templates and leases share the
 // Lab page's cache entries (same keys, same plain-list shape).
 
 export const RECIPES_KEY = ['images', 'recipes'] as const
 export const BUILD_OPERATIONS_KEY = ['images', 'build-operations'] as const
+/** Every build-record query; invalidated when a build starts or settles. */
+export const BUILD_RECORDS_KEY = ['images', 'build-records'] as const
 export function versionsKey(recipeId: string) {
   return ['images', 'recipes', recipeId, 'versions'] as const
 }
@@ -107,4 +112,33 @@ export function useImages() {
   const loading = computed(() => recipes.isLoading.value || versionQueries.value.some(q => q.isLoading))
 
   return { recipes, versions, templates, leases, operations, builds, loadError, loading }
+}
+
+/** How many build records a version's history reads (the API's default page). */
+export const BUILD_HISTORY_LIMIT = 50
+
+/**
+ * A version's immutable build records, newest first (the API's order), as
+ * `fleetctl images builds --version <id>` reports them. Polls while one is
+ * still running, and while `live` (a build this page follows has not
+ * settled, so its record may not exist yet).
+ */
+export function useVersionBuilds(versionId: MaybeRefOrGetter<string>, live: MaybeRefOrGetter<boolean> = false) {
+  return useQuery({
+    queryKey: computed(() => [...BUILD_RECORDS_KEY, 'version', toValue(versionId)] as const),
+    queryFn: async () => items<ImageBuildDto>(await listImageBuilds({ versionId: toValue(versionId), limit: BUILD_HISTORY_LIMIT })),
+    retry: retryTransient,
+    refetchInterval: q => (toValue(live) || (q.state.data?.items ?? []).some(buildRunning) ? LIVE_REFRESH_MS : false),
+  })
+}
+
+/** One build record (`fleetctl images build-show <id>`), for a record not on the listed page. */
+export function useBuildRecord(buildId: MaybeRefOrGetter<string | null>, enabled: MaybeRefOrGetter<boolean>) {
+  return useQuery({
+    queryKey: computed(() => [...BUILD_RECORDS_KEY, 'record', toValue(buildId)] as const),
+    queryFn: async () => unwrap<ImageBuildDto>(await getImageBuild(toValue(buildId)!)),
+    enabled: computed(() => !!toValue(buildId) && toValue(enabled)),
+    retry: retryTransient,
+    refetchInterval: q => (q.state.data && buildRunning(q.state.data) ? LIVE_REFRESH_MS : false),
+  })
 }
