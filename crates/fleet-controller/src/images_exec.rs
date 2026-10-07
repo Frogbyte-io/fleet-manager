@@ -221,6 +221,9 @@ impl OperationExecutor for ImagesExecutor {
                 // The build finished before the interrupt took effect: its
                 // template exists, so the record says so.
                 (_, Ok(template)) => Ok(template),
+                // The build's own account of the interrupt is the more
+                // precise one (verified or not).
+                (Some(_), Err(reason @ ("cancelled" | "cancelled_unverified"))) => Err(reason),
                 (Some(reason), Err(_)) => Err(reason),
                 (None, Err(reason)) => Err(reason),
             }
@@ -232,7 +235,7 @@ impl OperationExecutor for ImagesExecutor {
                 record.template = Some(template);
             }
             Err(reason) => {
-                record.outcome = if reason == "cancelled" {
+                record.outcome = if reason.starts_with("cancelled") {
                     "cancelled"
                 } else {
                     "failed"
@@ -410,11 +413,18 @@ impl ImagesExecutor {
             .await
             .map_err(|_| "build_failed")?;
         let built = stoppable.outcome;
+        // A cancel interrupted the build: only Packer's own clean-cancel
+        // report says the plugin removed its VM.
+        if !built.killed_by_deadline && stoppable.stopped.is_some() {
+            return Err(if stoppable.cleanly_cancelled {
+                "cancelled"
+            } else {
+                "cancelled_unverified"
+            });
+        }
         if built.killed_by_deadline {
-            // Interrupted at the deadline: the plugin's cleanup ran unless
-            // it outlived the grace period and was killed.
-            // Interrupted and reported clean by Packer itself, or not: only
-            // the former says the plugin removed its VM.
+            // Interrupted at the deadline and reported clean by Packer, or
+            // only interrupted, or killed after the grace period.
             return Err(if stoppable.cleanly_cancelled {
                 "deadline_interrupted"
             } else if stoppable.stopped == Some(fleet_provider_packer::Stopped::Interrupted) {
@@ -679,6 +689,8 @@ mod tests {
         building: tokio::sync::Notify,
         saw_var_file: Mutex<Option<String>>,
         interrupted: std::sync::atomic::AtomicBool,
+        /// Whether an interrupted build reports Packer's clean cancel.
+        clean_cancel: std::sync::atomic::AtomicBool,
     }
     #[async_trait::async_trait]
     impl PackerTransport for Script {
@@ -738,19 +750,21 @@ mod tests {
                         killed_by_deadline: false,
                     },
                     stopped: Some(fleet_provider_packer::Stopped::Interrupted),
-                    cleanly_cancelled: true,
+                    cleanly_cancelled: self.clean_cancel.load(std::sync::atomic::Ordering::SeqCst),
                 });
             }
             let outcome = self.run(command, deadline).await?;
-            // A scripted deadline reply stands for a clean interrupt at the
-            // deadline when its stdout carries Packer's clean-cancel line.
-            let interrupted = outcome.killed_by_deadline
+            // A scripted deadline reply mentioning "interrupted" stands for
+            // an interrupt at the deadline; it was clean only when it carries
+            // Packer's clean-cancel line.
+            let interrupted = outcome.killed_by_deadline && outcome.stdout.contains("interrupted");
+            let clean = outcome.killed_by_deadline
                 && outcome
                     .stdout
                     .contains(fleet_provider_packer::CLEAN_CANCEL_MESSAGE);
             Ok(fleet_provider_packer::StoppableOutcome {
                 stopped: interrupted.then_some(fleet_provider_packer::Stopped::Interrupted),
-                cleanly_cancelled: interrupted,
+                cleanly_cancelled: clean,
                 outcome,
             })
         }
@@ -859,6 +873,7 @@ mod tests {
             building: tokio::sync::Notify::new(),
             saw_var_file: Mutex::new(None),
             interrupted: std::sync::atomic::AtomicBool::new(false),
+            clean_cancel: std::sync::atomic::AtomicBool::new(true),
         });
         (dir, store, repository, operations, operation, script)
     }
@@ -936,6 +951,11 @@ mod tests {
                     true,
                 ),
                 "deadline_interrupted",
+            ),
+            // Interrupted at the deadline without Packer's clean report.
+            (
+                reply("1,,ui,say,build interrupted", Some(1), true),
+                "deadline_interrupted_unverified",
             ),
             (reply("", Some(0), false), "artifact_missing"),
             (
@@ -1117,6 +1137,40 @@ mod tests {
             "cancelled"
         );
         assert!(!dir.path().join("work").join(&operation.id).exists());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_without_packers_clean_report_is_recorded_as_unverified() {
+        let mut replies = probes();
+        replies.push(reply("", Some(0), false));
+        let (dir, _store, repository, operations, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, true).await;
+        transport
+            .clean_cancel
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            None,
+            dir.path().join("work"),
+        );
+        let running = operations.execute_claimed(&executor, operation.clone());
+        let cancel = async {
+            transport.building.notified().await;
+            operations
+                .cancel(&Allow, "anonymous-lan-admin", &operation.id)
+                .await
+                .unwrap();
+        };
+        let (completed, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(running, cancel)
+        })
+        .await
+        .unwrap();
+        assert!(completed);
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "cancelled");
+        assert_eq!(record.reason.as_deref(), Some("cancelled_unverified"));
     }
 
     #[tokio::test]

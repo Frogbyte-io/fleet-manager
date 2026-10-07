@@ -524,23 +524,42 @@ async fn signal_group(pgid: u32, signal: &str) {
         .await;
 }
 
-/// Drains one pipe to its end, keeping at most [`MAX_OUTPUT_BYTES`]: the
-/// rest is read and discarded, so a verbose CLI neither blocks on a full
-/// pipe nor grows controller memory.
+/// How much of the end of an over-limit stream is kept: Packer reports its
+/// final outcome (including [`CLEAN_CANCEL_MESSAGE`]) last.
+pub const OUTPUT_TAIL_BYTES: usize = 64 * 1024;
+
+/// Drains one pipe to its end, so a verbose CLI never blocks on a full
+/// pipe, keeping the first [`MAX_OUTPUT_BYTES`] and, past that, the last
+/// [`OUTPUT_TAIL_BYTES`] joined by a truncation line. Memory stays bounded.
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> String {
     use tokio::io::AsyncReadExt as _;
-    let mut kept = Vec::new();
+    let mut head = Vec::new();
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut truncated = false;
     if let Some(mut pipe) = pipe {
         let mut chunk = [0_u8; 8192];
         while let Ok(read) = pipe.read(&mut chunk).await {
             if read == 0 {
                 break;
             }
-            let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
-            kept.extend_from_slice(&chunk[..read.min(room)]);
+            let room = MAX_OUTPUT_BYTES.saturating_sub(head.len());
+            head.extend_from_slice(&chunk[..read.min(room)]);
+            if read > room {
+                truncated = true;
+                tail.extend(&chunk[room..read]);
+                while tail.len() > OUTPUT_TAIL_BYTES {
+                    tail.pop_front();
+                }
+            }
         }
     }
-    String::from_utf8_lossy(&kept).into_owned()
+    let mut text = String::from_utf8_lossy(&head).into_owned();
+    if truncated {
+        let tail: Vec<u8> = tail.into_iter().collect();
+        text.push_str("\n[... output truncated ...]\n");
+        text.push_str(&String::from_utf8_lossy(&tail));
+    }
+    text
 }
 
 #[async_trait]

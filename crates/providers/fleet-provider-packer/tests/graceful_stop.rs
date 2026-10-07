@@ -88,9 +88,10 @@ async fn a_stop_request_interrupts_and_lets_the_cleanup_finish() {
 async fn the_deadline_interrupts_too_and_says_so() {
     let (dir, transport) = fake(CLEANS_UP, Duration::from_secs(10));
     let (_stop, stop_rx) = tokio::sync::watch::channel(false);
-    // Long enough for the fake to install its trap first.
+    // Generous, so the fake installs its trap long before the deadline even
+    // on a loaded machine; the run still ends at the deadline.
     let result = transport
-        .run_stoppable(&command(dir.path()), Duration::from_secs(2), stop_rx)
+        .run_stoppable(&command(dir.path()), Duration::from_secs(10), stop_rx)
         .await
         .unwrap();
     assert_eq!(result.stopped, Some(Stopped::Interrupted));
@@ -152,4 +153,23 @@ async fn an_unstopped_run_completes_normally() {
     assert!(!result.cleanly_cancelled);
     assert_eq!(result.outcome.exit_code, Some(0));
     assert!(result.outcome.stdout.contains("done"));
+}
+
+#[tokio::test]
+async fn the_clean_cancel_report_survives_output_past_the_bound() {
+    // More than MAX_OUTPUT_BYTES of output, then Packer's closing report.
+    let script = format!(
+        "trap 'head -c {} /dev/zero | tr \"\\\\0\" a; echo; echo \"1,,ui,say,Cleanly cancelled builds after being interrupted.\"; exit 1' INT\ntouch ready\nwhile :; do sleep 0.1; done",
+        fleet_provider_packer::MAX_OUTPUT_BYTES + 200_000
+    );
+    let result = stop_after_ready(&script, Duration::from_secs(20)).await;
+    assert_eq!(result.stopped, Some(Stopped::Interrupted));
+    assert!(result.cleanly_cancelled, "the trailing report was lost");
+    assert!(result.outcome.stdout.contains("[... output truncated ...]"));
+    assert!(
+        result.outcome.stdout.len()
+            <= fleet_provider_packer::MAX_OUTPUT_BYTES
+                + fleet_provider_packer::OUTPUT_TAIL_BYTES
+                + 64
+    );
 }
