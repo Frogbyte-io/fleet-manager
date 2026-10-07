@@ -77,7 +77,15 @@ macro_rules! scenario {
                 }
                 let result = match start($id, target.clone()).await {
                     Ok(run) => {
-                        let result = $body(&run).await;
+                        // The shared start sweep never destroys templates,
+                        // so this suite clears its own leftovers (from an
+                        // interrupted earlier run) before the body too.
+                        let result = match destroy_image_templates(&run).await {
+                            Ok(()) => $body(&run).await,
+                            Err(cleanup) => Err(format!(
+                                "the start-of-scenario template cleanup failed: {cleanup}"
+                            )),
+                        };
                         let swept = destroy_image_templates(&run).await;
                         let result = match (result, swept) {
                             (Ok(outcome), Ok(())) => Ok(outcome),

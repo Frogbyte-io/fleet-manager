@@ -247,7 +247,7 @@ These figures come from one run on one host. FM-613 should re-check them on 8.x 
 
 ## Step 9: the image build suite (FM-704)
 
-`cargo xtask image-acceptance [--target NAME]` ([#255](https://github.com/Frogbyte-io/fleet-manager/issues/255)) reuses the Step 7 targets, gate, and env file unchanged:
+`cargo xtask image-acceptance [--target NAME]` ([#255](https://github.com/Frogbyte-io/fleet-manager/issues/255)) reuses the Step 7 targets and gate: export `FLEET_PVE_LIVE=1` and the `FLEET_PVE_TARGET_<NAME>_*` lines you put in your local env file in Step 7 (this example calls it `~/.config/fleet/pve-acceptance.env`; any untracked path works):
 
 ```sh
 set -a; . ~/.config/fleet/pve-acceptance.env; set +a

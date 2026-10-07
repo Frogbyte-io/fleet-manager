@@ -120,7 +120,9 @@ pub fn configured_targets(env: &BTreeMap<String, String>, filter: Option<&str>) 
     let mut names: Vec<String> = env
         .keys()
         .filter_map(|key| key.strip_prefix(TARGET_PREFIX)?.strip_suffix("_HOST"))
-        .filter(|name| !name.is_empty())
+        // The same alphabet `--target` accepts: the name is one
+        // space-separated field of every result line.
+        .filter(|name| valid_target_name(name))
         .filter(|name| filter.is_none_or(|filter| filter == *name))
         .map(str::to_owned)
         .collect();
@@ -195,6 +197,30 @@ impl Summary {
                 }));
             }
         }
+        // A scenario the suite reported but this runner does not list is
+        // drift between the two lists: kept, and failed loudly, never
+        // dropped.
+        let mut unexpected: Vec<ResultRow> = Vec::new();
+        for row in reported {
+            if !spec.scenarios.contains(&row.scenario.as_str())
+                && !unexpected
+                    .iter()
+                    .any(|seen| seen.scenario == row.scenario && seen.target == row.target)
+            {
+                unexpected.push(ResultRow {
+                    status: Status::Fail,
+                    reason: format!(
+                        "scenario {:?} is not in the runner's list ({}); update its SCENARIOS (reported {}: {})",
+                        row.scenario,
+                        spec.suite,
+                        row.status.id(),
+                        row.reason
+                    ),
+                    ..row.clone()
+                });
+            }
+        }
+        results.extend(unexpected);
         Self {
             spec,
             live,
@@ -815,6 +841,35 @@ mod tests {
         }
         // The child itself was reaped.
         assert!(!Path::new(&format!("/proc/{root}")).exists());
+    }
+
+    #[test]
+    fn a_scenario_the_runner_does_not_list_fails_loudly() {
+        let reported = vec![
+            row("trust", Some("PVE9"), Status::Pass, ""),
+            row("brand-new", Some("PVE9"), Status::Pass, ""),
+        ];
+        let summary = Summary::build(SPEC, true, None, &["PVE9".to_owned()], &reported, true);
+        let unexpected = summary
+            .results
+            .iter()
+            .find(|row| row.scenario == "brand-new")
+            .expect("kept, not dropped");
+        assert_eq!(unexpected.status, Status::Fail);
+        assert!(unexpected.reason.contains("not in the runner's list"));
+        assert!(!summary.ok());
+    }
+
+    #[test]
+    fn host_variables_with_names_outside_the_alphabet_are_ignored() {
+        let env: BTreeMap<String, String> = [
+            ("FLEET_PVE_TARGET_PVE-9_HOST", "h"),
+            ("FLEET_PVE_TARGET_PVE9_HOST", "h"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        assert_eq!(configured_targets(&env, None), vec!["PVE9"]);
     }
 
     #[test]
