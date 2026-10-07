@@ -2106,7 +2106,8 @@ pub const STUCK_GRACE_MILLIS: i64 = 10 * 60 * 1000;
 /// Where the sweeper moves a lease whose provision stopped converging, if
 /// anywhere (FM-716). An in-flight lease is compensated once it is past its
 /// readiness deadline plus [`STUCK_GRACE_MILLIS`], or past its maximum
-/// lifetime. A `failed` lease whose record still holds a guest is moved to
+/// lifetime. A record counts as the lease's guest only when it links back
+/// to the lease. A `failed` lease whose record still holds a guest is moved to
 /// cleanup at once: `failed` is terminal, so a crash between the failure and
 /// its compensation would otherwise strand the guest.
 #[must_use]
@@ -2115,7 +2116,12 @@ pub fn stuck_compensation(
     record: Option<&ProvisionRecord>,
     now: i64,
 ) -> Option<LeaseState> {
-    let allocated = record.is_some_and(|record| record.vmid.is_some());
+    // Only a record that links back to this lease is its guest: an
+    // inconsistent link must never move this lease to a cleanup that would
+    // destroy another lease's VM.
+    let allocated = record.is_some_and(|record| {
+        record.lease_id.as_deref() == Some(lease.id.as_str()) && record.vmid.is_some()
+    });
     let due = match lease.state {
         LeaseState::Failed => true,
         LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping => {
@@ -2136,7 +2142,8 @@ pub fn stuck_compensation(
 /// Whether a Fleet-named Lab guest (`fm-lab-<record>`), listed through
 /// `account_id` with `vmid`, is accounted for by Lab state (FM-716): its
 /// record exists and names that account and VMID (the ones cleanup would
-/// destroy through), and the record is standalone, its lease still owns the
+/// destroy through), and the record is standalone, or its lease links back
+/// to it (`provision_id`) and still owns the
 /// guest (any state but `released` or `failed`), or the lease was released
 /// with `keep`. A record whose lease no longer exists owns nothing.
 #[must_use]
@@ -2155,11 +2162,15 @@ pub fn guest_owned(
     if record.lease_id.is_none() {
         return true;
     }
-    lease.is_some_and(|lease| match lease.state {
-        LeaseState::Released => lease.cleanup == CleanupStrategy::Keep,
-        LeaseState::Failed => false,
-        _ => true,
-    })
+    // The lease must link back to this record: its cleanup destroys only the
+    // guest its own `provision_id` names.
+    lease
+        .filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()))
+        .is_some_and(|lease| match lease.state {
+            LeaseState::Released => lease.cleanup == CleanupStrategy::Keep,
+            LeaseState::Failed => false,
+            _ => true,
+        })
 }
 
 /// Whether a releasing lease's next cleanup attempt may be queued at `now`:
@@ -2321,6 +2332,14 @@ mod tests {
         );
         assert_eq!(stuck_compensation(&lease(Failed), Some(&none), past), None);
         assert_eq!(stuck_compensation(&lease(Ready), Some(&guest), past), None);
+        // A record linked to another lease is not this lease's guest: no
+        // cleanup through this lease, only the unallocated outcome.
+        let foreign = record(Some(9000), Some("l2"));
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&foreign), past),
+            Some(Failed)
+        );
+        assert_eq!(stuck_compensation(&lease(Failed), Some(&foreign), 0), None);
     }
 
     #[test]
@@ -2331,6 +2350,7 @@ mod tests {
             id: "l1".to_owned(),
             state,
             cleanup,
+            provision_id: Some("r1".to_owned()),
             ..fleet_core::Lease::default()
         };
         let linked = record(Some(9000), Some("l1"));
@@ -2357,6 +2377,12 @@ mod tests {
         assert!(guest_owned(Some(&linked), Some(&kept), "a1", 9000));
         assert!(!guest_owned(Some(&linked), Some(&destroyed), "a1", 9000));
         assert!(!guest_owned(Some(&linked), Some(&failed), "a1", 9000));
+        // A lease that points at another record does not own this guest.
+        let mut elsewhere = ready.clone();
+        elsewhere.provision_id = Some("r2".to_owned());
+        assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
+        elsewhere.provision_id = None;
+        assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
     }
 
     #[test]
