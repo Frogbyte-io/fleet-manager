@@ -194,3 +194,205 @@ async fn a_cross_origin_preflight_is_not_approved() {
     let _ = response.into_parts().0.status;
     let _: Option<SqlitePool> = None;
 }
+
+/// A shell built with Vite's `html.cspNonce` placeholder, as `apps/web` is.
+fn nonce_shell_dist() -> tempfile::TempDir {
+    let dist = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dist.path().join("index.html"),
+        format!(
+            "<html><head><meta property=\"csp-nonce\" nonce=\"{0}\">\
+             <link rel=\"stylesheet\" nonce=\"{0}\" href=\"/assets/app.css\"></head></html>",
+            fleet_controller::browser::CSP_NONCE_PLACEHOLDER
+        ),
+    )
+    .unwrap();
+    dist
+}
+
+async fn get_shell(router: axum::Router, uri: &str) -> (Parts, String) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("host", HOST)
+                .header("accept", "text/html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (parts, body) = response.into_parts();
+    let body = body.collect().await.unwrap().to_bytes();
+    (parts, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The nonce the policy allows, read back from a response's CSP.
+fn policy_nonce(parts: &Parts) -> String {
+    let csp = parts
+        .headers
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(!csp.contains("unsafe-inline"), "{csp}");
+    let (_, rest) = csp
+        .split_once("style-src 'self' 'nonce-")
+        .unwrap_or_else(|| panic!("no style nonce in {csp}"));
+    rest.split_once('\'').unwrap().0.to_owned()
+}
+
+#[tokio::test]
+async fn the_shell_gets_a_fresh_style_nonce_on_every_response() {
+    let dist = nonce_shell_dist();
+    let router = build_router(
+        &settings(dist.path()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let mut nonces = Vec::new();
+    // The static index, the explicit file, and an SPA deep link (served from
+    // the cached shell) all carry the placeholder.
+    for uri in ["/", "/index.html", "/images", "/"] {
+        let (parts, body) = get_shell(router.clone(), uri).await;
+        assert_eq!(parts.status, StatusCode::OK, "{uri}");
+        let nonce = policy_nonce(&parts);
+        assert!(
+            !body.contains(fleet_controller::browser::CSP_NONCE_PLACEHOLDER),
+            "{uri}: {body}"
+        );
+        // The meta tag and the stylesheet link both carry the policy's nonce.
+        assert_eq!(
+            body.matches(&format!("nonce=\"{nonce}\"")).count(),
+            2,
+            "{uri}: {body}"
+        );
+        assert_eq!(
+            parts.headers.get("content-length").unwrap(),
+            &body.len().to_string(),
+            "{uri}"
+        );
+        assert_eq!(
+            parts.headers.get("cache-control").unwrap(),
+            "no-store",
+            "{uri}"
+        );
+        assert!(parts.headers.get("etag").is_none(), "{uri}");
+        assert!(parts.headers.get("last-modified").is_none(), "{uri}");
+        assert_eq!(parts.headers.get("x-frame-options").unwrap(), "DENY");
+        nonces.push(nonce);
+    }
+    nonces.sort();
+    nonces.dedup();
+    assert_eq!(nonces.len(), 4, "every response must get its own nonce");
+}
+
+#[tokio::test]
+async fn responses_without_the_placeholder_keep_the_static_policy() {
+    let (router, _dirs) = router_with_db().await;
+    for uri in ["/", "/api/v1/meta"] {
+        let (parts, _) = get_shell(router.clone(), uri).await;
+        assert_eq!(parts.status, StatusCode::OK, "{uri}");
+        assert_eq!(
+            parts.headers.get("content-security-policy").unwrap(),
+            "default-src 'self'; img-src 'self' data:; style-src 'self'",
+            "{uri}"
+        );
+    }
+
+    // The placeholder-less shell is passed through byte for byte, with the
+    // static service's length and validators intact.
+    let (parts, body) = get_shell(router, "/").await;
+    assert_eq!(body, "<html>fleet</html>");
+    assert_eq!(
+        parts.headers.get("content-length").unwrap(),
+        &body.len().to_string()
+    );
+    assert!(parts.headers.get("cache-control").is_none());
+    assert!(parts.headers.get("etag").is_some());
+    assert!(parts.headers.get("last-modified").is_some());
+}
+
+#[tokio::test]
+async fn a_head_of_the_shell_describes_the_rewritten_page() {
+    let dist = nonce_shell_dist();
+    let router = build_router(
+        &settings(dist.path()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let (_, get_body) = get_shell(router.clone(), "/").await;
+    for uri in ["/", "/images"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(uri)
+                    .header("host", HOST)
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::OK, "{uri}");
+        policy_nonce(&parts);
+        assert_eq!(
+            parts.headers.get("content-length").unwrap(),
+            &get_body.len().to_string(),
+            "{uri}"
+        );
+        assert_eq!(
+            parts.headers.get("cache-control").unwrap(),
+            "no-store",
+            "{uri}"
+        );
+        assert!(parts.headers.get("etag").is_none(), "{uri}");
+        assert!(parts.headers.get("last-modified").is_none(), "{uri}");
+        assert!(body.collect().await.unwrap().to_bytes().is_empty(), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn html_too_large_to_be_the_shell_passes_through_untouched() {
+    let dist = tempfile::tempdir().unwrap();
+    let big = format!(
+        "<html>{}{}</html>",
+        fleet_controller::browser::CSP_NONCE_PLACEHOLDER,
+        "x".repeat(2 * 1024 * 1024)
+    );
+    std::fs::write(dist.path().join("index.html"), &big).unwrap();
+    let router = build_router(
+        &settings(dist.path()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let (parts, body) = get_shell(router, "/").await;
+    assert_eq!(parts.status, StatusCode::OK);
+    assert_eq!(body, big);
+    assert_eq!(
+        parts.headers.get("content-security-policy").unwrap(),
+        "default-src 'self'; img-src 'self' data:; style-src 'self'"
+    );
+}
