@@ -13,7 +13,8 @@
 //! 2. The configuration file, selected with `--config <path>` (TOML).
 //! 3. Environment variables (`FLEET_LISTEN`, `FLEET_TAILSCALE_SERVE_LISTEN`,
 //!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`,
-//!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`).
+//!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, `FLEET_LAB_MEMORY_OVERCOMMIT`,
+//!    `FLEET_LAB_CPU_OVERCOMMIT`, `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`).
 //!
 //! `FLEET_LAB_SWEEP_INTERVAL_SECONDS` (TOML `lab_sweep_interval_seconds`,
 //! default 60) is the Lab sweeper's interval; `0` disables the background
@@ -54,6 +55,17 @@ pub const TAILSCALE_SERVE_LISTEN_VAR: &str = "FLEET_TAILSCALE_SERVE_LISTEN";
 pub const LAB_SWEEP_INTERVAL_VAR: &str = "FLEET_LAB_SWEEP_INTERVAL_SECONDS";
 /// The default Lab sweeper interval (FM-716).
 pub const DEFAULT_LAB_SWEEP_INTERVAL_SECONDS: u64 = 60;
+/// Environment variable holding the Lab placement memory overcommit ratio.
+pub const LAB_MEMORY_OVERCOMMIT_VAR: &str = "FLEET_LAB_MEMORY_OVERCOMMIT";
+/// Environment variable holding the Lab placement CPU overcommit ratio.
+pub const LAB_CPU_OVERCOMMIT_VAR: &str = "FLEET_LAB_CPU_OVERCOMMIT";
+/// Environment variable holding the maximum age of a node capacity
+/// observation Lab placement accepts, in seconds.
+pub const LAB_CAPACITY_MAX_AGE_VAR: &str = "FLEET_LAB_CAPACITY_MAX_AGE_SECONDS";
+/// The largest Lab overcommit ratio accepted.
+pub const MAX_LAB_OVERCOMMIT: f64 = 16.0;
+/// The largest Lab capacity observation age accepted: one day.
+pub const MAX_LAB_CAPACITY_AGE_SECONDS: u64 = 86_400;
 
 /// The default listen address: loopback only, because the controller is a
 /// trusted-LAN service and must not face an untrusted network by accident.
@@ -81,6 +93,31 @@ pub struct ControllerConfig {
     /// How often the Lab sweeper expires leases, queues due cleanups, and
     /// reconciles Lab guests, in seconds; `0` disables it.
     pub lab_sweep_interval_seconds: u64,
+    /// The Lab placement policy (FM-715).
+    pub lab_placement: LabPlacementConfig,
+}
+
+/// The Lab placement policy settings (FM-715).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LabPlacementConfig {
+    /// The ratio applied to a node's total memory; `1.0` is no overcommit.
+    pub memory_overcommit: f64,
+    /// The ratio applied to a node's logical CPU count; `1.0` is no
+    /// overcommit.
+    pub cpu_overcommit: f64,
+    /// How old a node capacity observation may be before placement refuses
+    /// it, in seconds.
+    pub capacity_max_age_seconds: u64,
+}
+
+impl Default for LabPlacementConfig {
+    fn default() -> Self {
+        Self {
+            memory_overcommit: 1.0,
+            cpu_overcommit: 1.0,
+            capacity_max_age_seconds: 300,
+        }
+    }
 }
 
 /// The TOML configuration file's on-disk shape.
@@ -95,6 +132,9 @@ struct ConfigFile {
     data_dir: Option<String>,
     master_key_file: Option<String>,
     lab_sweep_interval_seconds: Option<u64>,
+    lab_memory_overcommit: Option<f64>,
+    lab_cpu_overcommit: Option<f64>,
+    lab_capacity_max_age_seconds: Option<u64>,
 }
 
 /// A configuration problem that is safe to print: paths and expected facts,
@@ -176,11 +216,22 @@ pub enum ConfigError {
         /// The observed permission bits.
         mode: u32,
     },
+    /// A Lab placement setting is not a number in its accepted range.
+    LabPlacementInvalid {
+        /// The setting's name.
+        setting: &'static str,
+        /// The value that was refused.
+        value: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LabPlacementInvalid { setting, value } => write!(
+                f,
+                "{setting} must be an overcommit ratio greater than 0 and at most {MAX_LAB_OVERCOMMIT}, or an age of 1..={MAX_LAB_CAPACITY_AGE_SECONDS} seconds; got {value:?}"
+            ),
             Self::FileRead { path, error } => {
                 write!(f, "cannot read config file {}: {error}", path.display())
             }
@@ -275,6 +326,7 @@ pub fn load(
     let mut data_dir: Option<String> = None;
     let mut master_key_file: Option<String> = None;
     let mut lab_sweep_interval_seconds: Option<u64> = None;
+    let mut lab_placement = LabPlacementConfig::default();
 
     if let Some(path) = config_file {
         let raw = std::fs::read_to_string(path).map_err(|error| ConfigError::FileRead {
@@ -296,6 +348,15 @@ pub fn load(
         data_dir = file.data_dir;
         master_key_file = file.master_key_file;
         lab_sweep_interval_seconds = file.lab_sweep_interval_seconds;
+        if let Some(ratio) = file.lab_memory_overcommit {
+            lab_placement.memory_overcommit = ratio;
+        }
+        if let Some(ratio) = file.lab_cpu_overcommit {
+            lab_placement.cpu_overcommit = ratio;
+        }
+        if let Some(age) = file.lab_capacity_max_age_seconds {
+            lab_placement.capacity_max_age_seconds = age;
+        }
     }
 
     listen = env(LISTEN_VAR).or(listen);
@@ -309,6 +370,42 @@ pub fn load(
                 .parse()
                 .map_err(|_| ConfigError::LabSweepIntervalInvalid { value: raw })?,
         );
+    }
+    let invalid =
+        |setting: &'static str, value: String| ConfigError::LabPlacementInvalid { setting, value };
+    if let Some(raw) = env(LAB_MEMORY_OVERCOMMIT_VAR) {
+        lab_placement.memory_overcommit = raw
+            .trim()
+            .parse()
+            .map_err(|_| invalid("lab_memory_overcommit", raw))?;
+    }
+    if let Some(raw) = env(LAB_CPU_OVERCOMMIT_VAR) {
+        lab_placement.cpu_overcommit = raw
+            .trim()
+            .parse()
+            .map_err(|_| invalid("lab_cpu_overcommit", raw))?;
+    }
+    if let Some(raw) = env(LAB_CAPACITY_MAX_AGE_VAR) {
+        lab_placement.capacity_max_age_seconds = raw
+            .trim()
+            .parse()
+            .map_err(|_| invalid("lab_capacity_max_age_seconds", raw))?;
+    }
+    for (setting, ratio) in [
+        ("lab_memory_overcommit", lab_placement.memory_overcommit),
+        ("lab_cpu_overcommit", lab_placement.cpu_overcommit),
+    ] {
+        if !ratio.is_finite() || ratio <= 0.0 || ratio > MAX_LAB_OVERCOMMIT {
+            return Err(invalid(setting, ratio.to_string()));
+        }
+    }
+    if lab_placement.capacity_max_age_seconds == 0
+        || lab_placement.capacity_max_age_seconds > MAX_LAB_CAPACITY_AGE_SECONDS
+    {
+        return Err(invalid(
+            "lab_capacity_max_age_seconds",
+            lab_placement.capacity_max_age_seconds.to_string(),
+        ));
     }
 
     let listen_raw = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
@@ -331,6 +428,7 @@ pub fn load(
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
+        lab_placement,
     })
 }
 
@@ -414,6 +512,18 @@ impl ControllerConfig {
             )),
             None => lines.push("master_key_file = <unset; secret store unavailable>".to_owned()),
         }
+        lines.push(format!(
+            "lab_memory_overcommit = {}",
+            self.lab_placement.memory_overcommit
+        ));
+        lines.push(format!(
+            "lab_cpu_overcommit = {}",
+            self.lab_placement.cpu_overcommit
+        ));
+        lines.push(format!(
+            "lab_capacity_max_age_seconds = {}",
+            self.lab_placement.capacity_max_age_seconds
+        ));
         lines.join("\n")
     }
 }

@@ -52,6 +52,9 @@ refuses to start on a missing or unsafe setting.
 | `FLEET_DATA_DIR` | `./data` | Runtime state directory; created during startup validation. The container sets `/var/lib/fleet`. |
 | `FLEET_MASTER_KEY_FILE` | *(unset)* | Master key file for the secret store. Must exist, be a regular file, and have owner-only permissions; startup refuses a more exposed key. Compose sets `/tmp/fleet-secrets/master_key`, the protected copy made by the entrypoint from `/run/secrets/master_key`, so service and healthcheck use the same file. |
 | `FLEET_LAB_SWEEP_INTERVAL_SECONDS` | `60` | How often the Lab sweeper runs (FM-716). Each tick expires leases past their TTL, queues due cleanups (including backoff retries), compensates leases stuck past their readiness deadline (and `failed` leases still holding a guest), and reports `fm-lab-*` guests that no live lease owns (audit event `lab_orphan_guest`, plus a log line; never deleted). `0` disables the loop; `POST /api/v1/lab/leases/sweep` still works. TOML key: `lab_sweep_interval_seconds`. |
+| `FLEET_LAB_MEMORY_OVERCOMMIT` | `1.0` | Lab placement: the ratio applied to a node's total memory before observed usage and held reservations are subtracted. `1.0` is no overcommit; accepted range is above 0 up to 16. File key `lab_memory_overcommit`. |
+| `FLEET_LAB_CPU_OVERCOMMIT` | `1.0` | Lab placement: the ratio applied to a node's logical CPU count before held reservations are subtracted. File key `lab_cpu_overcommit`. |
+| `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS` | `300` | Lab placement refuses a node capacity observation older than this (1 to 86400 seconds) instead of guessing. File key `lab_capacity_max_age_seconds`. Both Compose files forward the three `FLEET_LAB_*` variables from the host environment (or a Compose `.env`). |
 
 An unset master key source is reported in the startup summary as "secret store
 unavailable" rather than pointed at a file that does not exist.

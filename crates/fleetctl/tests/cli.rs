@@ -2898,7 +2898,23 @@ fn parsing_walks_the_lease_forms() {
         fleetctl::parse(&provision).unwrap().command,
         fleetctl::Command::LabLeaseProvision {
             lease_id: "lease-1".to_owned(),
-            account_id: "pve-1".to_owned(),
+            account_id: Some("pve-1".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn provision_lease_without_an_account_leaves_it_to_placement() {
+    // FM-715: without an account, placement selects one.
+    let placed = ["lab", "provision-lease", "lease-1"]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fleetctl::parse(&placed).unwrap().command,
+        fleetctl::Command::LabLeaseProvision {
+            lease_id: "lease-1".to_owned(),
+            account_id: None,
         }
     );
 }

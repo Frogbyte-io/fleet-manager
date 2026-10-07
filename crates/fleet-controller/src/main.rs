@@ -454,11 +454,26 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     ));
                 let lab_accounts = proxmox_accounts.clone();
                 let lab_credentials = proxmox_credentials.clone();
+                // FM-715: placement observations and capacity reservations.
+                let lab_capacity = std::sync::Arc::new(
+                    fleet_storage_sqlite::CapacityRepository::new(store.pool().clone()),
+                );
+                let lab_placement_policy = fleet_application::lab_placement::PlacementPolicy {
+                    memory_overcommit: config.lab_placement.memory_overcommit,
+                    cpu_overcommit: config.lab_placement.cpu_overcommit,
+                    max_observation_age_ms: i64::try_from(
+                        config
+                            .lab_placement
+                            .capacity_max_age_seconds
+                            .saturating_mul(1_000),
+                    )
+                    .unwrap_or(i64::MAX),
+                };
                 // FM-713: Lab cleanup destroys through its own reviewed
                 // destroy executor, guarded against templates and promoted
                 // image artifacts like the dedicated destroy route.
-                let lab_cleanup =
-                    std::sync::Arc::new(fleet_controller::lab_cleanup::LabCleanupExecutor::new(
+                let lab_cleanup = std::sync::Arc::new(
+                    fleet_controller::lab_cleanup::LabCleanupExecutor::new(
                         lab_leases.clone(),
                         lab_provisions.clone(),
                         std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
@@ -482,7 +497,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                                 ),
                             )),
                         ),
-                    ));
+                    )
+                    .with_reservations(lab_capacity.clone()),
+                );
                 std::sync::Arc::new(
                     fleet_controller::proxmox_exec::LabDispatch::new(
                         with_images.clone(),
@@ -527,7 +544,15 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                                 fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
                                     store.pool().clone(),
                                 ),
-                            )),
+                            ))
+                            .with_placement(
+                                lab_capacity.clone(),
+                                lab_capacity,
+                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                    store.pool().clone(),
+                                )),
+                                lab_placement_policy,
+                            ),
                         ),
                     )
                     .with_cleanup(lab_cleanup, lab_leases, lab_provisions),

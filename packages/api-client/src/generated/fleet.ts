@@ -5178,11 +5178,18 @@ export interface StartFrogenvOperationRequest {
 }
 
 /**
- * The configured Proxmox account used to provision a lease.
+ * How to provision a lease: through an explicit Proxmox account, or through
+ * the one placement selects.
  */
 export interface StartLeaseProvisionRequest {
-  /** The identity of the explicitly configured Proxmox account. */
-  accountId: string;
+  /**
+     * The identity of the explicitly configured Proxmox account. When
+     * omitted, placement selects the one trusted account whose cluster
+     * holds the pinned image's template; none or several fail the
+     * provision operation with an explanation.
+     * @nullable
+     */
+  accountId?: string | null;
 }
 
 /**

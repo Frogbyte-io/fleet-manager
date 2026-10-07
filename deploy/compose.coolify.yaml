@@ -18,6 +18,10 @@ services:
       # The entrypoint copies the mounted key here with owner-only permissions.
       # Healthchecks must read the same copy as the service process.
       FLEET_MASTER_KEY_FILE: /tmp/fleet-secrets/master_key
+      # Lab placement policy (FM-715); the defaults are the controller's own.
+      FLEET_LAB_MEMORY_OVERCOMMIT: ${FLEET_LAB_MEMORY_OVERCOMMIT:-1.0}
+      FLEET_LAB_CPU_OVERCOMMIT: ${FLEET_LAB_CPU_OVERCOMMIT:-1.0}
+      FLEET_LAB_CAPACITY_MAX_AGE_SECONDS: ${FLEET_LAB_CAPACITY_MAX_AGE_SECONDS:-300}
     volumes:
       - fleet-data:/var/lib/fleet
     secrets:

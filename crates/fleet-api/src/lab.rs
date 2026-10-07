@@ -632,12 +632,17 @@ pub async fn start_lab_provision(
     Ok((StatusCode::CREATED, Json(Resource::new(record.into()))))
 }
 
-/// The configured Proxmox account used to provision a lease.
+/// How to provision a lease: through an explicit Proxmox account, or through
+/// the one placement selects.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StartLeaseProvisionRequest {
-    /// The identity of the explicitly configured Proxmox account.
-    pub account_id: String,
+    /// The identity of the explicitly configured Proxmox account. When
+    /// omitted, placement selects the one trusted account whose cluster
+    /// holds the pinned image's template; none or several fail the
+    /// provision operation with an explanation.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// Starts provisioning the requested lease and queues its durable operation.
@@ -671,7 +676,11 @@ pub async fn start_lab_lease_provision(
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    if request.account_id.trim().is_empty() {
+    if request
+        .account_id
+        .as_deref()
+        .is_some_and(|account_id| account_id.trim().is_empty())
+    {
         return Err(map_lab_error(
             &LabUseCaseError::Invalid {
                 detail: "accountId must not be empty".to_owned(),
@@ -708,12 +717,14 @@ pub async fn start_lab_lease_provision(
             .events
             .publish(fleet_application::events::EventKind::LeaseChanged);
     }
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "recordId": provision.id,
         "leaseId": lease_id,
-        "accountId": request.account_id,
-    })
-    .to_string();
+    });
+    if let Some(account_id) = &request.account_id {
+        payload["accountId"] = serde_json::Value::String(account_id.clone());
+    }
+    let payload = payload.to_string();
     let operation = state
         .operations
         .create_lab_provision(

@@ -73,7 +73,7 @@ tell the user instead of retrying.
 ```bash
 fleetctl --output json lab templates
 fleetctl --output json lab lease <template-version-id> --purpose "reproduce flaky test"
-fleetctl --output json lab provision-lease <lease-id> --account <account-id>
+fleetctl --output json lab provision-lease <lease-id>
 fleetctl --output json lab leases
 fleetctl --output json lab provisions
 fleetctl --output json lab extend <lease-id> --seconds 3600
@@ -81,8 +81,14 @@ fleetctl --output json lab release <lease-id>
 ```
 
 1. Pick a published template version from `lab templates` (`publishedFrom`).
-2. `lab lease` creates the lease; `lab provision-lease` builds it on a Proxmox
-   account.
+2. `lab lease` creates the lease; `lab provision-lease` builds it on the one
+   Proxmox account whose cluster holds the template's image, after reserving
+   its CPU, memory, and disk. The provision operation fails with an
+   explanation when no trusted account holds the template, when several do
+   (pass `--account <account-id>` to choose one), when the node lacks
+   capacity, or when its capacity cannot be observed or is stale. Report the
+   explanation to the user; only the several-accounts case is fixed by
+   `--account`.
 3. Poll `lab leases` until the lease `state` is `ready`. `lab provisions` shows
    where it landed (node, VMID, address).
 4. `lab extend` adds time up to the lease's maximum lifetime; the controller
