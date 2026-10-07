@@ -1268,6 +1268,7 @@ pub async fn exec_lab_lease(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     Path(lease_id): Path<String>,
+    headers: axum::http::HeaderMap,
     request: Result<Json<ExecLeaseRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
@@ -1287,6 +1288,11 @@ pub async fn exec_lab_lease(
             &lease_id,
             &request.script,
             request.timeout_seconds.unwrap_or(60),
+            // A retried request with the same key returns the original
+            // command operation instead of running the script again.
+            headers
+                .get(crate::IDEMPOTENCY_KEY_HEADER)
+                .and_then(|value| value.to_str().ok()),
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await

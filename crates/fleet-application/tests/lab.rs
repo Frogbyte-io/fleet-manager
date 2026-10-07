@@ -1643,7 +1643,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
         let lab = &lab;
         let id = lease.id.clone();
         async move {
-            lab.exec_lease(&AllowAll, &principal(), &id, script, timeout, now)
+            lab.exec_lease(&AllowAll, &principal(), &id, script, timeout, None, now)
                 .await
         }
     };
@@ -1693,6 +1693,65 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
     assert!(audited.contains("lab_exec_requested"));
     assert!(!audited.contains("secret-ish-value"));
 
+    // A retried request with the same key maps to the same operation key.
+    let keyed = lab
+        .exec_lease(
+            &AllowAll,
+            &principal(),
+            &lease.id,
+            "true",
+            60,
+            Some("k1"),
+            NOW + 5,
+        )
+        .await
+        .unwrap();
+    assert!(
+        keyed
+            .idempotency_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":k1"))
+    );
+
+    // The 64 KiB bound.
+    let oversized = "x".repeat(fleet_application::lab::MAX_LAB_EXEC_SCRIPT_BYTES + 1);
+    assert!(matches!(
+        lab.exec_lease(
+            &AllowAll,
+            &principal(),
+            &lease.id,
+            &oversized,
+            60,
+            None,
+            NOW + 5
+        )
+        .await
+        .unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+
+    // A ready lease without a TTL deadline is refused too.
+    {
+        let mut stored = leases.leases.lock().unwrap();
+        stored
+            .iter_mut()
+            .find(|entry| entry.id == lease.id)
+            .unwrap()
+            .expires_at = None;
+    }
+    assert!(matches!(
+        exec(NOW + 5, "true", 60).await.unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+    {
+        let mut stored = leases.leases.lock().unwrap();
+        stored
+            .iter_mut()
+            .find(|entry| entry.id == lease.id)
+            .unwrap()
+            .expires_at = Some(NOW + 1_000);
+    }
+
     // Bounds, expiry, and authorization.
     for (now, script, timeout) in [
         (NOW + 5, "  ", 60),
@@ -1706,7 +1765,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
         ));
     }
     assert!(matches!(
-        lab.exec_lease(&DenyAll, &principal(), &lease.id, "true", 60, NOW + 5)
+        lab.exec_lease(&DenyAll, &principal(), &lease.id, "true", 60, None, NOW + 5)
             .await
             .unwrap_err(),
         LabUseCaseError::Denied(_)

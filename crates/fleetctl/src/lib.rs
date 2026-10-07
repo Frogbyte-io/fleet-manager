@@ -2951,6 +2951,16 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
     let correlation_id = uuid::Uuid::now_v7().to_string();
     let client = http_client()?;
 
+    // `lab create` without --account resolves the account before the
+    // lease exists, so a refusal leaves no orphaned requested lease.
+    let lab_account = match &invocation.command {
+        Command::LabNew { account: None, .. } => Some(only_trusted_account(&client, invocation)?),
+        Command::LabNew {
+            account: Some(account),
+            ..
+        } => Some(account.clone()),
+        _ => None,
+    };
     let (method, path, query, request_body) = request_for(&invocation.command)?;
 
     let body = send(
@@ -2967,7 +2977,7 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
     let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
     let body = follow_checkout_wait(&client, invocation, body)?;
-    let body = follow_lab(&client, invocation, body)?;
+    let body = follow_lab(&client, invocation, body, lab_account.as_deref())?;
     let payload = if body.get("items").is_some() {
         body
     } else {
@@ -3037,19 +3047,12 @@ fn follow_lab(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
     body: Value,
+    account: Option<&str>,
 ) -> Result<Value, CliError> {
     match &invocation.command {
-        Command::LabNew {
-            account,
-            wait,
-            timeout,
-            ..
-        } => {
+        Command::LabNew { wait, timeout, .. } => {
             let lease_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
-            let account = match account {
-                Some(account) => account.clone(),
-                None => only_trusted_account(client, invocation)?,
-            };
+            let account = account.unwrap_or_default();
             send(
                 client,
                 invocation,
@@ -3126,24 +3129,38 @@ fn only_trusted_account(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
 ) -> Result<String, CliError> {
-    let body = send(
-        client,
-        invocation,
-        reqwest::Method::GET,
-        "/api/v1/proxmox/accounts",
-        &[],
-        None,
-        uuid::Uuid::now_v7().to_string(),
-    )?;
-    let trusted: Vec<&str> = body["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|account| account["fingerprint"].is_string())
-        .filter_map(|account| account["id"].as_str())
-        .collect();
+    // Every page: a trusted account on a later page must count.
+    let mut trusted: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query: Vec<(&str, String)> = cursor
+            .iter()
+            .map(|cursor| ("cursor", cursor.clone()))
+            .collect();
+        let body = send(
+            client,
+            invocation,
+            reqwest::Method::GET,
+            "/api/v1/proxmox/accounts",
+            &query,
+            None,
+            uuid::Uuid::now_v7().to_string(),
+        )?;
+        trusted.extend(
+            body["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|account| account["fingerprint"].is_string())
+                .filter_map(|account| account["id"].as_str().map(str::to_owned)),
+        );
+        match body["page"]["nextCursor"].as_str() {
+            Some(next) if Some(next) != cursor.as_deref() => cursor = Some(next.to_owned()),
+            _ => break,
+        }
+    }
     match trusted.as_slice() {
-        [only] => Ok((*only).to_owned()),
+        [only] => Ok(only.clone()),
         [] => Err(CliError {
             message: "no trusted Proxmox account exists; add and confirm one first".to_owned(),
         }),

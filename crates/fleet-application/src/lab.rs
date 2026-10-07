@@ -1010,6 +1010,7 @@ impl Lab {
     ///
     /// Fails on denial, an unknown lease, a lease that is not ready or has
     /// expired, a guest without a Lab machine, or an invalid command.
+    #[allow(clippy::too_many_arguments)]
     pub async fn exec_lease(
         &self,
         authorizer: &dyn Authorizer,
@@ -1017,6 +1018,7 @@ impl Lab {
         id: &str,
         script: &str,
         timeout_seconds: u64,
+        idempotency_key: Option<&str>,
         now: i64,
     ) -> Result<crate::operation::NewOperation, LabUseCaseError> {
         authorize(
@@ -1080,7 +1082,8 @@ impl Lab {
         .await?;
         Ok(crate::operation::NewOperation {
             kind: "lab.exec".to_owned(),
-            idempotency_key: None,
+            idempotency_key: idempotency_key
+                .map(|key| format!("{}:lab-exec:{id}:{key}", principal.id)),
             deadline_at: None,
             correlation_id: None,
             payload_json: Some(
@@ -2063,8 +2066,12 @@ pub fn lease_exec_ready(lease: &Lease, now: i64) -> Result<(), String> {
             lease.state.id()
         ));
     }
-    if lease.expires_at.is_some_and(|expires| expires <= now) {
-        return Err("the lease has expired".to_owned());
+    // A ready lease always has a TTL deadline; one without is not trusted
+    // to run commands indefinitely.
+    match lease.expires_at {
+        Some(expires) if expires > now => {}
+        Some(_) => return Err("the lease has expired".to_owned()),
+        None => return Err("the lease has no expiry deadline".to_owned()),
     }
     Ok(())
 }
