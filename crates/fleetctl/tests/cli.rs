@@ -3126,3 +3126,129 @@ fn image_build_history_commands_refuse_missing_and_extra_arguments() {
         assert!(fleetctl::parse(&args).is_err());
     }
 }
+
+fn lab_parse(words: &[&str]) -> Result<fleetctl::Command, String> {
+    let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+    fleetctl::parse(&args)
+        .map(|invocation| invocation.command)
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn the_one_command_lab_flow_parses() {
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "create",
+            "tv-1",
+            "--purpose",
+            "flaky test",
+            "--project",
+            "p1",
+            "--wait",
+            "--timeout",
+            "600",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabNew {
+            version_id: "tv-1".to_owned(),
+            purpose: "flaky test".to_owned(),
+            project: Some("p1".to_owned()),
+            account: None,
+            wait: true,
+            timeout: Some(600),
+        }
+    );
+    assert!(
+        lab_parse(&["lab", "create", "tv-1"])
+            .unwrap_err()
+            .contains("--purpose")
+    );
+    assert_eq!(
+        lab_parse(&["lab", "status", "lease-1"]).unwrap(),
+        fleetctl::Command::LabStatus {
+            lease_id: "lease-1".to_owned()
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "exec",
+            "lease-1",
+            "--timeout",
+            "120",
+            "--wait",
+            "--",
+            "echo",
+            "a b",
+            "it's",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabExec {
+            lease_id: "lease-1".to_owned(),
+            script: "echo 'a b' 'it'\\''s'".to_owned(),
+            timeout: Some(120),
+            wait: true,
+        }
+    );
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1"])
+            .unwrap_err()
+            .contains("`--`")
+    );
+    assert!(matches!(
+        lab_parse(&["lab", "destroy", "lease-1", "--keep", "--wait"]).unwrap(),
+        fleetctl::Command::LabDestroy {
+            keep: true,
+            wait: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn the_template_form_of_lab_create_still_parses_and_has_a_new_name() {
+    let template = [
+        "--name",
+        "t",
+        "--description",
+        "d",
+        "--image-version",
+        "iv",
+        "--cores",
+        "2",
+        "--memory",
+        "2048",
+        "--disk",
+        "20",
+        "--probe",
+        "guest_agent",
+        "--readiness-deadline",
+        "300",
+        "--ttl",
+        "3600",
+        "--cleanup",
+        "destroy",
+    ];
+    for verb in ["create", "template-create"] {
+        let mut words = vec!["lab", verb];
+        words.extend(template);
+        assert!(
+            matches!(
+                lab_parse(&words).unwrap(),
+                fleetctl::Command::LabCreate { .. }
+            ),
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn shell_join_quotes_only_what_needs_it() {
+    assert_eq!(fleetctl::shell_join(&["make", "test"]), "make test");
+    assert_eq!(
+        fleetctl::shell_join(&["printf", "%s\n", "$HOME"]),
+        "printf '%s\n' '$HOME'"
+    );
+    assert_eq!(fleetctl::shell_join(&[""]), "''");
+}

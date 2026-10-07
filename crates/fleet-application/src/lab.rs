@@ -1001,6 +1001,100 @@ impl Lab {
         })
     }
 
+    /// Validates a command for a ready lease's guest and answers the
+    /// `lab.exec` operation to queue (FM-720). The lease must be `ready`
+    /// and unexpired, and its guest must be a registered Lab machine. The
+    /// command itself is never audited: it may carry secrets.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, a lease that is not ready or has
+    /// expired, a guest without a Lab machine, or an invalid command.
+    pub async fn exec_lease(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+        script: &str,
+        timeout_seconds: u64,
+        now: i64,
+    ) -> Result<crate::operation::NewOperation, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabExec,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if script.trim().is_empty() || script.len() > MAX_LAB_EXEC_SCRIPT_BYTES {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!(
+                    "the command must be non-empty and at most {MAX_LAB_EXEC_SCRIPT_BYTES} bytes"
+                ),
+            });
+        }
+        if timeout_seconds == 0 || timeout_seconds > MAX_LAB_EXEC_TIMEOUT_SECONDS {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!("timeoutSeconds must be 1..={MAX_LAB_EXEC_TIMEOUT_SECONDS}"),
+            });
+        }
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
+        let record = match &lease.provision_id {
+            Some(provision) => Some(self.provisions.get(provision).await.map_err(|detail| {
+                LabUseCaseError::Backend {
+                    context: "provisions",
+                    detail,
+                }
+            })?),
+            None => None,
+        };
+        if record
+            .as_ref()
+            .is_none_or(|record| record.machine_id.is_none() || record.endpoint_id.is_none())
+        {
+            return Err(LabUseCaseError::Invalid {
+                detail: "the lease's guest has no registered Lab machine to run on".to_owned(),
+            });
+        }
+        self.audit_event(
+            principal,
+            Permission::LabExec,
+            Some(id),
+            "lab_exec_requested",
+            None,
+        )
+        .await?;
+        Ok(crate::operation::NewOperation {
+            kind: "lab.exec".to_owned(),
+            idempotency_key: None,
+            deadline_at: None,
+            correlation_id: None,
+            payload_json: Some(
+                serde_json::json!({
+                    "leaseId": id,
+                    "script": script,
+                    "timeoutSeconds": timeout_seconds,
+                })
+                .to_string(),
+            ),
+            review_token: None,
+        })
+    }
+
     /// Releases a lease: transitions it into `releasing` and records the
     /// intent. The executor performs the cleanup (destroy/revert through
     /// the destructive gate) and completes the release. A `keep` request
@@ -1948,6 +2042,31 @@ pub fn provision_compensation(state: LeaseState, allocated: bool) -> Option<Leas
         (true, false) if in_flight => Some(LeaseState::Failed),
         _ => None,
     }
+}
+
+/// The largest command a Lab exec accepts.
+pub const MAX_LAB_EXEC_SCRIPT_BYTES: usize = 64 * 1024;
+/// The longest a Lab exec may run (the SSH exec bound).
+pub const MAX_LAB_EXEC_TIMEOUT_SECONDS: u64 = 900;
+
+/// Whether a lease may run a command at `now`: it is `ready` and its TTL
+/// has not expired. Checked when the exec is requested and again when it
+/// runs.
+///
+/// # Errors
+///
+/// Answers why it may not.
+pub fn lease_exec_ready(lease: &Lease, now: i64) -> Result<(), String> {
+    if lease.state != LeaseState::Ready {
+        return Err(format!(
+            "the lease is {}; commands run only on a ready lease",
+            lease.state.id()
+        ));
+    }
+    if lease.expires_at.is_some_and(|expires| expires <= now) {
+        return Err("the lease has expired".to_owned());
+    }
+    Ok(())
 }
 
 /// Whether a releasing lease's next cleanup attempt may be queued at `now`:

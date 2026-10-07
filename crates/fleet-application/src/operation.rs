@@ -45,7 +45,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 60] = [
+pub const CREATABLE_KINDS: [&str; 61] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -106,6 +106,7 @@ pub const CREATABLE_KINDS: [&str; 60] = [
     "image.build",
     "lab.provision",
     "lab.cleanup",
+    "lab.exec",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -772,6 +773,42 @@ impl Operations {
         Ok(())
     }
 
+    /// Queues a `lab.exec` that `Lab::exec_lease` validated (FM-720). Like
+    /// the other Lab kinds it is created only through its dedicated route,
+    /// against its own lease, by a caller allowed to exec on it.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_exec(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned));
+        if new.kind != "lab.exec" || linked.as_deref() != Some(lease_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the lab.exec payload must match its lease".to_owned(),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::LabExec,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.create_inner(authorizer, principal_id, new, true).await
+    }
+
     /// Queues the `lab.cleanup` operation for one releasing lease. Like
     /// `lab.provision`, the kind is created only through this dedicated
     /// path (the release and sweep routes), never the generic surface: the
@@ -1001,6 +1038,13 @@ impl Operations {
                         detail: "catalog rollout requires an SSH endpoint".to_owned(),
                     });
                 }
+            }
+        } else if new.kind == "lab.exec" {
+            // Authorized by `create_lab_exec` against its lease.
+            if !allow_lab_provision {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.exec runs through the lease exec route".to_owned(),
+                });
             }
         } else if new.kind == "lab.cleanup" {
             // Authorized by `create_lab_cleanup` against its lease.

@@ -1593,3 +1593,121 @@ async fn lease_creation_refuses_a_stale_template_bootstrap_project() {
         "the lease was created for a stale bootstrap project"
     );
 }
+
+#[tokio::test]
+async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
+    let templates = Arc::new(FakeTemplates::default());
+    let audit = Arc::new(FakeAudit::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        audit.clone(),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let lease = lab
+        .create_lease(
+            &AllowAll,
+            &principal(),
+            fleet_application::lab::NewLease {
+                template_version_id: version.id.clone(),
+                purpose: "exec".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    let exec = |now: i64, script: &'static str, timeout: u64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(&AllowAll, &principal(), &id, script, timeout, now)
+                .await
+        }
+    };
+
+    // Not ready yet.
+    assert!(matches!(
+        exec(NOW + 3, "uname -a", 60).await.unwrap_err(),
+        LabUseCaseError::Invalid { .. }
+    ));
+
+    // Ready, but the guest has no Lab machine.
+    let mut record = provisions
+        .create(
+            &NewProvision {
+                template_version_id: version.id.clone(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: None,
+            },
+            NOW + 3,
+        )
+        .await
+        .unwrap();
+    {
+        let mut stored = leases.leases.lock().unwrap();
+        let entry = stored
+            .iter_mut()
+            .find(|entry| entry.id == lease.id)
+            .unwrap();
+        entry.state = fleet_core::LeaseState::Ready;
+        entry.provision_id = Some(record.id.clone());
+        entry.expires_at = Some(NOW + 1_000);
+    }
+    let error = exec(NOW + 4, "uname -a", 60).await.unwrap_err();
+    assert!(error.to_string().contains("Lab machine"), "{error}");
+
+    // Ready with a machine: the lab.exec operation, the command not audited.
+    record.machine_id = Some("machine-1".to_owned());
+    record.endpoint_id = Some("endpoint-1".to_owned());
+    provisions.update(&record).await.unwrap();
+    let new = exec(NOW + 5, "echo secret-ish-value", 120).await.unwrap();
+    assert_eq!(new.kind, "lab.exec");
+    let payload: serde_json::Value =
+        serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["leaseId"], lease.id.as_str());
+    assert_eq!(payload["timeoutSeconds"], 120);
+    let audited = format!("{:?}", audit.intents.lock().unwrap());
+    assert!(audited.contains("lab_exec_requested"));
+    assert!(!audited.contains("secret-ish-value"));
+
+    // Bounds, expiry, and authorization.
+    for (now, script, timeout) in [
+        (NOW + 5, "  ", 60),
+        (NOW + 5, "true", 0),
+        (NOW + 5, "true", 901),
+        (NOW + 1_000, "true", 60),
+    ] {
+        assert!(matches!(
+            exec(now, script, timeout).await.unwrap_err(),
+            LabUseCaseError::Invalid { .. }
+        ));
+    }
+    assert!(matches!(
+        lab.exec_lease(&DenyAll, &principal(), &lease.id, "true", 60, NOW + 5)
+            .await
+            .unwrap_err(),
+        LabUseCaseError::Denied(_)
+    ));
+}

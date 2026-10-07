@@ -172,6 +172,9 @@ pub enum Permission {
     /// Keep a Lab lease's VM out of automatic cleanup. An elevated
     /// mutation: it transfers a VM out of automatic cleanup.
     LabKeep,
+    /// Run a command on a ready Lab lease's guest (FM-720). A privileged
+    /// mutation: it executes on a machine, like machine exec.
+    LabExec,
 }
 
 impl Permission {
@@ -230,6 +233,7 @@ impl Permission {
         Permission::LabLease,
         Permission::LabExtend,
         Permission::LabKeep,
+        Permission::LabExec,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -287,6 +291,7 @@ impl Permission {
             Permission::LabLease => "lab.lease",
             Permission::LabExtend => "lab.extend",
             Permission::LabKeep => "lab.keep",
+            Permission::LabExec => "lab.exec",
         }
     }
 
@@ -346,7 +351,8 @@ impl Permission {
             | Permission::LabProvision
             | Permission::LabLease
             | Permission::LabExtend
-            | Permission::LabKeep => true,
+            | Permission::LabKeep
+            | Permission::LabExec => true,
         }
     }
 
@@ -406,7 +412,8 @@ impl Permission {
             | Permission::ApplyExecute
             | Permission::LabProvision
             | Permission::LabExtend
-            | Permission::LabKeep => true,
+            | Permission::LabKeep
+            | Permission::LabExec => true,
         }
     }
 }
