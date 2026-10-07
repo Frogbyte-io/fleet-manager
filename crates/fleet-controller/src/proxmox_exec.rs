@@ -1990,7 +1990,8 @@ fn pve_request(
 impl ProvisionExecutor {
     /// The Lab cleanup guard over the cluster's live truth (issue #220):
     /// refuses a VMID that `/cluster/resources` reports as a template, or
-    /// that matches a promoted image's recorded build artifact. Lab cleanup
+    /// that matches a protected image build artifact (a promoted version's
+    /// build or a promotion's pinned build, issue #281). Lab cleanup
     /// (`destroy`, FM-711) must pass this before it deletes a guest; the
     /// provision executor also applies it before it resumes a record.
     ///
@@ -2175,7 +2176,7 @@ impl ProvisionExecutor {
                 return Ok(Err(Refusal::new(
                     "conflict",
                     format!(
-                        "the next free VMID {candidate} is a promoted image's recorded template, which no longer exists in the cluster; rebuild or demote that image, or move the next-id range"
+                        "the next free VMID {candidate} is a promoted image's recorded template, which no longer exists in the cluster; promote a newer build of that image version, or move the next-id range"
                     ),
                 )));
             }

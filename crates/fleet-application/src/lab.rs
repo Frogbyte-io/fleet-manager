@@ -607,8 +607,11 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
 }
 
 /// The Lab cleanup guard (issue #220): a VMID that is a template, or that
-/// matches a promoted image version's recorded build artifact, is never
-/// destroyed by Lab cleanup, whatever a provision record claims. Fleet has
+/// matches a protected image build artifact, is never destroyed by Lab
+/// cleanup, whatever a provision record claims. The protected artifacts are
+/// [`ImageArtifactPort::promoted_template_vmids`]: every successful build of
+/// a promoted image version, plus every build a promotion pinned, including
+/// a demoted version's (issue #281). Fleet has
 /// no Lab destroy path yet; the cleanup that FM-711 adds must call this
 /// with the cluster's live truth before it deletes anything. The
 /// provision executor already applies it before it resumes a record.
@@ -628,7 +631,7 @@ pub fn guard_destroy_target(
     }
     if promoted_template_vmids.contains(&vmid) {
         return Err(format!(
-            "VMID {vmid} is a promoted image's recorded build artifact; Lab cleanup never destroys an image template"
+            "VMID {vmid} is a protected image build artifact (a promoted version's build or a promotion's pinned build); Lab cleanup never destroys an image template"
         ));
     }
     Ok(())
