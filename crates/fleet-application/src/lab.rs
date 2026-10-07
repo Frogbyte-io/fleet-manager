@@ -726,6 +726,22 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         observed_expires_at: i64,
         now: i64,
     ) -> Result<bool, String>;
+    /// Moves a lease to `to` only while it is still in `observed` with the
+    /// same provision link: the compare-and-set that keeps the sweeper's
+    /// compensation from overwriting a concurrent `complete_ready`, release,
+    /// or executor compensation. Returns whether this caller made the
+    /// transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String>;
 }
 
 /// Result of linking a provision record to a lease.
@@ -2082,6 +2098,89 @@ pub fn lease_exec_ready(lease: &Lease, now: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// How long past its readiness deadline an in-flight lease may stay before
+/// the sweeper compensates it: the provision executor enforces the deadline
+/// itself, so this only catches a provision that stopped running.
+pub const STUCK_GRACE_MILLIS: i64 = 10 * 60 * 1000;
+
+/// Whether `record`, the record named by `lease.provision_id`, holds a guest
+/// that belongs to `lease`: it links back to the lease and allocated a VMID.
+/// Only then may compensation queue a cleanup for it; an inconsistent link
+/// must never move this lease to a cleanup that would destroy another
+/// lease's VM.
+#[must_use]
+pub fn lease_allocated(lease: &Lease, record: Option<&ProvisionRecord>) -> bool {
+    record.is_some_and(|record| {
+        record.lease_id.as_deref() == Some(lease.id.as_str()) && record.vmid.is_some()
+    })
+}
+
+/// Where the sweeper moves a lease whose provision stopped converging, if
+/// anywhere (FM-716). An in-flight lease is compensated once it is past its
+/// readiness deadline plus [`STUCK_GRACE_MILLIS`], or past its maximum
+/// lifetime (both inclusive, like the TTL and cleanup deadlines). A record
+/// counts as the lease's guest only when it links back to the lease
+/// ([`lease_allocated`]). A `failed` lease whose record still holds a guest
+/// is moved to cleanup at once: `failed` is terminal, so a crash between the failure and
+/// its compensation would otherwise strand the guest.
+#[must_use]
+pub fn stuck_compensation(
+    lease: &Lease,
+    record: Option<&ProvisionRecord>,
+    now: i64,
+) -> Option<LeaseState> {
+    let allocated = lease_allocated(lease, record);
+    let due = match lease.state {
+        LeaseState::Failed => true,
+        LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping => {
+            record
+                .and_then(|record| record.readiness_deadline_at)
+                .is_some_and(|deadline| deadline.saturating_add(STUCK_GRACE_MILLIS) <= now)
+                || lease.max_lifetime_at <= now
+        }
+        _ => false,
+    };
+    if due {
+        provision_compensation(lease.state, allocated)
+    } else {
+        None
+    }
+}
+
+/// Whether a Fleet-named Lab guest (`fm-lab-<record>`), listed through
+/// `account_id` with `vmid`, is accounted for by Lab state (FM-716): its
+/// record exists and names that account and VMID (the ones cleanup would
+/// destroy through), and the record is standalone, or its lease links back
+/// to it (`provision_id`) and still owns the
+/// guest (any state but `released` or `failed`), or the lease was released
+/// with `keep`. A record whose lease no longer exists owns nothing.
+#[must_use]
+pub fn guest_owned(
+    record: Option<&ProvisionRecord>,
+    lease: Option<&Lease>,
+    account_id: &str,
+    vmid: u32,
+) -> bool {
+    let Some(record) = record else {
+        return false;
+    };
+    if record.vmid != Some(vmid) || record.account_id.as_deref() != Some(account_id) {
+        return false;
+    }
+    if record.lease_id.is_none() {
+        return true;
+    }
+    // The lease must link back to this record: its cleanup destroys only the
+    // guest its own `provision_id` names.
+    lease
+        .filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()))
+        .is_some_and(|lease| match lease.state {
+            LeaseState::Released => lease.cleanup == CleanupStrategy::Keep,
+            LeaseState::Failed => false,
+            _ => true,
+        })
+}
+
 /// Whether a releasing lease's next cleanup attempt may be queued at `now`:
 /// not before the backoff after a failed attempt has passed.
 #[must_use]
@@ -2178,6 +2277,135 @@ mod tests {
         // Each attempt gets its own idempotency key.
         let key = super::cleanup_operation(&lease, None).idempotency_key;
         assert_eq!(key.as_deref(), Some("lab-cleanup:l1:5"));
+    }
+
+    fn record(vmid: Option<u32>, lease_id: Option<&str>) -> super::ProvisionRecord {
+        super::ProvisionRecord {
+            id: "r1".to_owned(),
+            template_version_id: "tv1".to_owned(),
+            lease_id: lease_id.map(str::to_owned),
+            state: fleet_core::GuestState::default(),
+            node: vmid.map(|_| "pve".to_owned()),
+            vmid,
+            clone_upid: None,
+            guest_ipv4: None,
+            machine_id: None,
+            endpoint_id: None,
+            ready_project_operation_id: None,
+            readiness_deadline_at: Some(10_000),
+            failed_step: None,
+            account_id: Some("a1".to_owned()),
+            idempotency_key: None,
+            ready_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn the_sweeper_compensates_stuck_and_failed_leases_by_what_they_allocated() {
+        use super::{STUCK_GRACE_MILLIS, stuck_compensation};
+        use fleet_core::LeaseState::{Booting, Failed, Provisioning, Ready, Releasing};
+        let lease = |state| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            max_lifetime_at: i64::MAX,
+            ..fleet_core::Lease::default()
+        };
+        let past = 10_000 + STUCK_GRACE_MILLIS + 1;
+        let guest = record(Some(9000), Some("l1"));
+        let none = record(None, Some("l1"));
+        // Inside the grace the provision may still be running.
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), 10_001),
+            None
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past),
+            Some(Releasing)
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Booting), Some(&none), past),
+            Some(Failed)
+        );
+        // Both deadlines are inclusive: due the moment they are reached.
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past - 1),
+            Some(Releasing)
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past - 2),
+            None
+        );
+        // Past the maximum lifetime, whatever the deadline.
+        let mut old = lease(Booting);
+        old.max_lifetime_at = 5;
+        assert_eq!(stuck_compensation(&old, None, 5), Some(Failed));
+        assert_eq!(stuck_compensation(&old, None, 4), None);
+        // A failed lease still holding a guest is repaired at once; one
+        // that never allocated stays failed.
+        assert_eq!(
+            stuck_compensation(&lease(Failed), Some(&guest), 0),
+            Some(Releasing)
+        );
+        assert_eq!(stuck_compensation(&lease(Failed), Some(&none), past), None);
+        assert_eq!(stuck_compensation(&lease(Ready), Some(&guest), past), None);
+        // A record linked to another lease is not this lease's guest: no
+        // cleanup through this lease, only the unallocated outcome.
+        let foreign = record(Some(9000), Some("l2"));
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&foreign), past),
+            Some(Failed)
+        );
+        assert_eq!(stuck_compensation(&lease(Failed), Some(&foreign), 0), None);
+        // The executor's failure-path compensation shares the predicate.
+        assert!(super::lease_allocated(&lease(Failed), Some(&guest)));
+        assert!(!super::lease_allocated(&lease(Failed), Some(&foreign)));
+        assert!(!super::lease_allocated(&lease(Failed), Some(&none)));
+        assert!(!super::lease_allocated(&lease(Failed), None));
+    }
+
+    #[test]
+    fn a_guest_is_owned_only_through_its_records_account_and_vmid() {
+        use super::guest_owned;
+        use fleet_core::{CleanupStrategy, LeaseState};
+        let lease = |state, cleanup| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            cleanup,
+            provision_id: Some("r1".to_owned()),
+            ..fleet_core::Lease::default()
+        };
+        let linked = record(Some(9000), Some("l1"));
+        let ready = lease(LeaseState::Ready, CleanupStrategy::Destroy);
+        assert!(guest_owned(Some(&linked), Some(&ready), "a1", 9000));
+        // The same VMID on another account is not this record's guest.
+        assert!(!guest_owned(Some(&linked), Some(&ready), "a2", 9000));
+        assert!(!guest_owned(Some(&linked), Some(&ready), "a1", 9001));
+        let mut unbound = linked.clone();
+        unbound.account_id = None;
+        assert!(!guest_owned(Some(&unbound), Some(&ready), "a1", 9000));
+        assert!(!guest_owned(None, None, "a1", 9000));
+        // Standalone records own their guest; a vanished lease owns nothing.
+        assert!(guest_owned(
+            Some(&record(Some(9000), None)),
+            None,
+            "a1",
+            9000
+        ));
+        assert!(!guest_owned(Some(&linked), None, "a1", 9000));
+        let kept = lease(LeaseState::Released, CleanupStrategy::Keep);
+        let destroyed = lease(LeaseState::Released, CleanupStrategy::Destroy);
+        let failed = lease(LeaseState::Failed, CleanupStrategy::Destroy);
+        assert!(guest_owned(Some(&linked), Some(&kept), "a1", 9000));
+        assert!(!guest_owned(Some(&linked), Some(&destroyed), "a1", 9000));
+        assert!(!guest_owned(Some(&linked), Some(&failed), "a1", 9000));
+        // A lease that points at another record does not own this guest.
+        let mut elsewhere = ready.clone();
+        elsewhere.provision_id = Some("r2".to_owned());
+        assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
+        elsewhere.provision_id = None;
+        assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
     }
 
     #[test]

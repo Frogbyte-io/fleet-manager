@@ -1970,7 +1970,7 @@ impl ProvisionExecutor {
 
 /// The pinned request every provider call of the Lab executor carries. The
 /// account's host is the API endpoint; it is never a PVE node name.
-fn pve_request(
+pub(crate) fn pve_request(
     account: &fleet_application::proxmox::ProxmoxAccount,
     secret: String,
 ) -> fleet_provider_proxmox::PveHttpRequest {
@@ -2878,13 +2878,12 @@ impl LabDispatch {
         let Ok(mut lease) = leases.get(&lease_id).await else {
             return;
         };
-        let allocated = match &lease.provision_id {
-            Some(id) => provisions
-                .get(id)
-                .await
-                .is_ok_and(|record| record.vmid.is_some()),
-            None => false,
+        let record = match &lease.provision_id {
+            Some(id) => provisions.get(id).await.ok(),
+            None => None,
         };
+        // Only a record linking back to this lease is its guest.
+        let allocated = fleet_application::lab::lease_allocated(&lease, record.as_ref());
         match fleet_application::lab::provision_compensation(lease.state, allocated) {
             Some(fleet_core::LeaseState::Releasing) => {
                 lease.state = fleet_core::LeaseState::Releasing;

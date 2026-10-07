@@ -12,7 +12,13 @@
 //! 1. Built-in defaults — deliberately the safe ones: loopback listener.
 //! 2. The configuration file, selected with `--config <path>` (TOML).
 //! 3. Environment variables (`FLEET_LISTEN`, `FLEET_TAILSCALE_SERVE_LISTEN`,
-//!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`).
+//!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`,
+//!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`).
+//!
+//! `FLEET_LAB_SWEEP_INTERVAL_SECONDS` (TOML `lab_sweep_interval_seconds`,
+//! default 60) is the Lab sweeper's interval; `0` disables the background
+//! sweeper and leaves the manual sweep. A value that is not a whole number
+//! of seconds fails configuration loading.
 //!
 //! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
 //! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
@@ -43,6 +49,11 @@ pub const DATA_DIR_VAR: &str = "FLEET_DATA_DIR";
 pub const MASTER_KEY_FILE_VAR: &str = "FLEET_MASTER_KEY_FILE";
 /// Environment variable enabling a dedicated Tailscale Serve identity listener.
 pub const TAILSCALE_SERVE_LISTEN_VAR: &str = "FLEET_TAILSCALE_SERVE_LISTEN";
+/// Environment variable holding the Lab sweeper's interval in seconds
+/// (`0` disables the background sweeper; the manual sweep stays).
+pub const LAB_SWEEP_INTERVAL_VAR: &str = "FLEET_LAB_SWEEP_INTERVAL_SECONDS";
+/// The default Lab sweeper interval (FM-716).
+pub const DEFAULT_LAB_SWEEP_INTERVAL_SECONDS: u64 = 60;
 
 /// The default listen address: loopback only, because the controller is a
 /// trusted-LAN service and must not face an untrusted network by accident.
@@ -67,6 +78,9 @@ pub struct ControllerConfig {
     /// The master key file for the secret store, when configured. The path is
     /// a reference; the key material is read by the secret store, never here.
     pub master_key_file: Option<PathBuf>,
+    /// How often the Lab sweeper expires leases, queues due cleanups, and
+    /// reconciles Lab guests, in seconds; `0` disables it.
+    pub lab_sweep_interval_seconds: u64,
 }
 
 /// The TOML configuration file's on-disk shape.
@@ -80,6 +94,7 @@ struct ConfigFile {
     web_dist: Option<String>,
     data_dir: Option<String>,
     master_key_file: Option<String>,
+    lab_sweep_interval_seconds: Option<u64>,
 }
 
 /// A configuration problem that is safe to print: paths and expected facts,
@@ -112,6 +127,11 @@ pub enum ConfigError {
     },
     /// The configured Tailscale Serve listener is not a socket address.
     TailscaleServeListenInvalid {
+        /// The value that failed to parse.
+        value: String,
+    },
+    /// The Lab sweeper interval is not a whole number of seconds.
+    LabSweepIntervalInvalid {
         /// The value that failed to parse.
         value: String,
     },
@@ -178,6 +198,10 @@ impl fmt::Display for ConfigError {
             Self::ListenInvalid { value } => {
                 write!(f, "{LISTEN_VAR} is not a socket address: {value:?}")
             }
+            Self::LabSweepIntervalInvalid { value } => write!(
+                f,
+                "{LAB_SWEEP_INTERVAL_VAR} must be a whole number of seconds (0 disables the sweeper), not {value:?}"
+            ),
             Self::TailscaleServeListenInvalid { value } => write!(
                 f,
                 "{TAILSCALE_SERVE_LISTEN_VAR} is not a socket address: {value:?}"
@@ -250,6 +274,7 @@ pub fn load(
     let mut web_dist: Option<String> = None;
     let mut data_dir: Option<String> = None;
     let mut master_key_file: Option<String> = None;
+    let mut lab_sweep_interval_seconds: Option<u64> = None;
 
     if let Some(path) = config_file {
         let raw = std::fs::read_to_string(path).map_err(|error| ConfigError::FileRead {
@@ -270,6 +295,7 @@ pub fn load(
         web_dist = file.web_dist;
         data_dir = file.data_dir;
         master_key_file = file.master_key_file;
+        lab_sweep_interval_seconds = file.lab_sweep_interval_seconds;
     }
 
     listen = env(LISTEN_VAR).or(listen);
@@ -277,6 +303,13 @@ pub fn load(
     web_dist = env(WEB_DIST_VAR).or(web_dist);
     data_dir = env(DATA_DIR_VAR).or(data_dir);
     master_key_file = env(MASTER_KEY_FILE_VAR).or(master_key_file);
+    if let Some(raw) = env(LAB_SWEEP_INTERVAL_VAR) {
+        lab_sweep_interval_seconds = Some(
+            raw.trim()
+                .parse()
+                .map_err(|_| ConfigError::LabSweepIntervalInvalid { value: raw })?,
+        );
+    }
 
     let listen_raw = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     let listen: SocketAddr = listen_raw
@@ -296,6 +329,8 @@ pub fn load(
         web_dist: web_dist.map_or_else(|| PathBuf::from(DEFAULT_WEB_DIST), PathBuf::from),
         data_dir: data_dir.map_or_else(|| PathBuf::from(DEFAULT_DATA_DIR), PathBuf::from),
         master_key_file: master_key_file.map(PathBuf::from),
+        lab_sweep_interval_seconds: lab_sweep_interval_seconds
+            .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
     })
 }
 
@@ -359,6 +394,15 @@ impl ControllerConfig {
             format!("web_dist = {}", self.web_dist.display()),
             format!("data_dir = {}", self.data_dir.display()),
             format!("config_version = {CONFIG_VERSION}"),
+            format!(
+                "lab_sweep_interval_seconds = {}{}",
+                self.lab_sweep_interval_seconds,
+                if self.lab_sweep_interval_seconds == 0 {
+                    " (disabled)"
+                } else {
+                    ""
+                }
+            ),
         ];
         if let Some(address) = self.tailscale_serve_listen {
             lines.push(format!("tailscale_serve_listen = {address}"));

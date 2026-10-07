@@ -486,6 +486,24 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         stored.state = LeaseState::Releasing;
         Ok(true)
     }
+
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state != observed || stored.provision_id.as_deref() != provision_id {
+            return Ok(false);
+        }
+        stored.state = to;
+        Ok(true)
+    }
 }
 
 /// The pin validator over a canned set of promoted versions.

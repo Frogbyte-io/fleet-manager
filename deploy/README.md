@@ -51,6 +51,7 @@ refuses to start on a missing or unsafe setting.
 | `FLEET_WEB_DIST` | `./web` | Directory of the built web shell. The image sets `/opt/fleet/web`. |
 | `FLEET_DATA_DIR` | `./data` | Runtime state directory; created during startup validation. The container sets `/var/lib/fleet`. |
 | `FLEET_MASTER_KEY_FILE` | *(unset)* | Master key file for the secret store. Must exist, be a regular file, and have owner-only permissions; startup refuses a more exposed key. Compose sets `/tmp/fleet-secrets/master_key`, the protected copy made by the entrypoint from `/run/secrets/master_key`, so service and healthcheck use the same file. |
+| `FLEET_LAB_SWEEP_INTERVAL_SECONDS` | `60` | How often the Lab sweeper runs (FM-716). Each tick expires leases past their TTL, queues due cleanups (including backoff retries), compensates leases stuck past their readiness deadline (and `failed` leases still holding a guest), and reports `fm-lab-*` guests that no live lease owns (audit event `lab_orphan_guest`, plus a log line; never deleted). `0` disables the loop; `POST /api/v1/lab/leases/sweep` still works. TOML key: `lab_sweep_interval_seconds`. |
 
 An unset master key source is reported in the startup summary as "secret store
 unavailable" rather than pointed at a file that does not exist.

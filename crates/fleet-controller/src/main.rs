@@ -551,6 +551,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 None => with_lab.clone(),
             }
         };
+        let sweeper_operations = worker_operations.clone();
         let worker_host = WorkerHost::new(worker_operations, executor, 4);
         let worker_handle = tokio::spawn(async move {
             worker_host
@@ -649,6 +650,43 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 ),
             )
         });
+        // FM-716: the Lab sweeper expires leases, queues due cleanups,
+        // compensates stuck provisions, and reports unowned Lab guests on
+        // its interval (0 disables it; the manual sweep route stays).
+        let (sweeper_shutdown, sweeper_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let sweeper_handle = (config.lab_sweep_interval_seconds > 0).then(|| {
+            let mut sweeper = fleet_controller::lab_sweeper::LabSweeper::new(
+                lab.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                sweeper_operations,
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            )
+            .with_events(events.clone());
+            if let Some(secrets) = &secrets {
+                sweeper = sweeper.with_inventory(std::sync::Arc::new(
+                    fleet_controller::lab_sweeper::ProxmoxLabGuests::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(
+                            fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                                secrets.clone(),
+                            ),
+                        ),
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    ),
+                ));
+            }
+            let interval = std::time::Duration::from_secs(config.lab_sweep_interval_seconds);
+            tokio::spawn(std::sync::Arc::new(sweeper).run(interval, async move {
+                let _ = sweeper_shutdown_rx.await;
+            }))
+        });
         let served = serve_with_events(
             settings,
             pool,
@@ -663,6 +701,10 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             shutdown_signal(),
         )
         .await;
+        let _ = sweeper_shutdown.send(());
+        if let Some(handle) = sweeper_handle {
+            let _ = handle.await;
+        }
         let _ = worker_shutdown.send(());
         let _ = worker_handle.await;
         store.close().await;

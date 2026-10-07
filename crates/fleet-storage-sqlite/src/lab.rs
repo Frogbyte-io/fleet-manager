@@ -811,6 +811,28 @@ impl LeasePort for LeaseRepository {
         .map_err(|error| format!("claim failed: {error}"))?;
         Ok(claimed.rows_affected() == 1)
     }
+
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String> {
+        // Compare state and provision link so a stale sweeper snapshot
+        // cannot overwrite a lease that became ready or was released.
+        let moved = sqlx::query(
+            "UPDATE lab_leases SET state = ?4 WHERE id = ?1 AND state = ?2 AND provision_id IS ?3",
+        )
+        .bind(id)
+        .bind(observed.id())
+        .bind(provision_id)
+        .bind(to.id())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("transition failed: {error}"))?;
+        Ok(moved.rows_affected() == 1)
+    }
 }
 
 /// A nullable column added by a later migration: absent (a database not yet
