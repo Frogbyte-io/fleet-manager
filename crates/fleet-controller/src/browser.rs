@@ -123,11 +123,13 @@ fn same_origin(origin: &str, host: Option<&str>) -> bool {
 /// not secret: it only marks where the controller writes the real nonce.
 pub const CSP_NONCE_PLACEHOLDER: &str = "__FLEET_CSP_NONCE__";
 
-/// The policy for every response that does not carry a nonce.
+/// The policy for every response that does not carry a nonce. `style-src`
+/// stays the last directive: the shell's nonce is appended to it.
 const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'";
 
 /// The largest HTML body the nonce rewrite will buffer. The shell's
-/// `index.html` is about a kilobyte; anything near this is not the shell.
+/// `index.html` is about a kilobyte; an HTML response that does not declare a
+/// length at or under this is not the shell and passes through untouched.
 const MAX_HTML_REWRITE: usize = 1024 * 1024;
 
 /// Adds the security headers the web shell and the API should always carry.
@@ -136,13 +138,25 @@ const MAX_HTML_REWRITE: usize = 1024 * 1024;
 /// nonce written over the placeholder and allowed in `style-src`, and is
 /// marked `no-store` so a cached copy can never pair an old nonce with a new
 /// policy. Every other response gets the static policy.
-pub async fn security_headers(request: Request, next: Next) -> Response {
+///
+/// `HEAD` is answered as a `GET` whose body is then dropped, so a `HEAD` of
+/// the shell reports the rewritten representation's length and caching
+/// headers rather than the file's. (Axum and the static service already
+/// answer `HEAD` with their `GET` handlers; only the body differs.)
+pub async fn security_headers(mut request: Request, next: Next) -> Response {
+    let head = request.method() == Method::HEAD;
+    if head {
+        *request.method_mut() = Method::GET;
+    }
     let response = next.run(request).await;
     let mut response = if is_html(&response) {
         with_style_nonce(response).await
     } else {
         response
     };
+    if head {
+        *response.body_mut() = Body::empty();
+    }
     let headers = response.headers_mut();
     if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
         // The shell loads nothing but its own assets; scripts from anywhere
@@ -177,9 +191,20 @@ fn is_html(response: &Response) -> bool {
 /// matching policy. A body without the placeholder is passed through
 /// unchanged (and gets the static policy from the caller).
 async fn with_style_nonce(response: Response) -> Response {
+    // Only a body that declares a small length is buffered; anything else
+    // (streamed, large) is not the shell and keeps its status and body.
+    let declared = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared.is_none_or(|length| length > MAX_HTML_REWRITE) {
+        return response;
+    }
     let (mut parts, body) = response.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_HTML_REWRITE).await else {
-        // The body is gone; an oversized or failed HTML body is not the shell.
+        // A read error on a small file: the response was already broken and
+        // its body is gone, so report it rather than send a truncated page.
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let rewritten = std::str::from_utf8(&bytes)
@@ -190,8 +215,8 @@ async fn with_style_nonce(response: Response) -> Response {
         return Response::from_parts(parts, Body::from(bytes));
     };
     let html = html.replace(CSP_NONCE_PLACEHOLDER, &nonce);
-    let policy =
-        format!("default-src 'self'; img-src 'self' data:; style-src 'self' 'nonce-{nonce}'");
+    // `CSP` ends with the style-src directive, so the nonce extends it.
+    let policy = format!("{CSP} 'nonce-{nonce}'");
     let headers = &mut parts.headers;
     // Base64 is header-safe; the conversion cannot fail.
     if let Ok(policy) = HeaderValue::from_str(&policy) {

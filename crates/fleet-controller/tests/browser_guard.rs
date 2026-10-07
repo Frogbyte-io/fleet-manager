@@ -307,3 +307,80 @@ async fn responses_without_the_placeholder_keep_the_static_policy() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_head_of_the_shell_describes_the_rewritten_page() {
+    let dist = nonce_shell_dist();
+    let router = build_router(
+        &settings(dist.path()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let (_, get_body) = get_shell(router.clone(), "/").await;
+    for uri in ["/", "/images"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(uri)
+                    .header("host", HOST)
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::OK, "{uri}");
+        policy_nonce(&parts);
+        assert_eq!(
+            parts.headers.get("content-length").unwrap(),
+            &get_body.len().to_string(),
+            "{uri}"
+        );
+        assert_eq!(
+            parts.headers.get("cache-control").unwrap(),
+            "no-store",
+            "{uri}"
+        );
+        assert!(parts.headers.get("etag").is_none(), "{uri}");
+        assert!(parts.headers.get("last-modified").is_none(), "{uri}");
+        assert!(body.collect().await.unwrap().to_bytes().is_empty(), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn html_too_large_to_be_the_shell_passes_through_untouched() {
+    let dist = tempfile::tempdir().unwrap();
+    let big = format!(
+        "<html>{}{}</html>",
+        fleet_controller::browser::CSP_NONCE_PLACEHOLDER,
+        "x".repeat(2 * 1024 * 1024)
+    );
+    std::fs::write(dist.path().join("index.html"), &big).unwrap();
+    let router = build_router(
+        &settings(dist.path()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let (parts, body) = get_shell(router, "/").await;
+    assert_eq!(parts.status, StatusCode::OK);
+    assert_eq!(body, big);
+    assert_eq!(
+        parts.headers.get("content-security-policy").unwrap(),
+        "default-src 'self'; img-src 'self' data:; style-src 'self'"
+    );
+}
