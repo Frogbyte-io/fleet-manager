@@ -833,6 +833,26 @@ impl LeasePort for LeaseRepository {
         .map_err(|error| format!("transition failed: {error}"))?;
         Ok(moved.rows_affected() == 1)
     }
+
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String> {
+        let rearmed = sqlx::query(
+            "UPDATE lab_leases SET state = 'releasing', cleanup_attempts = ?3, \
+             cleanup_next_at = NULL \
+             WHERE id = ?1 AND state = 'cleanup_failed' AND cleanup_attempts = ?2",
+        )
+        .bind(id)
+        .bind(i64::from(observed_attempts))
+        .bind(i64::from(attempts))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("re-arm failed: {error}"))?;
+        Ok(rearmed.rows_affected() == 1)
+    }
 }
 
 /// A nullable column added by a later migration: absent (a database not yet

@@ -504,6 +504,26 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         stored.state = to;
         Ok(true)
     }
+
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(false);
+        };
+        if stored.state != LeaseState::CleanupFailed || stored.cleanup_attempts != observed_attempts
+        {
+            return Ok(false);
+        }
+        stored.state = LeaseState::Releasing;
+        stored.cleanup_attempts = attempts;
+        stored.cleanup_next_at = None;
+        Ok(true)
+    }
 }
 
 /// The pin validator over a canned set of promoted versions.
@@ -1796,5 +1816,114 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
             .await
             .unwrap_err(),
         LabUseCaseError::Denied(_)
+    ));
+}
+
+#[tokio::test]
+async fn cleanup_retry_rearms_only_a_cleanup_failed_lease_authorized_and_audited() {
+    use fleet_application::lab::MAX_CLEANUP_ATTEMPTS;
+
+    // Denies exactly lab.lease, so the use case is shown to require it.
+    #[derive(Debug, Default)]
+    struct LeaseDenied;
+    impl Authorizer for LeaseDenied {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == fleet_application::authz::Permission::LabLease {
+                return Decision::deny(ReasonId::PolicyAllow);
+            }
+            Decision::allow()
+        }
+    }
+
+    let leases = Arc::new(FakeLeases::default());
+    let audit = Arc::new(FakeAudit::default());
+    let lab = Lab::new(
+        Arc::new(FakeTemplates::default()),
+        Arc::new(FakeProvisions::with_leases(leases.leases.clone())),
+        leases.clone(),
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        audit.clone(),
+    );
+    let mut lease = leases
+        .create(
+            &fleet_application::lab::NewLease {
+                template_version_id: "tv-1".to_owned(),
+                purpose: "the demo".to_owned(),
+                project_id: None,
+                cleanup: fleet_core::CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            NOW,
+        )
+        .await
+        .unwrap();
+
+    // Only cleanup_failed can be re-armed; a releasing lease is refused
+    // unchanged, before any audit.
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = 2;
+    lease.cleanup_next_at = Some(NOW + 60_000);
+    leases.update(&lease).await.unwrap();
+    let error = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Invalid { .. }), "{error}");
+    assert!(error.to_string().contains("releasing"), "{error}");
+    assert!(audit.intents.lock().unwrap().is_empty());
+
+    lease.state = LeaseState::CleanupFailed;
+    lease.cleanup_attempts = MAX_CLEANUP_ATTEMPTS;
+    lease.cleanup_next_at = None;
+    leases.update(&lease).await.unwrap();
+
+    // The caller must hold lab.lease on it.
+    let error = lab
+        .retry_cleanup(&LeaseDenied, &principal(), &lease.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LabUseCaseError::Denied(_)), "{error}");
+    assert!(matches!(
+        lab.retry_cleanup(&AllowAll, &principal(), "no-such-lease")
+            .await
+            .unwrap_err(),
+        LabUseCaseError::NotFound { .. }
+    ));
+
+    let rearmed = lab
+        .retry_cleanup(&AllowAll, &principal(), &lease.id)
+        .await
+        .unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(rearmed.cleanup_next_at, None);
+    // The failed-attempt count is kept, so the next attempt's idempotency
+    // key is a fresh one, and its cleanup is due at once.
+    assert_eq!(rearmed.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
+    assert!(fleet_application::lab::cleanup_due(&rearmed, NOW));
+    assert_eq!(
+        fleet_application::lab::cleanup_operation(&rearmed, None)
+            .idempotency_key
+            .as_deref(),
+        Some(format!("lab-cleanup:{}:{MAX_CLEANUP_ATTEMPTS}", lease.id).as_str())
+    );
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Releasing);
+    assert_eq!(stored.cleanup_attempts, MAX_CLEANUP_ATTEMPTS);
+    let intents = audit.intents.lock().unwrap().clone();
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].action, "lab.lease");
+    assert_eq!(intents[0].resource.as_deref(), Some(lease.id.as_str()));
+    let entries: Vec<(&str, &str)> = intents[0].metadata.entries().collect();
+    assert!(entries.contains(&("event", "lab_lease_cleanup_rearmed")));
+    assert!(entries.contains(&("failedAttempts", "5")));
+
+    // A second re-arm finds a releasing lease and changes nothing.
+    assert!(matches!(
+        lab.retry_cleanup(&AllowAll, &principal(), &lease.id)
+            .await
+            .unwrap_err(),
+        LabUseCaseError::Invalid { .. }
     ));
 }

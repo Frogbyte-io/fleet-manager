@@ -382,6 +382,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::start_lab_lease_provision))
                 .routes(routes!(lab::list_lab_leases))
                 .routes(routes!(lab::release_lab_lease))
+                .routes(routes!(lab::retry_lab_lease_cleanup))
                 .routes(routes!(lab::extend_lab_lease))
                 .routes(routes!(lab::get_lab_lease))
                 .routes(routes!(lab::exec_lab_lease))

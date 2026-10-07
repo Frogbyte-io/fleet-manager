@@ -314,6 +314,89 @@ async fn a_failing_destroy_backs_off_then_leaves_the_lease_cleanup_failed() {
     assert_eq!(harness.audit_events("lab_lease_cleanup_failed").await, 1);
 }
 
+/// No image version is promoted: the re-arm never pins one.
+#[derive(Debug)]
+struct NoPins;
+
+#[async_trait]
+impl fleet_application::lab::ImagePinValidator for NoPins {
+    async fn promoted_version(
+        &self,
+        _version_id: &str,
+    ) -> Result<Option<fleet_core::RecipeVersion>, String> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn a_rearmed_cleanup_failed_lease_resolves_to_released_once_the_guest_is_gone() {
+    let harness = Harness::new().await;
+    let lease = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9005, Some("account-1"))),
+        )
+        .await;
+    let machine = harness.link_machine(&lease).await;
+    let failing = Arc::new(Destroyer {
+        fail: true,
+        ..Destroyer::default()
+    });
+    for _ in 0..MAX_CLEANUP_ATTEMPTS {
+        harness.run(&lease, &failing).await;
+    }
+    let exhausted = harness.leases.get(&lease).await.unwrap();
+    assert_eq!(exhausted.state, LeaseState::CleanupFailed);
+
+    // The operator fixes the cause (here: removes the guest by hand) and
+    // re-arms the cleanup through the authorized, audited use case.
+    let lab = fleet_application::lab::Lab::new(
+        harness.labs.clone(),
+        harness.labs.clone(),
+        harness.leases.clone(),
+        Arc::new(NoPins),
+        Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+            harness.pool.clone(),
+        )),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+    );
+    let principal = fleet_application::authz::ActingPrincipal {
+        id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+    };
+    let rearmed = lab
+        .retry_cleanup(&fleet_auth::LanAllowAllAuthorizer, &principal, &lease)
+        .await
+        .unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(rearmed.cleanup_next_at, None);
+    assert_eq!(harness.audit_events("lab_lease_cleanup_rearmed").await, 1);
+    // A second re-arm is refused: the lease is releasing again.
+    assert!(
+        lab.retry_cleanup(&fleet_auth::LanAllowAllAuthorizer, &principal, &lease)
+            .await
+            .is_err()
+    );
+
+    // The reviewed destroy treats the absent guest as done (the stand-in
+    // succeeds), so the next attempt releases the lease and removes the
+    // Lab-owned machine record.
+    let gone = Arc::new(Destroyer::default());
+    let (state, _, after) = harness.run(&lease, &gone).await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(after.state, LeaseState::Released);
+    assert!(!harness.machine_exists(&machine).await);
+    assert_eq!(gone.ran.lock().unwrap().len(), 1);
+    // The re-armed attempt was a new operation, not the last failed one
+    // re-found under a reused idempotency key.
+    let cleanups: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT idempotency_key) FROM operations WHERE kind = 'lab.cleanup'",
+    )
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(cleanups, i64::from(MAX_CLEANUP_ATTEMPTS) + 1);
+}
+
 #[tokio::test]
 async fn keep_releases_without_destroying_and_the_decision_persists() {
     let harness = Harness::new().await;

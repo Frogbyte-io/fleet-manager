@@ -3197,6 +3197,24 @@ fn the_one_command_lab_flow_parses() {
             .unwrap_err()
             .contains("`--`")
     );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "cleanup-retry",
+            "lease-1",
+            "--wait",
+            "--timeout",
+            "300"
+        ])
+        .unwrap(),
+        fleetctl::Command::LabCleanupRetry {
+            lease_id: "lease-1".to_owned(),
+            wait: true,
+            timeout: Some(300),
+        }
+    );
+    assert!(lab_parse(&["lab", "cleanup-retry"]).is_err());
+    assert!(lab_parse(&["lab", "cleanup-retry", "lease-1", "--keep"]).is_err());
     assert!(matches!(
         lab_parse(&["lab", "destroy", "lease-1", "--keep", "--wait"]).unwrap(),
         fleetctl::Command::LabDestroy {

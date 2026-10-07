@@ -1004,15 +1004,16 @@ pub async fn release_lab_lease(
 /// second cleanup for the same attempt. A lease backing off after a failed
 /// attempt is not queued before its `cleanupNextAt`: the sweeper (FM-716)
 /// queues the retry when it is due, so repeated releases cannot burn the
-/// attempts.
+/// attempts. Answers the queued (or re-found) operation, or nothing when
+/// the attempt is not due yet.
 async fn queue_cleanup(
     state: &crate::operations::ApiState,
     principal_id: &str,
     lease: &fleet_core::Lease,
     correlation_id: CorrelationId,
-) -> Result<(), ApiErrorResponse> {
+) -> Result<Option<fleet_application::operation::Operation>, ApiErrorResponse> {
     if !fleet_application::lab::cleanup_due(lease, fleet_core::SystemClock::now_unix_millis()) {
-        return Ok(());
+        return Ok(None);
     }
     state
         .operations
@@ -1023,8 +1024,66 @@ async fn queue_cleanup(
             &fleet_application::lab::cleanup_operation(lease, Some(correlation_id.to_string())),
         )
         .await
-        .map(|_| ())
+        .map(Some)
         .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))
+}
+
+/// Re-arms the cleanup of a `cleanup_failed` lease once its cause is fixed
+/// (#292) and queues the next `lab.cleanup` attempt.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, an unknown lease, a lease
+/// that is not `cleanup_failed`, or a concurrent re-arm.
+#[utoipa::path(
+    post,
+    path = "/lab/leases/{leaseId}/cleanup/retry",
+    tag = "lab",
+    operation_id = "retryLabLeaseCleanup",
+    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    responses(
+        (status = 202, description = "The lease is `releasing` again with a fresh round of cleanup attempts (its `cleanupAttempts` total is kept), and its next `lab.cleanup` operation is queued. A guest that is already gone counts as destroyed, so a guest removed by hand resolves the lease to `released`.", body = Resource<crate::operations::OperationDto>),
+        (status = 400, description = "The lease is not `cleanup_failed`.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not release the lease or queue its cleanup.", body = crate::error::ApiError),
+        (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The lease changed while its cleanup was being re-armed.", body = crate::error::ApiError),
+        (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
+    )
+)]
+pub async fn retry_lab_lease_cleanup(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(lease_id): Path<String>,
+) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
+    let lab = lab_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The re-arm owes a cleanup: refuse before the lease changes if the
+    // caller could not queue it.
+    state
+        .operations
+        .authorize_lab_cleanup(state.authorizer.as_ref(), &principal.id, Some(&lease_id))
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
+    let lease = lab
+        .retry_cleanup(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    state
+        .events
+        .publish(fleet_application::events::EventKind::LeaseChanged);
+    // A re-armed lease is due at once, so the attempt is always queued.
+    let operation = queue_cleanup(&state, &principal.id, &lease, correlation_id)
+        .await?
+        .ok_or_else(|| {
+            map_lab_error(
+                &LabUseCaseError::Backend {
+                    context: "cleanup",
+                    detail: "the re-armed lease was not due".to_owned(),
+                },
+                correlation_id,
+            )
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(Resource::new(operation.into()))))
 }
 
 /// The release request.

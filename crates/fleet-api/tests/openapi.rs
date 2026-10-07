@@ -73,6 +73,10 @@ fn the_document_serves_every_path_under_the_versioned_prefix() {
         paths["/api/v1/lab/leases/{leaseId}/extend"]["post"].is_object(),
         "the lease extension contract must be published"
     );
+    assert!(
+        paths["/api/v1/lab/leases/{leaseId}/cleanup/retry"]["post"].is_object(),
+        "the cleanup re-arm contract must be published"
+    );
     for path in paths.keys() {
         assert!(
             path.starts_with("/api/v1/"),
