@@ -45,12 +45,12 @@ const SUCCEEDED = build('b-ok', { startedAt: T0 })
 const FAILED = build('b-fail', { startedAt: T0 - 600e3, endedAt: T0 - 590e3, outcome: 'failed', reason: 'validate_failed', template: null, packerVersion: null, proxmoxPluginVersion: null })
 const RUNNING = build('b-run', { startedAt: T0 + 900e3, endedAt: null, outcome: 'running', reason: null, template: null })
 
-async function mountHistory(v: RecipeVersionDto = version(), path = '/images') {
+async function mountHistory(v: RecipeVersionDto = version(), path = '/images', live = false) {
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/images', component: { template: '<div />' } }, { path: '/operations', component: { template: '<div />' } }] })
   await router.push(path)
   await router.isReady()
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
-  const wrapper = mount(BuildHistory, { props: { version: v }, global: { plugins: [[VueQueryPlugin, { queryClient }], router] } })
+  const wrapper = mount(BuildHistory, { props: { version: v, live }, global: { plugins: [[VueQueryPlugin, { queryClient }], router] } })
   await flushPromises()
   await flushPromises()
   return { wrapper, router }
@@ -171,5 +171,72 @@ describe('build history', () => {
     expect(wrapper.get('[data-testid="build-history-truncated"]').text()).toContain('newest 50 build records')
     expect(getImageBuild).toHaveBeenCalledWith('b-fail')
     expect(wrapper.get('[data-testid="build-record"]').text()).toContain('validate_failed')
+  })
+
+  it('shows a linked record\'s lookup failure and retries it', async () => {
+    listImageBuilds.mockResolvedValue(ok(page([SUCCEEDED], 'b-ok')))
+    getImageBuild.mockResolvedValueOnce({ status: 404, data: { code: 'not_found', message: 'no such build' }, headers: new Headers() })
+    const { wrapper } = await mountHistory(version(), '/images?build=b-fail')
+    expect(wrapper.get('[data-testid="linked-error"]').text()).toContain('not_found: no such build')
+    getImageBuild.mockResolvedValue(ok({ data: FAILED }))
+    await wrapper.get('[data-testid="linked-error"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="linked-error"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="build-record"]').text()).toContain('validate_failed')
+  })
+
+  it('shows a linked record loading, and says when it is another version\'s', async () => {
+    listImageBuilds.mockResolvedValue(ok(page([SUCCEEDED])))
+    let resolve: (value: unknown) => void = () => {}
+    getImageBuild.mockReturnValue(new Promise(r => (resolve = r)))
+    const { wrapper } = await mountHistory(version(), '/images?build=b-other')
+    expect(wrapper.find('[data-testid="linked-loading"]').exists()).toBe(true)
+    resolve(ok({ data: build('b-other', { versionId: 'r1@zzzz' }) }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="linked-other-version"]').text()).toContain('another version')
+    expect(wrapper.find('[data-testid="build-record"]').exists()).toBe(false)
+  })
+
+  it('keeps refreshing while a followed build has no record yet', async () => {
+    vi.useFakeTimers()
+    try {
+      listImageBuilds.mockResolvedValue(ok(page([])))
+      await mountHistory(version(), '/images', true)
+      const before = listImageBuilds.mock.calls.length
+      await vi.advanceTimersByTimeAsync(3100)
+      expect(listImageBuilds.mock.calls.length).toBeGreaterThan(before)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says when no listed record succeeded but older pages exist', async () => {
+    listImageBuilds.mockResolvedValue(ok(page([FAILED], 'b-fail')))
+    const { wrapper } = await mountHistory()
+    expect(wrapper.get('[data-testid="build-history-truncated"]').text()).toContain('none of them succeeded')
+  })
+
+  it('expands a truncated digest and announces a copy', async () => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+    listImageBuilds.mockResolvedValue(ok(page([SUCCEEDED])))
+    const { wrapper } = await mountHistory(version(), '/images?build=b-ok')
+    const content = wrapper.get('[data-testid="build-record-content-digest"]')
+    await content.get('[data-testid="value-toggle"]').trigger('click')
+    expect(content.get('[data-testid="value-toggle"]').text()).toBe(DIGEST)
+    expect(content.get('[data-testid="value-toggle"]').attributes('aria-expanded')).toBe('true')
+    await content.get('[data-testid="copy-value"]').trigger('click')
+    await flushPromises()
+    expect(content.get('[role="status"]').text()).toBe('Copied recipe digest')
+  })
+
+  it('shows the full value to select when the clipboard is unavailable', async () => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    listImageBuilds.mockResolvedValue(ok(page([SUCCEEDED])))
+    const { wrapper } = await mountHistory(version(), '/images?build=b-ok')
+    const content = wrapper.get('[data-testid="build-record-content-digest"]')
+    await content.get('[data-testid="copy-value"]').trigger('click')
+    await flushPromises()
+    expect(content.get('[data-testid="value-toggle"]').text()).toBe(DIGEST)
   })
 })

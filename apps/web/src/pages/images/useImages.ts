@@ -120,14 +120,15 @@ export const BUILD_HISTORY_LIMIT = 50
 /**
  * A version's immutable build records, newest first (the API's order), as
  * `fleetctl images builds --version <id>` reports them. Polls while one is
- * still running.
+ * still running, and while `live` (a build this page follows has not
+ * settled, so its record may not exist yet).
  */
-export function useVersionBuilds(versionId: MaybeRefOrGetter<string>) {
+export function useVersionBuilds(versionId: MaybeRefOrGetter<string>, live: MaybeRefOrGetter<boolean> = false) {
   return useQuery({
     queryKey: computed(() => [...BUILD_RECORDS_KEY, 'version', toValue(versionId)] as const),
     queryFn: async () => items<ImageBuildDto>(await listImageBuilds({ versionId: toValue(versionId), limit: BUILD_HISTORY_LIMIT })),
     retry: retryTransient,
-    refetchInterval: q => ((q.state.data?.items ?? []).some(buildRunning) ? LIVE_REFRESH_MS : false),
+    refetchInterval: q => (toValue(live) || (q.state.data?.items ?? []).some(buildRunning) ? LIVE_REFRESH_MS : false),
   })
 }
 

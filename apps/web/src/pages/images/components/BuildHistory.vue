@@ -18,12 +18,14 @@ import BuildRecord from './BuildRecord.vue'
 // (`?build=<id>`) so a provenance view can be linked.
 const props = defineProps<{
   version: RecipeVersionDto
+  /** Keep refreshing: a build this page follows has not settled yet. */
+  live?: boolean
 }>()
 
 const route = useRoute()
 const router = useRouter()
 
-const builds = useVersionBuilds(() => props.version.id)
+const builds = useVersionBuilds(() => props.version.id, () => props.live ?? false)
 const list = computed(() => builds.data.value?.items ?? [])
 const truncated = computed(() => builds.data.value?.truncated ?? false)
 
@@ -33,8 +35,10 @@ const latestSuccess = computed(() => latestSucceeded(list.value))
 const openId = computed(() => (typeof route.query.build === 'string' ? route.query.build : null))
 const listed = computed(() => list.value.find(b => b.id === openId.value) ?? null)
 // A linked record that is not on the listed page (older, or another version's).
-const linked = useBuildRecord(openId, computed(() => builds.isSuccess.value && !listed.value))
-const unlisted = computed(() => (!listed.value && linked.data.value?.versionId === props.version.id ? linked.data.value : null))
+const lookingUp = computed(() => builds.isSuccess.value && !!openId.value && !listed.value)
+const linked = useBuildRecord(openId, lookingUp)
+const unlisted = computed(() => (lookingUp.value && linked.data.value?.versionId === props.version.id ? linked.data.value : null))
+const otherVersion = computed(() => lookingUp.value && !!linked.data.value && linked.data.value.versionId !== props.version.id)
 
 function toggle(id: string) {
   router.replace({ query: { ...route.query, build: openId.value === id ? undefined : id } })
@@ -175,6 +179,36 @@ function toggle(id: string) {
       </li>
     </ul>
 
+    <p
+      v-if="lookingUp && linked.isLoading.value"
+      class="text-[11px] text-fc-faint"
+      aria-busy="true"
+      data-testid="linked-loading"
+    >
+      Loading linked build record {{ openId }}…
+    </p>
+    <div
+      v-else-if="lookingUp && linked.isError.value"
+      class="flex flex-wrap items-center gap-2 border-l-2 border-l-fc-err bg-fc-inset px-3 py-2 text-fc-muted"
+      role="alert"
+      data-testid="linked-error"
+    >
+      <span>Could not load linked build record {{ openId }}: {{ errorMessage(linked.error.value) }}</span>
+      <button
+        type="button"
+        class="ml-auto font-mono text-[10px] uppercase tracking-wider text-fc-info hover:text-fc-ink"
+        @click="linked.refetch()"
+      >
+        Retry
+      </button>
+    </div>
+    <p
+      v-else-if="otherVersion"
+      class="text-[11px] text-fc-warn"
+      data-testid="linked-other-version"
+    >
+      Linked build record {{ openId }} belongs to another version.
+    </p>
     <div
       v-if="unlisted"
       class="space-y-1"
@@ -193,7 +227,9 @@ function toggle(id: string) {
       class="text-[10.5px] text-fc-faint"
       data-testid="build-history-truncated"
     >
-      Showing the newest {{ BUILD_HISTORY_LIMIT }} build records; <span class="font-mono">fleetctl images builds --cursor</span> pages further.
+      Showing the newest {{ BUILD_HISTORY_LIMIT }} build records<template v-if="!latestSuccess">
+        , none of them succeeded; an older success may exist
+      </template>; <span class="font-mono">fleetctl images builds --cursor</span> pages further.
     </p>
     <CopyFleetctl :command="buildsCommand(version.id)" />
   </section>
