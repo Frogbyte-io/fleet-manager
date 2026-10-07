@@ -597,7 +597,8 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
     /// a VMID.
     async fn template_vmid(&self, image_version_id: &str) -> Result<Option<u32>, String>;
     /// The template VMIDs recorded by the successful builds of every
-    /// currently promoted image version.
+    /// currently promoted image version, plus every build a promotion
+    /// pinned, including a demoted version's (the pin outlives demotion).
     ///
     /// # Errors
     ///

@@ -552,12 +552,13 @@ impl ImageArtifactPort for RecipeRepository {
     async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
         // Fetch only the artifact columns of successful builds whose versions
         // are promoted. Build provenance and failed history never enter memory.
-        // Every successful build of a promoted version is protected. That
-        // includes the build its promotion pinned (the schema only pins a
-        // successful build of the same version) and any later rebuild: a
-        // rebuild's template is not the clone source (issue #281), but
-        // cleanup still never destroys it.
-        let mut vmids: Vec<u32> = sqlx::query_scalar("SELECT DISTINCT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.outcome = 'succeeded' AND v.promoted_at IS NOT NULL")
+        // Every successful build of a promoted version is protected,
+        // including any rebuild: a rebuild's template is not the clone source
+        // (issue #281), but cleanup still never destroys it. Every pinned
+        // build is protected too, even after its version was demoted: the
+        // pin survives demotion and stays the clone source for leases pinned
+        // to that version.
+        let mut vmids: Vec<u32> = sqlx::query_scalar("SELECT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.id = b.version_id WHERE b.outcome = 'succeeded' AND v.promoted_at IS NOT NULL UNION SELECT b.template_vmid FROM image_build_records b JOIN image_recipe_versions v ON v.promoted_build_id = b.id")
             .fetch_all(&self.pool).await.map_err(|error| format!("promoted image build artifacts failed: {error}"))?;
         let legacy: Vec<Option<String>> = sqlx::query_scalar("SELECT o.result_json FROM operations o JOIN image_recipe_versions v ON v.id = json_extract(CASE WHEN json_valid(o.payload_json) THEN o.payload_json ELSE '{}' END, '$.versionId') WHERE o.kind = 'image.build' AND o.state = 'succeeded' AND v.promoted_at IS NOT NULL")
             .fetch_all(&self.pool).await.map_err(|error| format!("promoted legacy artifacts failed: {error}"))?;
@@ -1002,7 +1003,8 @@ mod build_record_tests {
         );
         // A demotion (the statement `promote` runs for the recipe's other
         // versions) keeps the pin, so a lease pinned to the version before
-        // the demotion keeps its clone source.
+        // the demotion keeps its clone source, and cleanup keeps protecting
+        // it. The demoted version's other builds lose that protection.
         sqlx::query(
             "UPDATE image_recipe_versions SET promoted_at = NULL, promoted_by = NULL WHERE id = ?1",
         )
@@ -1014,7 +1016,19 @@ mod build_record_tests {
             recipes.template_vmid(&record.version_id).await.unwrap(),
             Some(125)
         );
-        assert!(recipes.promoted_template_vmids().await.unwrap().is_empty());
+        assert_eq!(recipes.promoted_template_vmids().await.unwrap(), vec![125]);
+        // A version row cannot be inserted already pinning a build.
+        assert!(
+            sqlx::query("INSERT INTO image_recipe_versions (id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_build_id) VALUES ('other@digest', 'other', 'other', '', ?2, '{}', 'clone', 'pve', 'local-lvm', 1, ?1)")
+                .bind(&build_b)
+                .bind(&record.content_digest)
+                .execute(store.pool())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("a promotion pins a successful build of the same version"),
+            "an inserted version cannot pin another version's build"
+        );
     }
 }
 
