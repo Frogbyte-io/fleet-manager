@@ -90,6 +90,7 @@ pub trait PackerTransport: fmt::Debug + Send + Sync {
             .await
             .map(|outcome| StoppableOutcome {
                 stopped: outcome.killed_by_deadline.then_some(Stopped::Killed),
+                cleanly_cancelled: false,
                 outcome,
             })
     }
@@ -99,11 +100,20 @@ pub trait PackerTransport: fmt::Debug + Send + Sync {
 /// The plugin stops and deletes its VM in this window.
 pub const STOP_GRACE: Duration = Duration::from_secs(180);
 
+/// How long the output pipes may stay open after the CLI exits (a plugin
+/// process still holding them) before the CLI's process group is killed.
+pub const PIPE_DRAIN: Duration = Duration::from_secs(5);
+
+/// What Packer prints (`ui,say`) when an interrupt cancelled its builds and
+/// their cleanup completed.
+pub const CLEAN_CANCEL_MESSAGE: &str = "Cleanly cancelled builds after being interrupted";
+
 /// How a stoppable run was stopped, when it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stopped {
-    /// Interrupted, and the CLI exited on its own within the grace period:
-    /// its cleanup ran.
+    /// Interrupted, and the CLI exited on its own within the grace period.
+    /// That gave the plugin its chance to clean up; whether it did is
+    /// [`StoppableOutcome::cleanly_cancelled`], not this.
     Interrupted,
     /// Killed after the grace period (or by a transport without graceful
     /// stop): any remote cleanup is unknown.
@@ -118,6 +128,10 @@ pub struct StoppableOutcome {
     pub outcome: CliOutcome,
     /// Whether, and how, the run was stopped early.
     pub stopped: Option<Stopped>,
+    /// Whether Packer itself reported that the interrupt cancelled its
+    /// builds cleanly ([`CLEAN_CANCEL_MESSAGE`]). The remote host is not
+    /// re-checked here.
+    pub cleanly_cancelled: bool,
 }
 
 /// The CLI's version answer, parsed from the machine-readable stream.
@@ -510,17 +524,23 @@ async fn signal_group(pgid: u32, signal: &str) {
         .await;
 }
 
-/// Reads one pipe to its end, bounded to [`MAX_OUTPUT_BYTES`] characters.
+/// Drains one pipe to its end, keeping at most [`MAX_OUTPUT_BYTES`]: the
+/// rest is read and discarded, so a verbose CLI neither blocks on a full
+/// pipe nor grows controller memory.
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> String {
     use tokio::io::AsyncReadExt as _;
-    let mut bytes = Vec::new();
+    let mut kept = Vec::new();
     if let Some(mut pipe) = pipe {
-        let _ = pipe.read_to_end(&mut bytes).await;
+        let mut chunk = [0_u8; 8192];
+        while let Ok(read) = pipe.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
+            kept.extend_from_slice(&chunk[..read.min(room)]);
+        }
     }
-    String::from_utf8_lossy(&bytes)
-        .chars()
-        .take(MAX_OUTPUT_BYTES)
-        .collect()
+    String::from_utf8_lossy(&kept).into_owned()
 }
 
 #[async_trait]
@@ -553,12 +573,20 @@ impl PackerTransport for ProcessTransport {
         let deadline_sleep = tokio::time::sleep(deadline);
         tokio::pin!(deadline_sleep);
         // `Some(true)`: the deadline ended the run; `Some(false)`: a stop
-        // request did.
-        let (mut status, by_deadline) = tokio::select! {
+        // request did. An exit that is ready at the same moment wins: a
+        // finished build is never reported as interrupted.
+        let (mut status, mut by_deadline) = tokio::select! {
+            biased;
             status = child.wait() => (status.ok(), None),
             () = &mut deadline_sleep => (None, Some(true)),
             () = stop_requested(&mut stop) => (None, Some(false)),
         };
+        if by_deadline.is_some()
+            && let Ok(Some(exit)) = child.try_wait()
+        {
+            status = Some(exit);
+            by_deadline = None;
+        }
         let mut stopped = None;
         if by_deadline.is_some() {
             signal_group(pgid, "INT").await;
@@ -571,9 +599,30 @@ impl PackerTransport for ProcessTransport {
                 stopped = Some(Stopped::Killed);
             }
         }
-        let stdout = stdout.await.unwrap_or_default();
-        let stderr = stderr.await.unwrap_or_default();
+        // A plugin process that outlives the CLI can hold the pipes open:
+        // give the readers a moment, then kill whatever is left of the group
+        // so the reads end.
+        let mut readers = tokio::spawn(async move {
+            (
+                stdout.await.unwrap_or_default(),
+                stderr.await.unwrap_or_default(),
+            )
+        });
+        let (stdout, stderr) =
+            if let Ok(output) = tokio::time::timeout(PIPE_DRAIN, &mut readers).await {
+                output.unwrap_or_default()
+            } else {
+                signal_group(pgid, "KILL").await;
+                tokio::time::timeout(PIPE_DRAIN, readers)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default()
+            };
+        let cleanly_cancelled =
+            stopped == Some(Stopped::Interrupted) && stdout.contains(CLEAN_CANCEL_MESSAGE);
         Ok(StoppableOutcome {
+            cleanly_cancelled,
             outcome: CliOutcome {
                 stdout,
                 stderr,

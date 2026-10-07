@@ -366,10 +366,27 @@ impl ImagesExecutor {
             args.push(recipe_path.display().to_string());
             args
         };
+        // A cancel that arrived during the probes stops here; one during
+        // validate interrupts it, and no build starts afterwards.
+        if *stop.borrow() {
+            return Err("cancelled");
+        }
         let validated = self
-            .packer_version_aware_call(&args(&["validate"]), work_dir, VALIDATE_DEADLINE)
+            .transport
+            .run_stoppable(
+                &PackerCommand {
+                    args: args(&["validate"]),
+                    work_dir: work_dir.to_path_buf(),
+                },
+                VALIDATE_DEADLINE,
+                stop.clone(),
+            )
             .await
-            .map_err(|_| "validate_failed")?;
+            .map_err(|_| "validate_failed")?
+            .outcome;
+        if *stop.borrow() {
+            return Err("cancelled");
+        }
         if validated.killed_by_deadline {
             return Err("deadline_killed");
         }
@@ -396,13 +413,15 @@ impl ImagesExecutor {
         if built.killed_by_deadline {
             // Interrupted at the deadline: the plugin's cleanup ran unless
             // it outlived the grace period and was killed.
-            return Err(
-                if stoppable.stopped == Some(fleet_provider_packer::Stopped::Interrupted) {
-                    "deadline_interrupted"
-                } else {
-                    "deadline_killed"
-                },
-            );
+            // Interrupted and reported clean by Packer itself, or not: only
+            // the former says the plugin removed its VM.
+            return Err(if stoppable.cleanly_cancelled {
+                "deadline_interrupted"
+            } else if stoppable.stopped == Some(fleet_provider_packer::Stopped::Interrupted) {
+                "deadline_interrupted_unverified"
+            } else {
+                "deadline_killed"
+            });
         }
         if built.exit_code != Some(0) {
             return Err("build_failed");
@@ -410,22 +429,6 @@ impl ImagesExecutor {
         let stream = BuildStream::parse(&built.stdout);
         let id = stream.artifact_id().ok_or("artifact_missing")?;
         output_template(id, version).ok_or("artifact_missing")
-    }
-}
-
-impl ImagesExecutor {
-    /// Runs one CLI call through the transport, bounding the output.
-    async fn packer_version_aware_call(
-        &self,
-        args: &[String],
-        work_dir: &std::path::Path,
-        deadline: Duration,
-    ) -> Result<fleet_provider_packer::CliOutcome, String> {
-        let command = PackerCommand {
-            args: args.to_vec(),
-            work_dir: work_dir.to_path_buf(),
-        };
-        self.transport.run(&command, deadline).await
     }
 }
 
@@ -735,11 +738,19 @@ mod tests {
                         killed_by_deadline: false,
                     },
                     stopped: Some(fleet_provider_packer::Stopped::Interrupted),
+                    cleanly_cancelled: true,
                 });
             }
             let outcome = self.run(command, deadline).await?;
+            // A scripted deadline reply stands for a clean interrupt at the
+            // deadline when its stdout carries Packer's clean-cancel line.
+            let interrupted = outcome.killed_by_deadline
+                && outcome
+                    .stdout
+                    .contains(fleet_provider_packer::CLEAN_CANCEL_MESSAGE);
             Ok(fleet_provider_packer::StoppableOutcome {
-                stopped: None,
+                stopped: interrupted.then_some(fleet_provider_packer::Stopped::Interrupted),
+                cleanly_cancelled: interrupted,
                 outcome,
             })
         }
@@ -917,6 +928,15 @@ mod tests {
             (reply("", Some(1), false), "build_failed"),
             (Err("fixture-secret-token".to_owned()), "build_failed"),
             (reply("", None, true), "deadline_killed"),
+            // Interrupted at the deadline and reported clean by Packer.
+            (
+                reply(
+                    "1,,ui,say,Cleanly cancelled builds after being interrupted.",
+                    Some(1),
+                    true,
+                ),
+                "deadline_interrupted",
+            ),
             (reply("", Some(0), false), "artifact_missing"),
             (
                 reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
