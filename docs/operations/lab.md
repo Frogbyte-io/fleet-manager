@@ -268,6 +268,13 @@ To resolve it:
 
    For a protected clone, run `qm set <vmid> --protection 0` on the host first.
 
+   If Fleet's destroy fails for the same reason as the cleanup (a missing ACL, an unconfirmed account, an unreachable API), remove the guest on the PVE node instead. First check that `qm config <vmid>` shows the lease's `fm-lab-<record-id>` name and is not a template:
+
+   ```sh
+   qm stop <vmid>
+   qm destroy <vmid> --purge
+   ```
+
 4. Re-arm the cleanup:
 
    ```sh
