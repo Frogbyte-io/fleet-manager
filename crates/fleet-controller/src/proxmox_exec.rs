@@ -2368,9 +2368,19 @@ impl ProvisionExecutor {
         if !config.protection {
             return Ok(Ok(()));
         }
+        // Never an unconditional update: the digest binds the write to
+        // the config whose identity was just checked.
+        let Some(digest) = config.digest.as_deref() else {
+            return Ok(Err(Refusal::new(
+                "unprotect_failed",
+                format!(
+                    "the config of {node}/qemu/{vmid} carries no digest, so its protection flag is not cleared unconditionally; until it is cleared, PVE refuses to destroy the guest"
+                ),
+            )));
+        };
         if let Err(error) = self
             .client
-            .qemu_clear_protection(request.clone(), node, vmid, config.digest.as_deref())
+            .qemu_clear_protection(request.clone(), node, vmid, digest)
             .await
         {
             return Ok(Err(Refusal::new(

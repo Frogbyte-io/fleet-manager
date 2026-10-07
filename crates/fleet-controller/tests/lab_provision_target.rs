@@ -77,6 +77,7 @@ struct CloneConfig {
     locked_reads: usize,
     missing_reads: usize,
     forbid_read: bool,
+    no_digest: bool,
     cloned: Option<(u32, String)>,
 }
 
@@ -117,6 +118,12 @@ impl Pve {
     /// writes it inside the forked qmclone worker).
     fn missing_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
         self.clone_config.lock().unwrap().missing_reads = reads;
+        self
+    }
+
+    /// The clone's config carries no digest.
+    fn without_digest(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().no_digest = true;
         self
     }
 
@@ -224,6 +231,9 @@ impl Pve {
         });
         if config.protected {
             answer["protection"] = serde_json::json!(1);
+        }
+        if config.no_digest {
+            answer.as_object_mut().unwrap().remove("digest");
         }
         (200, serde_json::json!({ "data": answer }).to_string())
     }
@@ -1838,4 +1848,23 @@ async fn a_config_not_written_yet_is_retried_but_a_refused_read_fails_at_once() 
     assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
     assert_eq!(stored.state, GuestState::NeverReady);
     assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_protected_clone_without_a_config_digest_is_never_updated_unconditionally() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().without_digest();
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "unprotect_failed");
+    assert!(detail.contains("digest"), "{detail}");
+    assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
 }

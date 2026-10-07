@@ -2228,26 +2228,27 @@ impl ProxmoxClient {
                 }),
             },
         };
+        // Over-long values are a payload error, never truncated: they feed
+        // the clone-identity check and the conditional update.
         let text = |key: &str, limit: usize| {
-            config
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .map(|value| value.chars().take(limit).collect::<String>())
+            bounded_str(&config, key, limit)
+                .map_err(|detail| PveApiError::InvalidPayload { detail })
         };
         Ok(PveQemuConfigFlags {
-            name: text("name", MAX_ID_CHARS),
+            name: text("name", MAX_ID_CHARS)?,
             template: flag("template")?,
             protection: flag("protection")?,
-            lock: text("lock", 32),
-            digest: text("digest", 64),
+            lock: text("lock", 32)?,
+            digest: text("digest", 64)?,
         })
     }
 
     /// Clears the `protection` flag of one QEMU guest
     /// (`PUT /nodes/{node}/qemu/{vmid}/config` with `protection=0`), which
     /// PVE answers synchronously. Needs `VM.Config.Options` on
-    /// `/vms/{vmid}`. With a `digest`, PVE refuses the change when the
-    /// config changed since the read that produced it. The caller decides
+    /// `/vms/{vmid}`. The update is always conditional on `digest` (from
+    /// [`Self::qemu_config_flags`]): PVE refuses it when the config changed
+    /// since that read. The caller decides
     /// which guest may be unprotected; Lab clears it only on its own fresh
     /// clones, never on a template (issue #290).
     ///
@@ -2260,12 +2261,9 @@ impl ProxmoxClient {
         request: PveHttpRequest,
         node: &str,
         vmid: u32,
-        digest: Option<&str>,
+        digest: &str,
     ) -> Result<(), PveApiError> {
-        let body = match digest {
-            Some(digest) => serde_json::json!({ "protection": 0, "digest": digest }),
-            None => serde_json::json!({ "protection": 0 }),
-        };
+        let body = serde_json::json!({ "protection": 0, "digest": digest });
         self.call_method_with_body(
             request,
             PveHttpMethod::Put,

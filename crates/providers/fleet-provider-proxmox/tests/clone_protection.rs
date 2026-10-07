@@ -128,6 +128,10 @@ async fn an_unreadable_config_is_refused() {
         json!({"data": ["protection", 1]}),
         json!({"data": {"protection": "yes"}}),
         json!({"data": {"template": 2}}),
+        // Over-long values are refused, never truncated.
+        json!({"data": {"name": "x".repeat(129)}}),
+        json!({"data": {"digest": "0".repeat(65)}}),
+        json!({"data": {"lock": "l".repeat(33)}}),
     ] {
         let (flags, _) = flags(body.clone()).await;
         assert!(
@@ -143,25 +147,17 @@ async fn clearing_protection_is_a_put_of_protection_zero_with_the_digest() {
     let transport = Transport::new(200, json!({"data": null}));
     let client = ProxmoxClient::new(transport.clone());
     client
-        .qemu_clear_protection(request(), "pve9-n1", 9000, Some("3c1f0a5d"))
-        .await
-        .unwrap();
-    client
-        .qemu_clear_protection(request(), "pve9-n1", 9000, None)
+        .qemu_clear_protection(request(), "pve9-n1", 9000, "3c1f0a5d")
         .await
         .unwrap();
     let seen = transport.seen.lock().unwrap();
-    assert_eq!(seen.len(), 2);
-    for (request, _) in seen.iter() {
-        assert_eq!(request.path, CONFIG_PATH);
-        assert_eq!(request.method, PveHttpMethod::Put);
-        assert_eq!(request.pinned_fingerprint.as_deref(), Some("fixture-pin"));
-    }
-    assert_eq!(
-        seen[0].1,
-        Some(json!({"protection": 0, "digest": "3c1f0a5d"}))
-    );
-    assert_eq!(seen[1].1, Some(json!({"protection": 0})));
+    assert_eq!(seen.len(), 1);
+    let (request, body) = &seen[0];
+    assert_eq!(request.path, CONFIG_PATH);
+    assert_eq!(request.method, PveHttpMethod::Put);
+    assert_eq!(request.pinned_fingerprint.as_deref(), Some("fixture-pin"));
+    // Always conditional on the digest of the checked config.
+    assert_eq!(body, &Some(json!({"protection": 0, "digest": "3c1f0a5d"})));
 }
 
 #[tokio::test]
@@ -173,7 +169,7 @@ async fn pve_refusals_of_the_update_surface_as_errors() {
         json!({"data": null, "message": "Permission check failed (/vms/9000, VM.Config.Options)\n"}),
     );
     let error = ProxmoxClient::new(forbidden)
-        .qemu_clear_protection(request(), "pve9-n1", 9000, None)
+        .qemu_clear_protection(request(), "pve9-n1", 9000, "3c1f0a5d")
         .await
         .unwrap_err();
     assert!(
@@ -189,7 +185,7 @@ async fn pve_refusals_of_the_update_surface_as_errors() {
     ] {
         let refused = Transport::new(500, json!({"data": null, "message": message}));
         let error = ProxmoxClient::new(refused)
-            .qemu_clear_protection(request(), "pve9-n1", 9000, Some("stale"))
+            .qemu_clear_protection(request(), "pve9-n1", 9000, "stale")
             .await
             .unwrap_err();
         assert!(
