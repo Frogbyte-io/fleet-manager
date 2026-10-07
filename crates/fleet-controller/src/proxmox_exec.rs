@@ -2349,6 +2349,16 @@ impl ProvisionExecutor {
         // selection.
         let (account, secret) = self.bound(&account_id).await?;
         let request = pve_request(&account, secret);
+        // FM-713: the account is recorded before the clone, so cleanup
+        // destroys the guest through the same account even after a crash.
+        let mut record = record;
+        if record.account_id.as_deref() != Some(account_id.as_str()) {
+            record.account_id = Some(account_id.clone());
+            self.provisions
+                .update(&record)
+                .await
+                .map_err(|detail| format!("the provision record is unwritable: {detail}"))?;
+        }
 
         // Step 1: clone from the pinned image into a reserved VMID, unless
         // the record's clone already started (resume instead of creating a
@@ -2732,6 +2742,9 @@ impl OperationExecutor for ProvisionExecutor {
 pub struct LabDispatch {
     fallback: Arc<dyn OperationExecutor>,
     provision: Arc<ProvisionExecutor>,
+    cleanup: Option<Arc<crate::lab_cleanup::LabCleanupExecutor>>,
+    leases: Option<Arc<dyn fleet_application::lab::LeasePort>>,
+    provisions: Option<Arc<dyn fleet_application::lab::ProvisionPort>>,
 }
 
 impl LabDispatch {
@@ -2741,6 +2754,89 @@ impl LabDispatch {
         Self {
             fallback,
             provision,
+            cleanup: None,
+            leases: None,
+            provisions: None,
+        }
+    }
+
+    /// Routes `lab.cleanup` to the cleanup executor (FM-713), and
+    /// compensates terminal provision failures through it.
+    #[must_use]
+    pub fn with_cleanup(
+        mut self,
+        cleanup: Arc<crate::lab_cleanup::LabCleanupExecutor>,
+        leases: Arc<dyn fleet_application::lab::LeasePort>,
+        provisions: Arc<dyn fleet_application::lab::ProvisionPort>,
+    ) -> Self {
+        self.cleanup = Some(cleanup);
+        self.leases = Some(leases);
+        self.provisions = Some(provisions);
+        self
+    }
+
+    /// After a provision ends failed or cancelled, a lease that owns a guest
+    /// moves to `releasing` with its cleanup queued, even when the readiness
+    /// failure already made it `failed` (terminal, so it could never be
+    /// released and its guest would leak). A lease that never allocated a
+    /// guest ends `failed`.
+    async fn compensate(&self, operations: &Operations, operation: &Operation) {
+        let (Some(leases), Some(provisions)) = (&self.leases, &self.provisions) else {
+            return;
+        };
+        let Ok(finished) = operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &operation.id,
+            )
+            .await
+        else {
+            return;
+        };
+        if !matches!(finished.state.as_str(), "failed" | "cancelled") {
+            return;
+        }
+        let Some(lease_id) = operation
+            .payload_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+        else {
+            return;
+        };
+        let Ok(mut lease) = leases.get(&lease_id).await else {
+            return;
+        };
+        let allocated = match &lease.provision_id {
+            Some(id) => provisions
+                .get(id)
+                .await
+                .is_ok_and(|record| record.vmid.is_some()),
+            None => false,
+        };
+        match fleet_application::lab::provision_compensation(lease.state, allocated) {
+            Some(fleet_core::LeaseState::Releasing) => {
+                lease.state = fleet_core::LeaseState::Releasing;
+                if leases.update(&lease).await.is_ok() {
+                    let _ = operations
+                        .create_lab_cleanup(
+                            &fleet_auth::LanAllowAllAuthorizer,
+                            fleet_auth::LAN_PRINCIPAL_ID,
+                            &lease.id,
+                            &fleet_application::lab::cleanup_operation(
+                                &lease,
+                                Some(operation.id.clone()),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            Some(state) => {
+                lease.state = state;
+                let _ = leases.update(&lease).await;
+            }
+            None => {}
         }
     }
 }
@@ -2748,10 +2844,14 @@ impl LabDispatch {
 #[async_trait::async_trait]
 impl OperationExecutor for LabDispatch {
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
-        if operation.kind == "lab.provision" {
-            self.provision.execute(operations, operation).await
-        } else {
-            self.fallback.execute(operations, operation).await
+        match (operation.kind.as_str(), &self.cleanup) {
+            ("lab.provision", _) => {
+                let result = self.provision.execute(operations, operation).await;
+                self.compensate(operations, operation).await;
+                result
+            }
+            ("lab.cleanup", Some(cleanup)) => cleanup.execute(operations, operation).await,
+            _ => self.fallback.execute(operations, operation).await,
         }
     }
 }

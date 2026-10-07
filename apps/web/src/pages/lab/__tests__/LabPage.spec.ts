@@ -57,7 +57,7 @@ function lease(overrides: Partial<LeaseDto> = {}): LeaseDto {
     purpose: 'ci flake hunt',
     projectId: null,
     state: 'ready',
-    cleanup: 'destroy',
+    cleanup: 'destroy', cleanupAttempts: 0, cleanupNextAt: null,
     ttlSeconds: 7200,
     createdAt: NOW - 600_000,
     readyAt: NOW - 300_000,

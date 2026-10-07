@@ -37,12 +37,17 @@ A future catalog/marketplace distributes recipes, manifests, provisioning assets
 
 ```text
 requested -> queued -> reserving -> provisioning -> booting -> bootstrapping -> ready
-     |          |           |             |            |             |
-     +----------+-----------+-------------+------------+-----------> failed
-                                                                    |
-ready -> releasing -> released                                      |
-  |          |                                                       |
-  +-------> cleanup_failed <-----------------------------------------+
+     |          |           |             |            |             |            |
+     +----------+-----------+-------------+------------+-------------+--> failed  |
+                                                                          |        |
+                                    (a guest was allocated: cleanup owed) |        |
+                                                                          v        v
+                            released <-- releasing <----------------------+--------+
+                                           |   ^
+                          (attempt failed) |   | (retry after backoff)
+                                           +---+
+                                           |
+                                           +--> cleanup_failed  (attempts exhausted)
 ```
 
 Cancellation and expiry transition any non-terminal state into release/compensation. Provider VM state is tracked separately; a running VM does not imply a ready lease.
@@ -58,13 +63,15 @@ Deadlines:
 
 The current controller path attaches a provision record to a requested lease before queuing `lab.provision`. When the provision executor reaches guest readiness, it marks that same linked lease `ready`, starts its template TTL, and caps the expiry at the creation-relative maximum. Standalone template provisioning remains separate from lease lifecycle and does not make a lease ready.
 
-If the linked operation fails, the lease becomes `failed` and the provision record becomes `never_ready`, retaining its named failure step and any guest identifiers. A readiness timeout is terminal for that lease: another provision request returns a conflict directing the caller to release it and request a replacement. Provision failure cleanup remains part of the broader Lab saga work.
+If the linked operation fails, the lease becomes `failed` and the provision record becomes `never_ready`, retaining its named failure step and any guest identifiers. A readiness timeout is terminal for that lease: another provision request returns a conflict directing the caller to release it and request a replacement. When the failed or cancelled provision owns a guest, the lease moves on to `releasing` and its cleanup runs (FM-713); a lease that never allocated one stays `failed`.
+
+Release queues one `lab.cleanup` operation per attempt (FM-713). It destroys the guest through the reviewed `proxmox.guest.destroy` path, with a review token the controller computes itself; that path stops the guest first, refuses templates and promoted image artifacts, and treats an absent guest as done. After a successful destroy, cleanup removes the Lab-owned machine record and marks the lease `released`; a failure at either step is a failed attempt. A failed attempt backs off (one minute, doubling, capped at an hour, with the next attempt's time stored on the lease); repeating a release does not queue the retry early. After five attempts the lease becomes `cleanup_failed`, and an audit event records the guest identifiers it last knew (the guest may already be gone if only the machine-record removal failed). Each provision record stores the Proxmox account its guest was cloned through, so cleanup uses the same account; a record from before that column refuses to guess.
 
 Cleanup strategies:
 
 - `destroy` is the default and deletes the allocated clone.
-- `revert` is allowed only for explicitly managed preallocated/pool instances whose reservation prevents concurrent use.
-- `keep` requires elevated permission; it detaches the instance from automatic Lab cleanup and records the new owner. It is not “skip cleanup and forget.”
+- `revert` is meant for explicitly managed preallocated/pool instances whose reservation prevents concurrent use. Pooled guests do not exist yet (FM-717), so cleanup currently refuses `revert` (`unsupported_until_pooled`) without destroying anything or spending an attempt; the lease stays `releasing`, so an operator can release it with `keep` instead.
+- `keep` requires elevated permission; it releases the lease and leaves the guest and its Lab-owned machine record in place, out of automatic Lab cleanup. It is not “skip cleanup and forget.”
 
 ## Placement and later scheduling
 

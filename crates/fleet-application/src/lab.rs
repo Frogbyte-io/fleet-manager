@@ -171,6 +171,9 @@ pub struct ProvisionRecord {
     pub readiness_deadline_at: Option<i64>,
     /// The named saga step that failed, without provider output or secrets.
     pub failed_step: Option<String>,
+    /// The Proxmox account the guest was cloned through, recorded before
+    /// the clone so cleanup destroys it through the same account.
+    pub account_id: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
     /// When the guest reached ready (epoch millis), when it did — the TTL
@@ -1901,9 +1904,149 @@ impl Lab {
     }
 }
 
+/// The failed cleanup attempts after which a releasing lease stops
+/// retrying and becomes `cleanup_failed`: it then visibly owns whatever is
+/// left on the host until an operator resolves it.
+pub const MAX_CLEANUP_ATTEMPTS: u32 = 5;
+
+/// The delay before the next cleanup attempt after `attempts` failed ones:
+/// one minute, doubling, capped at an hour.
+#[must_use]
+pub fn cleanup_backoff_millis(attempts: u32) -> i64 {
+    const MINUTE: i64 = 60_000;
+    let factor = 1_i64 << attempts.saturating_sub(1).min(6);
+    (MINUTE * factor).min(60 * MINUTE)
+}
+
+/// What one failed cleanup attempt does to its lease: it stays `releasing`
+/// with the next attempt scheduled, or, once the attempts are exhausted,
+/// becomes `cleanup_failed` with nothing scheduled.
+pub fn record_cleanup_failure(lease: &mut Lease, now: i64) {
+    lease.cleanup_attempts = lease.cleanup_attempts.saturating_add(1);
+    if lease.cleanup_attempts >= MAX_CLEANUP_ATTEMPTS {
+        lease.state = LeaseState::CleanupFailed;
+        lease.cleanup_next_at = None;
+    } else {
+        lease.state = LeaseState::Releasing;
+        lease.cleanup_next_at =
+            Some(now.saturating_add(cleanup_backoff_millis(lease.cleanup_attempts)));
+    }
+}
+
+/// Where a lease goes after its provision failed or was cancelled: to
+/// `releasing` (cleanup owed) when the record allocated a guest, including
+/// from `failed`, whose terminal state would otherwise strand the guest; to
+/// `failed` when an in-flight lease never allocated one; otherwise nowhere.
+#[must_use]
+pub fn provision_compensation(state: LeaseState, allocated: bool) -> Option<LeaseState> {
+    let in_flight = matches!(
+        state,
+        LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping
+    );
+    match (in_flight || state == LeaseState::Failed, allocated) {
+        (true, true) => Some(LeaseState::Releasing),
+        (true, false) if in_flight => Some(LeaseState::Failed),
+        _ => None,
+    }
+}
+
+/// Whether a releasing lease's next cleanup attempt may be queued at `now`:
+/// not before the backoff after a failed attempt has passed.
+#[must_use]
+pub fn cleanup_due(lease: &Lease, now: i64) -> bool {
+    lease.state == LeaseState::Releasing && lease.cleanup_next_at.is_none_or(|due| due <= now)
+}
+
+/// The `lab.cleanup` operation for a releasing lease's next attempt. The
+/// idempotency key names the attempt, so a repeated release or sweep never
+/// queues a second cleanup for the same attempt, while a retry after a
+/// failed attempt queues a new one.
+#[must_use]
+pub fn cleanup_operation(
+    lease: &Lease,
+    correlation_id: Option<String>,
+) -> crate::operation::NewOperation {
+    crate::operation::NewOperation {
+        kind: "lab.cleanup".to_owned(),
+        idempotency_key: Some(format!(
+            "lab-cleanup:{}:{}",
+            lease.id, lease.cleanup_attempts
+        )),
+        deadline_at: None,
+        correlation_id,
+        payload_json: Some(serde_json::json!({ "leaseId": lease.id }).to_string()),
+        review_token: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::guard_destroy_target;
+
+    #[test]
+    fn a_failed_provision_owes_cleanup_only_for_an_allocated_guest() {
+        use fleet_core::LeaseState::{
+            Booting, Failed, Provisioning, Ready, Released, Releasing, Requested,
+        };
+        assert_eq!(
+            super::provision_compensation(Provisioning, true),
+            Some(Releasing)
+        );
+        assert_eq!(
+            super::provision_compensation(Booting, true),
+            Some(Releasing)
+        );
+        // FM-714 marks a readiness failure `failed`; its guest still needs cleanup.
+        assert_eq!(super::provision_compensation(Failed, true), Some(Releasing));
+        assert_eq!(
+            super::provision_compensation(Provisioning, false),
+            Some(Failed)
+        );
+        assert_eq!(super::provision_compensation(Failed, false), None);
+        for state in [Requested, Ready, Releasing, Released] {
+            assert_eq!(
+                super::provision_compensation(state, true),
+                None,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_backs_off_then_gives_up_visibly() {
+        assert_eq!(super::cleanup_backoff_millis(1), 60_000);
+        assert_eq!(super::cleanup_backoff_millis(2), 120_000);
+        assert_eq!(super::cleanup_backoff_millis(40), 3_600_000);
+        let mut lease = fleet_core::Lease {
+            id: "l1".to_owned(),
+            state: fleet_core::LeaseState::Releasing,
+            ..fleet_core::Lease::default()
+        };
+        for attempt in 1..super::MAX_CLEANUP_ATTEMPTS {
+            super::record_cleanup_failure(&mut lease, 1_000);
+            assert_eq!(
+                lease.state,
+                fleet_core::LeaseState::Releasing,
+                "attempt {attempt}"
+            );
+            assert_eq!(
+                lease.cleanup_next_at,
+                Some(1_000 + super::cleanup_backoff_millis(attempt))
+            );
+        }
+        super::record_cleanup_failure(&mut lease, 2_000);
+        assert_eq!(lease.state, fleet_core::LeaseState::CleanupFailed);
+        assert_eq!(lease.cleanup_next_at, None);
+        // Not due again until the backoff passes.
+        lease.state = fleet_core::LeaseState::Releasing;
+        lease.cleanup_next_at = Some(5_000);
+        assert!(!super::cleanup_due(&lease, 4_999));
+        assert!(super::cleanup_due(&lease, 5_000));
+        lease.state = fleet_core::LeaseState::CleanupFailed;
+        // Each attempt gets its own idempotency key.
+        let key = super::cleanup_operation(&lease, None).idempotency_key;
+        assert_eq!(key.as_deref(), Some("lab-cleanup:l1:5"));
+    }
 
     #[test]
     fn the_cleanup_guard_refuses_templates_and_image_artifacts() {

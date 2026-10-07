@@ -209,6 +209,7 @@ impl ProvisionPort for FakeProvisions {
             ready_project_operation_id: None,
             readiness_deadline_at: None,
             failed_step: None,
+            account_id: None,
             ready_at: None,
             idempotency_key: new.idempotency_key.clone(),
             created_at: now,
@@ -356,6 +357,7 @@ impl fleet_application::lab::LeasePort for FakeLeases {
             ready_at: None,
             expires_at: None,
             cleanup_attempts: 0,
+            cleanup_next_at: None,
         };
         leases.push(stored.clone());
         Ok(stored)

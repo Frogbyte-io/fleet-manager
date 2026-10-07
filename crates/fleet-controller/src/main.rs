@@ -455,52 +455,84 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         fleet_controller::proxmox_store::AbsentProxmoxCredentials,
                     ),
                 };
-                std::sync::Arc::new(fleet_controller::proxmox_exec::LabDispatch::new(
-                    with_images.clone(),
-                    std::sync::Arc::new(
-                        fleet_controller::proxmox_exec::ProvisionExecutor::new(
-                            lab_accounts,
-                            lab_credentials,
-                            lab_provisions,
-                            lab_leases,
-                            lab_versions,
-                            std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
-                                store.pool().clone(),
-                            )),
-                            fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
-                        )
-                        .with_readiness(
-                            std::sync::Arc::new(
-                                fleet_controller::proxmox_exec::ProvisionReadiness::new(
-                                    std::sync::Arc::new(
-                                        fleet_storage_sqlite::MachineRepository::new(
-                                            store.pool().clone(),
-                                        ),
-                                    ),
-                                    std::sync::Arc::new(
-                                        fleet_storage_sqlite::ProjectRepository::new(
-                                            store.pool().clone(),
-                                        ),
-                                    ),
-                                    std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                                        store.pool().clone(),
-                                    )),
-                                    with_ready.clone(),
-                                    worker_operations.clone(),
-                                    config.data_dir.join("ssh"),
-                                ),
-                            ),
-                            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
-                                store.pool().clone(),
-                            )),
-                        )
-                        .with_task_links(std::sync::Arc::new(
-                            fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
-                                store.pool().clone(),
-                            ),
+                // FM-713: Lab cleanup destroys through its own reviewed
+                // destroy executor, guarded against templates and promoted
+                // image artifacts like the dedicated destroy route.
+                let lab_cleanup =
+                    std::sync::Arc::new(fleet_controller::lab_cleanup::LabCleanupExecutor::new(
+                        lab_leases.clone(),
+                        lab_provisions.clone(),
+                        std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                            store.pool().clone(),
                         )),
-                    ),
-                ))
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                        std::sync::Arc::new(
+                            fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
+                                lab_accounts.clone(),
+                                lab_credentials.clone(),
+                                fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                            )
+                            .with_image_artifacts(std::sync::Arc::new(
+                                fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                            ))
+                            .with_task_links(std::sync::Arc::new(
+                                fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            )),
+                        ),
+                    ));
+                std::sync::Arc::new(
+                    fleet_controller::proxmox_exec::LabDispatch::new(
+                        with_images.clone(),
+                        std::sync::Arc::new(
+                            fleet_controller::proxmox_exec::ProvisionExecutor::new(
+                                lab_accounts.clone(),
+                                lab_credentials.clone(),
+                                lab_provisions.clone(),
+                                lab_leases.clone(),
+                                lab_versions,
+                                std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                            )
+                            .with_readiness(
+                                std::sync::Arc::new(
+                                    fleet_controller::proxmox_exec::ProvisionReadiness::new(
+                                        std::sync::Arc::new(
+                                            fleet_storage_sqlite::MachineRepository::new(
+                                                store.pool().clone(),
+                                            ),
+                                        ),
+                                        std::sync::Arc::new(
+                                            fleet_storage_sqlite::ProjectRepository::new(
+                                                store.pool().clone(),
+                                            ),
+                                        ),
+                                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                            store.pool().clone(),
+                                        )),
+                                        with_ready.clone(),
+                                        worker_operations.clone(),
+                                        config.data_dir.join("ssh"),
+                                    ),
+                                ),
+                                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                                    store.pool().clone(),
+                                )),
+                            )
+                            .with_task_links(std::sync::Arc::new(
+                                fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
+                                    store.pool().clone(),
+                                ),
+                            )),
+                        ),
+                    )
+                    .with_cleanup(lab_cleanup, lab_leases, lab_provisions),
+                )
             };
             match &services {
                 Some(services) => {

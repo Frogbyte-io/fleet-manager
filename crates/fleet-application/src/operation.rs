@@ -45,7 +45,7 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 59] = [
+pub const CREATABLE_KINDS: [&str; 60] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -105,6 +105,7 @@ pub const CREATABLE_KINDS: [&str; 59] = [
     "proxmox.task-cancel",
     "image.build",
     "lab.provision",
+    "lab.cleanup",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -672,7 +673,7 @@ impl Operations {
                 "agentless.inventory" | "node.inventory" | "machine.install-fleetd" => {
                     Some(crate::events::EventKind::MachineChanged)
                 }
-                "lab.provision" => Some(crate::events::EventKind::LeaseChanged),
+                "lab.provision" | "lab.cleanup" => Some(crate::events::EventKind::LeaseChanged),
                 kind if kind.starts_with("proxmox.") => {
                     Some(crate::events::EventKind::ProxmoxChanged)
                 }
@@ -738,6 +739,74 @@ impl Operations {
                 detail: "the lab.provision payload must match its dedicated lease route".to_owned(),
             });
         }
+        self.create_inner(authorizer, principal_id, new, true).await
+    }
+
+    /// Checks, before a release or sweep changes any lease, that the caller
+    /// may also queue the cleanup that change owes: otherwise the lease
+    /// would commit to `releasing` with no cleanup queued.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial.
+    pub fn authorize_lab_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: Option<&str>,
+    ) -> Result<(), OperationUseCaseError> {
+        for (action, resource) in [
+            (Permission::OperationCreate, None),
+            (Permission::LabLease, lease_id),
+        ] {
+            authorize(
+                authorizer,
+                AccessRequest {
+                    principal_id,
+                    action,
+                    resource,
+                },
+            )
+            .map_err(OperationUseCaseError::Denied)?;
+        }
+        Ok(())
+    }
+
+    /// Queues the `lab.cleanup` operation for one releasing lease. Like
+    /// `lab.provision`, the kind is created only through this dedicated
+    /// path (the release and sweep routes), never the generic surface: the
+    /// payload must carry exactly this lease, and the caller must be
+    /// allowed to lease Lab guests.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked_lease_id = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned));
+        if new.kind != "lab.cleanup" || linked_lease_id.as_deref() != Some(lease_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the lab.cleanup payload must match its lease".to_owned(),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::LabLease,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
         self.create_inner(authorizer, principal_id, new, true).await
     }
 
@@ -932,6 +1001,14 @@ impl Operations {
                         detail: "catalog rollout requires an SSH endpoint".to_owned(),
                     });
                 }
+            }
+        } else if new.kind == "lab.cleanup" {
+            // Authorized by `create_lab_cleanup` against its lease.
+            if !allow_lab_provision {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.cleanup is queued by releasing a lease, not created directly"
+                        .to_owned(),
+                });
             }
         } else if new.kind == "lab.provision" {
             if !allow_lab_provision {

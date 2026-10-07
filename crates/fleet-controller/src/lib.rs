@@ -20,6 +20,7 @@ pub mod gateway;
 pub mod git_credentials;
 pub mod images_exec;
 pub mod install;
+pub mod lab_cleanup;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;

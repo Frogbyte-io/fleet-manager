@@ -798,6 +798,11 @@ pub struct LeaseDto {
     pub ready_at: Option<i64>,
     /// When the lease's TTL expires, once ready.
     pub expires_at: Option<i64>,
+    /// Failed cleanup attempts so far (FM-713).
+    pub cleanup_attempts: u32,
+    /// When the next cleanup attempt is due (epoch millis), while a
+    /// releasing lease backs off after a failed attempt.
+    pub cleanup_next_at: Option<i64>,
 }
 
 impl From<fleet_application::lab::Lease> for LeaseDto {
@@ -815,6 +820,8 @@ impl From<fleet_application::lab::Lease> for LeaseDto {
             max_lifetime_at: lease.max_lifetime_at,
             ready_at: lease.ready_at,
             expires_at: lease.expires_at,
+            cleanup_attempts: lease.cleanup_attempts,
+            cleanup_next_at: lease.cleanup_next_at,
         }
     }
 }
@@ -953,7 +960,7 @@ pub async fn list_lab_leases(
     params(("leaseId" = String, Path, description = "The lease's identity.")),
     request_body = ReleaseLeaseRequest,
     responses(
-        (status = 200, description = "The lease entered releasing (or keeping).", body = Resource<LeaseDto>),
+        (status = 200, description = "The lease entered releasing (or keeping), and its `lab.cleanup` operation is queued: it destroys the guest (or keeps it) and completes the release, or leaves the lease `cleanup_failed` after its retries.", body = Resource<LeaseDto>),
         (status = 400, description = "The lease is already terminal.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not release (or keep) the lease.", body = crate::error::ApiError),
         (status = 404, description = "The lease does not exist.", body = crate::error::ApiError),
@@ -969,6 +976,12 @@ pub async fn release_lab_lease(
 ) -> Result<Json<Resource<LeaseDto>>, ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The release owes a cleanup: refuse before the lease changes if the
+    // caller could not queue it.
+    state
+        .operations
+        .authorize_lab_cleanup(state.authorizer.as_ref(), &principal.id, Some(&lease_id))
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
     let lease = lab
         .release_lease(
             state.authorizer.as_ref(),
@@ -982,7 +995,36 @@ pub async fn release_lab_lease(
     state
         .events
         .publish(fleet_application::events::EventKind::LeaseChanged);
+    queue_cleanup(&state, &principal.id, &lease, correlation_id).await?;
     Ok(Json(Resource::new(lease.into())))
+}
+
+/// Queues the `lab.cleanup` operation for a releasing lease (FM-713). The
+/// key names the cleanup attempt, so repeating a release never queues a
+/// second cleanup for the same attempt. A lease backing off after a failed
+/// attempt is not queued before its `cleanupNextAt`: the sweeper (FM-716)
+/// queues the retry when it is due, so repeated releases cannot burn the
+/// attempts.
+async fn queue_cleanup(
+    state: &crate::operations::ApiState,
+    principal_id: &str,
+    lease: &fleet_core::Lease,
+    correlation_id: CorrelationId,
+) -> Result<(), ApiErrorResponse> {
+    if !fleet_application::lab::cleanup_due(lease, fleet_core::SystemClock::now_unix_millis()) {
+        return Ok(());
+    }
+    state
+        .operations
+        .create_lab_cleanup(
+            state.authorizer.as_ref(),
+            principal_id,
+            &lease.id,
+            &fleet_application::lab::cleanup_operation(lease, Some(correlation_id.to_string())),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))
 }
 
 /// The release request.
@@ -1070,7 +1112,7 @@ pub async fn extend_lab_lease(
     tag = "lab",
     operation_id = "sweepLabLeases",
     responses(
-        (status = 200, description = "All expired leases transitioned into releasing. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.", body = Page<LeaseDto>),
+        (status = 200, description = "All expired leases transitioned into releasing, each with its `lab.cleanup` operation queued. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.", body = Page<LeaseDto>),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed. Earlier claims in this sweep may already be committed; retry to process the remaining expired leases.", body = crate::error::ApiError),
     )
@@ -1082,6 +1124,10 @@ pub async fn sweep_lab_leases(
 ) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    state
+        .operations
+        .authorize_lab_cleanup(state.authorizer.as_ref(), &principal.id, None)
+        .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
     let released = lab
         .sweep_expired_with_progress(
             state.authorizer.as_ref(),
@@ -1095,6 +1141,9 @@ pub async fn sweep_lab_leases(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    for lease in &released {
+        queue_cleanup(&state, &principal.id, lease, correlation_id).await?;
+    }
     let items: Vec<LeaseDto> = released.into_iter().map(Into::into).collect();
     Ok(Json(Page {
         page: PageInfo {
