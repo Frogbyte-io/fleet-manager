@@ -2238,7 +2238,18 @@ impl ProxmoxClient {
             name: text("name", MAX_ID_CHARS)?,
             template: flag("template")?,
             protection: flag("protection")?,
-            lock: text("lock", 32)?,
+            // A present lock that is not a string is unreadable, never
+            // "no lock": the caller would treat the guest as settled.
+            lock: match config.get("lock") {
+                None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => {
+                    text("lock", 32)?
+                }
+                Some(_) => {
+                    return Err(PveApiError::InvalidPayload {
+                        detail: "the guest config's lock field is unreadable".to_owned(),
+                    });
+                }
+            },
             digest: text("digest", 64)?,
         })
     }

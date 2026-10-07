@@ -78,6 +78,7 @@ struct CloneConfig {
     missing_reads: usize,
     forbid_read: bool,
     no_digest: bool,
+    stale_puts: usize,
     cloned: Option<(u32, String)>,
 }
 
@@ -118,6 +119,12 @@ impl Pve {
     /// writes it inside the forked qmclone worker).
     fn missing_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
         self.clone_config.lock().unwrap().missing_reads = reads;
+        self
+    }
+
+    /// PVE refuses this many digest-bound updates as stale.
+    fn stale_for(self: Arc<Self>, puts: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().stale_puts = puts;
         self
     }
 
@@ -176,6 +183,14 @@ impl Pve {
                     format!(
                         r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.Options)\n"}}"#
                     ),
+                );
+            }
+            if config.stale_puts > 0 {
+                config.stale_puts -= 1;
+                return (
+                    500,
+                    r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                        .to_owned(),
                 );
             }
             config.protected = false;
@@ -1866,5 +1881,37 @@ async fn a_protected_clone_without_a_config_digest_is_never_updated_unconditiona
     assert!(detail.contains("digest"), "{detail}");
     assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
     assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
+}
+
+#[tokio::test]
+async fn a_stale_digest_is_reread_and_retried_once() {
+    // One stale refusal: the config is re-read and re-checked, and the
+    // second, digest-bound update lands before the start.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().stale_for(1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(pve.config_updates().len(), 2, "{:?}", pve.paths());
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+        .count();
+    assert_eq!(reads, 2, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_some());
+
+    // Refused twice: the provision fails before the start.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().stale_for(2);
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "unprotect_failed");
+    assert_eq!(pve.config_updates().len(), 2, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_none());
     assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
 }

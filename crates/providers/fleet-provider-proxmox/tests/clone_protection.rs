@@ -132,6 +132,8 @@ async fn an_unreadable_config_is_refused() {
         json!({"data": {"name": "x".repeat(129)}}),
         json!({"data": {"digest": "0".repeat(65)}}),
         json!({"data": {"lock": "l".repeat(33)}}),
+        json!({"data": {"lock": 1}}),
+        json!({"data": {"lock": {"kind": "clone"}}}),
     ] {
         let (flags, _) = flags(body.clone()).await;
         assert!(

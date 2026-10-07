@@ -32,6 +32,8 @@ pub const MAX_LIFECYCLE_TIMEOUT: u64 = 600;
 /// How long the Lab executor waits for a fresh clone's config lock to clear
 /// (a full clone copies every disk) before it gives up on the clone.
 const CLONE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3_600);
+/// How often the Lab executor records progress while it waits for a clone.
+const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The payload every lifecycle kind carries: the machine-scoped shape plus
 /// the account, the guest, and its node.
@@ -2276,7 +2278,10 @@ impl ProvisionExecutor {
     /// template or another guest, and a clone that carries no flag (an
     /// unprotected template, or a resumed record already cleared) is left
     /// alone, so a resume repeats nothing. The update carries the config
-    /// digest it was checked against.
+    /// digest it was checked against; when PVE refuses it with a server
+    /// error (a config rewritten after the read: stale digest, or a brief
+    /// lock), the executor re-reads and re-checks the config and tries once
+    /// more.
     async fn unprotect_clone(
         &self,
         operations: &Operations,
@@ -2287,9 +2292,76 @@ impl ProvisionExecutor {
         vmid: u32,
     ) -> Result<Result<(), Refusal>, String> {
         let name = format!("fm-lab-{record_id}");
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let config = match self
+                .settled_clone_config(operations, operation_id, request, node, vmid)
+                .await?
+            {
+                Ok(config) => config,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            if config.template || config.name.as_deref() != Some(name.as_str()) {
+                return Ok(Err(Refusal::new(
+                    "conflict",
+                    format!(
+                        "{node}/qemu/{vmid} is {} named {}, not this provision's clone; its config is left unchanged",
+                        if config.template {
+                            "a template"
+                        } else {
+                            "a guest"
+                        },
+                        config.name.as_deref().unwrap_or("nothing")
+                    ),
+                )));
+            }
+            if !config.protection {
+                return Ok(Ok(()));
+            }
+            // Never an unconditional update: the digest binds the write to
+            // the config whose identity was just checked.
+            let Some(digest) = config.digest.as_deref() else {
+                return Ok(Err(Refusal::new(
+                    "unprotect_failed",
+                    format!(
+                        "the config of {node}/qemu/{vmid} carries no digest, so its protection flag is not cleared unconditionally; until it is cleared, PVE refuses to destroy the guest"
+                    ),
+                )));
+            };
+            match self
+                .client
+                .qemu_clear_protection(request.clone(), node, vmid, digest)
+                .await
+            {
+                Ok(()) => return Ok(Ok(())),
+                Err(fleet_provider_proxmox::PveApiError::Http { .. }) if attempt < 2 => {}
+                Err(error) => {
+                    return Ok(Err(Refusal::new(
+                        "unprotect_failed",
+                        format!(
+                            "the clone {node}/qemu/{vmid} inherited the template's protection flag, which could not be cleared ({error}); the token needs VM.Config.Options on /vms/{vmid}. Until the flag is cleared, PVE refuses to destroy the guest"
+                        ),
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Reads the new guest's config until it exists and carries no lock,
+    /// bounded by [`CLONE_SETTLE_TIMEOUT`], honoring cancellation, and
+    /// recording progress about once a minute while it waits.
+    async fn settled_clone_config(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<fleet_provider_proxmox::PveQemuConfigFlags, Refusal>, String> {
         let started = std::time::Instant::now();
-        let mut reported = false;
-        let config = loop {
+        let mut reported: Option<std::time::Instant> = None;
+        loop {
             if operations
                 .cancel_requested(operation_id)
                 .await
@@ -2313,7 +2385,7 @@ impl ProvisionExecutor {
                 .await
             {
                 Ok(config) => match config.lock.clone() {
-                    None => break config,
+                    None => return Ok(Ok(config)),
                     Some(lock) => format!("{lock} lock"),
                 },
                 Err(
@@ -2335,62 +2407,23 @@ impl ProvisionExecutor {
                     ),
                 )));
             }
-            if !reported {
-                reported = true;
+            if reported.is_none_or(|at| at.elapsed() >= CLONE_PROGRESS_INTERVAL) {
+                reported = Some(std::time::Instant::now());
                 operations
                     .record_progress(
                         operation_id,
                         Some(1),
                         Some(3),
                         Some(&format!(
-                            "waiting for the clone {node}/qemu/{vmid} to finish ({waiting_on})"
+                            "waiting for the clone {node}/qemu/{vmid} to finish ({waiting_on}; {} s so far)",
+                            started.elapsed().as_secs()
                         )),
                     )
                     .await
                     .map_err(|error| error.to_string())?;
             }
             tokio::time::sleep(POLL_INTERVAL).await;
-        };
-        if config.template || config.name.as_deref() != Some(name.as_str()) {
-            return Ok(Err(Refusal::new(
-                "conflict",
-                format!(
-                    "{node}/qemu/{vmid} is {} named {}, not this provision's clone; its config is left unchanged",
-                    if config.template {
-                        "a template"
-                    } else {
-                        "a guest"
-                    },
-                    config.name.as_deref().unwrap_or("nothing")
-                ),
-            )));
         }
-        if !config.protection {
-            return Ok(Ok(()));
-        }
-        // Never an unconditional update: the digest binds the write to
-        // the config whose identity was just checked.
-        let Some(digest) = config.digest.as_deref() else {
-            return Ok(Err(Refusal::new(
-                "unprotect_failed",
-                format!(
-                    "the config of {node}/qemu/{vmid} carries no digest, so its protection flag is not cleared unconditionally; until it is cleared, PVE refuses to destroy the guest"
-                ),
-            )));
-        };
-        if let Err(error) = self
-            .client
-            .qemu_clear_protection(request.clone(), node, vmid, digest)
-            .await
-        {
-            return Ok(Err(Refusal::new(
-                "unprotect_failed",
-                format!(
-                    "the clone {node}/qemu/{vmid} inherited the template's protection flag, which could not be cleared ({error}); the token needs VM.Config.Options on /vms/{vmid}. Until the flag is cleared, PVE refuses to destroy the guest"
-                ),
-            )));
-        }
-        Ok(Ok(()))
     }
 
     #[allow(clippy::too_many_lines)]
