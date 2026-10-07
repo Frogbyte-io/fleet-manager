@@ -217,19 +217,7 @@ impl OperationExecutor for ImagesExecutor {
                     }
                 }
             };
-            match (cancel, result) {
-                // The build finished before the interrupt took effect: its
-                // template exists, so the record says so.
-                (_, Ok(template)) => Ok(template),
-                // The build's own account of the interrupt is the more
-                // precise one (verified or not).
-                // A poll failure (`cancel_poll_failed`) stays a failure.
-                (Some("cancelled"), Err(reason @ ("cancelled" | "cancelled_unverified"))) => {
-                    Err(reason)
-                }
-                (Some(reason), Err(_)) => Err(reason),
-                (None, Err(reason)) => Err(reason),
-            }
+            settle_build(cancel, result)
         };
         record.ended_at = Some(fleet_core::SystemClock::now_unix_millis().max(record.started_at));
         match result {
@@ -442,6 +430,25 @@ impl ImagesExecutor {
         let stream = BuildStream::parse(&built.stdout);
         let id = stream.artifact_id().ok_or("artifact_missing")?;
         output_template(id, version).ok_or("artifact_missing")
+    }
+}
+
+/// The build's terminal result, given how a cancel (if any) was seen and
+/// what the build itself reported.
+fn settle_build(
+    cancel: Option<&'static str>,
+    result: Result<ImageBuildTemplate, &'static str>,
+) -> Result<ImageBuildTemplate, &'static str> {
+    match (cancel, result) {
+        // The build finished before the interrupt took effect: its template
+        // exists, so the record says so.
+        (_, Ok(template)) => Ok(template),
+        // A confirmed cancel: the build's own account of the interrupt is
+        // the more precise one (verified or not).
+        (Some("cancelled"), Err(reason @ ("cancelled" | "cancelled_unverified"))) => Err(reason),
+        // Anything else the cancel side saw, including `cancel_poll_failed`,
+        // stays as that: a poll failure is never reported as a cancel.
+        (Some(reason), Err(_)) | (None, Err(reason)) => Err(reason),
     }
 }
 
@@ -890,6 +897,35 @@ mod tests {
                 false,
             ),
         ]
+    }
+
+    #[test]
+    fn a_cancel_poll_failure_is_never_reported_as_a_cancel() {
+        for reported in ["cancelled", "cancelled_unverified", "build_failed"] {
+            assert_eq!(
+                super::settle_build(Some("cancel_poll_failed"), Err(reported)).unwrap_err(),
+                "cancel_poll_failed",
+                "{reported}"
+            );
+        }
+        assert_eq!(
+            super::settle_build(Some("cancelled"), Err("cancelled_unverified")).unwrap_err(),
+            "cancelled_unverified"
+        );
+        assert_eq!(
+            super::settle_build(Some("cancelled"), Err("build_failed")).unwrap_err(),
+            "cancelled"
+        );
+        assert_eq!(
+            super::settle_build(None, Err("validate_failed")).unwrap_err(),
+            "validate_failed"
+        );
+        let template = ImageBuildTemplate {
+            node: "pve".to_owned(),
+            vmid: 120,
+            name: "ubuntu-base".to_owned(),
+        };
+        assert!(super::settle_build(Some("cancel_poll_failed"), Ok(template)).is_ok());
     }
 
     #[test]
