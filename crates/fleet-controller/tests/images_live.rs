@@ -136,9 +136,19 @@ fn skip_reason(scenario: &str, packer: Result<(), String>) -> Option<String> {
     }
 }
 
-/// Starts one scenario's run. The version gate's controller sees no
-/// Packer at all; every other controller gets the plugin's credentials.
+/// Starts one scenario's run with one trusted Proxmox account for the
+/// target, so every build resolves its account from the recipe's
+/// `proxmox_url` (FM-702) without `--account`. The version gate's
+/// controller sees no Packer at all; every other controller gets the
+/// plugin's credentials.
 async fn start(scenario: &str, target: Arc<Target>) -> Result<TargetRun, String> {
+    let run = start_controller(scenario, target).await?;
+    run.trusted_account("acceptance-images", &run.target.token)
+        .await?;
+    Ok(run)
+}
+
+async fn start_controller(scenario: &str, target: Arc<Target>) -> Result<TargetRun, String> {
     let env = if scenario == "version-gate" {
         let empty = empty_path_dir();
         std::fs::create_dir_all(&empty).map_err(|error| error.to_string())?;
@@ -194,6 +204,13 @@ fn clone_recipe(url: &str, node: &str, template_vmid: u32, vmid: u32, label: &st
             "template_name": format!("{IMAGE_PREFIX}{label}-{vmid}"),
             "template_description": "Fleet image acceptance (FM-704); safe to delete",
             "tags": TAG,
+            // The plugin's default controller is `lsi`; a cloud-image
+            // template with a virtio-scsi root disk then hangs in its
+            // initramfs and never honours the shutdown before conversion.
+            "scsi_controller": "virtio-scsi-pci",
+            "memory": 1024,
+            "cores": 1,
+            "network_adapters": [{ "model": "virtio", "bridge": "vmbr0" }],
             "communicator": "none",
             "qemu_agent": true,
             "task_timeout": "10m"
@@ -201,17 +218,12 @@ fn clone_recipe(url: &str, node: &str, template_vmid: u32, vmid: u32, label: &st
     })
 }
 
-/// A recipe `packer validate` refuses: the builder lacks its required
-/// `node` and clone source.
-fn invalid_recipe(target: &Target) -> Value {
-    json!({
-        "builders": [{
-            "type": "proxmox-clone",
-            "proxmox_url": format!("https://{}:{}/api2/json", target.host, target.port),
-            "insecure_skip_tls_verify": true,
-            "communicator": "none"
-        }]
-    })
+/// A recipe Fleet accepts as a frozen build target but `packer validate`
+/// refuses: an otherwise valid clone with a key the plugin does not have.
+fn invalid_recipe(target: &Target, vmid: u32) -> Value {
+    let mut content = recipe(target, vmid, "invalid");
+    content["builders"][0]["fleet_acceptance_unknown_key"] = json!(true);
+    content
 }
 
 /// Creates a recipe from `content` and publishes it; answers the version id.
@@ -285,12 +297,21 @@ async fn build_ok(run: &TargetRun, version: &str, vmid: u32) -> Result<u32, Stri
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    // The proxmox plugin reports the template's VMID as the artifact id.
+    // FM-702 records the template as `<node>:<vmid>`.
+    let expected = format!("{}:{vmid}", run.target.node);
     check!(
-        artifact == vmid.to_string(),
-        "the recorded artifact is {artifact:?}, not the built VMID {vmid}"
+        artifact == expected,
+        "the recorded artifact is {artifact:?}, not the built template {expected}"
     );
-    let template = run.pve.resource(vmid).await?;
+    // `/cluster/resources` can lag the conversion by a few seconds.
+    let converted = Instant::now();
+    let mut template = run.pve.resource(vmid).await?;
+    while !template.as_ref().is_some_and(|guest| guest.template)
+        && converted.elapsed() < Duration::from_secs(60)
+    {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        template = run.pve.resource(vmid).await?;
+    }
     check!(
         template.as_ref().is_some_and(|guest| guest.template),
         "VMID {vmid} is not a template on the host after a successful build: {template:?}"
@@ -376,21 +397,20 @@ async fn version_gate(run: &TargetRun) -> Result<Outcome, String> {
     Ok(Outcome::Pass)
 }
 
-/// Scenario 2: `packer validate` refuses an invalid recipe, the build
-/// fails with the diagnostics, and nothing is created on the host.
+/// Scenario 2: `packer validate` refuses a recipe Fleet accepted, the
+/// build fails with the `validate_failed` reason, and nothing is created on
+/// the host. FM-702 keeps provider output out of the record by design, so
+/// the reason code is the whole public diagnostic.
 async fn validate_failure(run: &TargetRun) -> Result<Outcome, String> {
     let before: Vec<u32> = run.pve.resources().await?.iter().map(|r| r.vmid).collect();
-    let version = publish(run, "invalid", &invalid_recipe(&run.target)).await?;
+    let vmid = run.guard.allocate().await?;
+    let version = publish(run, "invalid", &invalid_recipe(&run.target, vmid)).await?;
     let data = build_wait(run, &version).await?;
     let (reason, detail) = operation_error(&data);
     check!(
         data["state"] == "failed" && reason == "validate_failed",
-        "an invalid recipe ended {} ({reason}), not failed/validate_failed",
+        "an invalid recipe ended {} ({reason}: {detail}), not failed/validate_failed",
         data["state"]
-    );
-    check!(
-        !detail.trim().is_empty(),
-        "the validate failure carries no diagnostics"
     );
     let after: Vec<u32> = run.pve.resources().await?.iter().map(|r| r.vmid).collect();
     let created: Vec<&u32> = after.iter().filter(|vmid| !before.contains(vmid)).collect();
@@ -410,19 +430,104 @@ async fn build(run: &TargetRun) -> Result<Outcome, String> {
     Ok(Outcome::Pass)
 }
 
-/// Scenario 4: the immutable build record (FM-702, #249) matches the
-/// recipe's digest and the probed tool versions.
+/// Scenario 4: the immutable build record (FM-702) holds the version's
+/// digest, the Packer and plugin versions actually installed, the resolved
+/// account and frozen target, and the built template, and carries no
+/// credential.
 async fn build_record(run: &TargetRun) -> Result<Outcome, String> {
-    let (status, _) = run.controller.get("/api/v1/images/builds").await?;
+    let vmid = run.guard.allocate().await?;
+    let version = publish(run, "record", &recipe(&run.target, vmid, "record")).await?;
+    build_ok(run, &version, vmid).await?;
+    let builds = run
+        .controller
+        .fleetctl(&args(&["images", "builds", "--version", &version]), None)
+        .await?;
+    check!(builds.success, "images builds failed: {}", builds.stderr);
+    let items = builds.json["items"].as_array().cloned().unwrap_or_default();
     check!(
-        status == 200,
-        "the build-record API answered {status}: FM-702 (#249) has not landed on this controller"
+        items.len() == 1,
+        "expected one build record, got {}",
+        builds.json
     );
-    // FM-704 completes these assertions against FM-702's DTO once it
-    // merges: digest = the version's contentDigest, the probed packer and
-    // proxmox-plugin versions, the target node/storage, and the output
-    // template reference = the built VMID.
-    Err("the build-record assertions are pending FM-702's DTO (#249)".to_owned())
+    let id = items[0]["id"].as_str().unwrap_or_default().to_owned();
+    let shown = run
+        .controller
+        .fleetctl(&args(&["images", "build-show", &id]), None)
+        .await?;
+    check!(shown.success, "images build-show failed: {}", shown.stderr);
+    let record = shown.json.clone();
+    let dto = version_dto(run, &version).await?;
+    let (status, accounts) = run.controller.get("/api/v1/proxmox/accounts").await?;
+    check!(status == 200, "listing accounts answered {status}");
+    let account = accounts["items"][0]["id"].clone();
+    let (packer, plugin) = installed_versions()?;
+    let expected = [
+        ("outcome", json!("succeeded")),
+        ("versionId", json!(version)),
+        ("contentDigest", dto["contentDigest"].clone()),
+        ("packerVersion", json!(packer)),
+        ("proxmoxPluginVersion", json!(plugin)),
+        ("accountId", account),
+        ("node", json!(run.target.node)),
+        ("storagePool", json!(run.target.storage)),
+    ];
+    for (field, want) in expected {
+        check!(
+            record[field] == want,
+            "build record {field} is {}, expected {want}",
+            record[field]
+        );
+    }
+    check!(
+        record["template"]["vmid"] == vmid
+            && record["template"]["node"] == run.target.node.as_str(),
+        "the record's template is {}, not {}:{vmid}",
+        record["template"],
+        run.target.node
+    );
+    check!(
+        record["endedAt"].as_i64() >= record["startedAt"].as_i64(),
+        "the record ends before it starts: {record}"
+    );
+    let text = record.to_string();
+    check!(
+        !text.contains(run.target.token.secret.expose()) && !text.contains(&run.target.token.id),
+        "the build record carries the token"
+    );
+    Ok(Outcome::Pass)
+}
+
+/// The installed Packer and Proxmox plugin versions, as the record should
+/// hold them, read from the documented CLI surfaces.
+fn installed_versions() -> Result<(String, String), String> {
+    let run = |args: &[&str]| {
+        std::process::Command::new("packer")
+            .args(args)
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .map_err(|error| format!("packer {args:?}: {error}"))
+    };
+    let version = run(&["-machine-readable", "version"])?
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<&str> = line.split(',').collect();
+            (fields.get(2) == Some(&"version")).then(|| fields.get(3).map(|v| (*v).to_owned()))
+        })
+        .flatten()
+        .ok_or("packer reported no version")?;
+    let plugin = run(&["plugins", "installed"])?
+        .lines()
+        .find_map(|line| {
+            let name = line.trim().rsplit('/').next()?;
+            Some(
+                name.strip_prefix("packer-plugin-proxmox_v")?
+                    .split('_')
+                    .next()?
+                    .to_owned(),
+            )
+        })
+        .ok_or("no proxmox plugin is installed")?;
+    Ok((version, plugin))
 }
 
 /// Scenario 5: a successfully built version can be promoted, and the
@@ -457,24 +562,48 @@ async fn rebuild_keeps_promotion(run: &TargetRun) -> Result<Outcome, String> {
     check!(answer.success, "images promote failed: {}", answer.stderr);
     let promoted = version_dto(run, &version).await?["promotedAt"].clone();
 
-    // The same version again: the recipe pins `vm_id`, so Packer must
-    // refuse (the VMID is taken) or produce nothing new.
+    // The same version again. The recipe pins `vm_id`, so Packer must
+    // refuse it (the VMID is taken): the rebuild fails and the newest
+    // successful build, which Lab clones from, is still the first. A recipe
+    // without `vm_id` would succeed into a new VMID and silently move
+    // Lab's clone source (#281); the suite cannot build outside its range,
+    // so #281 covers that case with unit tests.
     let data = build_wait(run, &version).await?;
-    run.log(&format!("the rebuild ended {}", data["state"]));
+    let (reason, _) = operation_error(&data);
+    check!(
+        data["state"] == "failed" && reason == "build_failed",
+        "rebuilding into a taken VMID ended {} ({reason}), not failed/build_failed",
+        data["state"]
+    );
     let dto = version_dto(run, &version).await?;
     check!(
         dto["promotedAt"] == promoted,
         "the rebuild changed the promotion: {promoted} → {}",
         dto["promotedAt"]
     );
+    let builds = run
+        .controller
+        .fleetctl(&args(&["images", "builds", "--version", &version]), None)
+        .await?;
+    check!(builds.success, "images builds failed: {}", builds.stderr);
+    let succeeded: Vec<Value> = builds.json["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|build| build["outcome"] == "succeeded")
+        .collect();
+    check!(
+        succeeded.len() == 1 && succeeded[0]["template"]["vmid"] == first,
+        "the version's successful builds changed: {}",
+        builds.json
+    );
     let template = run.pve.resource(first).await?;
     check!(
         template.as_ref().is_some_and(|guest| guest.template),
         "the promoted template {first} is gone after the rebuild"
     );
-    // Which template the version resolves to after a rebuild is only
-    // observable through the build record (FM-702, #249).
-    Err("the artifact-identity assertion is pending FM-702's build record (#249)".to_owned())
+    Ok(Outcome::Pass)
 }
 
 /// Scenario 7: cancelling a running build stops Packer gracefully and the
@@ -520,7 +649,7 @@ async fn cancel_cleanup(run: &TargetRun) -> Result<Outcome, String> {
     while run.pve.resource(vmid).await?.is_some() {
         check!(
             cleaned.elapsed() < Duration::from_secs(300),
-            "VMID {vmid} is still on the host 5 minutes after the cancel"
+            "VMID {vmid} is still on the host 5 minutes after the cancel; see #271"
         );
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -587,6 +716,7 @@ mod tests {
         assert_eq!(builder["vm_id"], 901);
         assert_eq!(builder["full_clone"], false);
         assert_eq!(builder["tags"], TAG);
+        assert_eq!(builder["scsi_controller"], "virtio-scsi-pci");
         let name = builder["template_name"].as_str().unwrap();
         assert!(name.starts_with(IMAGE_PREFIX) && name.starts_with(NAME_PREFIX));
         // Credentials ride the controller environment, never the recipe
