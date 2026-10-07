@@ -1364,6 +1364,17 @@ export interface LabTemplateVersionDto {
 export interface LeaseDto {
   /** The cleanup strategy. */
   cleanup: string;
+  /**
+     * Failed cleanup attempts so far (FM-713).
+     * @minimum 0
+     */
+  cleanupAttempts: number;
+  /**
+     * When the next cleanup attempt is due (epoch millis), while a
+     * releasing lease backs off after a failed attempt.
+     * @nullable
+     */
+  cleanupNextAt?: number | null;
   /** When the lease was created. */
   createdAt: number;
   /**
@@ -2260,6 +2271,17 @@ export interface PageLabTemplateDto {
 export type PageLeaseDtoItemsItem = {
   /** The cleanup strategy. */
   cleanup: string;
+  /**
+     * Failed cleanup attempts so far (FM-713).
+     * @minimum 0
+     */
+  cleanupAttempts: number;
+  /**
+     * When the next cleanup attempt is due (epoch millis), while a
+     * releasing lease backs off after a failed attempt.
+     * @nullable
+     */
+  cleanupNextAt?: number | null;
   /** When the lease was created. */
   createdAt: number;
   /**
@@ -3846,6 +3868,17 @@ export interface ResourceLabTemplateVersionDto {
 export type ResourceLeaseDtoData = {
   /** The cleanup strategy. */
   cleanup: string;
+  /**
+     * Failed cleanup attempts so far (FM-713).
+     * @minimum 0
+     */
+  cleanupAttempts: number;
+  /**
+     * When the next cleanup attempt is due (epoch millis), while a
+     * releasing lease backs off after a failed attempt.
+     * @nullable
+     */
+  cleanupNextAt?: number | null;
   /** When the lease was created. */
   createdAt: number;
   /**

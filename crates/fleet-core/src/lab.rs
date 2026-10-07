@@ -566,7 +566,7 @@ impl LeaseState {
 
 /// A lease: the owner/purpose/project-scoped request and lifecycle, with
 /// the public handle the CLI/API use.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Lease {
     /// The lease's identity.
@@ -599,6 +599,9 @@ pub struct Lease {
     pub expires_at: Option<i64>,
     /// The cleanup attempts so far, for the backoff.
     pub cleanup_attempts: u32,
+    /// When the next cleanup attempt is due (epoch millis), while a
+    /// releasing lease is backing off after a failed attempt.
+    pub cleanup_next_at: Option<i64>,
 }
 
 impl Lease {
@@ -699,6 +702,7 @@ mod lease_tests {
             ready_at: None,
             expires_at,
             cleanup_attempts: 0,
+            cleanup_next_at: None,
         }
     }
 

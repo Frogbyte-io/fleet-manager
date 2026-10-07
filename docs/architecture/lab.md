@@ -56,7 +56,9 @@ Deadlines:
 
 The current controller path attaches a provision record to a requested lease before queuing `lab.provision`. When the provision executor reaches guest readiness, it marks that same linked lease `ready`, starts its template TTL, and caps the expiry at the creation-relative maximum. Standalone template provisioning remains separate from lease lifecycle and does not make a lease ready.
 
-If the linked operation fails, the lease becomes `failed` and the provision record becomes `never_ready`, retaining its named failure step and any guest identifiers. A readiness timeout is terminal for that lease: another provision request returns a conflict directing the caller to release it and request a replacement. Provision failure cleanup remains part of the broader Lab saga work.
+If the linked operation fails, the lease becomes `failed` and the provision record becomes `never_ready`, retaining its named failure step and any guest identifiers. A readiness timeout is terminal for that lease: another provision request returns a conflict directing the caller to release it and request a replacement. When the failed or cancelled provision owns a guest, the lease moves on to `releasing` and its cleanup runs (FM-713); a lease that never allocated one stays `failed`.
+
+Release queues one `lab.cleanup` operation per attempt (FM-713). It destroys the guest through the reviewed `proxmox.guest.destroy` path, with a review token the controller computes itself; that path stops the guest first, refuses templates and promoted image artifacts, and treats an absent guest as done. Cleanup then removes the Lab-owned machine record and marks the lease `released`. A failed attempt backs off (one minute, doubling, capped at an hour, with the next attempt's time stored on the lease). After five attempts the lease becomes `cleanup_failed` and an audit event names the guest it still owns. Each provision record stores the Proxmox account its guest was cloned through, so cleanup uses the same account; a record from before that column refuses to guess.
 
 Cleanup strategies:
 

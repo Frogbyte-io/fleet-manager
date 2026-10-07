@@ -67,7 +67,7 @@ function template(overrides: Partial<LabTemplateDto> = {}): LabTemplateDto {
 }
 
 function lease(overrides: Partial<LeaseDto> = {}): LeaseDto {
-  return { id: 'lease-1', templateVersionId: 't1@1111', owner: 'me', purpose: 'debug', projectId: null, state: 'ready', cleanup: 'destroy', ttlSeconds: 3600, createdAt: 0, readyAt: 0, expiresAt: Date.now() + 3600e3, maxLifetimeAt: Date.now() + 86400e3, ...overrides } as LeaseDto
+  return { id: 'lease-1', templateVersionId: 't1@1111', owner: 'me', purpose: 'debug', projectId: null, state: 'ready', cleanup: 'destroy', cleanupAttempts: 0, cleanupNextAt: null, ttlSeconds: 3600, createdAt: 0, readyAt: 0, expiresAt: Date.now() + 3600e3, maxLifetimeAt: Date.now() + 86400e3, ...overrides } as LeaseDto
 }
 
 async function mountAt(path: string) {

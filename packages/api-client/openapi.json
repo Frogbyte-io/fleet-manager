@@ -1652,7 +1652,7 @@
         "operationId": "sweepLabLeases",
         "responses": {
           "200": {
-            "description": "All expired leases transitioned into releasing. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.",
+            "description": "All expired leases transitioned into releasing, each with its `lab.cleanup` operation queued. Claims commit and emit lease.changed immediately; if a later claim fails, earlier transitions remain committed and the handler returns 500. Retrying safely continues with leases that remain expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1901,7 +1901,7 @@
         },
         "responses": {
           "200": {
-            "description": "The lease entered releasing (or keeping).",
+            "description": "The lease entered releasing (or keeping), and its `lab.cleanup` operation is queued: it destroys the guest (or keeps it) and completes the release, or leaves the lease `cleanup_failed` after its retries.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8714,12 +8714,27 @@
           "cleanup",
           "createdAt",
           "ttlSeconds",
-          "maxLifetimeAt"
+          "maxLifetimeAt",
+          "cleanupAttempts"
         ],
         "properties": {
           "cleanup": {
             "type": "string",
             "description": "The cleanup strategy."
+          },
+          "cleanupAttempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Failed cleanup attempts so far (FM-713).",
+            "minimum": 0
+          },
+          "cleanupNextAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the next cleanup attempt is due (epoch millis), while a\nreleasing lease backs off after a failed attempt."
           },
           "createdAt": {
             "type": "integer",
@@ -10466,12 +10481,27 @@
                 "cleanup",
                 "createdAt",
                 "ttlSeconds",
-                "maxLifetimeAt"
+                "maxLifetimeAt",
+                "cleanupAttempts"
               ],
               "properties": {
                 "cleanup": {
                   "type": "string",
                   "description": "The cleanup strategy."
+                },
+                "cleanupAttempts": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "Failed cleanup attempts so far (FM-713).",
+                  "minimum": 0
+                },
+                "cleanupNextAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When the next cleanup attempt is due (epoch millis), while a\nreleasing lease backs off after a failed attempt."
                 },
                 "createdAt": {
                   "type": "integer",
@@ -13302,12 +13332,27 @@
               "cleanup",
               "createdAt",
               "ttlSeconds",
-              "maxLifetimeAt"
+              "maxLifetimeAt",
+              "cleanupAttempts"
             ],
             "properties": {
               "cleanup": {
                 "type": "string",
                 "description": "The cleanup strategy."
+              },
+              "cleanupAttempts": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Failed cleanup attempts so far (FM-713).",
+                "minimum": 0
+              },
+              "cleanupNextAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the next cleanup attempt is due (epoch millis), while a\nreleasing lease backs off after a failed attempt."
               },
               "createdAt": {
                 "type": "integer",

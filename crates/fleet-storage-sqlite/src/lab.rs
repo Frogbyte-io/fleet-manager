@@ -94,6 +94,8 @@ impl LabRepository {
             ready_project_operation_id: row.get("ready_project_operation_id"),
             readiness_deadline_at: row.get("readiness_deadline_at"),
             failed_step: row.get("failed_step"),
+            // Absent before migration 0038 (FM-713).
+            account_id: row.try_get("account_id").ok().flatten(),
             ready_at: row.get("ready_at"),
             idempotency_key: row.get("idempotency_key"),
             created_at: row.get("created_at"),
@@ -321,7 +323,7 @@ impl ProvisionPort for LabRepository {
 
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String> {
         sqlx::query(
-            "UPDATE lab_provisions SET state = ?2, node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8, machine_id = ?9, endpoint_id = ?10, ready_project_operation_id = ?11, readiness_deadline_at = ?12, failed_step = ?13 WHERE id = ?1",
+            "UPDATE lab_provisions SET state = ?2, node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8, machine_id = ?9, endpoint_id = ?10, ready_project_operation_id = ?11, readiness_deadline_at = ?12, failed_step = ?13, account_id = ?14 WHERE id = ?1",
         )
         .bind(&record.id)
         .bind(record.state.id())
@@ -336,6 +338,7 @@ impl ProvisionPort for LabRepository {
         .bind(&record.ready_project_operation_id)
         .bind(record.readiness_deadline_at)
         .bind(&record.failed_step)
+        .bind(&record.account_id)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;
@@ -631,6 +634,7 @@ impl LeaseRepository {
             ready_at: row.get("ready_at"),
             expires_at: row.get("expires_at"),
             cleanup_attempts: u32::try_from(row.get::<i64, _>("cleanup_attempts")).unwrap_or(0),
+            cleanup_next_at: row.try_get("cleanup_next_at").ok().flatten(),
         })
     }
 }
@@ -676,7 +680,7 @@ impl LeasePort for LeaseRepository {
 
     async fn update(&self, lease: &Lease) -> Result<(), String> {
         let updated = sqlx::query(
-            "UPDATE lab_leases SET state = ?2, provision_id = ?3, ready_at = ?4, expires_at = ?5, cleanup_attempts = ?6 WHERE id = ?1",
+            "UPDATE lab_leases SET state = ?2, provision_id = ?3, ready_at = ?4, expires_at = ?5, cleanup_attempts = ?6, cleanup = ?7, cleanup_next_at = ?8 WHERE id = ?1",
         )
         .bind(&lease.id)
         .bind(lease.state.id())
@@ -684,6 +688,10 @@ impl LeasePort for LeaseRepository {
         .bind(lease.ready_at)
         .bind(lease.expires_at)
         .bind(i64::from(lease.cleanup_attempts))
+        // The cleanup decision is part of the lease's mutable state: a
+        // `keep` release must persist, or the cleanup would destroy the VM.
+        .bind(lease.cleanup.id())
+        .bind(lease.cleanup_next_at)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;
