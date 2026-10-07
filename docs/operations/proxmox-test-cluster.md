@@ -258,7 +258,7 @@ It also needs an operator-installed `packer` inside the FM-S09 pins (`>= 1.15 < 
 
 Builds are linked clones of `…_TEMPLATE_VMID` into `…_VMID_RANGE`. Each built template is named `fleet-acceptance-image-*` and tagged `fleet-acceptance`. The suite destroys exactly those templates at the start and end of every scenario. The shared Step 7 sweep never destroys a template.
 
-Until [#272](https://github.com/Frogbyte-io/fleet-manager/issues/272) lands, the suite hands Packer the target token through the controller's environment (`PROXMOX_USERNAME`/`PROXMOX_TOKEN`), and its recipes set `insecure_skip_tls_verify`. These are the only credential and TLS paths the product supports today; they are not a recommended operator setup.
+Each build gets the trusted account's token through the product's own path (#272): the account is resolved from the recipe's `proxmox_url`, and its token reaches only the Packer child process. The controller carries no `PROXMOX_*` variables. The recipes still set `insecure_skip_tls_verify` until [#284](https://github.com/Frogbyte-io/fleet-manager/issues/284) gives Packer the pinned certificate.
 
 ## Evidence for #211
 

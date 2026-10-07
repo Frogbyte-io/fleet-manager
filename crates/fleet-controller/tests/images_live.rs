@@ -16,10 +16,12 @@
 //! The shared scratch guard never destroys a template, so this suite owns
 //! that narrower cleanup itself.
 //!
-//! Credentials reach Packer's Proxmox plugin through the controller's
-//! process environment (`PROXMOX_USERNAME`/`PROXMOX_TOKEN`), and the recipe
-//! sets `insecure_skip_tls_verify`. Both are the only paths the product
-//! supports today; #272 replaces them, and this suite follows.
+//! Credentials reach Packer's Proxmox plugin the product's way (#272): each
+//! build resolves its trusted account from the recipe's `proxmox_url`, and
+//! the executor hands that account's token to the Packer child process
+//! only. The controller itself carries no `PROXMOX_*` variables. The
+//! recipes still set `insecure_skip_tls_verify`; certificate pinning for
+//! Packer is #284.
 //!
 //! The unit tests at the bottom run without any PVE or Packer.
 
@@ -174,23 +176,10 @@ async fn start_controller(scenario: &str, target: Arc<Target>) -> Result<TargetR
             SensitiveString::new(empty.display().to_string()),
         )]
     } else {
-        plugin_env(&target)
+        // No ambient credentials: the build must get its account's token.
+        Vec::new()
     };
     TargetRun::start_with_env(target, scenario, env).await
-}
-
-/// The Proxmox plugin's credentials, from the target's token (#272).
-fn plugin_env(target: &Target) -> Vec<(String, SensitiveString)> {
-    vec![
-        (
-            "PROXMOX_USERNAME".to_owned(),
-            SensitiveString::new(target.token.id.clone()),
-        ),
-        (
-            "PROXMOX_TOKEN".to_owned(),
-            SensitiveString::new(target.token.secret.expose()),
-        ),
-    ]
 }
 
 /// The recipe content: a legacy-JSON `proxmox-clone` template, because the
