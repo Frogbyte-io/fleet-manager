@@ -2302,19 +2302,35 @@ impl ProvisionExecutor {
                     ),
                 )));
             }
-            let config = self
+            // PVE writes the target's config inside the forked qmclone
+            // worker, after the clone call returns: an early read can find
+            // no config yet (HTTP 500) or miss the node. Those are retried
+            // within the bound; a refused token or an unreadable answer
+            // fails at once.
+            let waiting_on = match self
                 .client
                 .qemu_config_flags(request.clone(), node, vmid)
                 .await
-                .map_err(|error| format!("the clone's config is unreadable: {error}"))?;
-            let Some(lock) = config.lock.as_deref() else {
-                break config;
+            {
+                Ok(config) => match config.lock.clone() {
+                    None => break config,
+                    Some(lock) => format!("{lock} lock"),
+                },
+                Err(
+                    error @ (fleet_provider_proxmox::PveApiError::Http { .. }
+                    | fleet_provider_proxmox::PveApiError::Transport(
+                        fleet_provider_proxmox::PveTransportError::Connect { .. },
+                    )),
+                ) => format!("config not readable yet: {error}"),
+                Err(error) => {
+                    return Err(format!("the clone's config is unreadable: {error}"));
+                }
             };
             if started.elapsed() >= CLONE_SETTLE_TIMEOUT {
                 return Ok(Err(Refusal::new(
                     "clone_unsettled",
                     format!(
-                        "{node}/qemu/{vmid} is still locked ({lock}) after {} seconds; the guest is retained for cleanup",
+                        "{node}/qemu/{vmid} has not settled after {} seconds ({waiting_on}); the guest is retained for cleanup",
                         CLONE_SETTLE_TIMEOUT.as_secs()
                     ),
                 )));
@@ -2327,7 +2343,7 @@ impl ProvisionExecutor {
                         Some(1),
                         Some(3),
                         Some(&format!(
-                            "waiting for the clone {node}/qemu/{vmid} to finish ({lock} lock)"
+                            "waiting for the clone {node}/qemu/{vmid} to finish ({waiting_on})"
                         )),
                     )
                     .await
@@ -2578,7 +2594,17 @@ impl ProvisionExecutor {
             self.leases.update(&booting_lease).await?;
         }
 
-        // Step 2: start the guest (idempotent when already running).
+        // Step 2: start the guest (idempotent when already running), unless
+        // the provision was cancelled since the clone settled.
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return self
+                .fail(operations, &operation.id, &record.id, "cancelled", "boot")
+                .await;
+        }
         operations
             .record_progress(
                 &operation.id,

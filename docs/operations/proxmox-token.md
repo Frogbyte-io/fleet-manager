@@ -216,7 +216,7 @@ qm set $TEMPLATE --protection 1
 
 Clones inherit the flag: PVE copies `protection` into the new guest's config, and a protected guest cannot be deleted. Right after a clone lands, and before it starts the guest, the Lab provision executor clears the flag on that new guest (`PUT /nodes/{node}/qemu/{newid}/config` with `protection=0`), so Lab cleanup can destroy it later. It does this only on its own `fm-lab-<record>` guest at the reserved VMID, and never on a template. Clearing the flag needs `VM.Config.Options` on the guest. `FleetLabTarget` grants it, and you grant that role only on the clone-target VMIDs ([below](#why-clone-and-lab-need-more-than-the-pool)), never on the template's `/vms/$TEMPLATE`. The token therefore still cannot unprotect, and so cannot delete, the template.
 
-Without `FleetLabTarget` on the clone targets, a clone of a protected template fails its provision at the `unprotect` step before it starts, and the cleanup that follows cannot delete the guest. The lease ends `cleanup_failed`. To remove such a guest by hand, run `qm set <vmid> --protection 0` and then destroy it, or grant the role and release the lease again. Clones of an unprotected template need no change.
+Without `FleetLabTarget` on the clone targets, a clone of a protected template fails its provision at the `unprotect` step before it starts, and the cleanup that follows cannot delete the guest. The lease ends `cleanup_failed`. Fleet clears the flag only while provisioning, never at cleanup, so granting the role later does not help that guest: run `qm set <vmid> --protection 0` on the host, then destroy it. Clones of an unprotected template need no change.
 
 On 8.x, if you opt into agent reads for the pool:
 

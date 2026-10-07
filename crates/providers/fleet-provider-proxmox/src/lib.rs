@@ -1172,27 +1172,21 @@ impl ProxmoxClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, PveApiError> {
-        let mut request = request;
-        request.path = path.to_owned();
-        request.method = PveHttpMethod::Post;
-        let response = self
-            .transport
-            .execute_with_body(request, body.to_string().into_bytes())
+        self.call_method_with_body(request, PveHttpMethod::Post, path, body)
             .await
-            .map_err(PveApiError::Transport)?;
-        Self::status_to_result(&response)
     }
 
-    /// One PUT with a JSON body, unwrapping the envelope.
-    async fn call_put(
+    /// One call with a JSON body (`POST` or `PUT`), unwrapping the envelope.
+    async fn call_method_with_body(
         &self,
         request: PveHttpRequest,
+        method: PveHttpMethod,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, PveApiError> {
         let mut request = request;
         request.path = path.to_owned();
-        request.method = PveHttpMethod::Put;
+        request.method = method;
         let response = self
             .transport
             .execute_with_body(request, body.to_string().into_bytes())
@@ -2272,8 +2266,9 @@ impl ProxmoxClient {
             Some(digest) => serde_json::json!({ "protection": 0, "digest": digest }),
             None => serde_json::json!({ "protection": 0 }),
         };
-        self.call_put(
+        self.call_method_with_body(
             request,
+            PveHttpMethod::Put,
             &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
             &body,
         )

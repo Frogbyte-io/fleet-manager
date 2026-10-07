@@ -75,6 +75,8 @@ struct CloneConfig {
     protected: bool,
     refuse_unprotect: bool,
     locked_reads: usize,
+    missing_reads: usize,
+    forbid_read: bool,
     cloned: Option<(u32, String)>,
 }
 
@@ -108,6 +110,19 @@ impl Pve {
     /// The token lacks `VM.Config.Options` on the clone target.
     fn refusing_unprotect(self: Arc<Self>) -> Arc<Self> {
         self.clone_config.lock().unwrap().refuse_unprotect = true;
+        self
+    }
+
+    /// The clone's config does not exist yet for this many reads (PVE
+    /// writes it inside the forked qmclone worker).
+    fn missing_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().missing_reads = reads;
+        self
+    }
+
+    /// The token lacks `VM.Audit` on the clone target.
+    fn forbidding_config_reads(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().forbid_read = true;
         self
     }
 
@@ -158,6 +173,23 @@ impl Pve {
             }
             config.protected = false;
             return (200, r#"{"data":null}"#.to_owned());
+        }
+        if config.forbid_read {
+            return (
+                403,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Audit)\n"}}"#
+                ),
+            );
+        }
+        if config.missing_reads > 0 {
+            config.missing_reads -= 1;
+            return (
+                500,
+                format!(
+                    r#"{{"data":null,"message":"Configuration file 'nodes/{TEMPLATE_NODE}/qemu-server/{vmid}.conf' does not exist\n"}}"#
+                ),
+            );
         }
         let listed = self
             .guests
@@ -1769,4 +1801,41 @@ async fn a_resumed_clone_is_neither_cloned_nor_unprotected_again() {
     let updates = third.config_updates();
     assert_eq!(updates.len(), 1, "{:?}", third.paths());
     assert_eq!(updates[0].path, CLONE_CONFIG);
+}
+
+#[tokio::test]
+async fn a_config_not_written_yet_is_retried_but_a_refused_read_fails_at_once() {
+    // PVE writes the clone's config inside the forked worker: an early read
+    // finds none yet, and the executor retries it.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().missing_for(1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+        .count();
+    assert_eq!(reads, 2, "{:?}", pve.paths());
+    assert_eq!(pve.config_updates().len(), 1);
+
+    // Without VM.Audit on the clone target, no polling and no start.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).forbidding_config_reads();
+    let (state, _, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG)
+        .count();
+    assert_eq!(reads, 1, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
 }
