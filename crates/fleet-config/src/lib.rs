@@ -218,20 +218,24 @@ pub enum ConfigError {
     },
     /// A Lab placement setting is not a number in its accepted range.
     LabPlacementInvalid {
-        /// The setting's name.
+        /// The setting as its source names it: the environment variable, or
+        /// the file key.
         setting: &'static str,
         /// The value that was refused.
         value: String,
+        /// What the setting accepts.
+        expected: String,
     },
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LabPlacementInvalid { setting, value } => write!(
-                f,
-                "{setting} must be an overcommit ratio greater than 0 and at most {MAX_LAB_OVERCOMMIT}, or an age of 1..={MAX_LAB_CAPACITY_AGE_SECONDS} seconds; got {value:?}"
-            ),
+            Self::LabPlacementInvalid {
+                setting,
+                value,
+                expected,
+            } => write!(f, "{setting} must be {expected}; got {value:?}"),
             Self::FileRead { path, error } => {
                 write!(f, "cannot read config file {}: {error}", path.display())
             }
@@ -371,42 +375,7 @@ pub fn load(
                 .map_err(|_| ConfigError::LabSweepIntervalInvalid { value: raw })?,
         );
     }
-    let invalid =
-        |setting: &'static str, value: String| ConfigError::LabPlacementInvalid { setting, value };
-    if let Some(raw) = env(LAB_MEMORY_OVERCOMMIT_VAR) {
-        lab_placement.memory_overcommit = raw
-            .trim()
-            .parse()
-            .map_err(|_| invalid("lab_memory_overcommit", raw))?;
-    }
-    if let Some(raw) = env(LAB_CPU_OVERCOMMIT_VAR) {
-        lab_placement.cpu_overcommit = raw
-            .trim()
-            .parse()
-            .map_err(|_| invalid("lab_cpu_overcommit", raw))?;
-    }
-    if let Some(raw) = env(LAB_CAPACITY_MAX_AGE_VAR) {
-        lab_placement.capacity_max_age_seconds = raw
-            .trim()
-            .parse()
-            .map_err(|_| invalid("lab_capacity_max_age_seconds", raw))?;
-    }
-    for (setting, ratio) in [
-        ("lab_memory_overcommit", lab_placement.memory_overcommit),
-        ("lab_cpu_overcommit", lab_placement.cpu_overcommit),
-    ] {
-        if !ratio.is_finite() || ratio <= 0.0 || ratio > MAX_LAB_OVERCOMMIT {
-            return Err(invalid(setting, ratio.to_string()));
-        }
-    }
-    if lab_placement.capacity_max_age_seconds == 0
-        || lab_placement.capacity_max_age_seconds > MAX_LAB_CAPACITY_AGE_SECONDS
-    {
-        return Err(invalid(
-            "lab_capacity_max_age_seconds",
-            lab_placement.capacity_max_age_seconds.to_string(),
-        ));
-    }
+    let lab_placement = layer_lab_placement(lab_placement, env)?;
 
     let listen_raw = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     let listen: SocketAddr = listen_raw
@@ -430,6 +399,73 @@ pub fn load(
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
         lab_placement,
     })
+}
+
+/// Layers the `FLEET_LAB_*` environment over the file's Lab placement
+/// settings and range-checks the result. Each failure names the setting as
+/// its winning source spells it.
+fn layer_lab_placement(
+    mut lab_placement: LabPlacementConfig,
+    env: EnvLookup<'_>,
+) -> Result<LabPlacementConfig, ConfigError> {
+    let ratio_expected =
+        || format!("an overcommit ratio greater than 0 and at most {MAX_LAB_OVERCOMMIT}");
+    let age_expected =
+        || format!("a whole number of seconds in 1..={MAX_LAB_CAPACITY_AGE_SECONDS}");
+    let invalid =
+        |setting: &'static str, value: String, expected: String| ConfigError::LabPlacementInvalid {
+            setting,
+            value,
+            expected,
+        };
+    let ratio_ok = |ratio: f64| ratio.is_finite() && ratio > 0.0 && ratio <= MAX_LAB_OVERCOMMIT;
+    let age_ok = |age: u64| (1..=MAX_LAB_CAPACITY_AGE_SECONDS).contains(&age);
+    let mut sources = [
+        "lab_memory_overcommit",
+        "lab_cpu_overcommit",
+        "lab_capacity_max_age_seconds",
+    ];
+    for (index, var, is_ratio) in [
+        (0, LAB_MEMORY_OVERCOMMIT_VAR, true),
+        (1, LAB_CPU_OVERCOMMIT_VAR, true),
+        (2, LAB_CAPACITY_MAX_AGE_VAR, false),
+    ] {
+        let Some(raw) = env(var) else { continue };
+        sources[index] = var;
+        if is_ratio {
+            let ratio: f64 = raw
+                .trim()
+                .parse()
+                .map_err(|_| invalid(var, raw.clone(), ratio_expected()))?;
+            if index == 0 {
+                lab_placement.memory_overcommit = ratio;
+            } else {
+                lab_placement.cpu_overcommit = ratio;
+            }
+        } else {
+            lab_placement.capacity_max_age_seconds = raw
+                .trim()
+                .parse()
+                .map_err(|_| invalid(var, raw.clone(), age_expected()))?;
+        }
+    }
+    for (setting, ratio) in [
+        (sources[0], lab_placement.memory_overcommit),
+        (sources[1], lab_placement.cpu_overcommit),
+    ] {
+        if !ratio_ok(ratio) {
+            return Err(invalid(setting, ratio.to_string(), ratio_expected()));
+        }
+    }
+    if !age_ok(lab_placement.capacity_max_age_seconds) {
+        return Err(invalid(
+            sources[2],
+            lab_placement.capacity_max_age_seconds.to_string(),
+            age_expected(),
+        ));
+    }
+
+    Ok(lab_placement)
 }
 
 impl ControllerConfig {

@@ -2595,12 +2595,32 @@ impl ProvisionExecutor {
             .await
             .map_err(|detail| format!("the Proxmox accounts are unreadable: {detail}"))?;
         let mut candidates = Vec::new();
+        // Confirmed non-candidates (untrusted, or no such template) are
+        // `skipped`; accounts whose answer is unknown are `unresolved`, and
+        // any of those refuses automatic selection: a same-VMID template
+        // there could be the one the sole visible match is not.
         let mut skipped = Vec::new();
+        let mut unresolved = Vec::new();
         for account in accounts {
+            if account.fingerprint.is_none() {
+                skipped.push(format!("{}: no confirmed fingerprint", account.name));
+                continue;
+            }
+            match self.credentials.load(&account.id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    skipped.push(format!("{}: no stored API token", account.name));
+                    continue;
+                }
+                Err(_) => {
+                    unresolved.push(format!("{}: the credential store failed", account.name));
+                    continue;
+                }
+            }
             let (bound, secret) = match self.bound(&account.id).await {
                 Ok(bound) => bound,
-                Err(detail) => {
-                    skipped.push(format!("{}: {detail}", account.name));
+                Err(_) => {
+                    unresolved.push(format!("{}: the account is unreadable", account.name));
                     continue;
                 }
             };
@@ -2609,7 +2629,7 @@ impl ProvisionExecutor {
                 .list_guest_resources(pve_request(&bound, secret))
                 .await
             else {
-                skipped.push(format!(
+                unresolved.push(format!(
                     "{}: the cluster's resources are unreadable",
                     account.name
                 ));
@@ -2631,7 +2651,7 @@ impl ProvisionExecutor {
                 )),
             }
         }
-        Ok(select_candidate(candidates, &skipped)
+        Ok(select_candidate(candidates, &skipped, &unresolved)
             .map(|candidate| candidate.account_id)
             .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
     }

@@ -129,10 +129,43 @@ fn out_of_range_lab_placement_settings_are_refused() {
     ] {
         let error = fleet_config::load(None, &env_of(&[(var, value)])).unwrap_err();
         assert!(
-            matches!(error, ConfigError::LabPlacementInvalid { .. }),
+            matches!(error, ConfigError::LabPlacementInvalid { setting, .. } if setting == var),
             "{var}={value}: {error:?}"
         );
+        // The guidance is the setting's own constraint, never the other's.
+        let message = error.to_string();
+        if var == fleet_config::LAB_CAPACITY_MAX_AGE_VAR {
+            assert!(
+                message.contains("seconds") && !message.contains("ratio"),
+                "{message}"
+            );
+        } else {
+            assert!(
+                message.contains("ratio") && !message.contains("seconds"),
+                "{message}"
+            );
+        }
     }
+}
+
+#[test]
+fn a_file_sourced_lab_setting_is_named_by_its_file_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}lab_cpu_overcommit = 20.0\n"),
+    );
+    let error = fleet_config::load(Some(&file), &none_env).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ConfigError::LabPlacementInvalid {
+                setting: "lab_cpu_overcommit",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 // File format ----------------------------------------------------------------

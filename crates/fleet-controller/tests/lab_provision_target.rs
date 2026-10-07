@@ -32,6 +32,8 @@ use fleet_storage_sqlite::{
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
 /// The account's API host: deliberately not a node name.
 const API_HOST: &str = "pve-api.example.test";
+/// FM-715: a second trusted account's API host that never answers.
+const UNREACHABLE_HOST: &str = "pve-unreachable.example.test";
 /// The node that holds the image template.
 const TEMPLATE_NODE: &str = "pve-b";
 /// The image template's VMID (the recorded build artifact).
@@ -387,6 +389,11 @@ impl Transport {
         request: PveHttpRequest,
         body: Option<serde_json::Value>,
     ) -> Result<PveHttpResponse, PveTransportError> {
+        if request.host == UNREACHABLE_HOST {
+            return Err(PveTransportError::Connect {
+                detail: "unreachable".to_owned(),
+            });
+        }
         assert_eq!(request.host, API_HOST, "every call goes to the API host");
         let path = request.path.clone();
         let stored_target = if path.ends_with("/clone") || path.ends_with("/status/start") {
@@ -2466,4 +2473,55 @@ async fn a_reservation_on_another_node_refuses_the_resumed_clone() {
     assert_eq!(reason, "reservation_mismatch", "{detail}");
     assert!(pve.clones().is_empty());
     assert_eq!(stored.vmid, None);
+}
+
+#[tokio::test]
+async fn an_unreadable_trusted_cluster_refuses_automatic_selection() {
+    let harness = Harness::new().await;
+    let other = harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-dark".to_owned(),
+            host: UNREACHABLE_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab3".to_owned(),
+        })
+        .await
+        .unwrap();
+    harness
+        .accounts
+        .set_fingerprint(&other.id, Some(FP.to_owned()))
+        .await
+        .unwrap();
+    // An untrusted account (no fingerprint) is a confirmed non-candidate
+    // and does not block selection on its own.
+    harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-untrusted".to_owned(),
+            host: UNREACHABLE_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab4".to_owned(),
+        })
+        .await
+        .unwrap();
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "placement_unresolved", "{detail}");
+    assert!(detail.contains("pve-dark"), "{detail}");
+    assert!(!detail.contains("pve-untrusted"), "{detail}");
+    assert!(pve.clones().is_empty());
 }

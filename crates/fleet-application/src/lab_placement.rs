@@ -150,6 +150,12 @@ pub enum PlacementRefusal {
         /// The candidate accounts' names, with the node each reaches.
         candidates: Vec<String>,
     },
+    /// A trusted account's cluster could not be read, so the candidates
+    /// cannot be known to be unique.
+    Unresolved {
+        /// Each unresolved account with why.
+        accounts: Vec<String>,
+    },
     /// No capacity observation exists for the node.
     NotObserved {
         /// The node.
@@ -223,6 +229,7 @@ impl PlacementRefusal {
         match self {
             Self::NoCandidate { .. } => "placement_no_candidate",
             Self::Ambiguous { .. } => "placement_ambiguous",
+            Self::Unresolved { .. } => "placement_unresolved",
             Self::NotObserved { .. } | Self::CapacityUnknown { .. } => "capacity_unknown",
             Self::StorageNotObserved { .. } => "storage_unknown",
             Self::Stale { .. } | Self::FutureDated { .. } => "capacity_stale",
@@ -244,6 +251,11 @@ impl fmt::Display for PlacementRefusal {
                 f,
                 "more than one account reaches a template with the pinned image's VMID ({}); pass --account to choose",
                 candidates.join(", ")
+            ),
+            Self::Unresolved { accounts } => write!(
+                f,
+                "cannot place automatically while a trusted account's cluster is unreadable ({}); retry, or pass --account to choose",
+                accounts.join("; ")
             ),
             Self::NotObserved { node } => {
                 write!(f, "no capacity observation exists for {node}")
@@ -406,7 +418,10 @@ pub struct PlacementCandidate {
 }
 
 /// Selects the target among the accounts that can reach the pinned
-/// template. `skipped` explains each account that was not a candidate.
+/// template. `skipped` explains each trusted-or-not account confirmed not to
+/// be a candidate; `unresolved` names each trusted account whose cluster
+/// could not be read. Any unresolved account refuses: it could hold a
+/// same-VMID template, so a sole visible match is not proof of uniqueness.
 ///
 /// # Errors
 ///
@@ -414,7 +429,13 @@ pub struct PlacementCandidate {
 pub fn select_candidate(
     mut candidates: Vec<PlacementCandidate>,
     skipped: &[String],
+    unresolved: &[String],
 ) -> Result<PlacementCandidate, PlacementRefusal> {
+    if !unresolved.is_empty() {
+        return Err(PlacementRefusal::Unresolved {
+            accounts: unresolved.to_vec(),
+        });
+    }
     match candidates.len() {
         0 => Err(PlacementRefusal::NoCandidate {
             detail: if skipped.is_empty() {
@@ -812,17 +833,29 @@ mod tests {
             node: "pve1".to_owned(),
         };
         assert_eq!(
-            select_candidate(vec![candidate("a")], &[]).unwrap(),
+            select_candidate(vec![candidate("a")], &[], &[]).unwrap(),
             candidate("a")
         );
         let none =
-            select_candidate(Vec::new(), &["b: no template qemu/120".to_owned()]).unwrap_err();
+            select_candidate(Vec::new(), &["b: no template qemu/120".to_owned()], &[]).unwrap_err();
         assert_eq!(none.reason(), "placement_no_candidate");
         assert!(none.to_string().contains("b: no template qemu/120"));
-        let many = select_candidate(vec![candidate("b"), candidate("a")], &[]).unwrap_err();
+        let many = select_candidate(vec![candidate("b"), candidate("a")], &[], &[]).unwrap_err();
         assert_eq!(
             many.to_string(),
             "more than one account reaches a template with the pinned image's VMID (a on pve1, b on pve1); pass --account to choose"
+        );
+        // A sole visible match with an unreadable trusted cluster refuses.
+        let unresolved = select_candidate(
+            vec![candidate("a")],
+            &[],
+            &["c: the cluster's resources are unreadable".to_owned()],
+        )
+        .unwrap_err();
+        assert_eq!(unresolved.reason(), "placement_unresolved");
+        assert!(
+            unresolved.to_string().contains("c: the cluster"),
+            "{unresolved}"
         );
     }
 
