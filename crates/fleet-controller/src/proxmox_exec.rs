@@ -1970,7 +1970,7 @@ impl ProvisionExecutor {
 
 /// The pinned request every provider call of the Lab executor carries. The
 /// account's host is the API endpoint; it is never a PVE node name.
-fn pve_request(
+pub(crate) fn pve_request(
     account: &fleet_application::proxmox::ProxmoxAccount,
     secret: String,
 ) -> fleet_provider_proxmox::PveHttpRequest {

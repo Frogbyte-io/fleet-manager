@@ -225,6 +225,7 @@ fn validation_creates_the_state_directory() {
         web_dist: dir.path().to_path_buf(),
         data_dir: state.clone(),
         master_key_file: None,
+        lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
     };
     config
@@ -243,6 +244,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         web_dist: dir.path().to_path_buf(),
         data_dir: blocker.join("state"),
         master_key_file: None,
+        lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
     };
     let error = config.validate().unwrap_err();
@@ -257,6 +259,7 @@ fn a_missing_master_key_file_fails_validation() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().join("absent_key")),
+        lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
     };
     let error = config.validate().unwrap_err();
@@ -271,6 +274,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().to_path_buf()),
+        lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
     };
     let error = config.validate().unwrap_err();
@@ -291,6 +295,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             web_dist: dir.path().to_path_buf(),
             data_dir: dir.path().join("state"),
             master_key_file: Some(key.clone()),
+            lab_sweep_interval_seconds: 60,
             tailscale_serve_listen: None,
         };
         let error = config.validate().unwrap_err();
@@ -309,6 +314,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(key),
+        lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
     };
     config
@@ -336,6 +342,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         web_dist: dir.path().to_path_buf(),
         data_dir: dir.path().join("state"),
         master_key_file: Some(key.clone()),
+        lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
     };
     config
@@ -361,4 +368,30 @@ fn no_diagnostic_surface_contains_secret_material() {
         summary.contains(key.to_str().unwrap()),
         "the summary shows the reference"
     );
+}
+
+#[test]
+fn the_lab_sweep_interval_defaults_and_layers() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert_eq!(
+        config.lab_sweep_interval_seconds,
+        fleet_config::DEFAULT_LAB_SWEEP_INTERVAL_SECONDS
+    );
+    let disabled = fleet_config::load(None, &|key| {
+        (key == fleet_config::LAB_SWEEP_INTERVAL_VAR).then(|| "0".to_owned())
+    })
+    .unwrap();
+    assert_eq!(disabled.lab_sweep_interval_seconds, 0);
+    assert!(
+        disabled
+            .summary()
+            .contains("lab_sweep_interval_seconds = 0 (disabled)")
+    );
+    let invalid = fleet_config::load(None, &|key| {
+        (key == fleet_config::LAB_SWEEP_INTERVAL_VAR).then(|| "soon".to_owned())
+    });
+    assert!(matches!(
+        invalid,
+        Err(fleet_config::ConfigError::LabSweepIntervalInvalid { .. })
+    ));
 }

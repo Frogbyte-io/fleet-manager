@@ -21,6 +21,7 @@ pub mod git_credentials;
 pub mod images_exec;
 pub mod install;
 pub mod lab_cleanup;
+pub mod lab_sweeper;
 pub mod mise;
 pub mod node_crypto;
 pub mod onboard;

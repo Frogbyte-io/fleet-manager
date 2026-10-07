@@ -71,6 +71,14 @@ If the linked operation fails, the lease becomes `failed` and the provision reco
 
 Release queues one `lab.cleanup` operation per attempt (FM-713). It destroys the guest through the reviewed `proxmox.guest.destroy` path, with a review token the controller computes itself; that path stops the guest first, refuses templates and promoted image artifacts, and treats an absent guest as done. After a successful destroy, cleanup removes the Lab-owned machine record and marks the lease `released`; a failure at either step is a failed attempt. A failed attempt backs off (one minute, doubling, capped at an hour, with the next attempt's time stored on the lease); repeating a release does not queue the retry early. After five attempts the lease becomes `cleanup_failed`, and an audit event records the guest identifiers it last knew (the guest may already be gone if only the machine-record removal failed). Each provision record stores the Proxmox account its guest was cloned through, so cleanup uses the same account; a record from before that column refuses to guess.
 
+The controller's Lab sweeper (FM-716, every `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, default 60) keeps this converging without an operator:
+- it expires `ready` leases past their TTL;
+- it queues the cleanup of every `releasing` lease whose next attempt is due, which also repairs a release or compensation whose enqueue was lost;
+- it compensates leases stuck past their readiness deadline (plus a ten-minute grace) or their maximum lifetime;
+- it compares the `fm-lab-*` guests on every trusted account with the Lab records, and reports, once per controller run, any guest that no live lease, standalone provision, or `keep` release owns. It never deletes a guest it cannot attribute.
+
+Every deadline and attempt lives in the rows, so a restarted controller continues where the last one stopped.
+
 Cleanup strategies:
 
 - `destroy` is the default and deletes the allocated clone.
