@@ -15,8 +15,11 @@
 //!
 //! The binary is never invoked through a shell: every call is an argument
 //! array, the recipe file travels as a file path inside a private work
-//! directory, and secrets ride `-var-file` resolved just in time — never
-//! argv, logs, or audit metadata.
+//! directory, and secrets never reach argv, logs, or audit metadata. They
+//! take one of two paths, both resolved just in time: recipe secret
+//! variables ride a `-var-file` inside the operation's private work
+//! directory, and the target account's Proxmox token rides the child's
+//! environment only ([`SecretEnv`], #272).
 #![warn(missing_docs)]
 
 use std::fmt;
@@ -52,30 +55,53 @@ pub struct PackerCommand {
     pub env: SecretEnv,
 }
 
-/// Variables set on one CLI child process. When any are given, the
-/// controller's own ambient `PROXMOX_*` variables are removed from the
-/// child, so a build never silently uses a credential other than the one
-/// it was handed.
+/// Variables set on one CLI child process.
+///
+/// [`SecretEnv::default`] inherits the controller's environment unchanged
+/// (a controller with no account credentials wired). Every other
+/// constructor isolates the child: the controller's own ambient
+/// `PROXMOX_*` variables are removed first, so a build never silently uses
+/// a credential other than the one it was handed, and a command handed no
+/// credential ([`SecretEnv::isolated`]) sees none at all.
 #[derive(Clone, Default)]
-pub struct SecretEnv(std::sync::Arc<Vec<(String, fleet_core::SensitiveString)>>);
+pub struct SecretEnv {
+    vars: std::sync::Arc<Vec<(String, fleet_core::SensitiveString)>>,
+    isolated: bool,
+}
 
 impl SecretEnv {
-    /// The given variables.
+    /// The given variables, with ambient `PROXMOX_*` removed.
     #[must_use]
     pub fn new(vars: Vec<(String, fleet_core::SensitiveString)>) -> Self {
-        Self(std::sync::Arc::new(vars))
+        Self {
+            vars: std::sync::Arc::new(vars),
+            isolated: true,
+        }
+    }
+
+    /// No variables, and ambient `PROXMOX_*` removed: for a command that
+    /// must not see any Proxmox credential.
+    #[must_use]
+    pub fn isolated() -> Self {
+        Self::new(Vec::new())
+    }
+
+    /// Whether ambient `PROXMOX_*` variables are removed from the child.
+    #[must_use]
+    pub fn is_isolated(&self) -> bool {
+        self.isolated
     }
 
     /// The variable names, for assertions and diagnostics.
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
-        self.0.iter().map(|(name, _)| name.as_str()).collect()
+        self.vars.iter().map(|(name, _)| name.as_str()).collect()
     }
 
     /// The exposed value of one variable (the trusted child boundary).
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0
+        self.vars
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.expose())
@@ -83,15 +109,24 @@ impl SecretEnv {
 
     /// Applies the variables to a child process.
     fn apply(&self, command: &mut tokio::process::Command) {
-        if self.0.is_empty() {
+        self.apply_over(command, std::env::vars_os().map(|(key, _)| key));
+    }
+
+    /// Applies the variables over the given ambient variable names.
+    fn apply_over(
+        &self,
+        command: &mut tokio::process::Command,
+        ambient: impl Iterator<Item = std::ffi::OsString>,
+    ) {
+        if !self.isolated {
             return;
         }
-        for (key, _) in std::env::vars_os() {
+        for key in ambient {
             if key.to_string_lossy().starts_with("PROXMOX_") {
                 command.env_remove(key);
             }
         }
-        for (key, value) in self.0.iter() {
+        for (key, value) in self.vars.iter() {
             command.env(key, value.expose());
         }
     }
@@ -468,6 +503,56 @@ fn parse_version(version: &str) -> Option<(u64, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The child environment `env` produces over `ambient`: each touched
+    /// variable and its value, `None` when removed.
+    fn child_env(env: &SecretEnv, ambient: &[&str]) -> Vec<(String, Option<String>)> {
+        let mut command = tokio::process::Command::new("packer");
+        env.apply_over(
+            &mut command,
+            ambient.iter().map(|name| std::ffi::OsString::from(*name)),
+        );
+        let mut vars: Vec<(String, Option<String>)> = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        vars.sort();
+        vars
+    }
+
+    #[test]
+    fn handed_credentials_replace_every_ambient_proxmox_variable() {
+        let env = SecretEnv::new(vec![(
+            "PROXMOX_TOKEN".to_owned(),
+            fleet_core::SensitiveString::new("handed"),
+        )]);
+        let vars = child_env(&env, &["PROXMOX_USERNAME", "PROXMOX_URL", "PATH"]);
+        assert_eq!(
+            vars,
+            vec![
+                ("PROXMOX_TOKEN".to_owned(), Some("handed".to_owned())),
+                ("PROXMOX_URL".to_owned(), None),
+                ("PROXMOX_USERNAME".to_owned(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_isolated_command_sees_no_ambient_proxmox_variable() {
+        let vars = child_env(&SecretEnv::isolated(), &["PROXMOX_TOKEN", "HOME"]);
+        assert_eq!(vars, vec![("PROXMOX_TOKEN".to_owned(), None)]);
+    }
+
+    #[test]
+    fn the_default_inherits_the_environment_unchanged() {
+        assert!(child_env(&SecretEnv::default(), &["PROXMOX_TOKEN"]).is_empty());
+    }
 
     #[test]
     fn machine_readable_lines_parse_and_unescape() {

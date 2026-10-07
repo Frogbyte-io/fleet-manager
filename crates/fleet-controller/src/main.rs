@@ -355,25 +355,31 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             // the same accounts and secret store the discovery surfaces
             // use; it composes after the source dispatch so its kinds
             // reach it and everything else falls through.
+            // One account repository and one credential store, shared by
+            // every executor that talks to Proxmox (lifecycle, destroy,
+            // images, Lab), so their selection cannot drift apart.
+            let proxmox_accounts: std::sync::Arc<
+                dyn fleet_application::proxmox::ProxmoxAccountPort,
+            > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                store.pool().clone(),
+            ));
+            let proxmox_credentials: std::sync::Arc<
+                dyn fleet_application::proxmox::ProxmoxCredentialStore,
+            > = match &secrets {
+                Some(secrets) => std::sync::Arc::new(
+                    fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
+                        secrets.clone(),
+                    ),
+                ),
+                None => {
+                    std::sync::Arc::new(fleet_controller::proxmox_store::AbsentProxmoxCredentials)
+                }
+            };
             let with_proxmox: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let proxmox_client =
                     fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone());
-                let accounts: std::sync::Arc<dyn fleet_application::proxmox::ProxmoxAccountPort> =
-                    std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
-                        store.pool().clone(),
-                    ));
-                let credentials: std::sync::Arc<
-                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
-                > = match &secrets {
-                    Some(secrets) => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
-                            secrets.clone(),
-                        ),
-                    ),
-                    None => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::AbsentProxmoxCredentials,
-                    ),
-                };
+                let accounts = proxmox_accounts.clone();
+                let credentials = proxmox_credentials.clone();
                 // FM-609: the executors record each UPID they start, so
                 // the task history can link it to its operation.
                 let task_links: std::sync::Arc<
@@ -425,19 +431,8 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         // #272: each build gets its own account's token, in
                         // Packer's child environment only.
                         .with_account_credentials(
-                            std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
-                                store.pool().clone(),
-                            )),
-                            match &secrets {
-                                Some(secrets) => std::sync::Arc::new(
-                                    fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
-                                        secrets.clone(),
-                                    ),
-                                ),
-                                None => std::sync::Arc::new(
-                                    fleet_controller::proxmox_store::AbsentProxmoxCredentials,
-                                ),
-                            },
+                            proxmox_accounts.clone(),
+                            proxmox_credentials.clone(),
                         ),
                     ),
                 ))
@@ -457,23 +452,8 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
                         store.pool().clone(),
                     ));
-                let lab_accounts: std::sync::Arc<
-                    dyn fleet_application::proxmox::ProxmoxAccountPort,
-                > = std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
-                    store.pool().clone(),
-                ));
-                let lab_credentials: std::sync::Arc<
-                    dyn fleet_application::proxmox::ProxmoxCredentialStore,
-                > = match &secrets {
-                    Some(secrets) => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::SecretBackedProxmoxCredentials::new(
-                            secrets.clone(),
-                        ),
-                    ),
-                    None => std::sync::Arc::new(
-                        fleet_controller::proxmox_store::AbsentProxmoxCredentials,
-                    ),
-                };
+                let lab_accounts = proxmox_accounts.clone();
+                let lab_credentials = proxmox_credentials.clone();
                 // FM-713: Lab cleanup destroys through its own reviewed
                 // destroy executor, guarded against templates and promoted
                 // image artifacts like the dedicated destroy route.

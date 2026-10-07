@@ -102,6 +102,16 @@ impl ImagesExecutor {
         self
     }
 
+    /// The version probes' environment: no Proxmox credential at all once
+    /// builds get their account's token, rather than the controller's own.
+    fn probe_env(&self) -> SecretEnv {
+        if self.credentials.is_some() {
+            SecretEnv::isolated()
+        } else {
+            SecretEnv::default()
+        }
+    }
+
     /// The Proxmox plugin's credentials for the build's account. A token is
     /// never handed out for an account whose host trust is unconfirmed.
     async fn account_env(&self, account_id: Option<&str>) -> Result<SecretEnv, &'static str> {
@@ -343,7 +353,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: vec!["-machine-readable".to_owned(), "version".to_owned()],
                     work_dir: self.work_root.clone(),
-                    env: SecretEnv::default(),
+                    env: self.probe_env(),
                 },
                 Duration::from_secs(30),
             )
@@ -368,7 +378,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: vec!["plugins".to_owned(), "installed".to_owned()],
                     work_dir: self.work_root.clone(),
-                    env: SecretEnv::default(),
+                    env: self.probe_env(),
                 },
                 Duration::from_secs(30),
             )
@@ -756,8 +766,9 @@ mod tests {
         interrupted: std::sync::atomic::AtomicBool,
         /// Whether an interrupted build reports Packer's clean cancel.
         clean_cancel: std::sync::atomic::AtomicBool,
-        /// Per command: its args joined, and the child's PROXMOX_TOKEN.
-        saw_env: Mutex<Vec<(String, Option<String>)>>,
+        /// Per command: its args joined, the child's PROXMOX_TOKEN, and
+        /// whether ambient PROXMOX_* are removed.
+        saw_env: Mutex<Vec<(String, Option<String>, bool)>>,
     }
     #[async_trait::async_trait]
     impl PackerTransport for Script {
@@ -769,6 +780,7 @@ mod tests {
             self.saw_env.lock().unwrap().push((
                 command.args.join(" "),
                 command.env.get("PROXMOX_TOKEN").map(str::to_owned),
+                command.env.is_isolated(),
             ));
             let record = self.repository.get_build(&self.operation_id).await.unwrap();
             assert_eq!(
@@ -995,7 +1007,7 @@ mod tests {
         token: Option<&'static str>,
     ) -> (
         fleet_core::ImageBuildRecord,
-        Vec<(String, Option<String>)>,
+        Vec<(String, Option<String>, bool)>,
         String,
     ) {
         let mut replies = probes();
@@ -1044,8 +1056,10 @@ mod tests {
     async fn a_build_gets_its_trusted_accounts_token_in_the_child_environment_only() {
         let (record, seen, stored) = credential_build(true, Some("fixture-account-token")).await;
         assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
-        // validate and build carry the token; the version probes do not.
-        for (args, token) in &seen {
+        // validate and build carry the token; the version probes carry
+        // none, not even the controller's own.
+        for (args, token, isolated) in &seen {
+            assert!(isolated, "{args}");
             let wants = args.starts_with("validate") || args.contains(" build ");
             assert_eq!(
                 token.as_deref(),
@@ -1054,7 +1068,7 @@ mod tests {
             );
             assert!(!args.contains("fixture-account-token"));
         }
-        assert!(seen.iter().any(|(args, _)| args.contains(" build ")));
+        assert!(seen.iter().any(|(args, _, _)| args.contains(" build ")));
         let record_text = serde_json::to_string(&record).unwrap();
         assert!(!record_text.contains("fixture-account-token"));
         assert!(!stored.contains("fixture-account-token"));
@@ -1066,12 +1080,15 @@ mod tests {
         assert_eq!(record.reason.as_deref(), Some("target_account_untrusted"));
         assert!(
             seen.iter()
-                .all(|(args, token)| token.is_none() && !args.starts_with("validate"))
+                .all(|(args, token, _)| token.is_none() && !args.starts_with("validate"))
         );
 
         let (record, seen, _) = credential_build(true, None).await;
         assert_eq!(record.reason.as_deref(), Some("account_credential_missing"));
-        assert!(seen.iter().all(|(args, _)| !args.starts_with("validate")));
+        assert!(
+            seen.iter()
+                .all(|(args, _, _)| !args.starts_with("validate"))
+        );
     }
 
     #[test]
