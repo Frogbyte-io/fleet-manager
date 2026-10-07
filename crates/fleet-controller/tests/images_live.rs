@@ -670,6 +670,30 @@ async fn cancel_cleanup(run: &TargetRun) -> Result<Outcome, String> {
         );
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+    // An empty host alone does not prove a clean cancel: the build record
+    // must carry Packer's own clean-cancel report (`cancelled`), not
+    // `cancelled_unverified`.
+    let builds = run
+        .controller
+        .fleetctl(&args(&["images", "builds", "--version", &version]), None)
+        .await?;
+    check!(builds.success, "images builds failed: {}", builds.stderr);
+    let build = builds.json["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|build| build["operationId"] == operation.as_str())
+        })
+        .cloned()
+        .unwrap_or_default();
+    check!(
+        build["outcome"] == "cancelled" && build["reason"] == "cancelled",
+        "the cancelled build recorded {}/{}, not cancelled/cancelled: Packer did not report a \
+         clean cancel; see #271",
+        build["outcome"],
+        build["reason"]
+    );
     Ok(Outcome::Pass)
 }
 

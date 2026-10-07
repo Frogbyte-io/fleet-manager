@@ -457,6 +457,61 @@ fn descendants(root: u32) -> Vec<u32> {
     descendants_in(root, &table)
 }
 
+/// Freezes `root` and every descendant it has, to a fixed point: `snapshot`
+/// lists the tree and `stop` sends `SIGSTOP`. A process forked after one
+/// snapshot is still found by the next (its stopped parent cannot exit and
+/// orphan it), and a stopped process forks nothing more, so the loop ends
+/// once a snapshot finds nothing new. `rounds` bounds a tree that somehow
+/// keeps growing. Answers every process it stopped, the root first.
+pub fn freeze_tree(
+    root: u32,
+    mut snapshot: impl FnMut() -> Vec<u32>,
+    mut stop: impl FnMut(&[u32]),
+    rounds: usize,
+) -> Vec<u32> {
+    let mut frozen = vec![root];
+    stop(&frozen);
+    for _ in 0..rounds {
+        let new: Vec<u32> = snapshot()
+            .into_iter()
+            .filter(|pid| !frozen.contains(pid))
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        stop(&new);
+        frozen.extend(new);
+    }
+    frozen
+}
+
+/// Sends `signal` to `pids` through `kill(1)`. Its exit status is not
+/// trusted either way: a process that already exited fails it harmlessly,
+/// so the caller checks what is still alive afterwards instead.
+fn send_signal(signal: &str, pids: &[u32]) -> Result<(), String> {
+    if pids.is_empty() {
+        return Ok(());
+    }
+    Command::new("kill")
+        .arg(signal)
+        .arg("--")
+        .args(pids.iter().map(u32::to_string))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+        .map_err(|error| format!("kill {signal} could not run: {error}"))
+}
+
+/// Whether `pid` is still running (a zombie has already died).
+fn is_running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
+}
+
 /// The running suite (`cargo test`, the test binary under it, and the
 /// `fleet-controller` that binary starts). Unless it is reaped through
 /// [`SuiteProcess::wait`], dropping it — on any early return or a panic —
@@ -481,23 +536,58 @@ impl Drop for SuiteProcess {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        // Collect the tree before anything dies (an orphan is re-parented
-        // and would no longer be found), then kill it all at once.
-        let tree = descendants(child.id());
-        if !tree.is_empty() {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .args(tree.iter().map(u32::to_string))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        eprintln!(
-            "==> the runner stopped early: killed the suite and its {} descendant process(es)",
-            tree.len()
+        let root = child.id();
+        // Freeze the whole tree before anything dies (a dead parent's
+        // orphans are re-parented and no longer found, and a live one can
+        // keep forking), then kill it all at once.
+        let mut errors = Vec::new();
+        let tree = freeze_tree(
+            root,
+            || descendants(root),
+            |pids| {
+                if let Err(error) = send_signal("-STOP", pids) {
+                    errors.push(error);
+                }
+            },
+            64,
         );
+        if let Err(error) = send_signal("-KILL", &tree) {
+            errors.push(error);
+        }
+        if let Err(error) = child.kill() {
+            errors.push(format!("killing the suite failed: {error}"));
+        }
+        if let Err(error) = child.wait() {
+            errors.push(format!("reaping the suite failed: {error}"));
+        }
+        let started = std::time::Instant::now();
+        let mut survivors: Vec<u32> = tree
+            .iter()
+            .copied()
+            .filter(|&pid| is_running(pid))
+            .collect();
+        while !survivors.is_empty() && started.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            survivors.retain(|&pid| is_running(pid));
+        }
+        if survivors.is_empty() {
+            eprintln!(
+                "==> the runner stopped early: killed the suite and its {} descendant process(es)",
+                tree.len() - 1
+            );
+        } else {
+            let list: Vec<String> = survivors.iter().map(u32::to_string).collect();
+            eprintln!(
+                "==> WARNING: the runner stopped early but could not kill process(es) {}; they may \
+                 still be creating and destroying guests, so stop them by hand{}",
+                list.join(" "),
+                if errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", errors.join("; "))
+                }
+            );
+        }
     }
 }
 
@@ -845,6 +935,43 @@ mod tests {
         assert!(descendants_in(20, &table).is_empty());
     }
 
+    #[test]
+    fn freezing_finds_processes_forked_after_the_first_snapshot() {
+        // Each snapshot reveals one more generation, as a tree forking
+        // between snapshots would, until the stopped tree forks no more.
+        let generations = [vec![11], vec![11, 12], vec![11, 12, 13], vec![11, 12, 13]];
+        let mut round = 0;
+        let mut stopped = Vec::new();
+        let frozen = freeze_tree(
+            10,
+            || {
+                let tree = generations[round.min(generations.len() - 1)].clone();
+                round += 1;
+                tree
+            },
+            |pids| stopped.extend_from_slice(pids),
+            64,
+        );
+        assert_eq!(frozen, vec![10, 11, 12, 13]);
+        assert_eq!(stopped, frozen);
+        assert_eq!(round, 4);
+    }
+
+    #[test]
+    fn freezing_a_tree_that_never_settles_is_bounded() {
+        let mut next = 100;
+        let frozen = freeze_tree(
+            10,
+            || {
+                next += 1;
+                (101..=next).collect()
+            },
+            |_| {},
+            5,
+        );
+        assert_eq!(frozen.len(), 6);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn dropping_the_suite_kills_and_reaps_the_whole_tree() {
@@ -866,10 +993,7 @@ mod tests {
         drop(SuiteProcess { child: Some(child) });
         let started = std::time::Instant::now();
         // The grandchild is gone (or a zombie awaiting its new parent).
-        while grandchildren.iter().any(|pid| {
-            std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .is_ok_and(|stat| !stat.contains(") Z"))
-        }) {
+        while grandchildren.iter().any(|&pid| is_running(pid)) {
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(10),
                 "the grandchild outlived the suite"
@@ -878,6 +1002,43 @@ mod tests {
         }
         // The child itself was reaped.
         assert!(!Path::new(&format!("/proc/{root}")).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_the_suite_kills_a_tree_that_keeps_forking() {
+        // A tree that keeps forking while it is being stopped; the marker
+        // duration finds its processes even after they are orphaned.
+        let marker = "301.7193";
+        let running_markers = || {
+            std::fs::read_dir("/proc")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    std::fs::read(entry.path().join("cmdline"))
+                        .is_ok_and(|cmdline| cmdline == format!("sleep\0{marker}\0").as_bytes())
+                })
+                .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+                .filter(|&pid| is_running(pid))
+                .count()
+        };
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                &format!("while :; do sleep {marker} & sleep 0.01; done"),
+            ])
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        while running_markers() < 3 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the tree never forked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(SuiteProcess { child: Some(child) });
+        assert_eq!(running_markers(), 0, "a forked process outlived the suite");
     }
 
     #[test]
