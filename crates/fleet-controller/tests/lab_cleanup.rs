@@ -463,12 +463,15 @@ impl Harness {
         machine.id
     }
 
+    /// Whether the machine row exists; any failure other than "not found"
+    /// fails the test rather than reading as a deletion.
     async fn machine_exists(&self, id: &str) -> bool {
         use fleet_application::machine::MachinePort as _;
-        MachineRepository::new(self.pool.clone())
-            .get(id)
-            .await
-            .is_ok()
+        match MachineRepository::new(self.pool.clone()).get(id).await {
+            Ok(_) => true,
+            Err(fleet_application::operation::PortFailure::NotFound { .. }) => false,
+            Err(other) => panic!("reading machine {id} failed: {other:?}"),
+        }
     }
 }
 
