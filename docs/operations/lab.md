@@ -32,7 +32,7 @@ The published controller image (`deploy/controller.Dockerfile`) does not contain
 
 Fleet talks to PVE with privilege-separated API tokens. Follow the [token guide](proxmox-token.md) for roles and ACLs, then register and confirm each account ([step 6](proxmox-token.md#6-register-the-token-in-fleet)). Fleet sends no credentials to an account until you confirm its certificate fingerprint.
 
-- **Lab.** The `lab` tier (`FleetLab`, plus `FleetAgent8` on 8.x) on the image template's VMID, the clone storage, the bridge, and every clone-target VMID. See [why clone and Lab need more than the pool](proxmox-token.md#why-clone-and-lab-need-more-than-the-pool).
+- **Lab.** Grant `FleetLab` on the image template's VMID, the clone storage, the bridge, and every clone-target VMID. On 8.x, also grant `FleetAgent8`, but only on the clone-target VMIDs: its `VM.Monitor` allows agent exec inside the guest. See [why clone and Lab need more than the pool](proxmox-token.md#why-clone-and-lab-need-more-than-the-pool).
 - **Cleanup.** Lab cleanup deletes clones through Fleet's reviewed guest-destroy primitive (FM-712). That needs `VM.PowerMgmt` (to stop the guest) and `VM.Allocate` on `/vms/<newid>`. `FleetLab` on the clone-target VMIDs already holds both.
 - **Protected templates.** The token guide recommends `qm set <template> --protection 1`. Clones inherit that flag, and Fleet's destroy does not clear it today. A protected clone makes every cleanup attempt fail, and the lease ends `cleanup_failed`. Either leave the image template unprotected and rely on Fleet's cleanup guard, which refuses to destroy templates and promoted image artifacts, or keep the flag and expect to remove each clone by hand (`qm set <vmid> --protection 0`, then destroy).
 - **Builds.** Packer calls the PVE API itself. Fleet's privilege table does not cover the plugin's calls, so `fleetctl proxmox privileges` does not evaluate them. Use a separate account for builds, scoped to the source template and the build VMIDs, and prove it with a test build.
@@ -151,7 +151,7 @@ The record holds the content digest, the Packer and plugin versions, the account
 
 Common reasons: `version_gate` and `plugin_version_gate` (Packer or plugin outside the pins), `validate_failed` (`packer validate` refused the recipe), `build_failed`, `artifact_missing` (Packer reported no template on the version's node), and `deadline_killed`.
 
-**Cancel and deadline.** On `dev`, cancelling a build (`fleetctl operations cancel <operation-id>`) or hitting its deadline kills Packer. The plugin removes its in-progress VM only when Packer is interrupted, so a killed build leaves that VM at the recipe's `vm_id`. Remove it by hand (it is not a template yet). Graceful interrupt is **pending** ([PR #283](https://github.com/Frogbyte-io/fleet-manager/pull/283)): Packer gets SIGINT, up to 180 s to clean up, and only then a kill. The record then tells `deadline_interrupted` (clean) apart from `deadline_killed` (host state unknown).
+**Cancel and deadline.** On `dev`, cancelling a build (`fleetctl operations cancel <operation-id>`) or hitting its deadline kills Packer. The plugin removes its in-progress VM only when Packer is interrupted, so a killed build can leave that VM at the recipe's `vm_id`. Fleet does not check the host afterwards. Look for it, and remove it by hand if it is there (it is not a template yet). Graceful interrupt is **pending** ([PR #283](https://github.com/Frogbyte-io/fleet-manager/pull/283)): Packer gets SIGINT, up to 180 s to clean up, and only then a kill. The record then tells `deadline_interrupted` (clean) apart from `deadline_killed` (host state unknown).
 
 ### 4. Promote
 
@@ -323,7 +323,7 @@ What Fleet guarantees on `dev`:
 - **External IDs first.** The provision executor records the VMID and node before it sends the clone. A re-run reuses the recorded VMID and never clones a second guest for one record.
 - **Adopt only its own guest.** On a re-run, a guest already at the recorded VMID is adopted only if it carries the record's name (`fm-lab-<record-id>`). Anything else there is a conflict, and Fleet touches nothing.
 - **Owed cleanup is not forgotten.** A failed or cancelled provision that allocated a guest moves its lease to `releasing`. Cleanup retries five times, then the lease becomes `cleanup_failed` with an audit event that names the guest.
-- **Templates are safe from cleanup.** Cleanup refuses any VMID that PVE reports as a template, or that is a promoted image's recorded build artifact. Fleet never reserves such a VMID as a clone target.
+- **Cleanup refuses templates.** Cleanup refuses any VMID that is a promoted image's recorded build artifact, or that PVE reports as a template. It checks the template state before the stop and again after it. PVE has no conditional delete, so a guest converted to a template outside Fleet after the last check can still be deleted. Fleet never reserves such a VMID as a clone target.
 - **No credentials to unconfirmed hosts.** No Proxmox operation sends a token to an account whose fingerprint you have not confirmed. Image builds on `dev` are the exception until #285 merges (see [Build](#3-build)).
 - **Builds leave records.** Every build has an immutable record, written before Packer runs and completed with its outcome.
 
