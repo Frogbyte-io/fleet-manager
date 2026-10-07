@@ -160,16 +160,16 @@ const structured = computed(() => props.version.structured ?? null)
     >
       <dt class="text-fc-faint">
         node / pool
-      </dt><dd>{{ structured.node }} · {{ structured.storagePool }}</dd>
+      </dt><dd>{{ structured.node }} · {{ structured.firstDiskStoragePool ?? (structured.source === 'clone' ? 'source storage' : '—') }}</dd>
       <dt class="text-fc-faint">
         {{ structured.source === 'clone' ? 'clone from' : 'iso' }}
-      </dt><dd>{{ structured.source === 'clone' ? structured.cloneVm ?? '—' : structured.isoFile ?? '—' }}</dd>
+      </dt><dd>{{ structured.source === 'clone' ? structured.cloneVm ?? '—' : structured.bootIsoFile ?? '—' }}</dd>
       <dt class="text-fc-faint">
         cores / memory
       </dt><dd>{{ structured.cores ?? '—' }} · {{ structured.memory ? `${structured.memory} MiB` : '—' }}</dd>
       <dt class="text-fc-faint">
         disk / bridge
-      </dt><dd>{{ structured.diskSize ?? '—' }} · {{ structured.bridge ?? '—' }}</dd>
+      </dt><dd>{{ structured.firstDiskSize ?? '—' }} · {{ structured.networkBridge ?? '—' }}</dd>
     </dl>
 
     <section class="space-y-2">

@@ -44,7 +44,7 @@ function page<T>(items: T[]) {
 }
 
 const CONTENT = JSON.stringify({
-  builders: [{ type: 'proxmox-clone', node: 'pve-01', clone_vm: 'ubuntu-cloud', vm_storage_pool: 'local-lvm', cores: 2, memory: 4096, x_keep: { a: 1 } }],
+  builders: [{ type: 'proxmox-clone', node: 'pve-01', clone_vm: 'ubuntu-cloud', cores: 2, memory: 4096, x_keep: { a: 1 } }],
   provisioners: [{ type: 'shell', inline: ['true'] }],
 }, null, 2)
 
@@ -211,12 +211,27 @@ describe('e2e: edit → publish → build → promote', () => {
     expect(wrapper.get('[data-testid="build"]').attributes('disabled')).toBeUndefined()
   })
 
-  it('clears the draft storage pool when the structured field is cleared', async () => {
+  it('treats a disk-less clone\'s storage pool as draft metadata only', async () => {
     const { wrapper } = await mountAt('/images?select=recipe:r1')
+    const raw = () => (wrapper.get('[data-testid="raw-editor"]').element as HTMLTextAreaElement).value
+    const before = raw()
+    expect(wrapper.get('[data-testid="pool-inherited"]').text()).toContain('keeps the source template\'s storage')
+    expect(wrapper.find('[data-testid="field-disk-size"]').exists()).toBe(false)
     await wrapper.get('[data-testid="field-pool"]').setValue('')
-    await wrapper.get('[data-testid="field-pool"]').trigger('change')
-    expect(JSON.parse((wrapper.get('[data-testid="raw-editor"]').element as HTMLTextAreaElement).value).builders[0]).not.toHaveProperty('vm_storage_pool')
+    expect(raw()).toBe(before)
     expect(wrapper.get('[data-testid="recipe-errors"]').text()).toContain('storage pool')
+  })
+
+  it('edits the first disk\'s pool when the builder declares disks', async () => {
+    const withDisk = JSON.stringify({ builders: [{ type: 'proxmox-iso', node: 'pve-01', disks: [{ type: 'scsi', storage_pool: 'local-lvm', disk_size: '20G' }] }] }, null, 2)
+    listImageRecipes.mockResolvedValue(ok(page([recipe({ source: 'iso', content: withDisk })])))
+    const { wrapper } = await mountAt('/images?select=recipe:r1')
+    expect(wrapper.find('[data-testid="pool-inherited"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="field-pool"]').setValue('fast')
+    await wrapper.get('[data-testid="field-pool"]').trigger('change')
+    const builder = JSON.parse((wrapper.get('[data-testid="raw-editor"]').element as HTMLTextAreaElement).value).builders[0]
+    expect(builder.disks).toEqual([{ type: 'scsi', storage_pool: 'fast', disk_size: '20G' }])
+    expect(builder).not.toHaveProperty('vm_storage_pool')
   })
 
   it('offers raw-only editing for a non-JSON template', async () => {

@@ -24,7 +24,7 @@ const TEMPLATE = `{
       "proxmox_url": "{{user \`pve_url\`}}/api2/json",
       "node": "pve-01",
       "clone_vm": "ubuntu-24-cloud",
-      "vm_storage_pool": "local-lvm",
+      "disks": [{ "type": "scsi", "storage_pool": "local-lvm", "disk_size": "20G" }],
       "cores": 2,
       "memory": 4096,
       "template_name": "ubuntu-24-dev",
@@ -54,11 +54,28 @@ describe('structured view', () => {
       cloneVm: 'ubuntu-24-cloud',
       cores: 2,
       memory: 4096,
-      diskSize: '',
-      bridge: '',
-      cloudInitUser: '',
-      sshKeys: '',
+      diskSize: '20G',
+      bridge: 'vmbr0',
     })
+    expect(analyze(TEMPLATE)).toMatchObject({ diskless: false })
+  })
+
+  it('ignores the top-level keys the Packer Proxmox plugin does not have', () => {
+    // `packer validate` refuses these, so the view never presents them.
+    const invalid = '{"builders":[{"type":"proxmox-iso","node":"p","vm_storage_pool":"a","storage_pool":"a","disk_size":"9G","bridge":"vmbr9"}]}'
+    expect(fields(invalid)).toMatchObject({ storagePool: '', diskSize: '', bridge: '' })
+  })
+
+  it('reads the ISO from boot_iso, falling back to the deprecated top-level keys', () => {
+    expect(fields('{"builders":[{"type":"proxmox-iso","node":"p","boot_iso":{"iso_file":"local:iso/new.iso","iso_storage_pool":"local"},"iso_file":"local:iso/old.iso"}]}'))
+      .toMatchObject({ isoFile: 'local:iso/new.iso', isoStoragePool: 'local' })
+    expect(fields('{"builders":[{"type":"proxmox-iso","node":"p","iso_file":"local:iso/old.iso"}]}'))
+      .toMatchObject({ isoFile: 'local:iso/old.iso' })
+  })
+
+  it('marks a clone without disks as inheriting its source storage', () => {
+    expect(analyze('{"builders":[{"type":"proxmox-clone","node":"p","clone_vm_id":7000}]}')).toMatchObject({ editable: true, diskless: true })
+    expect(analyze('{"builders":[{"type":"proxmox-iso","node":"p"}]}')).toMatchObject({ editable: true, diskless: false })
   })
 
   it('offers raw-only editing with a reason when there is no structured view', () => {
@@ -78,13 +95,19 @@ describe('structured view', () => {
 
 describe('round-trip', () => {
   it('changes only the edited keys and keeps every unknown field, builder, and provisioner', () => {
-    const edited = applyFields(TEMPLATE, { ...fields(TEMPLATE), cores: 4, node: 'pve-02', diskSize: '40G' })
+    const edited = applyFields(TEMPLATE, { ...fields(TEMPLATE), cores: 4, node: 'pve-02', diskSize: '40G', bridge: 'vmbr1' })
     const before = JSON.parse(TEMPLATE)
     const after = JSON.parse(edited)
     expect(after.variables).toEqual(before.variables)
     expect(after.provisioners).toEqual(before.provisioners)
     expect(after.builders[0]).toEqual(before.builders[0])
-    expect(after.builders[1]).toEqual({ ...before.builders[1], cores: 4, node: 'pve-02', disk_size: '40G' })
+    expect(after.builders[1]).toEqual({
+      ...before.builders[1],
+      cores: 4,
+      node: 'pve-02',
+      disks: [{ type: 'scsi', storage_pool: 'local-lvm', disk_size: '40G' }],
+      network_adapters: [{ model: 'virtio', bridge: 'vmbr1' }],
+    })
     // And back: the structured view of the result is what was applied.
     expect(fields(edited)).toMatchObject({ cores: 4, node: 'pve-02', diskSize: '40G', cloneVm: 'ubuntu-24-cloud' })
     expect(edited.endsWith('\n')).toBe(true)
@@ -98,16 +121,53 @@ describe('round-trip', () => {
     const edited = applyFields(TEMPLATE, { ...fields(TEMPLATE), memory: null, storagePool: '' })
     const builder = JSON.parse(edited).builders[1]
     expect(builder).not.toHaveProperty('memory')
-    expect(builder).not.toHaveProperty('vm_storage_pool')
+    expect(builder.disks).toEqual([{ type: 'scsi', disk_size: '20G' }])
   })
 
-  it('keeps the storage-pool and clone keys the template already uses', () => {
-    const legacy = '{"builders":[{"type":"proxmox-clone","node":"p","storage_pool":"a","clone_vm_id":8000}]}'
-    const edited = JSON.parse(applyFields(legacy, { ...fields(legacy), storagePool: 'b', cloneVm: '8001' })).builders[0]
-    expect(edited).toEqual({ type: 'proxmox-clone', node: 'p', storage_pool: 'b', clone_vm_id: 8001 })
+  it('keeps the clone key form the template already uses', () => {
+    const legacy = '{"builders":[{"type":"proxmox-clone","node":"p","clone_vm_id":8000}]}'
+    const edited = JSON.parse(applyFields(legacy, { ...fields(legacy), cloneVm: '8001' })).builders[0]
+    expect(edited).toEqual({ type: 'proxmox-clone', node: 'p', clone_vm_id: 8001 })
     // A name replaces the numeric form with Packer's documented `clone_vm`.
     const named = JSON.parse(applyFields(legacy, { ...fields(legacy), cloneVm: 'golden' })).builders[0]
-    expect(named).toEqual({ type: 'proxmox-clone', node: 'p', storage_pool: 'a', clone_vm: 'golden' })
+    expect(named).toEqual({ type: 'proxmox-clone', node: 'p', clone_vm: 'golden' })
+  })
+
+  it('never adds a disk to a clone implicitly, but gives an ISO build its first disk', () => {
+    const clone = '{"builders":[{"type":"proxmox-clone","node":"p","clone_vm_id":8000}]}'
+    expect(applyFields(clone, { ...fields(clone), storagePool: 'local-lvm', diskSize: '40G' })).toBe(clone)
+    const iso = '{"builders":[{"type":"proxmox-iso","node":"p"}]}'
+    const built = JSON.parse(applyFields(iso, { ...fields(iso), storagePool: 'local-lvm', diskSize: '40G' })).builders[0]
+    expect(built.disks).toEqual([{ type: 'scsi', storage_pool: 'local-lvm', disk_size: '40G' }])
+    expect(built).not.toHaveProperty('vm_storage_pool')
+  })
+
+  it('lets an explicit empty boot_iso value win over the deprecated key, as fleet-core does', () => {
+    expect(fields('{"builders":[{"type":"proxmox-iso","node":"p","boot_iso":{"iso_file":""},"iso_file":"local:iso/old.iso"}]}'))
+      .toMatchObject({ isoFile: '' })
+  })
+
+  it('clears a leftover top-level ISO key when the nested shape is in use', () => {
+    const both = '{"builders":[{"type":"proxmox-iso","node":"p","boot_iso":{"iso_file":"local:iso/new.iso"},"iso_file":"local:iso/old.iso"}]}'
+    const edited = applyFields(both, { ...fields(both), isoFile: '' })
+    expect(JSON.parse(edited).builders[0]).toEqual({ type: 'proxmox-iso', node: 'p' })
+    expect(fields(edited).isoFile).toBe('')
+  })
+
+  it('seeds an empty disk or adapter list', () => {
+    const empty = '{"builders":[{"type":"proxmox-iso","node":"p","disks":[],"network_adapters":[]}]}'
+    const built = JSON.parse(applyFields(empty, { ...fields(empty), storagePool: 'local-lvm', bridge: 'vmbr0' })).builders[0]
+    expect(built.disks).toEqual([{ type: 'scsi', storage_pool: 'local-lvm' }])
+    expect(built.network_adapters).toEqual([{ model: 'virtio', bridge: 'vmbr0' }])
+  })
+
+  it('writes the ISO into boot_iso unless the template uses the deprecated keys', () => {
+    const iso = '{"builders":[{"type":"proxmox-iso","node":"p"}]}'
+    expect(JSON.parse(applyFields(iso, { ...fields(iso), isoFile: 'local:iso/u.iso' })).builders[0].boot_iso)
+      .toEqual({ iso_file: 'local:iso/u.iso' })
+    const deprecated = '{"builders":[{"type":"proxmox-iso","node":"p","iso_file":"local:iso/a.iso"}]}'
+    const edited = JSON.parse(applyFields(deprecated, { ...fields(deprecated), isoFile: 'local:iso/b.iso' })).builders[0]
+    expect(edited).toEqual({ type: 'proxmox-iso', node: 'p', iso_file: 'local:iso/b.iso' })
   })
 
   it('switches the builder type and derives the draft metadata from it', () => {

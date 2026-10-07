@@ -27,6 +27,8 @@ A lease names the Fleet project it serves, when one is recorded: creation accept
 
 The first image-build provider invokes a compatible, externally installed Packer CLI. Fleet edits and stores modern `*.pkr.json`: a structured editor covers the supported Proxmox subset and an advanced raw editor exposes the complete JSON while preserving unknown fields. Recipes and provisioning scripts are privileged build inputs.
 
+The structured subset uses only keys the Packer Proxmox plugin has: the storage pool and disk size of `disks[0]`, the bridge of `network_adapters[0]`, and `boot_iso` for ISO builds. A build target is frozen when every declared disk names the version's storage pool. A `proxmox-clone` without `disks` keeps its source template's storage, which no recipe key can express: the version's storage pool is then the operator's declaration, and the build cannot verify it.
+
 Editing any recipe, including an existing version, creates an editable draft/new version. Starting a build snapshots immutable inputs, asset digests, Packer/plugin versions, and provider target. A completed build records the resulting Proxmox template identity but never replaces or promotes another version automatically. Promotion is a separate manual mutation. The mandatory validation evidence for promotion is still under review.
 
 A future catalog/marketplace distributes recipes, manifests, provisioning assets, compatibility constraints, and signatures/provenance. It never distributes VM disk images or licensed OS media; operators provide the required installation media and build locally.
