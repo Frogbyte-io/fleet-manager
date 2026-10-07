@@ -877,7 +877,7 @@ pub enum Command {
         lease_id: String,
         /// Keep the VM out of automatic cleanup (elevated).
         keep: bool,
-        /// Wait until the lease is released (or cleanup_failed).
+        /// Wait until the lease is released (or `cleanup_failed`).
         wait: bool,
         /// How long to wait, in seconds.
         timeout: Option<u64>,
@@ -1843,6 +1843,7 @@ pub fn shell_join(words: &[&str]) -> String {
         .join(" ")
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_lab_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
     match verb {
         "templates" => match rest {
@@ -5512,13 +5513,8 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
                 "timeoutSeconds": timeout.unwrap_or(60),
             })),
         ),
-        Command::LabDestroy { lease_id, keep, .. } => (
-            reqwest::Method::POST,
-            format!("/api/v1/lab/leases/{lease_id}/release"),
-            Vec::new(),
-            Some(serde_json::json!({ "keep": keep })),
-        ),
-        Command::LabLeaseRelease { lease_id, keep } => (
+        Command::LabDestroy { lease_id, keep, .. }
+        | Command::LabLeaseRelease { lease_id, keep } => (
             reqwest::Method::POST,
             format!("/api/v1/lab/leases/{lease_id}/release"),
             Vec::new(),

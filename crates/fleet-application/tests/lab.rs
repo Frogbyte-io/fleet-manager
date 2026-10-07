@@ -1595,6 +1595,7 @@ async fn lease_creation_refuses_a_stale_template_bootstrap_project() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
     let templates = Arc::new(FakeTemplates::default());
     let audit = Arc::new(FakeAudit::default());

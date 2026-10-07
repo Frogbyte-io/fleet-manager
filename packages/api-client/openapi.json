@@ -1684,6 +1684,152 @@
         }
       }
     },
+    "/api/v1/lab/leases/{leaseId}": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Reads one lease with its guest's connection details.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown lease.",
+        "operationId": "getLabLease",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lease and, once provisioned, its guest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LeaseDetailDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read Lab leases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/leases/{leaseId}/exec": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Runs a command on a ready lease's guest as a `lab.exec` operation. The\nresult carries the exit code and bounded, redacted stdout and stderr,\nas machine exec does.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease, a lease\nthat is not ready, or an invalid command.",
+        "operationId": "execLabLease",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The command is queued as a `lab.exec` operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is not ready or has expired, its guest has no Lab machine, or the command is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not run commands on Lab leases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases/{leaseId}/extend": {
       "post": {
         "tags": [
@@ -8072,6 +8218,28 @@
           }
         }
       },
+      "ExecLeaseRequest": {
+        "type": "object",
+        "description": "A command to run on a ready lease's guest.",
+        "required": [
+          "script"
+        ],
+        "properties": {
+          "script": {
+            "type": "string",
+            "description": "The shell script to run (at most 64 KiB). It is never audited."
+          },
+          "timeoutSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The deadline, in seconds (1–900; default 60).",
+            "minimum": 0
+          }
+        }
+      },
       "ExtendLeaseRequest": {
         "type": "object",
         "description": "The requested ready-TTL extension.",
@@ -8701,6 +8869,71 @@
             "description": "The template the version came from."
           }
         }
+      },
+      "LeaseDetailDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LeaseDto",
+            "description": "The lease."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The guest's IPv4 address, once its agent reported one."
+              },
+              "endpointId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "That machine's SSH endpoint."
+              },
+              "failedStep": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The saga step that failed, when provisioning failed."
+              },
+              "machineId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The Lab-owned Fleet machine the guest was registered as."
+              },
+              "node": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The PVE node the guest runs on."
+              },
+              "provisionState": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The guest's provision state, once provisioning started."
+              },
+              "vmid": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The guest's VMID.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "One lease with its guest's connection details (FM-720)."
       },
       "LeaseDto": {
         "type": "object",
@@ -13310,6 +13543,80 @@
                 "description": "The template the version came from."
               }
             }
+          }
+        }
+      },
+      "Resource_LeaseDetailDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeaseDto",
+                "description": "The lease."
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The guest's IPv4 address, once its agent reported one."
+                  },
+                  "endpointId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "That machine's SSH endpoint."
+                  },
+                  "failedStep": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The saga step that failed, when provisioning failed."
+                  },
+                  "machineId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The Lab-owned Fleet machine the guest was registered as."
+                  },
+                  "node": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The PVE node the guest runs on."
+                  },
+                  "provisionState": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The guest's provision state, once provisioning started."
+                  },
+                  "vmid": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "description": "The guest's VMID.",
+                    "minimum": 0
+                  }
+                }
+              }
+            ],
+            "description": "One lease with its guest's connection details (FM-720)."
           }
         }
       },

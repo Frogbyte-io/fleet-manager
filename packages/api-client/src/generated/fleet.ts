@@ -1072,6 +1072,20 @@ export interface EnrollmentTokenListDto {
 }
 
 /**
+ * A command to run on a ready lease's guest.
+ */
+export interface ExecLeaseRequest {
+  /** The shell script to run (at most 64 KiB). It is never audited. */
+  script: string;
+  /**
+     * The deadline, in seconds (1–900; default 60).
+     * @minimum 0
+     * @nullable
+     */
+  timeoutSeconds?: number | null;
+}
+
+/**
  * The requested ready-TTL extension.
  */
 export interface ExtendLeaseRequest {
@@ -1410,6 +1424,48 @@ export interface LeaseDto {
      */
   ttlSeconds: number;
 }
+
+/**
+ * One lease with its guest's connection details (FM-720).
+ */
+export type LeaseDetailDto = LeaseDto & ({
+  /**
+     * The guest's IPv4 address, once its agent reported one.
+     * @nullable
+     */
+  address?: string | null;
+  /**
+     * That machine's SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The saga step that failed, when provisioning failed.
+     * @nullable
+     */
+  failedStep?: string | null;
+  /**
+     * The Lab-owned Fleet machine the guest was registered as.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * The PVE node the guest runs on.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * The guest's provision state, once provisioning started.
+     * @nullable
+     */
+  provisionState?: string | null;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+});
 
 /**
  * The guest identity the operator explicitly confirms.
@@ -3905,6 +3961,59 @@ export type ResourceLabTemplateVersionDtoData = {
 export interface ResourceLabTemplateVersionDto {
   /** One published template version. */
   data: ResourceLabTemplateVersionDtoData;
+}
+
+/**
+ * One lease with its guest's connection details (FM-720).
+ */
+export type ResourceLeaseDetailDtoData = LeaseDto & ({
+  /**
+     * The guest's IPv4 address, once its agent reported one.
+     * @nullable
+     */
+  address?: string | null;
+  /**
+     * That machine's SSH endpoint.
+     * @nullable
+     */
+  endpointId?: string | null;
+  /**
+     * The saga step that failed, when provisioning failed.
+     * @nullable
+     */
+  failedStep?: string | null;
+  /**
+     * The Lab-owned Fleet machine the guest was registered as.
+     * @nullable
+     */
+  machineId?: string | null;
+  /**
+     * The PVE node the guest runs on.
+     * @nullable
+     */
+  node?: string | null;
+  /**
+     * The guest's provision state, once provisioning started.
+     * @nullable
+     */
+  provisionState?: string | null;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     * @nullable
+     */
+  vmid?: number | null;
+});
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLeaseDetailDto {
+  /** One lease with its guest's connection details (FM-720). */
+  data: ResourceLeaseDetailDtoData;
 }
 
 /**
@@ -7293,6 +7402,147 @@ export const sweepLabLeases = async ( options?: RequestInit): Promise<sweepLabLe
 
   const data: sweepLabLeasesResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as sweepLabLeasesResponse
+}
+
+
+
+export type getLabLeaseResponse200 = {
+  data: ResourceLeaseDetailDto
+  status: 200
+}
+
+export type getLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getLabLeaseResponseSuccess = (getLabLeaseResponse200) & {
+  headers: Headers;
+};
+export type getLabLeaseResponseError = (getLabLeaseResponse403 | getLabLeaseResponse404 | getLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type getLabLeaseResponse = (getLabLeaseResponseSuccess | getLabLeaseResponseError)
+
+export const getGetLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown lease.
+ * @summary Reads one lease with its guest's connection details.
+ */
+export const getLabLease = async (leaseId: string, options?: RequestInit): Promise<getLabLeaseResponse> => {
+
+  const res = await fetch(getGetLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabLeaseResponse
+}
+
+
+
+export type execLabLeaseResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type execLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type execLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type execLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type execLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type execLabLeaseResponseSuccess = (execLabLeaseResponse202) & {
+  headers: Headers;
+};
+export type execLabLeaseResponseError = (execLabLeaseResponse400 | execLabLeaseResponse403 | execLabLeaseResponse404 | execLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type execLabLeaseResponse = (execLabLeaseResponseSuccess | execLabLeaseResponseError)
+
+export const getExecLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/exec`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready, or an invalid command.
+ * @summary Runs a command on a ready lease's guest as a `lab.exec` operation. The
+result carries the exit code and bounded, redacted stdout and stderr,
+as machine exec does.
+ */
+export const execLabLease = async (leaseId: string,
+    execLeaseRequest: ExecLeaseRequest, options?: RequestInit): Promise<execLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExecLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(execLeaseRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: execLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as execLabLeaseResponse
 }
 
 
