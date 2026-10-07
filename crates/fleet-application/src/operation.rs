@@ -24,6 +24,16 @@ use serde::{Deserialize, Serialize};
 use crate::audit::{AuditMetadata, AuditOutcome};
 use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, authorize};
 
+/// Which surface is creating an operation: the generic `POST /operations`,
+/// or a kind's own dedicated route (the Lab kinds are created only there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreateRoute {
+    /// The generic surface.
+    Generic,
+    /// The kind's dedicated route, which already validated and authorized it.
+    Dedicated,
+}
+
 /// The kinds of operation the public API accepts. Until providers and nodes
 /// teach the controller their own kinds, the vocabulary is deliberately tiny:
 /// an unknown kind is refused rather than accepted as an unspecified promise.
@@ -44,16 +54,6 @@ use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId, au
 /// `projectId` and `dryRun` (FM-305); the apply workflow carries the
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
-/// Which surface is creating an operation: the generic `POST /operations`,
-/// or a kind's own dedicated route (the Lab kinds are created only there).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CreateRoute {
-    /// The generic surface.
-    Generic,
-    /// The kind's dedicated route, which already validated and authorized it.
-    Dedicated,
-}
-
 /// catalog-level (FM-403).
 pub const CREATABLE_KINDS: [&str; 61] = [
     "noop",

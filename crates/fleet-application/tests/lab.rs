@@ -1693,25 +1693,33 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
     assert!(audited.contains("lab_exec_requested"));
     assert!(!audited.contains("secret-ish-value"));
 
-    // A retried request with the same key maps to the same operation key.
-    let keyed = lab
-        .exec_lease(
-            &AllowAll,
-            &principal(),
-            &lease.id,
-            "true",
-            60,
-            Some("k1"),
-            NOW + 5,
-        )
-        .await
-        .unwrap();
-    assert!(
-        keyed
+    // A retried request with the same key maps to the same operation key,
+    // scoped to the principal and the lease; another principal's key differs.
+    let keyed = |who: &'static str, now: i64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &ActingPrincipal { id: who.to_owned() },
+                &id,
+                "true",
+                60,
+                Some("k1"),
+                now,
+            )
+            .await
+            .unwrap()
             .idempotency_key
-            .as_deref()
-            .is_some_and(|key| key.ends_with(":k1"))
+        }
+    };
+    let first = keyed("anonymous-lan-admin", NOW + 5).await;
+    assert_eq!(
+        first.as_deref(),
+        Some(format!("anonymous-lan-admin:lab-exec:{}:k1", lease.id).as_str())
     );
+    assert_eq!(keyed("anonymous-lan-admin", NOW + 6).await, first);
+    assert_ne!(keyed("someone-else", NOW + 6).await, first);
 
     // The 64 KiB bound.
     let oversized = "x".repeat(fleet_application::lab::MAX_LAB_EXEC_SCRIPT_BYTES + 1);
