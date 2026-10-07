@@ -19,7 +19,7 @@ use fleet_application::proxmox::{
 };
 use fleet_core::{CleanupStrategy, GuestState, LabTemplateContent, ReadinessProbe};
 use fleet_provider_proxmox::{
-    ProxmoxClient, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
+    ProxmoxClient, PveHttpMethod, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
 };
 use fleet_storage_sqlite::{
     AuditSink, LabRepository, LeaseRepository, OperationRepository, ProxmoxAccountRepository, Store,
@@ -46,6 +46,7 @@ const START_UPID: &str = "UPID:pve-b:00155300:0C6DF600:6AAFE1F0:qmstart:9000:fle
 #[derive(Clone, Debug)]
 struct Seen {
     path: String,
+    method: PveHttpMethod,
     body: Option<serde_json::Value>,
     /// The record's stored (node, VMID) when a clone or start request
     /// arrived.
@@ -63,6 +64,18 @@ struct Pve {
     /// The repository and record whose target the clone request observes.
     observe: Mutex<Option<(Arc<LabRepository>, String)>>,
     ready_ip: bool,
+    /// The clone's config: whether it carries the inherited `protection`
+    /// flag (cleared by a PUT), how many more reads still report the
+    /// clone lock, and the name the clone request gave it.
+    clone_config: Mutex<CloneConfig>,
+}
+
+#[derive(Debug, Default)]
+struct CloneConfig {
+    protected: bool,
+    refuse_unprotect: bool,
+    locked_reads: usize,
+    cloned: Option<(u32, String)>,
 }
 
 impl Pve {
@@ -82,7 +95,105 @@ impl Pve {
             seen: Mutex::new(Vec::new()),
             observe: Mutex::new(None),
             ready_ip: false,
+            clone_config: Mutex::new(CloneConfig::default()),
         })
+    }
+
+    /// The template is protected, so its clone inherits the flag.
+    fn protected(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().protected = true;
+        self
+    }
+
+    /// The token lacks `VM.Config.Options` on the clone target.
+    fn refusing_unprotect(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().refuse_unprotect = true;
+        self
+    }
+
+    /// The clone's config stays locked for this many reads.
+    fn locked_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().locked_reads = reads;
+        self
+    }
+
+    /// The config updates (PUTs) PVE received, with their bodies.
+    fn config_updates(&self) -> Vec<Seen> {
+        self.seen()
+            .into_iter()
+            .filter(|seen| seen.method == PveHttpMethod::Put)
+            .collect()
+    }
+
+    /// `GET`/`PUT …/qemu/{vmid}/config`: the scripted clone config.
+    fn config(
+        &self,
+        vmid: u32,
+        method: PveHttpMethod,
+        body: Option<&serde_json::Value>,
+    ) -> (u16, String) {
+        assert_ne!(
+            vmid, TEMPLATE_VMID,
+            "the template's config is never read or changed"
+        );
+        let mut config = self.clone_config.lock().unwrap();
+        if method == PveHttpMethod::Put {
+            let body = body.expect("a config update carries a body");
+            assert_eq!(
+                body["protection"], 0,
+                "only the protection flag is cleared: {body}"
+            );
+            assert_eq!(
+                body["digest"], "0123abcd",
+                "the update is conditional: {body}"
+            );
+            assert_eq!(body.as_object().unwrap().len(), 2, "{body}");
+            if config.refuse_unprotect {
+                return (
+                    403,
+                    format!(
+                        r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.Options)\n"}}"#
+                    ),
+                );
+            }
+            config.protected = false;
+            return (200, r#"{"data":null}"#.to_owned());
+        }
+        let listed = self
+            .guests
+            .iter()
+            .find(|guest| guest["vmid"] == vmid)
+            .and_then(|guest| guest["name"].as_str().map(str::to_owned));
+        let cloned = config
+            .cloned
+            .as_ref()
+            .filter(|(id, _)| *id == vmid)
+            .map(|(_, name)| name.clone());
+        let Some(name) = listed.or(cloned) else {
+            return (
+                500,
+                format!(
+                    r#"{{"data":null,"message":"Configuration file 'nodes/{TEMPLATE_NODE}/qemu-server/{vmid}.conf' does not exist\n"}}"#
+                ),
+            );
+        };
+        if config.locked_reads > 0 {
+            config.locked_reads -= 1;
+            // While PVE clones, the target's config holds the lock (and,
+            // between disks, the name).
+            return (
+                200,
+                format!(r#"{{"data":{{"lock":"clone","name":"{name}","digest":"0000"}}}}"#),
+            );
+        }
+        let mut answer = serde_json::json!({
+            "name": name, "cores": 2, "memory": "2048", "digest": "0123abcd",
+            "scsi0": format!("local-lvm:vm-{vmid}-disk-0,size=20G"),
+        });
+        if config.protected {
+            answer["protection"] = serde_json::json!(1);
+        }
+        (200, serde_json::json!({ "data": answer }).to_string())
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -157,11 +268,31 @@ impl Transport {
         } else {
             None
         };
+        if path.ends_with("/clone")
+            && let Some(body) = &body
+        {
+            self.0.clone_config.lock().unwrap().cloned = Some((
+                u32::try_from(body["newid"].as_u64().unwrap()).unwrap(),
+                body["name"].as_str().unwrap().to_owned(),
+            ));
+        }
         self.0.seen.lock().unwrap().push(Seen {
             path: path.clone(),
-            body,
+            method: request.method,
+            body: body.clone(),
             stored_target,
         });
+        if let Some(vmid) = path
+            .strip_suffix("/config")
+            .and_then(|rest| rest.rsplit_once("/qemu/"))
+            .and_then(|(_, vmid)| vmid.parse::<u32>().ok())
+        {
+            let (status, answer) = self.0.config(vmid, request.method, body.as_ref());
+            return Ok(PveHttpResponse {
+                status,
+                body: answer.into_bytes(),
+            });
+        }
         let answer = if path == "/api2/json/version" {
             r#"{"data":{"version":"9.0.3"}}"#.to_owned()
         } else if path == "/api2/json/cluster/resources" {
@@ -1472,4 +1603,170 @@ async fn queue_claimed_m3_steps_inherit_the_persisted_lab_workflows_bound() {
     let calls = steps.0.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert!((1..=10).contains(&calls[0]));
+}
+
+// ── Issue #290: a clone of a protected template is unprotected ──────────
+
+/// The index of the first request whose path ends with `suffix`.
+fn first(pve: &Pve, suffix: &str) -> Option<usize> {
+    pve.paths().iter().position(|path| path.ends_with(suffix))
+}
+
+const CLONE_CONFIG: &str = "/api2/json/nodes/pve-b/qemu/9000/config";
+
+#[tokio::test]
+async fn a_clone_of_a_protected_template_is_unprotected_before_it_starts() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected();
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    // The saga goes on past the unprotect step (to the never-answering
+    // agent probe).
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "never_ready");
+    let updates = pve.config_updates();
+    assert_eq!(updates.len(), 1, "{:?}", pve.paths());
+    // Only the new guest's config, never the template's.
+    assert_eq!(updates[0].path, CLONE_CONFIG);
+    let paths = pve.paths();
+    let cloned = first(&pve, "/clone").unwrap();
+    let read = paths.iter().position(|path| path == CLONE_CONFIG).unwrap();
+    let put = pve
+        .seen()
+        .iter()
+        .position(|seen| seen.method == PveHttpMethod::Put)
+        .unwrap();
+    let started = first(&pve, "/status/start").unwrap();
+    assert!(cloned < read && read < put && put < started, "{paths:?}");
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.contains(&format!("/qemu/{TEMPLATE_VMID}/config"))),
+        "{paths:?}"
+    );
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.failed_step.as_deref(), Some("guest_ip"));
+}
+
+#[tokio::test]
+async fn a_clone_without_the_flag_is_read_but_not_changed() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+    let read = first(&pve, "/qemu/9000/config").unwrap();
+    assert!(read < first(&pve, "/status/start").unwrap());
+}
+
+#[tokio::test]
+async fn the_clone_lock_is_waited_out_before_the_flag_is_cleared() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().locked_for(1);
+
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(error.unwrap().0, "never_ready");
+    let reads = pve
+        .seen()
+        .iter()
+        .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+        .count();
+    assert_eq!(reads, 2, "the locked read is retried: {:?}", pve.paths());
+    assert_eq!(pve.config_updates().len(), 1);
+    let put = pve
+        .seen()
+        .iter()
+        .position(|seen| seen.method == PveHttpMethod::Put)
+        .unwrap();
+    assert!(put < first(&pve, "/status/start").unwrap());
+}
+
+#[tokio::test]
+async fn a_refused_unprotect_fails_the_provision_before_the_start() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected().refusing_unprotect();
+
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "unprotect_failed");
+    assert!(
+        detail.contains("VM.Config.Options on /vms/9000"),
+        "{detail}"
+    );
+    assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+    // The guest stays recorded, so cleanup still owns it.
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+}
+
+/// Puts a run's record and lease back to `provisioning`, as if the
+/// controller had stopped after the clone was recorded.
+async fn interrupt(harness: &Harness, lease_id: &str, record_id: &str) {
+    let mut lease = harness.leases.get(lease_id).await.unwrap();
+    lease.state = fleet_core::LeaseState::Provisioning;
+    harness.leases.update(&lease).await.unwrap();
+    let mut record = ProvisionPort::get(harness.labs.as_ref(), record_id)
+        .await
+        .unwrap();
+    record.failed_step = None;
+    record.state = GuestState::Provisioning;
+    ProvisionPort::update(harness.labs.as_ref(), &record)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_resumed_clone_is_neither_cloned_nor_unprotected_again() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).protected();
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(pve.config_updates().len(), 1);
+    interrupt(&harness, &lease_id, &record.id).await;
+
+    // The flag was cleared before the interruption: nothing to repeat.
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)]);
+    let (_, error, stored) = harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(second.clones().is_empty(), "{:?}", second.paths());
+    assert!(second.config_updates().is_empty(), "{:?}", second.paths());
+    assert!(first(&second, "/status/start").is_some());
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+
+    // Interrupted between the clone and the unprotect: the resume clears
+    // the flag once, still without a second clone.
+    interrupt(&harness, &lease_id, &record.id).await;
+    let third = Pve::new(vec![guest(NEXT_VMID, &name)]).protected();
+    harness
+        .run(&third, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(third.clones().is_empty(), "{:?}", third.paths());
+    let updates = third.config_updates();
+    assert_eq!(updates.len(), 1, "{:?}", third.paths());
+    assert_eq!(updates[0].path, CLONE_CONFIG);
 }

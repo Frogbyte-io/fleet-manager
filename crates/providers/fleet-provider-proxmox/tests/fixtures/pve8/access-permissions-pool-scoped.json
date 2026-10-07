@@ -74,6 +74,7 @@
       "VM.Allocate": 1,
       "VM.Audit": 1,
       "VM.Clone": 1,
+      "VM.Config.Options": 1,
       "VM.PowerMgmt": 1
     }
   }
