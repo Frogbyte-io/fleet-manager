@@ -245,16 +245,25 @@ impl LabSweeper {
                 Ok(false) => {}
                 Ok(true) => {
                     self.changed();
-                    self.audit(
-                        &lease.id,
-                        "lab_lease_stuck_compensated",
-                        &[
-                            ("from", lease.state.id().to_owned()),
-                            ("to", state.id().to_owned()),
-                        ],
-                    )
-                    .await;
                     report.compensated += 1;
+                    // The transition is committed; a refused audit is
+                    // reported rather than hidden.
+                    if let Err(error) = self
+                        .audit(
+                            &lease.id,
+                            "lab_lease_stuck_compensated",
+                            &[
+                                ("from", lease.state.id().to_owned()),
+                                ("to", state.id().to_owned()),
+                            ],
+                        )
+                        .await
+                    {
+                        report.failures.push(format!(
+                            "auditing the compensation of lease {}: {error}",
+                            lease.id
+                        ));
+                    }
                 }
                 Err(error) => report
                     .failures
@@ -314,13 +323,14 @@ impl LabSweeper {
                     if self.owned(&guest, &records, &leases) {
                         continue;
                     }
-                    let fresh = self
-                        .reported
-                        .lock()
-                        .map_err(|_| "the orphan set is poisoned".to_owned())?
-                        .insert((guest.account_id.clone(), guest.vmid));
-                    if fresh {
-                        self.audit(
+                    let key = (guest.account_id.clone(), guest.vmid);
+                    if self.reported()?.contains(&key) {
+                        continue;
+                    }
+                    // Marked reported only once its audit is recorded, so a
+                    // refused audit is retried on the next tick.
+                    match self
+                        .audit(
                             &guest.name,
                             "lab_orphan_guest",
                             &[
@@ -329,8 +339,16 @@ impl LabSweeper {
                                 ("vmid", guest.vmid.to_string()),
                             ],
                         )
-                        .await;
-                        report.orphans.push(guest);
+                        .await
+                    {
+                        Ok(()) => {
+                            self.reported()?.insert(key);
+                            report.orphans.push(guest);
+                        }
+                        Err(error) => report.failures.push(format!(
+                            "auditing unowned guest {} (VMID {}): {error}",
+                            guest.name, guest.vmid
+                        )),
                     }
                 }
             }
@@ -363,14 +381,29 @@ impl LabSweeper {
         guest_owned(record, lease, &guest.account_id, guest.vmid)
     }
 
-    async fn audit(&self, resource: &str, event: &str, facts: &[(&str, String)]) {
+    /// The orphans already reported by this process.
+    fn reported(&self) -> Result<std::sync::MutexGuard<'_, HashSet<(String, u32)>>, String> {
+        self.reported
+            .lock()
+            .map_err(|_| "the orphan set is poisoned".to_owned())
+    }
+
+    async fn audit(
+        &self,
+        resource: &str,
+        event: &str,
+        facts: &[(&str, String)],
+    ) -> Result<(), String> {
         let mut metadata = AuditMetadata::default();
-        let _ = metadata.insert("event", event);
+        metadata
+            .insert("event", event)
+            .map_err(|error| error.to_string())?;
         for (key, value) in facts {
-            let _ = metadata.insert(key, value);
+            metadata
+                .insert(key, value)
+                .map_err(|error| error.to_string())?;
         }
-        let _ = self
-            .audit
+        self.audit
             .record_intent(&AuditIntent {
                 actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
                 action: Permission::LabLease.id().to_owned(),
@@ -380,15 +413,17 @@ impl LabSweeper {
                 operation_id: None,
                 metadata,
             })
-            .await;
+            .await
     }
 
     /// Ticks every `interval` until `shutdown` resolves. Shutdown also
     /// cancels an in-flight tick (for example one waiting on an unreachable
     /// Proxmox host): every step commits on its own, so a cancelled tick
     /// leaves only committed changes, and the next run resumes from the
-    /// rows. A failed tick is logged and retried on the next one; the loop
-    /// never blocks the worker (it only reads rows and queues operations).
+    /// rows. A failed tick is logged and retried on the next one. Each tick
+    /// transitions lease rows (expiry and compensation), records audit
+    /// intents, publishes `lease.changed`, and queues cleanup operations; it
+    /// never runs Proxmox work itself, so it never blocks the worker.
     pub async fn run(
         self: Arc<Self>,
         interval: Duration,

@@ -2103,12 +2103,25 @@ pub fn lease_exec_ready(lease: &Lease, now: i64) -> Result<(), String> {
 /// itself, so this only catches a provision that stopped running.
 pub const STUCK_GRACE_MILLIS: i64 = 10 * 60 * 1000;
 
+/// Whether `record`, the record named by `lease.provision_id`, holds a guest
+/// that belongs to `lease`: it links back to the lease and allocated a VMID.
+/// Only then may compensation queue a cleanup for it; an inconsistent link
+/// must never move this lease to a cleanup that would destroy another
+/// lease's VM.
+#[must_use]
+pub fn lease_allocated(lease: &Lease, record: Option<&ProvisionRecord>) -> bool {
+    record.is_some_and(|record| {
+        record.lease_id.as_deref() == Some(lease.id.as_str()) && record.vmid.is_some()
+    })
+}
+
 /// Where the sweeper moves a lease whose provision stopped converging, if
 /// anywhere (FM-716). An in-flight lease is compensated once it is past its
 /// readiness deadline plus [`STUCK_GRACE_MILLIS`], or past its maximum
-/// lifetime. A record counts as the lease's guest only when it links back
-/// to the lease. A `failed` lease whose record still holds a guest is moved to
-/// cleanup at once: `failed` is terminal, so a crash between the failure and
+/// lifetime (both inclusive, like the TTL and cleanup deadlines). A record
+/// counts as the lease's guest only when it links back to the lease
+/// ([`lease_allocated`]). A `failed` lease whose record still holds a guest
+/// is moved to cleanup at once: `failed` is terminal, so a crash between the failure and
 /// its compensation would otherwise strand the guest.
 #[must_use]
 pub fn stuck_compensation(
@@ -2116,19 +2129,14 @@ pub fn stuck_compensation(
     record: Option<&ProvisionRecord>,
     now: i64,
 ) -> Option<LeaseState> {
-    // Only a record that links back to this lease is its guest: an
-    // inconsistent link must never move this lease to a cleanup that would
-    // destroy another lease's VM.
-    let allocated = record.is_some_and(|record| {
-        record.lease_id.as_deref() == Some(lease.id.as_str()) && record.vmid.is_some()
-    });
+    let allocated = lease_allocated(lease, record);
     let due = match lease.state {
         LeaseState::Failed => true,
         LeaseState::Provisioning | LeaseState::Booting | LeaseState::Bootstrapping => {
             record
                 .and_then(|record| record.readiness_deadline_at)
-                .is_some_and(|deadline| deadline.saturating_add(STUCK_GRACE_MILLIS) < now)
-                || lease.max_lifetime_at < now
+                .is_some_and(|deadline| deadline.saturating_add(STUCK_GRACE_MILLIS) <= now)
+                || lease.max_lifetime_at <= now
         }
         _ => false,
     };
@@ -2320,10 +2328,20 @@ mod tests {
             stuck_compensation(&lease(Booting), Some(&none), past),
             Some(Failed)
         );
+        // Both deadlines are inclusive: due the moment they are reached.
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past - 1),
+            Some(Releasing)
+        );
+        assert_eq!(
+            stuck_compensation(&lease(Provisioning), Some(&guest), past - 2),
+            None
+        );
         // Past the maximum lifetime, whatever the deadline.
         let mut old = lease(Booting);
         old.max_lifetime_at = 5;
-        assert_eq!(stuck_compensation(&old, None, 6), Some(Failed));
+        assert_eq!(stuck_compensation(&old, None, 5), Some(Failed));
+        assert_eq!(stuck_compensation(&old, None, 4), None);
         // A failed lease still holding a guest is repaired at once; one
         // that never allocated stays failed.
         assert_eq!(
@@ -2340,6 +2358,11 @@ mod tests {
             Some(Failed)
         );
         assert_eq!(stuck_compensation(&lease(Failed), Some(&foreign), 0), None);
+        // The executor's failure-path compensation shares the predicate.
+        assert!(super::lease_allocated(&lease(Failed), Some(&guest)));
+        assert!(!super::lease_allocated(&lease(Failed), Some(&foreign)));
+        assert!(!super::lease_allocated(&lease(Failed), Some(&none)));
+        assert!(!super::lease_allocated(&lease(Failed), None));
     }
 
     #[test]

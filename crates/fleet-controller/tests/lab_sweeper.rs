@@ -117,6 +117,14 @@ impl Harness {
     /// A fresh sweeper over the same database: what a restarted controller
     /// builds.
     fn sweeper(&self) -> LabSweeper {
+        self.sweeper_with_audit(Arc::new(AuditSink::new(self.pool.clone())))
+    }
+
+    /// A fresh sweeper recording its audit through `audit`.
+    fn sweeper_with_audit(
+        &self,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+    ) -> LabSweeper {
         let lab = Arc::new(Lab::new(
             self.labs.clone(),
             self.labs.clone(),
@@ -130,7 +138,7 @@ impl Harness {
             self.leases.clone(),
             self.labs.clone(),
             self.operations.clone(),
-            Arc::new(AuditSink::new(self.pool.clone())),
+            audit,
         )
         .with_inventory(self.guests.clone())
     }
@@ -496,4 +504,62 @@ async fn shutdown_cancels_a_tick_stuck_on_proxmox() {
         .await
         .expect("shutdown does not wait for the stuck tick")
         .unwrap();
+}
+
+/// An audit sink that refuses while `refuse` is set.
+#[derive(Debug)]
+struct RefusingAudit {
+    inner: AuditSink,
+    refuse: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl fleet_application::operation::AuditPort for RefusingAudit {
+    async fn record_intent(
+        &self,
+        intent: &fleet_application::audit::AuditIntent,
+    ) -> Result<(), String> {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("the audit sink refused".to_owned());
+        }
+        fleet_application::operation::AuditPort::record_intent(&self.inner, intent).await
+    }
+
+    async fn record_outcome(
+        &self,
+        operation_id: &str,
+        outcome: fleet_application::audit::AuditOutcome,
+    ) -> Result<(), String> {
+        fleet_application::operation::AuditPort::record_outcome(&self.inner, operation_id, outcome)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn an_orphan_whose_audit_was_refused_is_reported_on_the_next_tick() {
+    let harness = Harness::new().await;
+    *harness.guests.0.lock().unwrap() = vec![LabGuest {
+        account_id: "account-1".to_owned(),
+        node: "pve-b".to_owned(),
+        vmid: 9100,
+        name: "fm-lab-00000000-0000-0000-0000-000000000000".to_owned(),
+    }];
+    let audit = Arc::new(RefusingAudit {
+        inner: AuditSink::new(harness.pool.clone()),
+        refuse: std::sync::atomic::AtomicBool::new(true),
+    });
+    let sweeper = harness.sweeper_with_audit(audit.clone());
+    let refused = sweeper.tick(NOW).await.unwrap();
+    assert!(refused.orphans.is_empty());
+    assert_eq!(refused.failures.len(), 1, "{:?}", refused.failures);
+    assert!(refused.failures[0].contains("refused"));
+
+    audit
+        .refuse
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let retried = sweeper.tick(NOW + 1).await.unwrap();
+    assert_eq!(retried.orphans.len(), 1);
+    assert!(retried.failures.is_empty(), "{:?}", retried.failures);
+    // Then reported once, as before.
+    assert!(sweeper.tick(NOW + 2).await.unwrap().orphans.is_empty());
 }

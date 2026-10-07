@@ -2878,13 +2878,12 @@ impl LabDispatch {
         let Ok(mut lease) = leases.get(&lease_id).await else {
             return;
         };
-        let allocated = match &lease.provision_id {
-            Some(id) => provisions
-                .get(id)
-                .await
-                .is_ok_and(|record| record.vmid.is_some()),
-            None => false,
+        let record = match &lease.provision_id {
+            Some(id) => provisions.get(id).await.ok(),
+            None => None,
         };
+        // Only a record linking back to this lease is its guest.
+        let allocated = fleet_application::lab::lease_allocated(&lease, record.as_ref());
         match fleet_application::lab::provision_compensation(lease.state, allocated) {
             Some(fleet_core::LeaseState::Releasing) => {
                 lease.state = fleet_core::LeaseState::Releasing;
