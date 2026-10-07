@@ -69,10 +69,16 @@ macro_rules! scenario {
             let Some(mut suite) = Suite::begin_marked(RESULT_MARKER, $id) else {
                 return;
             };
+            // Probed once per scenario, and only where a build needs it.
+            let packer = if needs_packer($id) {
+                packer_gate().await.map_err(|gate| unusable_packer(&gate))
+            } else {
+                Ok(())
+            };
             for target in suite.targets() {
                 let started = Instant::now();
-                if let Some(reason) = skip_reason($id, packer_gate().await) {
-                    suite.record(&target, &Ok(Outcome::Skipped(reason)), started);
+                if let Err(reason) = &packer {
+                    suite.record(&target, &Err(reason.clone()), started);
                     continue;
                 }
                 let result = match start($id, target.clone()).await {
@@ -131,17 +137,20 @@ async fn packer_gate() -> Result<(), String> {
         .map_err(|gate| gate.to_string())
 }
 
-/// Why a scenario does not apply, when it does not. The version gate's
-/// absent leg needs no Packer; everything else builds and needs one inside
-/// the FM-S09 pins.
-fn skip_reason(scenario: &str, packer: Result<(), String>) -> Option<String> {
-    match (scenario, packer) {
-        ("version-gate", _) | (_, Ok(())) => None,
-        (_, Err(gate)) => Some(format!(
-            "skipped: no usable packer on this machine: {gate} (with the proxmox plugin \
-             >= 1.2.4 < 2, FM-S09)"
-        )),
-    }
+/// Whether a scenario builds, and so needs a Packer inside the FM-S09
+/// pins. The version gate's absent leg needs none.
+fn needs_packer(scenario: &str) -> bool {
+    scenario != "version-gate"
+}
+
+/// The failure a building scenario reports on a machine without a usable
+/// Packer. A live run asked for real builds, so this is an environment
+/// failure, never a skip that would let the run pass unexercised.
+fn unusable_packer(gate: &str) -> String {
+    format!(
+        "no usable packer on this machine: {gate} (needs packer >= 1.15 < 2 with the proxmox \
+         plugin >= 1.2.4 < 2, FM-S09)"
+    )
 }
 
 /// Starts one scenario's run with one trusted Proxmox account for the
@@ -682,13 +691,16 @@ mod tests {
 
     #[test]
     fn only_the_version_gate_runs_without_packer() {
-        let absent = || Err("the packer CLI is not installed".to_owned());
-        assert_eq!(skip_reason("version-gate", absent()), None);
-        for scenario in SCENARIOS.iter().filter(|id| **id != "version-gate") {
-            let reason = skip_reason(scenario, absent()).unwrap();
-            assert!(reason.starts_with("skipped: no usable packer"), "{reason}");
-        }
-        assert_eq!(skip_reason("build", Ok(())), None);
+        assert!(!needs_packer("version-gate"));
+        assert!(
+            SCENARIOS
+                .iter()
+                .filter(|id| **id != "version-gate")
+                .all(|id| needs_packer(id))
+        );
+        let reason = unusable_packer("the packer CLI is not installed");
+        assert!(reason.starts_with("no usable packer"), "{reason}");
+        assert!(!reason.starts_with("skipped"), "{reason}");
     }
 
     #[test]

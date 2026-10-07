@@ -422,6 +422,25 @@ pub fn descendants_in(root: u32, table: &[(u32, u32)]) -> Vec<u32> {
     found
 }
 
+/// Refuses a live run on a host whose process table the runner cannot read
+/// at `proc_root`: without it an early exit could not stop the suite's
+/// process tree, and the test binary and its controller would keep
+/// creating and destroying guests unattended.
+///
+/// # Errors
+///
+/// When `live` and `proc_root` has no readable process table.
+pub fn require_process_table(live: bool, proc_root: &Path) -> Result<(), String> {
+    if !live || proc_root.join("self").join("stat").is_file() {
+        return Ok(());
+    }
+    Err(format!(
+        "a live run needs the {} process table (Linux) to stop the suite's process tree if \
+         the runner exits early; run it on Linux",
+        proc_root.display()
+    ))
+}
+
 /// The live descendants of `root`, from `/proc` (empty where there is none).
 fn descendants(root: u32) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -482,6 +501,25 @@ impl Drop for SuiteProcess {
     }
 }
 
+/// Builds the real `fleetctl` binary the live suite drives and answers its
+/// path.
+fn build_fleetctl(repo_root: &Path) -> Result<PathBuf, String> {
+    eprintln!("==> building fleetctl for the live suite");
+    let status = Command::new("cargo")
+        .current_dir(repo_root)
+        .args(["build", "--locked", "-p", "fleetctl"])
+        .status()
+        .map_err(|error| format!("cargo build could not run: {error}"))?;
+    if !status.success() {
+        return Err("building fleetctl failed".to_owned());
+    }
+    Ok(
+        resolve_target_dir(repo_root, std::env::var_os("CARGO_TARGET_DIR"))
+            .join("debug")
+            .join(format!("fleetctl{}", std::env::consts::EXE_SUFFIX)),
+    )
+}
+
 /// Runs the suite and answers its summary. Progress and the suite's own
 /// output go to stderr; the caller prints the JSON on stdout.
 ///
@@ -493,6 +531,7 @@ pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<S
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
         .collect();
     let live = env.get(LIVE_GATE).map(|value| value.trim()) == Some("1");
+    require_process_table(live, Path::new("/proc"))?;
     let filter = effective_filter(target, &env);
     let expected = if live {
         let names = configured_targets(&env, filter.as_deref());
@@ -516,20 +555,7 @@ pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<S
     let mut command = Command::new("cargo");
     command.current_dir(repo_root);
     if live {
-        // The suite drives the real fleetctl binary.
-        eprintln!("==> building fleetctl for the live suite");
-        let status = Command::new("cargo")
-            .current_dir(repo_root)
-            .args(["build", "--locked", "-p", "fleetctl"])
-            .status()
-            .map_err(|error| format!("cargo build could not run: {error}"))?;
-        if !status.success() {
-            return Err("building fleetctl failed".to_owned());
-        }
-        let fleetctl = resolve_target_dir(repo_root, std::env::var_os("CARGO_TARGET_DIR"))
-            .join("debug")
-            .join(format!("fleetctl{}", std::env::consts::EXE_SUFFIX));
-        command.env(FLEETCTL_VAR, fleetctl);
+        command.env(FLEETCTL_VAR, build_fleetctl(repo_root)?);
     }
     if let Some(name) = target {
         command.env(TARGET_FILTER, name);
@@ -787,6 +813,17 @@ mod tests {
             resolve_target_dir(root, Some("/cache/target".into())),
             Path::new("/cache/target")
         );
+    }
+
+    #[test]
+    fn a_live_run_needs_a_readable_process_table() {
+        let missing = Path::new("/nonexistent-fleet-proc");
+        assert!(require_process_table(false, missing).is_ok());
+        let refused = require_process_table(true, missing).unwrap_err();
+        assert!(refused.contains("process table"), "{refused}");
+        if cfg!(target_os = "linux") {
+            assert!(require_process_table(true, Path::new("/proc")).is_ok());
+        }
     }
 
     #[test]
