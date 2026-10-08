@@ -6,11 +6,12 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
 import { relativeTime, type Tone } from '../../fleet/inventory'
-import { shortId, templatesByVersion } from '../lab'
+import { leaseTone, shortId, templatesByVersion } from '../lab'
 
 // Provisioning records: the durable saga state for each guest the Lab cloned,
 // with the external IDs it recorded (node, VMID, clone task, guest IP). The
-// API does not link a record to a lease, so this list stands on its own.
+// Fate column adds what became of the guest and, when a lease links back to
+// the record, that lease's state.
 const props = defineProps<{ provisions: ProvisionRecordDto[], templates: LabTemplateDto[], now: number, loading: boolean }>()
 
 const byVersion = computed(() => templatesByVersion(props.templates))
@@ -23,6 +24,18 @@ function tone(state: string): Tone {
     case 'provisioning':
     case 'provisioned': return 'info'
     case 'never_ready': return 'err'
+    default: return 'faint'
+  }
+}
+
+/** The guest's fate (API `guest`): saga state alone does not say it still exists. */
+function guestTone(guest: string): Tone {
+  switch (guest) {
+    case 'present': return 'ok'
+    case 'destroyed': return 'muted'
+    case 'kept':
+    case 'returned_to_pool': return 'info'
+    case 'quarantined_in_pool': return 'warn'
     default: return 'faint'
   }
 }
@@ -56,6 +69,9 @@ const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em
           State
         </TableHead>
         <TableHead :class="headClass">
+          Fate
+        </TableHead>
+        <TableHead :class="headClass">
           Template
         </TableHead>
         <TableHead :class="headClass">
@@ -77,11 +93,28 @@ const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em
         <TableCell class="font-mono text-xs">
           {{ shortId(record.id) }}
         </TableCell>
-        <TableCell>
+        <TableCell data-testid="saga-state">
           <StatusChip
-            :label="record.state.replace('_', ' ')"
+            :label="record.state.replaceAll('_', ' ')"
             :tone="tone(record.state)"
           />
+        </TableCell>
+        <TableCell data-testid="fate-cell">
+          <StatusChip
+            :label="(record.guest ?? '').replaceAll('_', ' ')"
+            :tone="guestTone(record.guest ?? '')"
+            data-testid="guest-fate"
+          />
+          <div
+            v-if="record.leaseState"
+            class="mt-1"
+            data-testid="lease-state"
+          >
+            <StatusChip
+              :label="`lease ${record.leaseState.replaceAll('_', ' ')}`"
+              :tone="leaseTone(record.leaseState)"
+            />
+          </div>
         </TableCell>
         <TableCell class="text-xs">
           {{ byVersion.get(record.templateVersionId)?.name ?? `version ${shortId(record.templateVersionId)}` }}
