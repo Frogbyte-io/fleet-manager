@@ -7494,8 +7494,8 @@ fn render_lab(value: Option<&Value>, surface: LabSurface) -> String {
             )]
         } else if is_provision {
             vec![format!(
-                "{:<38} {:<16} {:<10} {}",
-                "ID", "STATE", "VMID", "TEMPLATE VERSION"
+                "{:<38} {:<16} {:<18} {:<10} {}",
+                "ID", "STATE", "GUEST", "VMID", "TEMPLATE VERSION"
             )]
         } else {
             vec![format!(
@@ -7516,9 +7516,10 @@ fn render_lab(value: Option<&Value>, surface: LabSurface) -> String {
                 ));
             } else if is_provision {
                 lines.push(format!(
-                    "{:<38} {:<16} {:<10} {}",
+                    "{:<38} {:<16} {:<18} {:<10} {}",
                     item["id"].as_str().unwrap_or("-"),
                     item["state"].as_str().unwrap_or("-"),
+                    item["guest"].as_str().unwrap_or("-"),
                     item["vmid"]
                         .as_u64()
                         .map_or_else(|| "-".to_owned(), |v| v.to_string()),

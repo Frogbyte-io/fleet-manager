@@ -328,6 +328,62 @@ async fn a_failed_clone_task_releases_the_reserved_target() {
     assert_converged(&world, &controller).await;
 }
 
+/// #327: the provision record keeps its saga state (`ready`) and its VMID as
+/// history after cleanup, so the read model reports what became of the guest.
+#[tokio::test]
+async fn a_released_lease_reports_its_guest_as_destroyed_or_kept() {
+    let world = World::new(READINESS_SECONDS).await;
+    let controller = Controller::start(&world).await;
+
+    // Destroyed: the lease is released, the guest is gone from PVE, and the
+    // record no longer reads as a live guest.
+    let destroyed = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(
+        controller.provision_view(&destroyed).await,
+        (
+            "ready".to_owned(),
+            "present".to_owned(),
+            Some("ready".to_owned())
+        )
+    );
+    controller.release(&destroyed).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(
+        controller.lease(&destroyed).await.state,
+        LeaseState::Released
+    );
+    let vmid = controller.record(&destroyed).await.vmid;
+    assert!(vmid.is_some(), "the VMID stays as history");
+    assert_eq!(
+        controller.provision_view(&destroyed).await,
+        (
+            "ready".to_owned(),
+            "destroyed".to_owned(),
+            Some("released".to_owned())
+        )
+    );
+
+    // Kept: released too, but the guest stays and says so.
+    let kept = controller.request_lease().await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    controller.release_keeping(&kept).await;
+    assert_eq!(controller.drain(&world).await, Run::Done(1));
+    assert_eq!(controller.lease(&kept).await.state, LeaseState::Released);
+    assert_eq!(
+        controller.provision_view(&kept).await,
+        (
+            "ready".to_owned(),
+            "kept".to_owned(),
+            Some("released".to_owned())
+        )
+    );
+    assert!(
+        !world.pve.lab_guests().is_empty(),
+        "the kept guest is still in PVE"
+    );
+}
+
 #[tokio::test]
 async fn provider_errors_at_the_start_end_ready_or_cleaned_up() {
     // 403: nothing started, the provision fails at boot.

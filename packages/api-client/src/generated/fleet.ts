@@ -2992,12 +2992,24 @@ export type PageProvisionRecordDtoItemsItem = {
   /** When the record was created. */
   createdAt: number;
   /**
+     * What became of the guest: `not_allocated`, `present`, `destroyed`
+     * (cleanup removed it), `kept` (released with keep), or
+     * `returned_to_pool`. The node and VMID stay as history after it is
+     * gone, so `state` alone does not say the guest still exists.
+     */
+  guest: string;
+  /**
      * The guest's IPv4 address, once reported.
      * @nullable
      */
   guestIpv4?: string | null;
   /** The record's identity. */
   id: string;
+  /**
+     * The linked lease's state, when a lease links back to the record.
+     * @nullable
+     */
+  leaseState?: string | null;
   /**
      * The PVE node the guest landed on, once cloned.
      * @nullable
@@ -3397,12 +3409,24 @@ export interface ProvisionRecordDto {
   /** When the record was created. */
   createdAt: number;
   /**
+     * What became of the guest: `not_allocated`, `present`, `destroyed`
+     * (cleanup removed it), `kept` (released with keep), or
+     * `returned_to_pool`. The node and VMID stay as history after it is
+     * gone, so `state` alone does not say the guest still exists.
+     */
+  guest: string;
+  /**
      * The guest's IPv4 address, once reported.
      * @nullable
      */
   guestIpv4?: string | null;
   /** The record's identity. */
   id: string;
+  /**
+     * The linked lease's state, when a lease links back to the record.
+     * @nullable
+     */
+  leaseState?: string | null;
   /**
      * The PVE node the guest landed on, once cloned.
      * @nullable
@@ -5012,12 +5036,24 @@ export type ResourceProvisionRecordDtoData = {
   /** When the record was created. */
   createdAt: number;
   /**
+     * What became of the guest: `not_allocated`, `present`, `destroyed`
+     * (cleanup removed it), `kept` (released with keep), or
+     * `returned_to_pool`. The node and VMID stay as history after it is
+     * gone, so `state` alone does not say the guest still exists.
+     */
+  guest: string;
+  /**
      * The guest's IPv4 address, once reported.
      * @nullable
      */
   guestIpv4?: string | null;
   /** The record's identity. */
   id: string;
+  /**
+     * The linked lease's state, when a lease links back to the record.
+     * @nullable
+     */
+  leaseState?: string | null;
   /**
      * The PVE node the guest landed on, once cloned.
      * @nullable

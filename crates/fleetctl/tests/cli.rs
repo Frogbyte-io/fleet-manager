@@ -2706,12 +2706,16 @@ fn text_output_renders_lab_templates_and_provisions() {
     let provisions = json!({
         "items": [
             {"id": "prv-1", "state": "provisioning", "vmid": null,
-             "templateVersionId": "tpl-1@abc"}
+             "guest": "not_allocated", "templateVersionId": "tpl-1@abc"},
+            {"id": "prv-2", "state": "ready", "vmid": 900,
+             "guest": "destroyed", "templateVersionId": "tpl-1@abc"}
         ],
         "page": {"limit": 50, "nextCursor": null}
     });
     let text = fleetctl::render_lab_provisions_for_test(&provisions);
     assert!(text.contains("provisioning"), "{text}");
+    assert!(text.contains("GUEST"), "{text}");
+    assert!(text.contains("destroyed"), "{text}");
 }
 
 #[test]

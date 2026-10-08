@@ -12748,7 +12748,8 @@
                 "templateVersionId",
                 "state",
                 "createdAt",
-                "updatedAt"
+                "updatedAt",
+                "guest"
               ],
               "properties": {
                 "cloneUpid": {
@@ -12763,6 +12764,10 @@
                   "format": "int64",
                   "description": "When the record was created."
                 },
+                "guest": {
+                  "type": "string",
+                  "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool`. The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
+                },
                 "guestIpv4": {
                   "type": [
                     "string",
@@ -12773,6 +12778,13 @@
                 "id": {
                   "type": "string",
                   "description": "The record's identity."
+                },
+                "leaseState": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The linked lease's state, when a lease links back to the record."
                 },
                 "node": {
                   "type": [
@@ -13393,7 +13405,8 @@
           "templateVersionId",
           "state",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "guest"
         ],
         "properties": {
           "cloneUpid": {
@@ -13408,6 +13421,10 @@
             "format": "int64",
             "description": "When the record was created."
           },
+          "guest": {
+            "type": "string",
+            "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool`. The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
+          },
           "guestIpv4": {
             "type": [
               "string",
@@ -13418,6 +13435,13 @@
           "id": {
             "type": "string",
             "description": "The record's identity."
+          },
+          "leaseState": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The linked lease's state, when a lease links back to the record."
           },
           "node": {
             "type": [
@@ -16190,7 +16214,8 @@
               "templateVersionId",
               "state",
               "createdAt",
-              "updatedAt"
+              "updatedAt",
+              "guest"
             ],
             "properties": {
               "cloneUpid": {
@@ -16205,6 +16230,10 @@
                 "format": "int64",
                 "description": "When the record was created."
               },
+              "guest": {
+                "type": "string",
+                "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool`. The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
+              },
               "guestIpv4": {
                 "type": [
                   "string",
@@ -16215,6 +16244,13 @@
               "id": {
                 "type": "string",
                 "description": "The record's identity."
+              },
+              "leaseState": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The linked lease's state, when a lease links back to the record."
               },
               "node": {
                 "type": [
