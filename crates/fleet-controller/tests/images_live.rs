@@ -20,8 +20,11 @@
 //! build resolves its trusted account from the recipe's `proxmox_url`, and
 //! the executor hands that account's token to the Packer child process
 //! only. The controller itself carries no `PROXMOX_*` variables. The
-//! recipes still set `insecure_skip_tls_verify`; certificate pinning for
-//! Packer is #284.
+//! recipes verify TLS: the executor makes the account's confirmed leaf the
+//! Packer child's only trusted root (#284), so a default self-signed PVE
+//! certificate verifies without `insecure_skip_tls_verify`. The
+//! `pin-mismatch` scenario proves a changed certificate stops the build
+//! before the token leaves, at Fleet's own check and at Packer's handshake.
 //!
 //! The unit tests at the bottom run without any PVE or Packer.
 
@@ -43,9 +46,141 @@ use serde_json::{Value, json};
 /// `xtask/src/image_acceptance.rs`.
 const RESULT_MARKER: &str = "FLEET_IMAGE_ACCEPTANCE_RESULT";
 
+/// Where the local relay sends a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Relay {
+    /// Every connection to the real host: it presents the confirmed leaf.
+    Host,
+    /// Every connection to an impostor presenting another leaf.
+    Impostor,
+    /// The first connection (Fleet's credential-free pin check) to the
+    /// host, every later one (Packer's plugin) to the impostor.
+    HostThenImpostor,
+}
+
+/// A loopback relay in front of the target's API port. Raw TCP to the host
+/// (TLS passes through, so the host's own leaf is what clients see), or a
+/// local impostor with a leaf for `127.0.0.1`. The impostor counts every
+/// application byte it receives after a handshake completes.
+struct PinRelay {
+    port: u16,
+    /// The mode, and the connections accepted since it was set.
+    mode: Arc<std::sync::Mutex<(Relay, usize)>>,
+    impostor_handshakes: Arc<std::sync::atomic::AtomicUsize>,
+    impostor_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for PinRelay {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl PinRelay {
+    async fn start(host: String, port: u16) -> Result<Self, String> {
+        let key = rcgen::KeyPair::generate().map_err(|error| error.to_string())?;
+        let leaf = rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()])
+            .and_then(|params| params.self_signed(&key))
+            .map_err(|error| error.to_string())?;
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| error.to_string())?
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .map_err(|error| error.to_string())?;
+        let impostor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| error.to_string())?;
+        let local = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
+        let mode = Arc::new(std::sync::Mutex::new((Relay::Host, 0_usize)));
+        let handshakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (shared_mode, shared_handshakes, shared_bytes) = (
+            Arc::clone(&mode),
+            Arc::clone(&handshakes),
+            Arc::clone(&bytes),
+        );
+        let task = tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let to_impostor = {
+                    let mut mode = shared_mode.lock().expect("the relay mode lock");
+                    let accepted = mode.1;
+                    mode.1 += 1;
+                    match mode.0 {
+                        Relay::Host => false,
+                        Relay::Impostor => true,
+                        Relay::HostThenImpostor => accepted > 0,
+                    }
+                };
+                if to_impostor {
+                    let (impostor, handshakes, bytes) = (
+                        impostor.clone(),
+                        Arc::clone(&shared_handshakes),
+                        Arc::clone(&shared_bytes),
+                    );
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncReadExt as _;
+                        let Ok(mut tls) = impostor.accept(inbound).await else {
+                            return;
+                        };
+                        handshakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let mut buffer = vec![0_u8; 8192];
+                        while let Ok(read) = tls.read(&mut buffer).await {
+                            if read == 0 {
+                                break;
+                            }
+                            bytes.fetch_add(read, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                } else {
+                    let host = host.clone();
+                    tokio::spawn(async move {
+                        if let Ok(mut outbound) =
+                            tokio::net::TcpStream::connect((host.as_str(), port)).await
+                        {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                }
+            }
+        });
+        Ok(Self {
+            port: local,
+            mode,
+            impostor_handshakes: handshakes,
+            impostor_bytes: bytes,
+            task,
+        })
+    }
+
+    fn set(&self, mode: Relay) {
+        *self.mode.lock().expect("the relay mode lock") = (mode, 0);
+    }
+
+    fn impostor_saw(&self) -> (usize, usize) {
+        (
+            self.impostor_handshakes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            self.impostor_bytes
+                .load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+}
+
 /// The scenario identifiers, in report order. Kept in step with
 /// `xtask/src/image_acceptance.rs`.
-const SCENARIOS: [&str; 7] = [
+const SCENARIOS: [&str; 8] = [
     "version-gate",
     "validate-failure",
     "build",
@@ -53,6 +188,7 @@ const SCENARIOS: [&str; 7] = [
     "promotion",
     "rebuild-keeps-promotion",
     "cancel-cleanup",
+    "pin-mismatch",
 ];
 
 /// The name prefix of every template a build creates.
@@ -127,6 +263,7 @@ scenario!(
     rebuild_keeps_promotion
 );
 scenario!(live_cancel_cleanup, "cancel-cleanup", cancel_cleanup);
+scenario!(live_pin_mismatch, "pin-mismatch", pin_mismatch);
 
 /// Whether the machine running the suite has a Packer the product accepts:
 /// the CLI pin through the product's own version gate, then the Proxmox
@@ -219,7 +356,6 @@ fn clone_recipe(url: &str, node: &str, template_vmid: u32, vmid: u32, label: &st
         "builders": [{
             "type": "proxmox-clone",
             "proxmox_url": url,
-            "insecure_skip_tls_verify": true,
             "node": node,
             "clone_vm_id": template_vmid,
             "full_clone": false,
@@ -464,6 +600,107 @@ async fn validate_failure(run: &TargetRun) -> Result<Outcome, String> {
     check!(
         created.is_empty(),
         "a refused recipe created guests {created:?}"
+    );
+    Ok(Outcome::Pass)
+}
+
+/// Scenario 8 (#284): an account pinned to the host's confirmed leaf, reached
+/// through a loopback relay (`127.0.0.1` is in PVE's `pve-ssl.pem` SANs).
+/// When the relay presents another leaf, the build fails at Fleet's own
+/// check (`target_certificate_changed`) before Packer runs. When it swaps
+/// the leaf only after that check, Packer's plugin refuses the impostor's
+/// handshake: either way the impostor never completes a handshake or
+/// receives a byte, so the token never leaves, and no guest is created.
+async fn pin_mismatch(run: &TargetRun) -> Result<Outcome, String> {
+    let relay = PinRelay::start(run.target.host.clone(), run.target.port).await?;
+    let answer = run
+        .controller
+        .fleetctl(
+            &args(&[
+                "proxmox",
+                "create",
+                "--name",
+                "acceptance-pin",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &relay.port.to_string(),
+                "--token-id",
+                &run.target.token.id,
+            ]),
+            Some(format!("{}\n", run.target.token.secret.expose())),
+        )
+        .await?;
+    check!(
+        answer.success,
+        "fleetctl proxmox create failed: {}",
+        answer.stderr
+    );
+    let account = answer.json["id"]
+        .as_str()
+        .ok_or("the create answer carries no account id")?
+        .to_owned();
+    // Confirmed through the relay, so the pin is the host's own leaf.
+    run.trust(&account).await?;
+    let range = run.pve.range();
+    let in_range = |resources: Vec<proxmox_live_support::pve::VmResource>| -> Vec<u32> {
+        resources
+            .iter()
+            .map(|r| r.vmid)
+            .filter(|&vmid| range.contains(vmid))
+            .collect()
+    };
+    let before = in_range(run.pve.resources().await?);
+    let vmid = run.guard.allocate().await?;
+    let url = format!("https://127.0.0.1:{}/api2/json", relay.port);
+    let content = clone_recipe(
+        &url,
+        &run.target.node,
+        run.target.template_vmid,
+        vmid,
+        "pin",
+    );
+    let version = publish(run, "pin", &content).await?;
+    for (mode, reason) in [
+        (Relay::Impostor, "target_certificate_changed"),
+        (Relay::HostThenImpostor, "build_failed"),
+    ] {
+        relay.set(mode);
+        let data = run
+            .fleetctl_operation(
+                &[
+                    "images",
+                    "build",
+                    &version,
+                    "--account",
+                    &account,
+                    "--wait",
+                    "--timeout",
+                    "600",
+                ],
+                None,
+            )
+            .await?;
+        let (got, detail) = operation_error(&data);
+        check!(
+            data["state"] == "failed" && got == reason,
+            "with {mode:?} the build ended {} ({got}: {detail}), not failed/{reason}",
+            data["state"]
+        );
+        let (handshakes, bytes) = relay.impostor_saw();
+        check!(
+            handshakes == 0 && bytes == 0,
+            "with {mode:?} the impostor completed {handshakes} handshakes and received {bytes} bytes"
+        );
+        run.log(&format!(
+            "{mode:?}: refused with {reason}; the impostor received nothing"
+        ));
+    }
+    let after = in_range(run.pve.resources().await?);
+    let created: Vec<&u32> = after.iter().filter(|vmid| !before.contains(vmid)).collect();
+    check!(
+        created.is_empty(),
+        "a refused build created guests {created:?}"
     );
     Ok(Outcome::Pass)
 }
@@ -823,6 +1060,8 @@ mod tests {
         for key in ["username", "token", "password"] {
             assert!(builder.get(key).is_none(), "{key} is in the recipe");
         }
+        // TLS is verified against the pinned leaf, never skipped (#284).
+        assert!(!fleet_core::requests_insecure_tls(&content.to_string()));
     }
 
     #[test]
