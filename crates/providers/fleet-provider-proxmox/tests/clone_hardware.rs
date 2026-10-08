@@ -97,7 +97,11 @@ async fn a_clone_config_reads_as_its_cores_memory_and_boot_disk() {
     assert_eq!(
         read.unwrap(),
         PveQemuHardware {
+            name: Some("fm-lab-record-1".to_owned()),
+            template: false,
             cores: 2,
+            sockets: 1,
+            has_vcpus: false,
             memory_mib: 2048,
             memory_has_options: false,
             boot_disk: Some(boot_disk("scsi0", Some(20 * 1024))),
@@ -176,6 +180,62 @@ async fn the_boot_disk_follows_the_boot_order_then_bootdisk_then_the_only_disk()
 }
 
 #[tokio::test]
+async fn sockets_vcpus_template_and_name_are_read() {
+    let (read, _) = hardware(json!({"data": {
+        "name": "fm-lab-record-1", "template": 1, "sockets": "2", "cores": 2, "vcpus": 3,
+    }}))
+    .await;
+    let read = read.unwrap();
+    assert_eq!(read.name.as_deref(), Some("fm-lab-record-1"));
+    assert!(read.template);
+    assert_eq!((read.sockets, read.cores), (2, 2));
+    assert!(read.has_vcpus);
+    let (plain, _) = hardware(json!({"data": {}})).await;
+    let plain = plain.unwrap();
+    assert_eq!(plain.sockets, 1);
+    assert!(!plain.has_vcpus && !plain.template);
+    for body in [
+        json!({"data": {"sockets": 0}}),
+        json!({"data": {"sockets": "many"}}),
+        json!({"data": {"template": 2}}),
+    ] {
+        let (read, _) = hardware(body.clone()).await;
+        assert!(
+            matches!(read, Err(PveApiError::InvalidPayload { .. })),
+            "{body}: {read:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_size_without_a_unit_is_bytes_and_an_empty_drive_is_exactly_none() {
+    // Bytes round up to whole MiB.
+    let (read, _) =
+        hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=21474836480"}})).await;
+    assert_eq!(
+        read.unwrap().boot_disk,
+        Some(boot_disk("scsi0", Some(20 * 1024)))
+    );
+    let (read, _) = hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=1"}})).await;
+    assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", Some(1))));
+    // An unknown unit is no size, never a guess.
+    let (read, _) = hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=5X"}})).await;
+    assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", None)));
+    // The storage `none` is an empty drive; a storage that merely starts
+    // with those letters is a real one.
+    let (read, _) = hardware(json!({"data": {
+        "scsi0": "none",
+        "scsi1": "none,media=disk",
+        "scsi2": "nonesuch:vm-9000-disk-2,size=4G",
+    }}))
+    .await;
+    assert_eq!(
+        read.unwrap().boot_disk,
+        Some(boot_disk("scsi2", Some(4 * 1024)))
+    );
+}
+
+#[tokio::test]
 async fn an_unreadable_hardware_config_is_refused() {
     for body in [
         json!({"data": null}),
@@ -228,14 +288,21 @@ async fn setting_hardware_is_a_conditional_put_of_only_the_given_values() {
     assert_eq!(transport.seen.lock().unwrap().len(), 2);
 }
 
+const RESIZE_UPID: &str = "UPID:pve9-n1:0015523F:0C6DF532:6AAFE1EC:resize:9000:fleet@pve!test:";
+
 #[tokio::test]
-async fn resizing_is_a_conditional_put_to_an_absolute_size() {
-    let transport = Transport::new(200, json!({"data": null}));
+async fn resizing_is_a_conditional_put_to_an_absolute_size_that_answers_a_task() {
+    // PVE runs the resize as a task and answers its UPID.
+    let transport = Transport::new(200, json!({"data": RESIZE_UPID}));
     let client = ProxmoxClient::new(transport.clone());
-    client
+    let task = client
         .qemu_resize_disk(request(), "pve9-n1", 9000, "scsi0", 40, "3c1f0a5d")
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the answer is a task");
+    assert_eq!(task.raw, RESIZE_UPID);
+    assert_eq!(task.task_type, "resize");
+    assert_eq!(task.target, "9000");
     {
         let seen = transport.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
@@ -245,6 +312,26 @@ async fn resizing_is_a_conditional_put_to_an_absolute_size() {
         assert_eq!(
             body,
             &Some(json!({"disk": "scsi0", "size": "40G", "digest": "3c1f0a5d"}))
+        );
+    }
+    // An answer with no task is accepted; anything else is not.
+    let none = ProxmoxClient::new(Transport::new(200, json!({"data": null})))
+        .qemu_resize_disk(request(), "pve9-n1", 9000, "scsi0", 40, "d")
+        .await
+        .unwrap();
+    assert!(none.is_none());
+    for body in [
+        json!({"data": "not-a-upid"}),
+        json!({"data": {"upid": 1}}),
+        json!({"data": 7}),
+    ] {
+        let error = ProxmoxClient::new(Transport::new(200, body.clone()))
+            .qemu_resize_disk(request(), "pve9-n1", 9000, "scsi0", 40, "d")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PveApiError::InvalidPayload { .. }),
+            "{body}: {error:?}"
         );
     }
     // Only a QEMU disk key goes into the request.
@@ -296,19 +383,32 @@ async fn pve_refusals_of_the_hardware_writes_surface_as_errors() {
             "{error:?}"
         );
     }
-    // A stale digest and a shrink are server refusals, never writes.
-    for message in [
-        "checksum mismatch (file change by other user?)\n",
-        "shrinking disks is not supported\n",
-    ] {
-        let refused = Transport::new(500, json!({"data": null, "message": message}));
-        let error = ProxmoxClient::new(refused)
-            .qemu_resize_disk(request(), "pve9-n1", 9000, "scsi0", 10, "stale")
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, PveApiError::Http { status: 500, .. }),
-            "{error:?}"
-        );
-    }
+    // A stale config answers 500 on the synchronous config update (the
+    // resize reports a stale digest, a shrink, or a lock as its task's exit
+    // status instead, which the executor reads from the task).
+    let refused = Transport::new(
+        500,
+        json!({"data": null, "message": "checksum mismatch (file change by other user?)\n"}),
+    );
+    let error = ProxmoxClient::new(refused)
+        .qemu_set_hardware(request(), "pve9-n1", 9000, Some(2), None, "stale")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PveApiError::Http { status: 500, .. }),
+        "{error:?}"
+    );
+    // A value PVE refuses outright is a 400.
+    let rejected = Transport::new(
+        400,
+        json!({"data": null, "errors": {"memory": "value must have a minimum value of 16"}}),
+    );
+    let error = ProxmoxClient::new(rejected)
+        .qemu_set_hardware(request(), "pve9-n1", 9000, None, Some(8), "d")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PveApiError::Http { status: 400, .. }),
+        "{error:?}"
+    );
 }

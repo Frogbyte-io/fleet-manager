@@ -708,6 +708,18 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "When the clone's boot disk is smaller than the Lab template's disk size, the executor grows it to that size on its own new guest, conditional on the config digest (issue #372). A disk is never shrunk; nothing is resized, and the privilege is not used, when the disk is large enough.",
     },
     PrivilegeRequirement {
+        id: "lab.provision.hardware-resize-storage",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/resize",
+        majors: BOTH,
+        scope: PrivilegeScope::Storage,
+        privileges: &["Datastore.AllocateSpace"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "The resize also needs space on the disk's storage, checked in the resize task's API call (issue #372). Fleet's token already holds it there for the clone.",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.start",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,

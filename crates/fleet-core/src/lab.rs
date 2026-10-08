@@ -250,8 +250,8 @@ impl LabTemplateContent {
         if self.cores == 0 || self.cores > 64 {
             return Err("the cores must be 1..=64".to_owned());
         }
-        if self.memory_mib == 0 || self.memory_mib > 262_144 {
-            return Err("the memory must be 1..=262144 MiB".to_owned());
+        if self.memory_mib < 16 || self.memory_mib > 262_144 {
+            return Err("the memory must be 16..=262144 MiB".to_owned());
         }
         if self.disk_gib == 0 || self.disk_gib > 4096 {
             return Err("the disk must be 1..=4096 GiB".to_owned());

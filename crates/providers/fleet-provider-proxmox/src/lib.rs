@@ -1239,9 +1239,18 @@ pub struct PveQemuConfigFlags {
 /// template to a fresh clone (issue #372).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PveQemuHardware {
+    /// The guest's name, bounded.
+    pub name: Option<String>,
+    /// Whether the guest is a template (`template: 1`).
+    pub template: bool,
     /// The vCPU cores per socket. PVE's default of 1 when the config has no
     /// `cores` key.
     pub cores: u32,
+    /// The CPU sockets. PVE's default of 1 when the config has no `sockets`
+    /// key. The guest's vCPU count is `sockets * cores`.
+    pub sockets: u32,
+    /// Whether the config sets `vcpus` (hotplugged vCPUs below the maximum).
+    pub has_vcpus: bool,
     /// The memory in MiB. PVE's default of 512 when the config has no
     /// `memory` key.
     pub memory_mib: u32,
@@ -1259,7 +1268,8 @@ pub struct PveQemuHardware {
 pub struct PveBootDisk {
     /// The config key (`scsi0`, `virtio0`, …).
     pub key: String,
-    /// The disk's size in MiB, rounded up, when the config states one.
+    /// The disk's size in MiB, when the config states one. A size in bytes
+    /// or KiB is rounded up to a whole MiB; larger units are exact.
     pub size_mib: Option<u64>,
 }
 
@@ -2490,14 +2500,18 @@ impl ProxmoxClient {
 
     /// Grows one disk of a guest to `size_gib` GiB
     /// (`PUT /nodes/{node}/qemu/{vmid}/resize`; needs `VM.Config.Disk` on
-    /// `/vms/{vmid}`). PVE refuses to shrink a disk. Conditional on
-    /// `digest`. The caller confirms the new size by reading the config
-    /// again: the answer carries no task Fleet relies on.
+    /// `/vms/{vmid}` and `Datastore.AllocateSpace` on the disk's storage).
+    /// Conditional on `digest`. PVE runs the resize as a background task
+    /// and answers its UPID: the permission check happens before the task
+    /// starts, but the digest check, the config lock, the shrink refusal and
+    /// a missing disk are the task's exit status, so the caller polls the
+    /// task and then reads the config again. `None` when PVE answers no task.
     ///
     /// # Errors
     ///
     /// Fails with [`PveApiError`], including PVE's refusals, and
-    /// `InvalidPayload` for a `disk` that is not a QEMU disk key.
+    /// `InvalidPayload` for a `disk` that is not a QEMU disk key or an answer
+    /// that is neither null nor a UPID.
     pub async fn qemu_resize_disk(
         &self,
         request: PveHttpRequest,
@@ -2506,7 +2520,7 @@ impl ProxmoxClient {
         disk: &str,
         size_gib: u32,
         digest: &str,
-    ) -> Result<(), PveApiError> {
+    ) -> Result<Option<Upid>, PveApiError> {
         if !is_disk_key(disk) {
             return Err(PveApiError::InvalidPayload {
                 detail: format!("{disk:?} is not a QEMU disk key"),
@@ -2517,14 +2531,26 @@ impl ProxmoxClient {
             "size": format!("{size_gib}G"),
             "digest": digest,
         });
-        self.call_method_with_body(
-            request,
-            PveHttpMethod::Put,
-            &format!("/api2/json/nodes/{}/qemu/{vmid}/resize", urlencode(node)),
-            &body,
-        )
-        .await
-        .map(|_| ())
+        let answer = self
+            .call_method_with_body(
+                request,
+                PveHttpMethod::Put,
+                &format!("/api2/json/nodes/{}/qemu/{vmid}/resize", urlencode(node)),
+                &body,
+            )
+            .await?;
+        match answer {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(raw) => Upid::parse(&raw)
+                .map(Some)
+                .map_err(|detail| PveApiError::InvalidPayload { detail }),
+            other => Err(PveApiError::InvalidPayload {
+                detail: format!(
+                    "the resize answered a {} instead of a task",
+                    type_name_of(&other)
+                ),
+            }),
+        }
     }
 
     /// Reads one task's status.
@@ -2725,10 +2751,14 @@ fn disk_size_mib(entry: &str) -> Option<u64> {
     let size = entry
         .split(',')
         .find_map(|property| property.strip_prefix("size="))?;
-    let split = size.find(|character: char| !character.is_ascii_digit())?;
+    // No unit: bytes.
+    let split = size
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(size.len());
     let (digits, unit) = size.split_at(split);
     let value: u64 = digits.parse().ok()?;
     match unit {
+        "" => Some(value.div_ceil(1024 * 1024)),
         "K" => Some(value.div_ceil(1024)),
         "M" => Some(value),
         "G" => value.checked_mul(1024),
@@ -2751,6 +2781,21 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
             .and_then(|cores| u32::try_from(cores).ok())
             .filter(|cores| *cores >= 1)
             .ok_or("the guest config's cores value is unreadable")?,
+    };
+    let sockets = match config.get("sockets") {
+        None | Some(serde_json::Value::Null) => 1,
+        Some(_) => loose_number(config, "sockets")
+            .and_then(|sockets| u32::try_from(sockets).ok())
+            .filter(|sockets| *sockets >= 1)
+            .ok_or("the guest config's sockets value is unreadable")?,
+    };
+    let flag = |key: &str| match config.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(_) => match loose_number(config, key) {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(format!("the guest config's {key} flag is unreadable")),
+        },
     };
     let (memory_mib, memory_has_options) = match config.get("memory") {
         None | Some(serde_json::Value::Null) => (512, false),
@@ -2780,7 +2825,11 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         .iter()
         .filter(|(key, _)| is_disk_key(key))
         .filter_map(|(key, value)| value.as_str().map(|value| (key.as_str(), value)))
-        .filter(|(_, value)| !value.contains("media=cdrom") && !value.starts_with("none"))
+        .filter(|(_, value)| {
+            // An empty drive is the storage `none`, exactly (a storage that
+            // merely starts with those letters is a real one).
+            !value.contains("media=cdrom") && *value != "none" && !value.starts_with("none,")
+        })
         .collect();
     let by_order = config
         .get("boot")
@@ -2805,7 +2854,11 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
             size_mib: disk_size_mib(entry),
         });
     Ok(PveQemuHardware {
+        name: bounded_str(config, "name", MAX_ID_CHARS)?,
+        template: flag("template")?,
         cores,
+        sockets,
+        has_vcpus: config.get("vcpus").is_some_and(|vcpus| !vcpus.is_null()),
         memory_mib,
         memory_has_options,
         boot_disk,

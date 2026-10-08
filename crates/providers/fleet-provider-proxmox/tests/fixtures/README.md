@@ -245,12 +245,17 @@ read from qemu-server `src/PVE/API2/Qemu.pm` on
   ("checksum mismatch (file change by other user?)") and a locked guest
   ("VM is locked (clone)") before it writes.
 - Hardware (issue #372): `$check_vm_modify_config_perm` checks `VM.Config.CPU` for
-  `cores` and `VM.Config.Memory` for `memory`; `PUT …/resize` needs
-  `VM.Config.Disk` on `/vms/{vmid}`, takes an absolute `size` such as `20G`
-  (PVE refuses to shrink), and accepts `digest`. `memory` may be a plain MiB
-  number or, on newer PVE, a property string (`current=2048,max=65536`). These
-  response shapes are modeled on pve-manager's `Qemu.pm`, not captured from a
-  live host.
+  `cores` and `VM.Config.Memory` for `memory`, and `PUT …/config` is
+  synchronous (`{"data": null}`). `PUT …/resize` is a background task on 8.x
+  and 9.x: it checks `VM.Config.Disk` on `/vms/{vmid}` and
+  `Datastore.AllocateSpace` on the volume's storage before it starts and
+  answers a UPID (`…:resize:{vmid}:{user}:`); the `digest` check, the config
+  lock, the shrink refusal ("shrinking disks is not supported"), and a missing
+  disk are the task's exit status (`ERROR: …`), not an HTTP status. It takes an
+  absolute `size` such as `20G`. `memory` may be a plain MiB number or, on
+  newer PVE, a property string (`current=2048,max=65536`). A disk size in the
+  config may carry no unit (bytes). These shapes are modeled on pve-manager's
+  and qemu-server's `Qemu.pm`, not captured from a live host.
 - Flags in the config read are integers; the JSON formatter may answer them
   as strings, so both are accepted.
 
