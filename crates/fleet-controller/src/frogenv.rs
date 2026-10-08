@@ -39,6 +39,12 @@ use crate::exec::MAX_SCRIPT_TIMEOUT;
 /// The deadline bound for one Frogenv operation.
 pub const MAX_FROGENV_TIMEOUT: u64 = MAX_SCRIPT_TIMEOUT;
 
+/// The fixed scripts' own report that no Frogenv CLI was found (exit 3).
+/// A failed `frogenv.status` whose detail is exactly this is a positive
+/// "not installed" observation, which the ready workflow names
+/// `frogenv_missing`.
+pub const NOT_INSTALLED_DETAIL: &str = "frogenv is not installed";
+
 /// How the endpoint authenticates.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
@@ -642,5 +648,27 @@ impl OperationExecutor for FrogenvDispatch {
             }
             _ => self.fallback.execute(operations, operation).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod not_installed_tests {
+    #[test]
+    fn every_script_reports_a_missing_cli_with_the_shared_detail() {
+        let marker = format!("echo \"{}\" >&2; exit 3;", super::NOT_INSTALLED_DETAIL);
+        for script in [
+            super::status_script(),
+            super::ceremony_script("setup"),
+            super::sync_script(),
+            super::env_run_script(),
+        ] {
+            assert!(script.contains(&marker), "{script}");
+        }
+        // The status failure's detail passes through redaction unchanged,
+        // so the ready workflow can recognize it.
+        assert_eq!(
+            super::redact_output(&format!("{}\n", super::NOT_INSTALLED_DETAIL)),
+            super::NOT_INSTALLED_DETAIL
+        );
     }
 }
