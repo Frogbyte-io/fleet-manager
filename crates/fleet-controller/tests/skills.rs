@@ -524,10 +524,7 @@ async fn the_pinned_install_verifies_the_checksum() {
     assert_eq!(result["snapshotRecorded"], true);
     assert_eq!(result["availability"], "available");
     assert!(
-        format!("{home}/.local/bin/skills-manager-cli")
-            .lines()
-            .count()
-            > 0,
+        std::path::Path::new(&format!("{home}/.local/bin/skills-manager-cli")).is_file(),
         "the binary landed"
     );
 
