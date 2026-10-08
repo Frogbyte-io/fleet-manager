@@ -427,3 +427,91 @@ async fn the_project_link_migration_tolerates_linked_provisions_and_orphans() {
     assert_eq!(provision.lease_id, Some("lease-live".to_owned()));
     store.close().await;
 }
+
+#[tokio::test]
+async fn a_failed_cleanup_is_recorded_only_against_the_state_and_count_it_was_read_at() {
+    let (_dir, _store, leases) = setup().await;
+    let mut lease = ready_lease(&leases, NOW + 3_600_000).await;
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = 2;
+    leases.update(&lease).await.unwrap();
+
+    // The failure the application computed from the read lease.
+    let mut failed = lease.clone();
+    fleet_application::lab::record_cleanup_failure(&mut failed, NOW);
+    assert_eq!(failed.cleanup_attempts, 3);
+
+    // A stale count (another sweep already counted this attempt) writes
+    // nothing.
+    assert!(!leases.record_failed_cleanup(1, &failed).await.unwrap());
+    assert_eq!(leases.get(&lease.id).await.unwrap().cleanup_attempts, 2);
+
+    // A lease that left `releasing` (an operator's keep switch released it,
+    // or a re-arm moved it) is never overwritten.
+    let mut released = leases.get(&lease.id).await.unwrap();
+    released.state = LeaseState::Released;
+    leases.update(&released).await.unwrap();
+    assert!(!leases.record_failed_cleanup(2, &failed).await.unwrap());
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Released);
+    assert_eq!(stored.cleanup_attempts, 2);
+
+    // Back to the observed state and count: the write lands, with the
+    // computed attempt count and backoff.
+    let mut releasing = stored;
+    releasing.state = LeaseState::Releasing;
+    leases.update(&releasing).await.unwrap();
+    assert!(leases.record_failed_cleanup(2, &failed).await.unwrap());
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::Releasing);
+    assert_eq!(stored.cleanup_attempts, 3);
+    assert_eq!(stored.cleanup_next_at, failed.cleanup_next_at);
+    assert!(stored.cleanup_next_at.is_some());
+
+    // An attempt that ends the round leaves `cleanup_failed` with nothing
+    // scheduled.
+    let mut last = stored.clone();
+    last.cleanup_attempts = fleet_application::lab::MAX_CLEANUP_ATTEMPTS - 1;
+    leases.update(&last).await.unwrap();
+    let mut exhausted = last.clone();
+    fleet_application::lab::record_cleanup_failure(&mut exhausted, NOW);
+    assert_eq!(exhausted.state, LeaseState::CleanupFailed);
+    assert!(
+        leases
+            .record_failed_cleanup(last.cleanup_attempts, &exhausted)
+            .await
+            .unwrap()
+    );
+    let stored = leases.get(&lease.id).await.unwrap();
+    assert_eq!(stored.state, LeaseState::CleanupFailed);
+    assert_eq!(stored.cleanup_next_at, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_sweeps_count_one_failed_attempt_once() {
+    let (_dir, _store, leases) = setup().await;
+    let leases = std::sync::Arc::new(leases);
+    let mut lease = ready_lease(&leases, NOW + 3_600_000).await;
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = 0;
+    leases.update(&lease).await.unwrap();
+    let mut failed = lease.clone();
+    fleet_application::lab::record_cleanup_failure(&mut failed, NOW);
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let (leases, failed, barrier) = (leases.clone(), failed.clone(), barrier.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                leases.record_failed_cleanup(0, &failed).await.unwrap()
+            })
+        })
+        .collect();
+    let mut winners = 0;
+    for task in tasks {
+        winners += usize::from(task.await.unwrap());
+    }
+    assert_eq!(winners, 1);
+    assert_eq!(leases.get(&lease.id).await.unwrap().cleanup_attempts, 1);
+}

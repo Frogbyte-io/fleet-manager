@@ -558,6 +558,24 @@ impl fleet_application::lab::LeasePort for FakeLeases {
         stored.cleanup_next_at = None;
         Ok(true)
     }
+
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &fleet_application::lab::Lease,
+    ) -> Result<bool, String> {
+        let mut leases = self.leases.lock().unwrap();
+        let Some(stored) = leases.iter_mut().find(|stored| stored.id == failed.id) else {
+            return Ok(false);
+        };
+        if stored.state != LeaseState::Releasing || stored.cleanup_attempts != observed_attempts {
+            return Ok(false);
+        }
+        stored.state = failed.state;
+        stored.cleanup_attempts = failed.cleanup_attempts;
+        stored.cleanup_next_at = failed.cleanup_next_at;
+        Ok(true)
+    }
 }
 
 /// The pin validator over a canned set of promoted versions.

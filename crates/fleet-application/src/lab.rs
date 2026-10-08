@@ -771,6 +771,23 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         observed_attempts: u32,
         attempts: u32,
     ) -> Result<bool, String>;
+    /// Stores a failed cleanup attempt that [`record_cleanup_failure`]
+    /// computed on `failed` (its state, attempt count, and next due time),
+    /// conditional on the stored lease still being `releasing` with
+    /// `observed_attempts`: the compare-and-set that keeps the sweeper's
+    /// abandoned-attempt path from overwriting a concurrent operator
+    /// release, re-arm, or keep switch, and two overlapping sweeps from both
+    /// counting one attempt (#361). Returns whether this caller made the
+    /// transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &Lease,
+    ) -> Result<bool, String>;
 }
 
 /// Result of linking a provision record to a lease.

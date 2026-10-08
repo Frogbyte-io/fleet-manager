@@ -143,6 +143,50 @@ impl Harness {
         .with_inventory(self.guests.clone())
     }
 
+    /// A fresh sweeper whose lease port is `leases` (a decorator over the
+    /// real repository).
+    fn sweeper_over(&self, leases: Arc<dyn LeasePort>) -> LabSweeper {
+        let lab = Arc::new(Lab::new(
+            self.labs.clone(),
+            self.labs.clone(),
+            self.leases.clone(),
+            Arc::new(NoPins),
+            Arc::new(ProjectRepository::new(self.pool.clone())),
+            Arc::new(AuditSink::new(self.pool.clone())),
+        ));
+        LabSweeper::new(
+            lab,
+            leases,
+            self.labs.clone(),
+            self.operations.clone(),
+            Arc::new(AuditSink::new(self.pool.clone())),
+        )
+        .with_inventory(self.guests.clone())
+    }
+
+    /// A `releasing` lease whose current cleanup attempt was abandoned: the
+    /// controller died mid-attempt and worker maintenance failed it
+    /// (`worker_lease_expired`), which records nothing on the lease.
+    async fn abandoned_cleanup(&self) -> String {
+        let (lease_id, _) = self.lease(LeaseState::Releasing, Some(900)).await;
+        let lease = self.leases.get(&lease_id).await.unwrap();
+        let operation = self
+            .operations
+            .create_lab_cleanup(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &lease_id,
+                &fleet_application::lab::cleanup_operation(&lease, None),
+            )
+            .await
+            .unwrap();
+        self.operations
+            .claim_only_execute(&Abandon, &operation.id, "test")
+            .await
+            .unwrap();
+        lease_id
+    }
+
     /// A lease in `state` with a linked record; `vmid` allocates a guest.
     async fn lease(&self, state: LeaseState, vmid: Option<u32>) -> (String, String) {
         let lease = self
@@ -747,5 +791,196 @@ async fn an_ended_record_refuses_a_stale_saga_write_and_keeps_what_it_holds() {
     assert_eq!(
         (after.state, after.vmid, after.clone_upid),
         (GuestState::NeverReady, Some(9000), None)
+    );
+}
+
+/// Ends the operation the way worker maintenance does for an attempt whose
+/// worker died: failed with the `worker_lease_expired` reason.
+#[derive(Debug)]
+struct Abandon;
+
+#[async_trait]
+impl fleet_application::worker::OperationExecutor for Abandon {
+    async fn execute(
+        &self,
+        operations: &Operations,
+        operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        operations
+            .complete(
+                &operation.id,
+                "failed",
+                None,
+                Some(r#"{"reason":"worker_lease_expired","detail":"the worker's lease expired"}"#),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// Delegates to the real lease repository, and right after the sweeper's
+/// next read of the lease writes `concurrent` to it: an operator action that
+/// lands between the sweeper's read and its write (#361).
+#[derive(Debug)]
+struct Racing {
+    inner: Arc<LeaseRepository>,
+    concurrent: Mutex<Option<fleet_core::Lease>>,
+}
+
+#[async_trait]
+impl LeasePort for Racing {
+    async fn create(
+        &self,
+        lease: &NewLease,
+        owner: &str,
+        now: i64,
+    ) -> Result<fleet_core::Lease, String> {
+        self.inner.create(lease, owner, now).await
+    }
+    async fn get(&self, id: &str) -> Result<fleet_core::Lease, String> {
+        let read = self.inner.get(id).await?;
+        let concurrent = self.concurrent.lock().unwrap().take();
+        if let Some(concurrent) = concurrent {
+            self.inner.update(&concurrent).await?;
+        }
+        Ok(read)
+    }
+    async fn update(&self, lease: &fleet_core::Lease) -> Result<(), String> {
+        self.inner.update(lease).await
+    }
+    async fn list(&self, project_id: Option<&str>) -> Result<Vec<fleet_core::Lease>, String> {
+        self.inner.list(project_id).await
+    }
+    async fn expired(&self, now: i64) -> Result<Vec<fleet_core::Lease>, String> {
+        self.inner.expired(now).await
+    }
+    async fn extend_ready(
+        &self,
+        id: &str,
+        observed_expires_at: i64,
+        now: i64,
+        new_expires_at: i64,
+    ) -> Result<bool, String> {
+        self.inner
+            .extend_ready(id, observed_expires_at, now, new_expires_at)
+            .await
+    }
+    async fn attach_provision(
+        &self,
+        id: &str,
+        provision_id: &str,
+    ) -> Result<fleet_application::lab::AttachProvisionOutcome, String> {
+        self.inner.attach_provision(id, provision_id).await
+    }
+    async fn claim_for_release(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        observed_expires_at: i64,
+        now: i64,
+    ) -> Result<bool, String> {
+        self.inner
+            .claim_for_release(id, observed, observed_expires_at, now)
+            .await
+    }
+    async fn transition(
+        &self,
+        id: &str,
+        observed: LeaseState,
+        provision_id: Option<&str>,
+        to: LeaseState,
+    ) -> Result<bool, String> {
+        self.inner.transition(id, observed, provision_id, to).await
+    }
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String> {
+        self.inner
+            .rearm_cleanup(id, observed_attempts, attempts)
+            .await
+    }
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &fleet_core::Lease,
+    ) -> Result<bool, String> {
+        self.inner
+            .record_failed_cleanup(observed_attempts, failed)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn an_abandoned_cleanup_is_counted_once_and_never_over_a_concurrent_change() {
+    // Undisturbed: the abandoned attempt is counted, with a backoff.
+    let harness = Harness::new().await;
+    let lease_id = harness.abandoned_cleanup().await;
+    let report = harness.sweeper().tick(NOW).await.unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.cleanups_abandoned, 1);
+    let counted = harness.leases.get(&lease_id).await.unwrap();
+    assert_eq!(
+        (counted.state, counted.cleanup_attempts),
+        (LeaseState::Releasing, 1)
+    );
+    assert!(counted.cleanup_next_at.is_some());
+    // The next tick finds the backoff (stamped from the real clock, long
+    // before the test's `NOW`) passed and queues the next attempt under its
+    // fresh key; the abandoned one is not counted again.
+    let again = harness.sweeper().tick(NOW).await.unwrap();
+    assert_eq!(again.cleanups_abandoned, 0, "{again:?}");
+    assert_eq!(again.cleanups_queued, 1, "{again:?}");
+    assert_eq!(
+        harness
+            .leases
+            .get(&lease_id)
+            .await
+            .unwrap()
+            .cleanup_attempts,
+        1
+    );
+
+    // An operator's release lands between the sweeper's read and its write:
+    // the release stands and nothing is counted.
+    let harness = Harness::new().await;
+    let lease_id = harness.abandoned_cleanup().await;
+    let mut released = harness.leases.get(&lease_id).await.unwrap();
+    released.state = LeaseState::Released;
+    let racing = Arc::new(Racing {
+        inner: harness.leases.clone(),
+        concurrent: Mutex::new(Some(released)),
+    });
+    let report = harness.sweeper_over(racing).tick(NOW).await.unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.cleanups_abandoned, 0, "{report:?}");
+    let stored = harness.leases.get(&lease_id).await.unwrap();
+    assert_eq!(
+        (stored.state, stored.cleanup_attempts),
+        (LeaseState::Released, 0)
+    );
+
+    // Another sweep counts the same attempt first: the late one adds nothing.
+    let harness = Harness::new().await;
+    let lease_id = harness.abandoned_cleanup().await;
+    let mut counted_elsewhere = harness.leases.get(&lease_id).await.unwrap();
+    fleet_application::lab::record_cleanup_failure(&mut counted_elsewhere, NOW);
+    let racing = Arc::new(Racing {
+        inner: harness.leases.clone(),
+        concurrent: Mutex::new(Some(counted_elsewhere)),
+    });
+    let report = harness.sweeper_over(racing).tick(NOW).await.unwrap();
+    assert_eq!(report.cleanups_abandoned, 0, "{report:?}");
+    assert_eq!(
+        harness
+            .leases
+            .get(&lease_id)
+            .await
+            .unwrap()
+            .cleanup_attempts,
+        1
     );
 }
