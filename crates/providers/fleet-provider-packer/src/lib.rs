@@ -22,6 +22,12 @@
 //! environment only ([`SecretEnv`], #272). TLS-verified account builds
 //! also set `SSL_CERT_FILE` and `SSL_CERT_DIR` there, so the pinned
 //! certificate is Packer's only TLS root (#284).
+//!
+//! Every child starts from an empty environment (#335): only an allowlist
+//! of the controller's variables ([`AMBIENT_ALLOWLIST`]) reaches Packer and
+//! its plugins, plus the fixed [`FIXED_ENV`] and what the command is
+//! handed. That holds for the version probes as well as `validate` and
+//! `build`.
 #![warn(missing_docs)]
 
 use std::fmt;
@@ -57,41 +63,94 @@ pub struct PackerCommand {
     pub env: SecretEnv,
 }
 
+/// The ambient variables a Packer child may inherit from the controller,
+/// copied only when set (#335). Everything else in the controller's
+/// environment is dropped: the child starts from an empty environment.
+///
+/// Packer finds its plugins under `PACKER_PLUGIN_PATH`, else the SDK's
+/// config directory: `PACKER_CONFIG_DIR/.packer.d`, else `$HOME/.packer.d`
+/// when it exists, else `$XDG_CONFIG_HOME/packer` or `$HOME/.config/packer`
+/// (`packer-plugin-sdk` `pathing`). `HOME` therefore stays, and the
+/// operator's own overrides of those locations are honored rather than
+/// replaced. Packer's cache directory is `PACKER_CACHE_DIR`, else
+/// `$XDG_CACHE_HOME/packer`, else `$HOME/.cache/packer`, created on every
+/// run. `PACKER_CONFIG` names `.packerconfig`; `TMPDIR` is Go's
+/// `os.TempDir`; `LANG` and [`AMBIENT_PREFIXES`] are locale only.
+///
+/// Proxy variables are deliberately absent: the Proxmox plugin's API client
+/// uses `http.ProxyFromEnvironment`, so they would route the connection
+/// that carries the token, and a proxy URL can carry its own credentials.
+pub const AMBIENT_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "PACKER_PLUGIN_PATH",
+    "PACKER_CONFIG_DIR",
+    "PACKER_CONFIG",
+    "PACKER_CACHE_DIR",
+];
+
+/// Ambient variable prefixes a Packer child may inherit: the locale
+/// categories.
+pub const AMBIENT_PREFIXES: &[&str] = &["LC_"];
+
+/// Variables Fleet sets on every Packer child, whatever the controller's
+/// environment says or the command is handed: they are applied last.
+///
+/// - `CHECKPOINT_DISABLE`: no update or telemetry call to the
+///   vendor's checkpoint service.
+/// - `PACKER_NO_COLOR`: plain output for `validate` too, not only for
+///   `-machine-readable` commands.
+/// - `SSH_AUTH_SOCK` empty (#333): the SDK forwards the SSH agent to the
+///   build guest unless a recipe opts out, and its Unix
+///   `GetSSHAgentConnection` reads only this variable, so neither
+///   forwarding nor agent authentication can reach the controller's agent.
+pub const FIXED_ENV: &[(&str, &str)] = &[
+    ("CHECKPOINT_DISABLE", "1"),
+    ("PACKER_NO_COLOR", "1"),
+    ("SSH_AUTH_SOCK", ""),
+];
+
+/// Whether an ambient variable may reach a Packer child.
+#[must_use]
+pub fn ambient_allowed(name: &str) -> bool {
+    AMBIENT_ALLOWLIST.contains(&name)
+        || AMBIENT_PREFIXES
+            .iter()
+            .any(|prefix| name.len() > prefix.len() && name.starts_with(prefix))
+}
+
 /// Variables set on one CLI child process.
 ///
-/// [`SecretEnv::default`] inherits the controller's environment unchanged
-/// (a controller with no account credentials wired). Every other
-/// constructor isolates the child: the controller's own ambient
-/// `PROXMOX_*` variables are removed first, so a build never silently uses
-/// a credential other than the one it was handed, and a command handed no
-/// credential ([`SecretEnv::isolated`]) sees none at all.
+/// Every child starts from an empty environment (#335): only the
+/// [`AMBIENT_ALLOWLIST`] (and [`AMBIENT_PREFIXES`]) variables are copied
+/// from the controller, then the variables handed here, then
+/// [`FIXED_ENV`], which nothing overrides. So no ambient credential reaches Packer or its plugins (cloud
+/// credentials, `PKR_VAR_*`, proxies, the controller's own `PROXMOX_*`),
+/// and a command handed nothing ([`SecretEnv::default`],
+/// [`SecretEnv::isolated`]) sees only the allowlist.
 #[derive(Clone, Default)]
 pub struct SecretEnv {
     vars: std::sync::Arc<Vec<(String, fleet_core::SensitiveString)>>,
-    isolated: bool,
 }
 
 impl SecretEnv {
-    /// The given variables, with ambient `PROXMOX_*` removed.
+    /// The given variables over the allowlisted environment.
     #[must_use]
     pub fn new(vars: Vec<(String, fleet_core::SensitiveString)>) -> Self {
         Self {
             vars: std::sync::Arc::new(vars),
-            isolated: true,
         }
     }
 
-    /// No variables, and ambient `PROXMOX_*` removed: for a command that
-    /// must not see any Proxmox credential.
+    /// No handed variables: only the allowlisted environment. The same as
+    /// [`SecretEnv::default`].
     #[must_use]
     pub fn isolated() -> Self {
         Self::new(Vec::new())
-    }
-
-    /// Whether ambient `PROXMOX_*` variables are removed from the child.
-    #[must_use]
-    pub fn is_isolated(&self) -> bool {
-        self.isolated
     }
 
     /// The variable names, for assertions and diagnostics.
@@ -100,37 +159,40 @@ impl SecretEnv {
         self.vars.iter().map(|(name, _)| name.as_str()).collect()
     }
 
-    /// The exposed value of one variable (the trusted child boundary).
+    /// The exposed value of one variable (the trusted child boundary): the
+    /// last one handed, as the child sees it.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
         self.vars
             .iter()
-            .find(|(key, _)| key == name)
+            .rfind(|(key, _)| key == name)
             .map(|(_, value)| value.expose())
     }
 
-    /// Applies the variables to a child process.
+    /// Replaces the child's environment with this one.
     fn apply(&self, command: &mut tokio::process::Command) {
-        self.apply_over(command, std::env::vars_os().map(|(key, _)| key));
+        command.env_clear();
+        command.envs(self.child_env(std::env::vars_os()));
     }
 
-    /// Applies the variables over the given ambient variable names.
-    fn apply_over(
+    /// The child's whole environment over the given ambient one: the
+    /// allowlisted ambient variables, then the handed variables, then
+    /// [`FIXED_ENV`], a later entry replacing an earlier one of the same
+    /// name. So a handed `SSH_AUTH_SOCK` can never reopen #333.
+    fn child_env(
         &self,
-        command: &mut tokio::process::Command,
-        ambient: impl Iterator<Item = std::ffi::OsString>,
-    ) {
-        if !self.isolated {
-            return;
-        }
-        for key in ambient {
-            if key.to_string_lossy().starts_with("PROXMOX_") {
-                command.env_remove(key);
-            }
-        }
+        ambient: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let mut env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> = ambient
+            .filter(|(key, _)| key.to_str().is_some_and(ambient_allowed))
+            .collect();
         for (key, value) in self.vars.iter() {
-            command.env(key, value.expose());
+            env.insert(key.into(), value.expose().into());
         }
+        for (key, value) in FIXED_ENV {
+            env.insert((*key).into(), (*value).into());
+        }
+        env.into_iter().collect()
     }
 }
 
@@ -506,54 +568,122 @@ fn parse_version(version: &str) -> Option<(u64, u16)> {
 mod tests {
     use super::*;
 
-    /// The child environment `env` produces over `ambient`: each touched
-    /// variable and its value, `None` when removed.
-    fn child_env(env: &SecretEnv, ambient: &[&str]) -> Vec<(String, Option<String>)> {
-        let mut command = tokio::process::Command::new("packer");
-        env.apply_over(
-            &mut command,
-            ambient.iter().map(|name| std::ffi::OsString::from(*name)),
-        );
-        let mut vars: Vec<(String, Option<String>)> = command
-            .as_std()
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
+    /// The child environment `env` produces over `ambient`, as strings.
+    fn child_env(env: &SecretEnv, ambient: &[(&str, &str)]) -> Vec<(String, String)> {
+        env.child_env(
+            ambient
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into())),
+        )
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+    }
+
+    fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect();
-        vars.sort();
-        vars
+        pairs.sort();
+        pairs
+    }
+
+    /// A controller environment with credentials and settings that must
+    /// never reach Packer, beside the ones it needs.
+    const AMBIENT: &[(&str, &str)] = &[
+        ("PATH", "/usr/bin"),
+        ("HOME", "/home/fleet"),
+        ("TMPDIR", "/var/tmp"),
+        ("LANG", "C.UTF-8"),
+        ("LC_ALL", "C"),
+        ("LC_", "bare-prefix"),
+        ("PACKER_PLUGIN_PATH", "/opt/packer/plugins"),
+        ("PROXMOX_USERNAME", "ambient@pve!other"),
+        ("PROXMOX_TOKEN", "ambient-token"),
+        ("PROXMOX_URL", "https://elsewhere:8006/api2/json"),
+        ("AWS_SECRET_ACCESS_KEY", "aws-secret"),
+        ("VAULT_TOKEN", "vault-token"),
+        ("GIT_ASKPASS", "/bin/askpass"),
+        ("HTTPS_PROXY", "http://user:pass@proxy:3128"),
+        ("https_proxy", "http://user:pass@proxy:3128"),
+        ("NO_PROXY", "localhost"),
+        ("PKR_VAR_vm_id", "1"),
+        ("PACKER_LOG", "1"),
+        ("PACKER_GITHUB_API_TOKEN", "gh-token"),
+        ("GODEBUG", "x509sha1=1"),
+        ("SSL_CERT_FILE", "/etc/ambient.pem"),
+        ("SSH_AUTH_SOCK", "/run/agent.sock"),
+    ];
+
+    const PASSED: &[(&str, &str)] = &[
+        ("CHECKPOINT_DISABLE", "1"),
+        ("HOME", "/home/fleet"),
+        ("LANG", "C.UTF-8"),
+        ("LC_ALL", "C"),
+        ("PACKER_NO_COLOR", "1"),
+        ("PACKER_PLUGIN_PATH", "/opt/packer/plugins"),
+        ("PATH", "/usr/bin"),
+        ("SSH_AUTH_SOCK", ""),
+        ("TMPDIR", "/var/tmp"),
+    ];
+
+    #[test]
+    fn a_command_handed_nothing_sees_only_the_allowlist() {
+        assert_eq!(child_env(&SecretEnv::default(), AMBIENT), pairs(PASSED));
+        assert_eq!(child_env(&SecretEnv::isolated(), AMBIENT), pairs(PASSED));
     }
 
     #[test]
-    fn handed_credentials_replace_every_ambient_proxmox_variable() {
-        let env = SecretEnv::new(vec![(
-            "PROXMOX_TOKEN".to_owned(),
-            fleet_core::SensitiveString::new("handed"),
-        )]);
-        let vars = child_env(&env, &["PROXMOX_USERNAME", "PROXMOX_URL", "PATH"]);
+    fn handed_variables_replace_ambient_ones() {
+        let env = SecretEnv::new(vec![
+            (
+                "PROXMOX_TOKEN".to_owned(),
+                fleet_core::SensitiveString::new("handed"),
+            ),
+            (
+                "SSL_CERT_FILE".to_owned(),
+                fleet_core::SensitiveString::new("/work/tls/pinned.pem"),
+            ),
+        ]);
+        let mut expected = PASSED.to_vec();
+        expected.extend([
+            ("PROXMOX_TOKEN", "handed"),
+            ("SSL_CERT_FILE", "/work/tls/pinned.pem"),
+        ]);
+        assert_eq!(child_env(&env, AMBIENT), pairs(&expected));
+    }
+
+    #[test]
+    fn handed_variables_never_override_the_fixed_ones() {
+        let env = SecretEnv::new(vec![
+            (
+                "SSH_AUTH_SOCK".to_owned(),
+                fleet_core::SensitiveString::new("/run/agent.sock"),
+            ),
+            (
+                "CHECKPOINT_DISABLE".to_owned(),
+                fleet_core::SensitiveString::new(""),
+            ),
+        ]);
+        assert_eq!(child_env(&env, AMBIENT), pairs(PASSED));
+    }
+
+    #[test]
+    fn an_empty_controller_environment_still_gets_the_fixed_variables() {
         assert_eq!(
-            vars,
-            vec![
-                ("PROXMOX_TOKEN".to_owned(), Some("handed".to_owned())),
-                ("PROXMOX_URL".to_owned(), None),
-                ("PROXMOX_USERNAME".to_owned(), None),
-            ]
+            child_env(&SecretEnv::default(), &[]),
+            pairs(&[
+                ("CHECKPOINT_DISABLE", "1"),
+                ("PACKER_NO_COLOR", "1"),
+                ("SSH_AUTH_SOCK", ""),
+            ])
         );
-    }
-
-    #[test]
-    fn an_isolated_command_sees_no_ambient_proxmox_variable() {
-        let vars = child_env(&SecretEnv::isolated(), &["PROXMOX_TOKEN", "HOME"]);
-        assert_eq!(vars, vec![("PROXMOX_TOKEN".to_owned(), None)]);
-    }
-
-    #[test]
-    fn the_default_inherits_the_environment_unchanged() {
-        assert!(child_env(&SecretEnv::default(), &["PROXMOX_TOKEN"]).is_empty());
     }
 
     #[test]
