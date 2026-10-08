@@ -104,7 +104,9 @@ struct BuildEnvs {
 /// value the SDK's Unix `GetSSHAgentConnection` fails, so neither
 /// forwarding nor agent authentication reaches the agent, for stored
 /// versions too. (The SDK's Windows build dials a named pipe instead, so
-/// builds are refused on Windows controllers.)
+/// builds are refused on Windows controllers.) The provider sets it on
+/// every child as well ([`fleet_provider_packer::FIXED_ENV`], #335); this
+/// keeps the intent visible in every env the executor builds.
 fn no_ssh_agent() -> (String, fleet_core::SensitiveString) {
     (
         "SSH_AUTH_SOCK".to_owned(),
@@ -113,10 +115,10 @@ fn no_ssh_agent() -> (String, fleet_core::SensitiveString) {
 }
 
 /// The child environment for a controller without account credentials
-/// wired: the controller's environment as before, including its ambient
-/// `PROXMOX_*` credentials, but never its SSH agent. [`SecretEnv`] only
-/// sets variables on an isolating env, which removes ambient `PROXMOX_*`
-/// first, so they are carried over explicitly.
+/// wired: the provider's allowlisted environment (#335) plus the
+/// controller's ambient `PROXMOX_*` credentials, its only Proxmox
+/// credential in that mode, and never its SSH agent. The allowlist drops
+/// ambient `PROXMOX_*`, so they are carried over explicitly.
 fn inherited_env() -> SecretEnv {
     let mut vars: Vec<(String, fleet_core::SensitiveString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
@@ -162,7 +164,8 @@ impl ImagesExecutor {
     /// environment only, together with the account's pinned certificate as
     /// the child's only TLS root (#284). `certificates` captures the host's
     /// leaf without credentials for the pin check. Without this the CLI
-    /// inherits the controller's environment, as before.
+    /// gets the controller's ambient `PROXMOX_*` over the allowlisted
+    /// environment instead (#335).
     #[must_use]
     pub fn with_account_credentials(
         mut self,
@@ -1076,9 +1079,8 @@ mod tests {
         interrupted: std::sync::atomic::AtomicBool,
         /// Whether an interrupted build reports Packer's clean cancel.
         clean_cancel: std::sync::atomic::AtomicBool,
-        /// Per command: its args joined, the child's PROXMOX_TOKEN, and
-        /// whether ambient PROXMOX_* are removed.
-        saw_env: Mutex<Vec<(String, Option<String>, bool)>>,
+        /// Per command: its args joined and the child's PROXMOX_TOKEN.
+        saw_env: Mutex<Vec<(String, Option<String>)>>,
         /// Per command: its args joined and the trust it was handed, as
         /// the child would read it at that moment.
         saw_tls: Mutex<Vec<(String, Option<SeenTls>)>>,
@@ -1106,7 +1108,6 @@ mod tests {
             self.saw_env.lock().unwrap().push((
                 command.args.join(" "),
                 command.env.get("PROXMOX_TOKEN").map(str::to_owned),
-                command.env.is_isolated(),
             ));
             self.saw_agent.lock().unwrap().push((
                 command.args.join(" "),
@@ -1478,7 +1479,7 @@ mod tests {
     /// What one credentialed build left behind.
     struct Ran {
         record: fleet_core::ImageBuildRecord,
-        seen: Vec<(String, Option<String>, bool)>,
+        seen: Vec<(String, Option<String>)>,
         tls: Vec<(String, Option<SeenTls>)>,
         agent: Vec<(String, Option<String>)>,
         stored: String,
@@ -1492,7 +1493,7 @@ mod tests {
         token: Option<&'static str>,
     ) -> (
         fleet_core::ImageBuildRecord,
-        Vec<(String, Option<String>, bool)>,
+        Vec<(String, Option<String>)>,
         String,
     ) {
         let der = leaf(&["pve.example.test"]);
@@ -1746,7 +1747,7 @@ mod tests {
             ran.record.reason.as_deref(),
             Some("target_certificate_changed")
         );
-        assert!(ran.seen.iter().all(|(args, token, _)| token.is_none()
+        assert!(ran.seen.iter().all(|(args, token)| token.is_none()
             && !args.starts_with("validate")
             && !args.contains(" build ")));
         assert!(!ran.stored.contains("fixture-account-token"));
@@ -1760,7 +1761,7 @@ mod tests {
             ran.record.reason.as_deref(),
             Some("target_certificate_name_mismatch")
         );
-        assert!(ran.seen.iter().all(|(_, token, _)| token.is_none()));
+        assert!(ran.seen.iter().all(|(_, token)| token.is_none()));
     }
 
     #[tokio::test]
@@ -1772,7 +1773,7 @@ mod tests {
             ran.record.reason.as_deref(),
             Some("target_certificate_unobservable")
         );
-        assert!(ran.seen.iter().all(|(_, token, _)| token.is_none()));
+        assert!(ran.seen.iter().all(|(_, token)| token.is_none()));
     }
 
     const INSECURE: &str = r#"{"builders":[{"type":"proxmox-clone","node":"pve","insecure_skip_tls_verify":true,"disks":[{"type":"scsi","storage_pool":"local-lvm","disk_size":"8G"}],"vm_name":"ubuntu-base","proxmox_url":"https://pve.example.test:8006/api2/json"}]}"#;
@@ -1798,12 +1799,8 @@ mod tests {
         let ran = run_case(case).await;
         assert_eq!(ran.record.outcome, "succeeded", "{:?}", ran.record.reason);
         assert!(ran.tls.iter().all(|(_, tls)| tls.is_none()));
-        assert!(
-            ran.seen
-                .iter()
-                .any(|(args, token, _)| args.contains(" build ")
-                    && token.as_deref() == Some("fixture-account-token"))
-        );
+        assert!(ran.seen.iter().any(|(args, token)| args.contains(" build ")
+            && token.as_deref() == Some("fixture-account-token")));
         let mut case = Case::pinned_and_presented(&der);
         case.content = INSECURE;
         case.options.allow_insecure_tls = true;
@@ -1822,8 +1819,7 @@ mod tests {
         // Only the build child carries the real token. `packer validate`
         // carries a placeholder (its Prepare never connects), and the
         // version probes carry none, not even the controller's own (#313).
-        for (args, token, isolated) in &seen {
-            assert!(isolated, "{args}");
+        for (args, token) in &seen {
             if args.contains(" build ") {
                 assert_eq!(token.as_deref(), Some("fixture-account-token"), "{args}");
             } else if args.starts_with("validate") {
@@ -1837,8 +1833,8 @@ mod tests {
             }
             assert!(!args.contains("fixture-account-token"));
         }
-        assert!(seen.iter().any(|(args, _, _)| args.contains(" build ")));
-        assert!(seen.iter().any(|(args, _, _)| args.starts_with("validate")));
+        assert!(seen.iter().any(|(args, _)| args.contains(" build ")));
+        assert!(seen.iter().any(|(args, _)| args.starts_with("validate")));
         let record_text = serde_json::to_string(&record).unwrap();
         assert!(!record_text.contains("fixture-account-token"));
         assert!(!stored.contains("fixture-account-token"));
@@ -1850,15 +1846,12 @@ mod tests {
         assert_eq!(record.reason.as_deref(), Some("target_account_untrusted"));
         assert!(
             seen.iter()
-                .all(|(args, token, _)| token.is_none() && !args.starts_with("validate"))
+                .all(|(args, token)| token.is_none() && !args.starts_with("validate"))
         );
 
         let (record, seen, _) = credential_build(true, None).await;
         assert_eq!(record.reason.as_deref(), Some("account_credential_missing"));
-        assert!(
-            seen.iter()
-                .all(|(args, _, _)| !args.starts_with("validate"))
-        );
+        assert!(seen.iter().all(|(args, _)| !args.starts_with("validate")));
     }
 
     #[test]
@@ -2184,11 +2177,11 @@ mod tests {
             let seen = transport.saw_env.lock().unwrap().clone();
             assert!(
                 seen.iter()
-                    .all(|(args, _, _)| !args.starts_with("validate") && !args.contains(" build ")),
+                    .all(|(args, _)| !args.starts_with("validate") && !args.contains(" build ")),
                 "no validate/build ran: {seen:?}"
             );
             assert!(
-                seen.iter().all(|(_, token, _)| token.is_none()),
+                seen.iter().all(|(_, token)| token.is_none()),
                 "no token was handed to any child: {seen:?}"
             );
         }
