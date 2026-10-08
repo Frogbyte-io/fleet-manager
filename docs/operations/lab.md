@@ -327,7 +327,7 @@ What Fleet guarantees on `dev`:
 - **Adopt only its own guest.** On a re-run, a guest already at the recorded VMID is adopted only if it carries the record's name (`fm-lab-<record-id>`). Anything else there is a conflict, and Fleet touches nothing.
 - **Owed cleanup is not forgotten.** A failed or cancelled provision that allocated a guest moves its lease to `releasing`. Cleanup retries five times, then the lease becomes `cleanup_failed` with an audit event that names the guest.
 - **Cleanup refuses templates.** Cleanup refuses any VMID that is a promoted image's recorded build artifact, or that PVE reports as a template. It checks the template state before the stop and again after it. PVE has no conditional delete, so a guest converted to a template outside Fleet after the last check can still be deleted. Fleet never reserves such a VMID as a clone target.
-- **No credentials to unconfirmed hosts.** No Proxmox operation sends a token to an account whose fingerprint you have not confirmed. Image builds on `dev` are the exception until #285 merges (see [Build](#3-build)).
+- **No credentials to unconfirmed hosts.** No Proxmox operation sends a token to an account whose fingerprint you have not confirmed. Image builds fail with `target_account_untrusted` before any credential is resolved, and with `target_certificate_changed` when the host's certificate is no longer the confirmed one (see [Build](#3-build)).
 - **Builds leave records.** Every build has an immutable record, written before Packer runs and completed with its outcome.
 
 What Fleet never does:
