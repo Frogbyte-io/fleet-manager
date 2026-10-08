@@ -82,18 +82,21 @@ fleetctl --output json lab destroy <lease-id> --wait
 ```
 
 1. Pick a published template version from `lab templates` (`publishedFrom`).
-2. `lab create` leases, provisions, and waits for the environment. `--project`
-   attaches the lease to a project; `--account <account-id>` picks the Proxmox
-   account when more than one is trusted. Without `--wait` it returns the lease
-   and you follow it with `lab status` until its `state` is `ready`. With
+2. `lab create` leases and provisions the environment (`--wait` waits for it). `--project`
+   attaches the lease to a project. Without `--account` it uses the only
+   trusted Proxmox account; with none or several, pass `--account <account-id>`.
+   Without `--wait` it returns the lease as it is right after provisioning was
+   queued, and you follow it with `lab status` until its `state` is `ready`. With
    `--wait` the exit code is non-zero unless the lease is `ready`. Keep the
    lease `id` it returns, even on failure, so you can destroy it.
 3. `lab exec` runs a command in the guest. Put `--wait` and `--timeout` before
    the `--`; everything after it is the guest command. With `--wait` the exit
-   code is the guest command's. Its output is stored as an exec-log artifact.
+   code is the guest command's (1 if it did not run, or if the wait timed out
+   before the operation finished: the error names the operation). The default
+   `--timeout` is 60 seconds. Its output is stored as an exec-log artifact.
 4. Optionally `lab collect` copies absolute guest paths into artifacts, which
-   outlive the lease, and `lab artifacts` lists them (filter with `--lease` or
-   `--project`).
+   outlive the lease (with `--wait` it exits non-zero unless it succeeded), and
+   `lab artifacts` lists them (filter with `--lease` or `--project`).
 5. `lab extend` adds time up to the lease's maximum lifetime; the controller
    refuses more.
 6. `lab destroy` removes the environment.
@@ -110,12 +113,13 @@ Rules:
 - Do not put secrets in `--purpose` or in `lab exec` arguments.
 
 If `lab create` fails, the operation carries an explanation (for example
-`placement_no_candidate`, `placement_ambiguous`, `placement_unresolved`, or no
-capacity on the node). Report it to the user, then `lab destroy` any lease it
-left.
+`template_missing`, no capacity on the node, or `pool_exhausted`). Report it to
+the user, then `lab destroy` any lease it left. With no trusted account, or
+several and no `--account`, `lab create` stops before it creates a lease.
 
-Lab pools (`lab pool ...`) are set up by an operator; a template version with a
-pool is used by `lab create` without any extra step from you.
+Lab pools (`lab pool ...`) are set up by an operator. A template version with a
+pool is used by `lab create` with no extra step, provided `--account` is
+omitted or names the pool's account.
 
 ### Advanced: the low-level flow
 
