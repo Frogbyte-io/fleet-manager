@@ -118,7 +118,7 @@ What the live runs taught:
   - `target_certificate_name_mismatch`: the host is not in the SANs. Point the account and `proxmox_url` at a name or address the certificate lists, or install a certificate that names your host (a CA-signed one, or `pvecm updatecerts --force` after fixing the node's address), then observe and confirm the new fingerprint.
   - `target_certificate_changed`: the host now presents a different certificate than the one you confirmed, for example after a renewal. Run `fleetctl proxmox observe` and `confirm` again after checking the new fingerprint on the host.
   - `insecure_tls_not_allowed`: the recipe sets `insecure_skip_tls_verify`. Remove it. If you really must skip verification, publish with `fleetctl images publish <recipe-id> --allow-insecure-tls`. That opt-in is audited and part of the version, and the build still refuses a changed certificate. Versions published before this release that set the field fail this way. Publishing again, with or without the opt-in, makes a new version.
-  - The pin applies to every HTTPS connection Packer makes. Let PVE fetch ISOs (`iso_file` on PVE storage, or `iso_download_pve`) rather than having Packer download them.
+  - For builds without the opt-in, the confirmed leaf is the only trusted root for Go TLS clients that honor `SSL_CERT_FILE` and `SSL_CERT_DIR` (Packer and its plugins). A subprocess that uses another TLS implementation or trust store is not covered. Opted-in builds get only the pin check before Packer skips verification. Let PVE fetch ISOs (`iso_file` on PVE storage, or `iso_download_pve`) rather than having Packer download them.
 
 ### 2. Create and publish the recipe
 

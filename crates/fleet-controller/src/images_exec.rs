@@ -624,7 +624,17 @@ fn write_pinned_roots(
     }
     pem.push_str("-----END CERTIFICATE-----\n");
     let file = tls.join(PINNED_CERT_FILE);
-    std::fs::write(&file, pem)?;
+    // Owner-only and freshly created: a leftover from an earlier attempt of
+    // the same operation is replaced, never written through.
+    match std::fs::remove_file(&file) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&file)?, pem.as_bytes())?;
     // Packer runs inside the work directory, so a relative data directory
     // would make relative paths resolve beneath it: export absolute ones.
     Ok((file.canonicalize()?, empty.canonicalize()?))
@@ -894,6 +904,7 @@ mod tests {
         dir: PathBuf,
         pem: String,
         dir_entries: usize,
+        mode: u32,
     }
     #[async_trait::async_trait]
     impl PackerTransport for Script {
@@ -916,6 +927,15 @@ mod tests {
                     let file = PathBuf::from(file.expect("SSL_CERT_FILE travels with the dir"));
                     let dir = PathBuf::from(dir.expect("SSL_CERT_DIR travels with the file"));
                     Some(SeenTls {
+                        mode: {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt as _;
+                                std::fs::metadata(&file).unwrap().permissions().mode()
+                            }
+                            #[cfg(not(unix))]
+                            0o600
+                        },
                         pem: std::fs::read_to_string(&file).unwrap(),
                         dir_entries: std::fs::read_dir(&dir).unwrap().count(),
                         file,
@@ -1364,6 +1384,7 @@ mod tests {
             let tls = tls.as_ref().unwrap();
             // Absolute: Packer runs inside the work directory.
             assert!(tls.file.is_absolute() && tls.dir.is_absolute());
+            assert_eq!(tls.mode & 0o777, 0o600, "{}", tls.file.display());
             assert!(tls.file.starts_with(&ran.work), "{}", tls.file.display());
             assert!(tls.dir.starts_with(&ran.work), "{}", tls.dir.display());
             assert_eq!(tls.dir_entries, 0, "the root directory stays empty");
