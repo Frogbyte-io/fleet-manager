@@ -904,3 +904,65 @@ async fn a_store_failure_is_recorded_without_its_backend_text() {
     );
     assert!(!failure.detail.contains("not found"), "{}", failure.detail);
 }
+
+/// Grants `lab.artifacts` on one lease only, as a lease-scoped policy would.
+#[derive(Debug)]
+struct ArtifactsOnLease(String);
+
+impl fleet_application::authz::Authorizer for ArtifactsOnLease {
+    fn decide(
+        &self,
+        request: fleet_application::authz::AccessRequest<'_>,
+    ) -> fleet_application::authz::Decision {
+        if request.action != fleet_application::authz::Permission::LabArtifacts
+            || request.resource == Some(self.0.as_str())
+        {
+            fleet_application::authz::Decision::allow()
+        } else {
+            fleet_application::authz::Decision::deny(
+                fleet_application::authz::ReasonId::UnknownPrincipal,
+            )
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_download_is_authorized_on_the_artifacts_lease() {
+    let fixture = Fixture::new().await;
+    let principal = Fixture::principal();
+    let log = fixture
+        .artifacts
+        .record_exec_log(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &principal,
+            &fixture.lease_id,
+            "op-1",
+            "log\n",
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .unwrap();
+    // Granted on the artifact's lease: served.
+    assert!(
+        fixture
+            .artifacts
+            .open(
+                &ArtifactsOnLease(fixture.lease_id.clone()),
+                &principal,
+                &log.id
+            )
+            .await
+            .is_ok()
+    );
+    // Granted on another lease only (or on the artifact id): refused.
+    for scope in ["another-lease".to_owned(), log.id.clone()] {
+        assert!(matches!(
+            fixture
+                .artifacts
+                .open(&ArtifactsOnLease(scope), &principal, &log.id)
+                .await
+                .err(),
+            Some(fleet_application::lab::LabUseCaseError::Denied(_))
+        ));
+    }
+}

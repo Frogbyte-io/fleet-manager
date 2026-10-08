@@ -327,6 +327,8 @@ impl ScriptExecutor {
                         "partialOutput": {
                             "stdout": trim_to_bound(&result.stdout),
                             "stderr": trim_to_bound(&result.stderr),
+                            "truncatedStdout": result.truncated_stdout,
+                            "truncatedStderr": result.truncated_stderr,
                         },
                     })
                     .to_string();

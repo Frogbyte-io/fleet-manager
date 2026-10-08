@@ -426,7 +426,9 @@ pub fn exec_log_text(
     }
     for (name, truncated) in [("stdout", "truncatedStdout"), ("stderr", "truncatedStderr")] {
         let _ = write!(text, "--- {name}");
-        if output[truncated].as_bool() == Some(true) {
+        // The flags sit beside the streams (a deadline kill records them in
+        // `partialOutput`); older records carry them on the outer object.
+        if streams[truncated].as_bool() == Some(true) || output[truncated].as_bool() == Some(true) {
             text.push_str(" (truncated)");
         }
         text.push_str(" ---\n");
@@ -551,8 +553,15 @@ impl LabArtifacts {
         principal: &ActingPrincipal,
         id: &str,
     ) -> Result<(LabArtifact, ArtifactReader), LabUseCaseError> {
-        allow(authorizer, principal, Permission::LabArtifacts, Some(id))?;
+        // Authorize on the artifact's lease, as every other artifact check
+        // does, so a lease-scoped policy covers its downloads.
         let artifact = self.require(id).await?;
+        allow(
+            authorizer,
+            principal,
+            Permission::LabArtifacts,
+            Some(&artifact.lease_id),
+        )?;
         let reader = self
             .blobs
             .open(&artifact.location, &artifact.sha256, artifact.size_bytes)
@@ -1118,6 +1127,23 @@ mod tests {
         .unwrap();
         assert!(killed.contains("# reason: deadline_killed"));
         assert!(killed.contains("half"));
+
+        // A deadline kill records its truncation flags beside its streams.
+        let truncated = exec_log_text(
+            "op-2",
+            "lease-1",
+            "failed",
+            None,
+            Some(
+                r#"{"reason":"deadline_killed","partialOutput":{"stdout":"half","stderr":"","truncatedStdout":true,"truncatedStderr":false}}"#,
+            ),
+        )
+        .unwrap();
+        assert!(
+            truncated.contains("--- stdout (truncated) ---"),
+            "{truncated}"
+        );
+        assert!(truncated.contains("--- stderr ---"), "{truncated}");
 
         // Refused before anything ran: nothing to keep.
         assert!(
