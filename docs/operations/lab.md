@@ -71,17 +71,22 @@ A Lab image must contain:
 - `qemu-guest-agent`, enabled in the guest and in the VM (`--agent enabled=1`). Readiness polls the agent for every template, whatever its probe.
 - The controller's SSH public key, authorized for the template's SSH user (default `root`). The controller authenticates with its own SSH agent (`SSH_AUTH_SOCK`); Fleet never installs keys.
 - A way to get an IPv4 address on every clone. Lab readiness (`guest_agent`) needs a non-loopback IPv4 address, and a lease that never gets one fails at step `guest_ip`.
+- SSH host keys of its own on every clone, present by the time `sshd` starts. At `bootstrapping` the controller trusts the guest's host key on first contact, so a guest without `sshd` never becomes ready, and clones that share keys cannot be told apart.
 
-Cloud images (Debian, Ubuntu) break the last requirement in two ways, and both show up only on a clone:
+Cloud images (Debian, Ubuntu) break these requirements in ways that show up only on a clone:
 
 - **No `/etc/machine-id`.** A template whose `/etc/machine-id` is *missing* (not empty) leaves `systemd-networkd` unable to start its DHCP client (`Failed to configure DHCPv4 client: No such file or directory`). The guest has only loopback and IPv6 link-local. Leave an empty file instead (`truncate -s 0 /etc/machine-id`): the clone generates an ID on its first boot. Never boot the template again after you empty it.
-- **A network config bound to a MAC address.** The image's netplan file matches the MAC of the VM it was built on. A clone has a different MAC, so its NIC stays down. This also happens when `cloud-init clean` has run, or when the build's clone has no cloud-init drive to seed the network. Use a config that matches by name pattern (`match: {name: "e*"}`, `dhcp4: true`), and stop cloud-init from rewriting it. The NIC may be called `ens18` or `eth0`, depending on the image, so do not name it.
+- **A network config bound to a MAC address.** The image's netplan file (`50-cloud-init.yaml`) matches the MAC of the VM it was built on. A clone has a different MAC, so its NIC stays down unless cloud-init rewrites the file on the clone's first boot. Cloud-init can do that only when the clone has a cloud-init drive. A template that Packer built from a clone has none, so on its clones cloud-init reports `disabled`. For such templates, replace the file with one that matches by name pattern (`match: name: "e*"`, `dhcp4: true`), and stop cloud-init from writing its own. The NIC may be called `ens18` or `eth0`, depending on the image, so do not name it.
+- **No host keys after a reset.** Debian's `ssh.service` does not create missing host keys; the package does that once, at install. Cloud-init regenerates them only on a fresh instance with a cloud-init drive. A template whose host keys were removed therefore needs its own boot-time `ssh-keygen -A` (see the recipe below).
 
-[The Proxmox test-cluster runbook](proxmox-test-cluster.md#step-6-the-test-template-for-fm-611-and-lab) shows how to prepare such a source template by hand.
+[The Proxmox test-cluster runbook](proxmox-test-cluster.md#step-6-the-test-template-for-fm-611-and-lab) shows how to prepare the DHCP source template these recipes clone.
 
 #### Building an SSH-ready image from a DHCP template
 
-This recipe is the one the M7 exit-gate run built its working Lab image with, with placeholders. It is a `proxmox-clone` of a template that already has an empty machine ID and gets DHCP (`<dhcp-template-vmid>`). It uses an SSH communicator and an inline `shell` provisioner, so it passes the recipe gate: no `http_directory`, `cd_files`, `post-processors`, or template function (no `{{ … }}` at all), and only `shell` with `inline` lines. The SSH key file is read on the controller only to authenticate to the guest. Replace every `<…>` value.
+This is the recipe the M7 exit-gate run ([#266](https://github.com/Frogbyte-io/fleet-manager/issues/266)) built its working Lab image with. The run's extra software (git and Node) is left out, and placeholders replace the hosts and keys. This exact recipe, with the placeholders filled in, was published, built, promoted, and leased to `ready` through Fleet on a PVE 9.2 cluster. It clones a cloud-image template (`<dhcp-template-vmid>`) that has an empty machine ID, a cloud-init drive, and `ipconfig0=ip=dhcp`. Step 6 of the test-cluster runbook makes one.
+
+- **No credential in the recipe.** With no `ssh_password` and no `ssh_private_key_file`, Packer generates a temporary key pair. The Proxmox clone builder hands its public half, and `ssh_username`, to the build VM through cloud-init. The recipe therefore reads no file on the controller. The build logs in as the image's default user (`debian` for Debian cloud images) and uses `sudo`: the image's cloud-init config (`disable_root: true`) blocks a cloud-init key for `root`.
+- **The recipe gate.** It has no `{{ … }}` template function, no `http_directory`, `cd_files`, or `post-processors`, and only `shell` with `inline` lines, so `fleetctl images publish` accepts it.
 
 ```json
 {
@@ -95,31 +100,34 @@ This recipe is the one the M7 exit-gate run built its working Lab image with, wi
     "vm_name": "lab-base-<new-template-vmid>",
     "template_name": "lab-base-<new-template-vmid>",
     "scsi_controller": "virtio-scsi-pci",
-    "cores": 2,
-    "memory": 2048,
+    "cores": 1,
+    "memory": 1024,
     "network_adapters": [{ "model": "virtio", "bridge": "vmbr0" }],
+    "ipconfig": [{ "ip": "dhcp" }],
     "qemu_agent": true,
     "communicator": "ssh",
-    "ssh_username": "root",
-    "ssh_private_key_file": "<path-to-build-key-on-controller>",
-    "ssh_timeout": "10m",
+    "ssh_username": "debian",
+    "ssh_timeout": "15m",
     "task_timeout": "10m"
   }],
   "provisioners": [{
     "type": "shell",
     "inline": [
-      "mkdir -p /root/.ssh && chmod 700 /root/.ssh",
-      "echo '<controller-ssh-public-key>' >> /root/.ssh/authorized_keys",
-      "chmod 600 /root/.ssh/authorized_keys",
-      "rm -f /etc/netplan/*.yaml",
-      "printf 'network:\\n  version: 2\\n  ethernets:\\n    all-ethernets:\\n      match: {name: \"e*\"}\\n      dhcp4: true\\n' > /etc/netplan/50-fleet-dhcp.yaml",
-      "chmod 600 /etc/netplan/50-fleet-dhcp.yaml",
-      "echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-fleet-network.cfg",
-      "rm -f /etc/ssh/ssh_host_*",
-      "systemctl enable ssh",
-      "cloud-init clean --logs",
-      "truncate -s 0 /etc/machine-id",
-      "rm -f /var/lib/dbus/machine-id && ln -s /etc/machine-id /var/lib/dbus/machine-id",
+      "set -eu",
+      "sudo cloud-init status --wait || true",
+      "sudo install -d -m 700 /root/.ssh",
+      "echo '<controller-agent-public-key>' | sudo tee -a /root/.ssh/authorized_keys >/dev/null",
+      "echo '<controller-user-default-public-key>' | sudo tee -a /root/.ssh/authorized_keys >/dev/null",
+      "sudo chmod 600 /root/.ssh/authorized_keys",
+      "printf 'network:\\n  version: 2\\n  ethernets:\\n    lan:\\n      match:\\n        name: \"e*\"\\n      dhcp4: true\\n' | sudo tee /etc/netplan/60-fleet-dhcp.yaml >/dev/null",
+      "sudo chmod 600 /etc/netplan/60-fleet-dhcp.yaml",
+      "sudo rm -f /etc/netplan/50-cloud-init.yaml",
+      "echo 'network: {config: disabled}' | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg >/dev/null",
+      "printf '[Unit]\\nDescription=Generate missing SSH host keys\\nBefore=ssh.service\\n[Service]\\nType=oneshot\\nExecStart=/usr/bin/ssh-keygen -A\\n[Install]\\nWantedBy=multi-user.target\\n' | sudo tee /etc/systemd/system/fleet-ssh-hostkeys.service >/dev/null",
+      "sudo systemctl enable fleet-ssh-hostkeys.service",
+      "sudo cloud-init clean --logs",
+      "sudo rm -f /etc/ssh/ssh_host_*",
+      "sudo truncate -s 0 /etc/machine-id",
       "sync"
     ]
   }]
@@ -128,10 +136,13 @@ This recipe is the one the M7 exit-gate run built its working Lab image with, wi
 
 Notes:
 
-- **Authorize a key that exists as a file on the controller.** The SSH provider forces `IdentitiesOnly yes` without an identity file, so OpenSSH never offers an agent-only key ([#326](https://github.com/Frogbyte-io/fleet-manager/issues/326)). Authorize the controller user's default public key (`~/.ssh/id_ed25519.pub`) as well as any agent key. With only an agent key, the lease becomes `ready` but `lab exec` fails with `Permission denied (publickey)`.
+- **Wait for cloud-init first.** `cloud-init status --wait` lets the build VM's first-boot cloud-init finish before anything else runs, so a later `apt-get` does not race it.
+- **Authorize a key that exists as a file on the controller.** The SSH provider forces `IdentitiesOnly yes` without an identity file, so OpenSSH never offers an agent-only key ([#326](https://github.com/Frogbyte-io/fleet-manager/issues/326)). Authorize the controller user's default public key (for example `~/.ssh/id_ed25519.pub`) as well as the agent's key; that is why the recipe has two `authorized_keys` lines. With only an agent key, the lease becomes `ready` but `lab exec` fails with `Permission denied (publickey)`. Public keys are not secrets, but they are recorded with the recipe.
+- **Order matters at the end.** Enable the host-key unit before removing the keys, and run `cloud-init clean`, the key removal, and the machine-ID reset last. Packer shuts the VM down through the API right after the provisioner, so the template never boots again before it is converted.
+- **Keep `ssh_timeout` at 15 minutes.** A nested or slow host can take several minutes to boot the clone. If the build VM never gets an address, the build fails with `build_failed` only after this timeout.
 - **Use a different name from `fm-lab-`.** Fleet reserves that prefix for its Lab guests, and the sweeper reports a build VM with it as an orphan.
-- **Software the guests need** (git, Node, and so on) goes into the same `inline` list. Pin a checksum for anything you download, and never put credentials in the recipe.
-- **Check the result.** After promotion, a lease on a template that uses the image should reach `ready` in about 20 seconds. A lease that fails at `guest_ip` points to the machine-id or the network config above.
+- **Software the guests need** (git, Node, and so on) goes into the same `inline` list, after the cloud-init wait and before the cleanup lines. Pin a checksum for anything you download, and never put credentials in the recipe.
+- **Check the result.** After promotion, a lease on a template that uses the image should reach `ready` in about 20 seconds. A lease that fails at `guest_ip` points to the machine ID or the network config above. One that gets an address but never becomes ready points to `sshd` (the host keys) or the SSH port.
 
 ## First run
 
