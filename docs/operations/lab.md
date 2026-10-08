@@ -283,7 +283,7 @@ To resolve it:
 
    The lease goes back to `releasing` and one new `lab.cleanup` attempt is queued at once. A guest that is already gone counts as destroyed, so a guest you removed by hand resolves the lease to `released`, and the cleanup removes the guest's Lab machine record. `--wait` waits for that one attempt and exits non-zero unless the lease ended `released`. Without `--wait` the command prints the queued operation.
 
-The re-arm needs `lab.lease` on the lease and `operation.create`, as a release does; the controller checks both before it changes the lease. It is audited: `lab_lease_cleanup_rearm_requested` is recorded before the change, and a re-arm that cannot record it fails without changing the lease. `lab_lease_cleanup_rearmed` is recorded once the change is made, but only best effort, so do not rely on finding it; the requested event is the audit of record. It grants a fresh round of five attempts, with the backoff restarting at one minute. A failed attempt backs off as before, and the lease returns to `cleanup_failed` after the round. `cleanupAttempts` keeps counting across rounds: 5 just after the re-arm, and 10 if the new round is exhausted too. A lease that is not `cleanup_failed` is refused with `400 invalid_request`.
+The re-arm needs `lab.lease` on the lease and `operation.create`, as a release does; the controller checks both before it changes the lease. It is audited: `lab_lease_cleanup_rearm_requested` is recorded before the change, and a re-arm that cannot record it fails without changing the lease. `lab_lease_cleanup_rearmed` is recorded once the change is made, but only best effort, so do not rely on finding it; the requested event is the audit of record. It grants a fresh round of five attempts, with the backoff restarting at one minute. A failed attempt backs off as before, and the lease returns to `cleanup_failed` after the round. `cleanupAttempts` keeps counting across rounds: 5 just after the re-arm, and 10 if the new round is exhausted too. A lease that is not `cleanup_failed` when the request arrives is refused with `400 invalid_request`. If the lease changes between that check and the re-arm (another retry, release or sweep won the race), the request is refused with `409 conflict` and changes nothing; read the lease again before retrying.
 
 Until you re-arm it, `cleanup_failed` stays put: `lab release` refuses it, and Fleet does not retry it. The lease remains the record that it owned a guest that needed a human.
 
@@ -347,7 +347,7 @@ What Fleet guarantees on `dev`:
 What Fleet never does:
 
 - delete a guest it cannot attribute to a Lab record (an orphan), or one released with `keep`;
-- retry cleanup after `cleanup_failed` on its own (only `lab cleanup-retry` re-arms it);
+- retry cleanup after `cleanup_failed` on its own (only an explicit retry request re-arms it: `lab cleanup-retry`, or `POST /api/v1/lab/leases/{leaseId}/cleanup/retry`);
 - promote a build or replace a promoted version on its own.
 
 Not yet guaranteed:
