@@ -4,7 +4,8 @@
 //! A recipe row is always a **draft**: saving an edit of a published
 //! version creates a new draft, and publishing freezes an immutable
 //! version identified by its content digest — the same content published
-//! twice is the same version. Builds reference an immutable version id,
+//! twice with the same options is the same version (the audited
+//! insecure-TLS opt-in, #284, is part of the digest). Builds reference an immutable version id,
 //! never a mutable draft, so a build of a since-edited recipe is
 //! reproducible.
 //!
@@ -475,8 +476,11 @@ impl Images {
     }
 
     /// Publishes a draft: freezes an immutable version identified by its
-    /// content digest. The same content published twice yields the same
-    /// version, so publishing is idempotent by construction.
+    /// content digest. The same content published twice with the same
+    /// options yields the same version, so publishing is idempotent by
+    /// construction. The insecure-TLS opt-in is a build input: with it, the
+    /// same content is a different version, whose `content_digest` (the
+    /// version digest) covers the opt-in too.
     ///
     /// # Errors
     ///

@@ -16,13 +16,20 @@
 //! #284 pins the account's confirmed certificate for Packer. The Proxmox
 //! plugin verifies TLS against Go's system root pool, which on Linux is
 //! exactly `SSL_CERT_FILE` plus the directories in `SSL_CERT_DIR`. Each
-//! build captures the host's leaf without credentials, refuses it unless
-//! its SHA-256 equals the confirmed pin and it names the account host, and
-//! hands the validate/build children that one leaf as their only root (an
-//! empty `SSL_CERT_DIR` keeps the system directories out). Go accepts a
-//! leaf that is itself in the pool as a chain of one, still checking the
-//! host name, validity, and key usage; any other certificate fails the
-//! handshake before a request, and so the token, is sent.
+//! build captures the host's leaf without credentials and refuses it unless
+//! its SHA-256 equals the confirmed pin. A build that verifies TLS (every
+//! version without the audited `allowInsecureTls` opt-in) also requires the
+//! leaf to name the account host, and hands the validate/build children
+//! that one leaf as their only root (an empty `SSL_CERT_DIR` keeps the
+//! system directories out). Go accepts a leaf that is itself in the pool as
+//! a chain of one, still checking the host name, validity, and key usage.
+//! Any other certificate fails the handshake before a request is sent, so
+//! the token is never sent to it. The pin constrains Go TLS clients that
+//! honor these variables (Packer and its Proxmox plugin); other TLS stacks
+//! in a subprocess are not covered, and HTTPS downloads by Packer itself
+//! (an `iso_url` fetched on the controller) are unsupported under the pin.
+//! An opted-in build gets only the check-time pin: Packer then skips
+//! verification itself.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -621,8 +628,20 @@ fn write_pinned_roots(
     }
     pem.push_str("-----END CERTIFICATE-----\n");
     let file = tls.join(PINNED_CERT_FILE);
-    std::fs::write(&file, pem)?;
-    Ok((file, empty))
+    // Owner-only and freshly created: a leftover from an earlier attempt of
+    // the same operation is replaced, never written through.
+    match std::fs::remove_file(&file) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&file)?, pem.as_bytes())?;
+    // Packer runs inside the work directory, so a relative data directory
+    // would make relative paths resolve beneath it: export absolute ones.
+    Ok((file.canonicalize()?, empty.canonicalize()?))
 }
 
 /// Removes one operation's private work directory after a terminal
@@ -889,6 +908,7 @@ mod tests {
         dir: PathBuf,
         pem: String,
         dir_entries: usize,
+        mode: u32,
     }
     #[async_trait::async_trait]
     impl PackerTransport for Script {
@@ -911,6 +931,15 @@ mod tests {
                     let file = PathBuf::from(file.expect("SSL_CERT_FILE travels with the dir"));
                     let dir = PathBuf::from(dir.expect("SSL_CERT_DIR travels with the file"));
                     Some(SeenTls {
+                        mode: {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt as _;
+                                std::fs::metadata(&file).unwrap().permissions().mode()
+                            }
+                            #[cfg(not(unix))]
+                            0o600
+                        },
                         pem: std::fs::read_to_string(&file).unwrap(),
                         dir_entries: std::fs::read_dir(&dir).unwrap().count(),
                         file,
@@ -1357,6 +1386,9 @@ mod tests {
         use base64::Engine as _;
         for (_, tls) in pinned {
             let tls = tls.as_ref().unwrap();
+            // Absolute: Packer runs inside the work directory.
+            assert!(tls.file.is_absolute() && tls.dir.is_absolute());
+            assert_eq!(tls.mode & 0o777, 0o600, "{}", tls.file.display());
             assert!(tls.file.starts_with(&ran.work), "{}", tls.file.display());
             assert!(tls.dir.starts_with(&ran.work), "{}", tls.dir.display());
             assert_eq!(tls.dir_entries, 0, "the root directory stays empty");
