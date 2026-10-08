@@ -15,5 +15,10 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // Specs mount the full router and lazy pages; the first mount in a file is
+    // slow, and under host load (several verify runs at once) the 5 s default
+    // gives false failures. A real hang still fails, just later.
+    testTimeout: 20_000,
+    hookTimeout: 30_000,
   },
 })
