@@ -3363,13 +3363,34 @@ impl ProvisionExecutor {
         }
 
         let mut record = record;
-        record.readiness_deadline_at.get_or_insert_with(|| {
-            fleet_core::SystemClock::now_unix_millis()
-                .saturating_add(i64::from(version.content.readiness_deadline_seconds) * 1_000)
-        });
+        // The deadline was first set when the saga started (#302), so the
+        // sweeper can compensate an interruption before this step. The boot
+        // window starts fresh here; a resumed boot (already `booting`) keeps
+        // the deadline it set.
+        let boot_deadline = fleet_core::SystemClock::now_unix_millis()
+            .saturating_add(i64::from(version.content.readiness_deadline_seconds) * 1_000);
+        if record.state == fleet_core::GuestState::Booting {
+            record.readiness_deadline_at.get_or_insert(boot_deadline);
+        } else {
+            record.readiness_deadline_at = Some(boot_deadline);
+        }
+        // The sweeper may have compensated the lease while the clone ran
+        // (#302); a lease that left the saga must not be booted.
+        let mut booting_lease = self.leases.get(&lease_id).await?;
+        if !matches!(
+            booting_lease.state,
+            fleet_core::LeaseState::Provisioning
+                | fleet_core::LeaseState::Booting
+                | fleet_core::LeaseState::Bootstrapping
+                | fleet_core::LeaseState::Ready
+        ) {
+            return Err(format!(
+                "lease {lease_id} is {} and no longer awaiting its guest",
+                booting_lease.state.id()
+            ));
+        }
         record.state = fleet_core::GuestState::Booting;
         self.provisions.update(&record).await?;
-        let mut booting_lease = self.leases.get(&lease_id).await?;
         if booting_lease.state != fleet_core::LeaseState::Ready {
             booting_lease.state = fleet_core::LeaseState::Booting;
             self.leases.update(&booting_lease).await?;

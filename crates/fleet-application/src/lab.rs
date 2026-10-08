@@ -1918,7 +1918,7 @@ impl Lab {
                 .await?;
             return Ok((existing, changed));
         }
-        let provision = self
+        let mut provision = self
             .provisions
             .create(
                 &NewProvision {
@@ -1933,6 +1933,24 @@ impl Lab {
                 context: "provisions",
                 detail,
             })?;
+        // The readiness deadline runs from the request (lab.md): recorded
+        // before any step, so the sweeper can compensate a saga the
+        // controller died in before it booted a guest (#302).
+        if provision.readiness_deadline_at.is_none() {
+            provision.readiness_deadline_at = Some(
+                now.saturating_add(
+                    i64::from(version.content.readiness_deadline_seconds)
+                        .saturating_mul(1_000)
+                        .saturating_add(PRE_BOOT_ALLOWANCE_MILLIS),
+                ),
+            );
+            self.provisions.update(&provision).await.map_err(|detail| {
+                LabUseCaseError::Backend {
+                    context: "provisions",
+                    detail,
+                }
+            })?;
+        }
         let changed = self
             .attach_lease_provision(lease.as_ref(), &provision)
             .await?;
@@ -2264,6 +2282,11 @@ pub fn lease_exec_ready(lease: &Lease, now: i64) -> Result<(), String> {
 /// How long past its readiness deadline an in-flight lease may stay before
 /// the sweeper compensates it: the provision executor enforces the deadline
 /// itself, so this only catches a provision that stopped running.
+/// The time a saga is given before it boots a guest (reservation, clone,
+/// pool claim), on top of its readiness deadline, before the sweeper may
+/// compensate it as stuck. The boot step starts the real readiness window.
+pub const PRE_BOOT_ALLOWANCE_MILLIS: i64 = 30 * 60 * 1000;
+/// The grace after a readiness deadline before the sweeper compensates.
 pub const STUCK_GRACE_MILLIS: i64 = 10 * 60 * 1000;
 
 /// Whether `record`, the record named by `lease.provision_id`, holds a guest

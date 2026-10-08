@@ -514,7 +514,6 @@ async fn a_queued_lease_never_takes_the_vmid_of_an_interrupted_clone() {
 }
 
 #[tokio::test]
-#[ignore = "#302: a provision interrupted before boot waits for its 30-day maximum lifetime"]
 async fn interrupted_before_boot_the_lease_converges_within_an_hour() {
     for (step, fault) in BEFORE_BOOT {
         let world = World::new(READINESS_SECONDS).await;
