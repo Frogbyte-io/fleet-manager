@@ -7,7 +7,8 @@ use std::net::Ipv4Addr;
 
 use async_trait::async_trait;
 use fleet_application::images::{
-    BUILD_ADDRESS_QUARANTINE_MILLIS, BuildAddressError, BuildAddressPort,
+    BUILD_ADDRESS_QUARANTINE_MILLIS, BuildAddressError, BuildAddressPort, BuildAddressRecord,
+    BuildAddressStatus, ClearQuarantine,
 };
 use fleet_core::BuildAddressPool;
 use sqlx::Row as _;
@@ -185,5 +186,92 @@ impl BuildAddressPort for BuildAddressRepository {
             .await
             .map_err(|e| e.to_string())?;
         usize::try_from(done.rows_affected()).map_err(|e| e.to_string())
+    }
+
+    async fn list_unavailable(&self, now_millis: i64) -> Result<Vec<BuildAddressRecord>, String> {
+        let rows = sqlx::query(
+            "SELECT address, operation_id, state, created_at, released_at, hold_until \
+             FROM image_build_addresses \
+             WHERE state = 'held' OR hold_until > ?1 \
+             ORDER BY state, hold_until DESC, created_at DESC",
+        )
+        .bind(now_millis)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let mut seen = HashSet::new();
+        let mut records = Vec::new();
+        for row in &rows {
+            let Ok(address) = row.get::<String, _>("address").parse::<Ipv4Addr>() else {
+                continue;
+            };
+            if !seen.insert(address) {
+                continue;
+            }
+            let held = row.get::<String, _>("state") == "held";
+            records.push(BuildAddressRecord {
+                address,
+                status: if held {
+                    BuildAddressStatus::Held
+                } else {
+                    BuildAddressStatus::Quarantined
+                },
+                operation_id: row.get("operation_id"),
+                since: if held {
+                    row.get("created_at")
+                } else {
+                    row.get::<Option<i64>, _>("released_at").unwrap_or_default()
+                },
+                until: if held { None } else { row.get("hold_until") },
+            });
+        }
+        records.sort_by_key(|record| u32::from(record.address));
+        Ok(records)
+    }
+
+    async fn clear_quarantine(
+        &self,
+        address: Ipv4Addr,
+        now_millis: i64,
+    ) -> Result<ClearQuarantine, String> {
+        let text = address.to_string();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query(RELEASE_STALE)
+            .bind(now_millis)
+            .bind(now_millis + BUILD_ADDRESS_QUARANTINE_MILLIS)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        let held: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM image_build_addresses WHERE address = ?1 AND state = 'held'",
+        )
+        .bind(&text)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        let outcome = if held > 0 {
+            ClearQuarantine::Held
+        } else {
+            let done = sqlx::query(
+                "UPDATE image_build_addresses SET hold_until = NULL \
+                 WHERE address = ?1 AND state = 'released' AND hold_until > ?2",
+            )
+            .bind(&text)
+            .bind(now_millis)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            if done.rows_affected() > 0 {
+                ClearQuarantine::Cleared
+            } else {
+                ClearQuarantine::NotQuarantined
+            }
+        };
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(outcome)
     }
 }

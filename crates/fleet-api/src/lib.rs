@@ -380,6 +380,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::get_image_build))
                 .routes(routes!(images::promote_image_version))
                 .routes(routes!(images::get_image_version))
+                .routes(routes!(images::list_image_build_addresses))
+                .routes(routes!(images::clear_image_build_address))
                 .routes(routes!(lab::list_lab_templates, lab::create_lab_template))
                 .routes(routes!(lab::get_lab_template))
                 .routes(routes!(lab::update_lab_template))

@@ -928,3 +928,142 @@ async fn assert_fake_build_pagination(images: &Images, version: &RecipeVersion) 
         Err(RecipeUseCaseError::Denied(_))
     ));
 }
+
+// Build address quarantine clearing (#402) -------------------------------------
+
+#[derive(Debug)]
+struct FakeAddresses {
+    outcome: Mutex<fleet_application::images::ClearQuarantine>,
+    cleared: Mutex<Vec<std::net::Ipv4Addr>>,
+}
+
+#[async_trait]
+impl fleet_application::images::BuildAddressPort for FakeAddresses {
+    async fn allocate(
+        &self,
+        _operation_id: &str,
+        _pool: &fleet_core::BuildAddressPool,
+        _count: usize,
+        _now_millis: i64,
+    ) -> Result<Vec<std::net::Ipv4Addr>, fleet_application::images::BuildAddressError> {
+        unreachable!("not used")
+    }
+    async fn release(&self, _: &str, _: i64, _: bool) -> Result<usize, String> {
+        unreachable!("not used")
+    }
+    async fn reconcile(&self, _: i64) -> Result<usize, String> {
+        unreachable!("not used")
+    }
+    async fn list_unavailable(
+        &self,
+        _now: i64,
+    ) -> Result<Vec<fleet_application::images::BuildAddressRecord>, String> {
+        Ok(Vec::new())
+    }
+    async fn clear_quarantine(
+        &self,
+        address: std::net::Ipv4Addr,
+        _now: i64,
+    ) -> Result<fleet_application::images::ClearQuarantine, String> {
+        self.cleared.lock().unwrap().push(address);
+        Ok(*self.outcome.lock().unwrap())
+    }
+}
+
+fn address_service(
+    outcome: fleet_application::images::ClearQuarantine,
+) -> (Images, Arc<FakeAddresses>, Arc<FakeAudit>) {
+    let addresses = Arc::new(FakeAddresses {
+        outcome: Mutex::new(outcome),
+        cleared: Mutex::default(),
+    });
+    let audit = Arc::new(FakeAudit::default());
+    let images = Images::new(Arc::new(FakeRecipes::default()), audit.clone())
+        .with_build_addresses(addresses.clone());
+    (images, addresses, audit)
+}
+
+#[tokio::test]
+async fn clearing_a_quarantine_is_authorized_and_audited_before_and_after() {
+    use fleet_application::images::ClearQuarantine;
+    let (images, addresses, audit) = address_service(ClearQuarantine::Cleared);
+    let denied = images
+        .clear_build_address(&DenyAll, &principal(), "192.0.2.10", NOW)
+        .await;
+    assert!(matches!(denied, Err(RecipeUseCaseError::Denied(_))));
+    assert!(addresses.cleared.lock().unwrap().is_empty());
+    assert!(audit.intents.lock().unwrap().is_empty());
+
+    let cleared = images
+        .clear_build_address(&AllowAll, &principal(), "192.0.2.10", NOW)
+        .await
+        .unwrap();
+    assert_eq!(cleared.to_string(), "192.0.2.10");
+    let intents = audit.intents.lock().unwrap();
+    let events: Vec<_> = intents
+        .iter()
+        .map(|intent| {
+            intent
+                .metadata
+                .entries()
+                .find(|(key, _)| *key == "event")
+                .map(|(_, value)| value.to_owned())
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            Some("image_build_address_clearing".to_owned()),
+            Some("image_build_address_cleared".to_owned())
+        ]
+    );
+    assert!(intents.iter().all(|intent| intent.action == "images.config"
+        && intent.actor == "anonymous-lan-admin"
+        && intent.resource.as_deref() == Some("192.0.2.10")));
+}
+
+#[tokio::test]
+async fn clearing_refuses_a_malformed_held_or_unquarantined_address() {
+    use fleet_application::images::ClearQuarantine;
+    let (images, addresses, _) = address_service(ClearQuarantine::Held);
+    for bad in ["nonsense", "::1", "192.0.2.256", ""] {
+        assert!(matches!(
+            images
+                .clear_build_address(&AllowAll, &principal(), bad, NOW)
+                .await,
+            Err(RecipeUseCaseError::Invalid { .. })
+        ));
+    }
+    assert!(addresses.cleared.lock().unwrap().is_empty());
+    assert!(matches!(
+        images
+            .clear_build_address(&AllowAll, &principal(), "192.0.2.10", NOW)
+            .await,
+        Err(RecipeUseCaseError::Conflict { .. })
+    ));
+    *addresses.outcome.lock().unwrap() = ClearQuarantine::NotQuarantined;
+    assert!(matches!(
+        images
+            .clear_build_address(&AllowAll, &principal(), "192.0.2.10", NOW)
+            .await,
+        Err(RecipeUseCaseError::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn listing_build_addresses_needs_images_read() {
+    let (images, _, _) = address_service(fleet_application::images::ClearQuarantine::Cleared);
+    assert!(matches!(
+        images
+            .list_build_addresses(&DenyAll, &principal(), NOW)
+            .await,
+        Err(RecipeUseCaseError::Denied(_))
+    ));
+    assert!(
+        images
+            .list_build_addresses(&AllowAll, &principal(), NOW)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

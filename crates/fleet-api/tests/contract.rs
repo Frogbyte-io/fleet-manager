@@ -2446,6 +2446,93 @@ async fn image_build_history_requires_images_read_on_both_endpoints() {
 }
 
 #[tokio::test]
+async fn build_addresses_list_and_clear_are_authorized_and_additive() {
+    use fleet_application::authz::{AccessRequest, Permission};
+    use fleet_application::images::BuildAddressPort as _;
+    #[derive(Debug)]
+    struct ReadOnly;
+    impl fleet_application::authz::Authorizer for ReadOnly {
+        fn decide(&self, request: AccessRequest<'_>) -> Decision {
+            if request.action == Permission::ImagesConfig {
+                Decision::deny(ReasonId::UnknownPrincipal)
+            } else {
+                Decision::allow()
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let addresses = Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+        store.pool().clone(),
+    ));
+    let build = |authorizer: Arc<dyn fleet_application::authz::Authorizer>| {
+        let mut state = (*test_state().0).clone();
+        state.authorizer = authorizer;
+        state.images = Some(Arc::new(
+            fleet_application::images::Images::new(
+                Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                    store.pool().clone(),
+                )),
+                Arc::new(FakeAudit),
+            )
+            .with_build_addresses(addresses.clone()),
+        ));
+        principal_router(Arc::new(state))
+    };
+    let permit = build(Arc::new(PermitAllAuthorizer));
+    let post = |path: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("{API_BASE_PATH}{path}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let list = || get(&format!("{API_BASE_PATH}/images/build-addresses"));
+
+    // Seed one quarantined address.
+    let pool = fleet_core::BuildAddressPool::parse(
+        "192.0.2.0/24",
+        "192.0.2.10-192.0.2.11",
+        "192.0.2.1",
+        None,
+        false,
+    )
+    .unwrap();
+    let now = fleet_core::SystemClock::now_unix_millis();
+    addresses.allocate("op-gone", &pool, 1, now).await.unwrap();
+    addresses.release("op-gone", now, true).await.unwrap();
+
+    let (parts, body) = call_via(&permit, list()).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["address"], "192.0.2.10");
+    assert_eq!(body["items"][0]["status"], "quarantined");
+
+    // Clearing needs images.config; reading does not give it.
+    let read_only = build(Arc::new(ReadOnly));
+    let (parts, _) = call_via(&read_only, list()).await;
+    assert_eq!(parts.status, StatusCode::OK);
+    let (parts, body) =
+        call_via(&read_only, post("/images/build-addresses/192.0.2.10/clear")).await;
+    assert_eq!(parts.status, StatusCode::FORBIDDEN, "{body}");
+
+    let (parts, body) = call_via(&permit, post("/images/build-addresses/not-an-ip/clear")).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    let (parts, body) = call_via(&permit, post("/images/build-addresses/192.0.2.11/clear")).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+    let (parts, body) = call_via(&permit, post("/images/build-addresses/192.0.2.10/clear")).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["address"], "192.0.2.10");
+    let (_, body) = call_via(&permit, list()).await;
+    assert!(body["items"].as_array().unwrap().is_empty(), "{body}");
+
+    let value = serde_json::to_value(fleet_api::openapi()).unwrap();
+    assert!(value["paths"]["/api/v1/images/build-addresses"]["get"].is_object());
+    assert!(value["paths"]["/api/v1/images/build-addresses/{address}/clear"]["post"].is_object());
+}
+
+#[tokio::test]
 async fn an_unknown_recipe_source_is_a_json_400_not_a_panic() {
     let dir = tempfile::tempdir().unwrap();
     let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))

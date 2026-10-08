@@ -436,6 +436,32 @@ export interface AuditEventDto {
 }
 
 /**
+ * One build address that is out of allocation (#402).
+ */
+export interface BuildAddressDto {
+  /** The IPv4 address. */
+  address: string;
+  /**
+     * The operation that holds the address, or held it when it was
+     * quarantined.
+     */
+  operationId: string;
+  /** When the address was taken or quarantined, Unix milliseconds. */
+  since: number;
+  /**
+     * `held` by a running build, or `quarantined` after a build that did
+     * not end verifiably.
+     */
+  status: string;
+  /**
+     * When a quarantine ends on its own, Unix milliseconds; absent while
+     * held.
+     * @nullable
+     */
+  until?: number | null;
+}
+
+/**
  * One secret-backed build variable.
  */
 export interface SecretVarDto {
@@ -638,6 +664,14 @@ export interface CheckoutFactDto {
   root: string;
   /** What observed it. */
   source: string;
+}
+
+/**
+ * The result of clearing a quarantine.
+ */
+export interface ClearedBuildAddressDto {
+  /** The address that can be allocated again. */
+  address: string;
 }
 
 /**
@@ -2225,6 +2259,45 @@ export type PageAuditEventDtoItemsItem = {
 export interface PageAuditEventDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageAuditEventDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One build address that is out of allocation (#402).
+ */
+export type PageBuildAddressDtoItemsItem = {
+  /** The IPv4 address. */
+  address: string;
+  /**
+     * The operation that holds the address, or held it when it was
+     * quarantined.
+     */
+  operationId: string;
+  /** When the address was taken or quarantined, Unix milliseconds. */
+  since: number;
+  /**
+     * `held` by a running build, or `quarantined` after a build that did
+     * not end verifiably.
+     */
+  status: string;
+  /**
+     * When a quarantine ends on its own, Unix milliseconds; absent while
+     * held.
+     * @nullable
+     */
+  until?: number | null;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageBuildAddressDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageBuildAddressDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -4121,6 +4194,25 @@ export type ResourceCatalogVersionDtoData = {
 export interface ResourceCatalogVersionDto {
   /** Immutable published version response. */
   data: ResourceCatalogVersionDtoData;
+}
+
+/**
+ * The result of clearing a quarantine.
+ */
+export type ResourceClearedBuildAddressDtoData = {
+  /** The address that can be allocated again. */
+  address: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceClearedBuildAddressDto {
+  /** The result of clearing a quarantine. */
+  data: ResourceClearedBuildAddressDtoData;
 }
 
 /**
@@ -7058,6 +7150,129 @@ const res = await fetch(getStoreDesiredSourceCredentialUrl(),
 
   const data: storeDesiredSourceCredentialResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as storeDesiredSourceCredentialResponse
+}
+
+
+
+export type listImageBuildAddressesResponse200 = {
+  data: PageBuildAddressDto
+  status: 200
+}
+
+export type listImageBuildAddressesResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listImageBuildAddressesResponseSuccess = (listImageBuildAddressesResponse200) & {
+  headers: Headers;
+};
+export type listImageBuildAddressesResponseError = (listImageBuildAddressesResponse403) & {
+  headers: Headers;
+};
+
+export type listImageBuildAddressesResponse = (listImageBuildAddressesResponseSuccess | listImageBuildAddressesResponseError)
+
+export const getListImageBuildAddressesUrl = () => {
+
+
+
+
+  return `/api/v1/images/build-addresses`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the build addresses that are held or quarantined.
+ */
+export const listImageBuildAddresses = async ( options?: RequestInit): Promise<listImageBuildAddressesResponse> => {
+
+  const res = await fetch(getListImageBuildAddressesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listImageBuildAddressesResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listImageBuildAddressesResponse
+}
+
+
+
+export type clearImageBuildAddressResponse200 = {
+  data: ResourceClearedBuildAddressDto
+  status: 200
+}
+
+export type clearImageBuildAddressResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type clearImageBuildAddressResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type clearImageBuildAddressResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type clearImageBuildAddressResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type clearImageBuildAddressResponseSuccess = (clearImageBuildAddressResponse200) & {
+  headers: Headers;
+};
+export type clearImageBuildAddressResponseError = (clearImageBuildAddressResponse400 | clearImageBuildAddressResponse403 | clearImageBuildAddressResponse404 | clearImageBuildAddressResponse409) & {
+  headers: Headers;
+};
+
+export type clearImageBuildAddressResponse = (clearImageBuildAddressResponseSuccess | clearImageBuildAddressResponseError)
+
+export const getClearImageBuildAddressUrl = (address: string,) => {
+
+
+
+
+  return `/api/v1/images/build-addresses/${address}/clear`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, a malformed address, an
+ * address that is not quarantined, or an address a running build holds.
+ * @summary Ends the quarantine of one build address early. Remove the stranded VM
+first; Fleet does not probe for it.
+ */
+export const clearImageBuildAddress = async (address: string, options?: RequestInit): Promise<clearImageBuildAddressResponse> => {
+
+  const res = await fetch(getClearImageBuildAddressUrl(address),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: clearImageBuildAddressResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as clearImageBuildAddressResponse
 }
 
 
