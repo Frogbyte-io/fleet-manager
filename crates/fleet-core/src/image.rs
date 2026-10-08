@@ -300,6 +300,17 @@ const ALLOWED_COMMUNICATOR_KEYS: &[&str] = &[
     "winrm_no_proxy",
 ];
 
+/// The only ports the communicator may dial, per option (#337): the SDK's
+/// own defaults (`prepareSSH` sets 22; `prepareWinRM` sets 5985, or 5986
+/// with `winrm_use_ssl`). The Proxmox builder connects to whatever address
+/// the build guest's QEMU agent reports, re-read on every connection
+/// attempt, so the recipe chooses the host; pinning the port keeps that
+/// connection to an SSH or `WinRM` service. A port must be a literal JSON
+/// integer from this list: a string, template, `0`, or any other number is
+/// refused, at any depth and in any ASCII case.
+const ALLOWED_COMMUNICATOR_PORTS: &[(&str, &[u64])] =
+    &[("ssh_port", &[22]), ("winrm_port", &[5985, 5986])];
+
 /// Every stable reason [`recipe_build_refusal`] can return.
 pub const RECIPE_REFUSAL_REASONS: &[&str] = &[
     "recipe_content_not_json_object",
@@ -313,6 +324,7 @@ pub const RECIPE_REFUSAL_REASONS: &[&str] = &[
     "recipe_controller_file_input",
     "recipe_http_server_option",
     "recipe_communicator_forbidden_option",
+    "recipe_communicator_port",
 ];
 
 /// A stable, secret-free reason a recipe's structure is refused before any
@@ -364,7 +376,11 @@ pub const RECIPE_REFUSAL_REASONS: &[&str] = &[
 ///   literal `none`, `ssh`, or `winrm`, and `winrm` needs a literal
 ///   `winrm_no_proxy: true` (otherwise the `WinRM` client goes through the controller's
 ///   HTTP proxy). Packer's temporary key, the default when no credential is
-///   given, stays allowed.
+///   given, stays allowed;
+/// - `ssh_port` and `winrm_port`, if set, must be literal integers from
+///   [`ALLOWED_COMMUNICATOR_PORTS`] (`recipe_communicator_port`): the guest
+///   chooses the address the communicator dials, so the port is the part
+///   Fleet can pin.
 #[must_use]
 pub fn recipe_build_refusal(content: &str) -> Option<&'static str> {
     if let Err(reason) = audit_keys(content) {
@@ -408,6 +424,9 @@ pub fn recipe_build_refusal(content: &str) -> Option<&'static str> {
         .any(|builder| uses_forbidden_communicator_option(builder) || unsafe_communicator(builder))
     {
         return Some("recipe_communicator_forbidden_option");
+    }
+    if builders.iter().any(uses_forbidden_communicator_port) {
+        return Some("recipe_communicator_port");
     }
     None
 }
@@ -466,6 +485,12 @@ pub fn recipe_refusal_message(reason: &str) -> &'static str {
              communicator other than a literal none, ssh, or winrm (winrm needs \
              winrm_no_proxy: true); leave the credential out so Packer uses a temporary \
              key, and set ssh_disable_agent_forwarding only to true"
+        }
+        "recipe_communicator_port" => {
+            "the recipe sets a communicator port other than the defaults: ssh_port may \
+             only be the literal number 22, and winrm_port only 5985 or 5986 (leave them \
+             out to use the defaults); the build guest chooses the address the controller \
+             connects to, so Fleet fixes the port"
         }
         _ => "the recipe content must be a JSON object",
     }
@@ -630,6 +655,23 @@ fn uses_forbidden_communicator_option(value: &serde_json::Value) -> bool {
                 return true;
             }
             uses_forbidden_communicator_option(child)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a builder, at any depth and in any ASCII case, sets `ssh_port` or
+/// `winrm_port` to anything but a literal integer in
+/// [`ALLOWED_COMMUNICATOR_PORTS`].
+fn uses_forbidden_communicator_port(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(uses_forbidden_communicator_port),
+        serde_json::Value::Object(object) => object.iter().any(|(key, child)| {
+            let forbidden = ALLOWED_COMMUNICATOR_PORTS
+                .iter()
+                .find(|(name, _)| key.eq_ignore_ascii_case(name))
+                .is_some_and(|(_, ports)| child.as_u64().is_none_or(|port| !ports.contains(&port)));
+            forbidden || uses_forbidden_communicator_port(child)
         }),
         _ => false,
     }
@@ -1343,6 +1385,99 @@ mod tests {
             }]
         });
         assert_eq!(recipe_build_refusal(&winrm.to_string()), None);
+    }
+
+    #[test]
+    fn communicator_ports_are_pinned_to_the_sdk_defaults() {
+        // #337: the guest chooses the address, so the port is pinned.
+        let refused = Some("recipe_communicator_port");
+        let winrm = |extra: &serde_json::Value| {
+            let mut block = serde_json::json!({
+                "type": "proxmox-iso",
+                "communicator": "winrm",
+                "winrm_username": "Administrator",
+                "winrm_no_proxy": true,
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                block[key] = value.clone();
+            }
+            recipe_build_refusal(&serde_json::json!({ "builders": [block] }).to_string())
+        };
+        // Absent ports use the SDK defaults.
+        assert_eq!(ssh_builder(&serde_json::json!({})), None);
+        assert_eq!(winrm(&serde_json::json!({})), None);
+        for spelling in ["ssh_port", "SSH_PORT", "Ssh_Port"] {
+            assert_eq!(ssh_builder(&serde_json::json!({ spelling: 22 })), None);
+        }
+        for port in [5985, 5986] {
+            for spelling in ["winrm_port", "WINRM_PORT"] {
+                assert_eq!(winrm(&serde_json::json!({ spelling: port })), None);
+            }
+        }
+        let bad: &[serde_json::Value] = &[
+            serde_json::json!(0),
+            serde_json::json!(2222),
+            serde_json::json!(5985),
+            serde_json::json!(5986),
+            serde_json::json!(6379),
+            serde_json::json!(-22),
+            serde_json::json!(22.0),
+            serde_json::json!(22.5),
+            serde_json::json!(65_558),
+            serde_json::json!("22"),
+            serde_json::json!("{{user `port`}}"),
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!([22]),
+        ];
+        for value in bad {
+            for spelling in ["ssh_port", "SSH_Port"] {
+                let extra = serde_json::json!({ spelling: value });
+                assert_eq!(ssh_builder(&extra), refused, "{extra}");
+                let nested = serde_json::json!({ "additional_iso_files": [{ spelling: value }] });
+                assert_eq!(ssh_builder(&nested), refused, "{nested}");
+            }
+        }
+        for value in bad
+            .iter()
+            .filter(|value| !matches!(value.as_u64(), Some(5985 | 5986)))
+            .chain([&serde_json::json!(22)])
+        {
+            for spelling in ["winrm_port", "WinRM_Port"] {
+                let extra = serde_json::json!({ spelling: value });
+                assert_eq!(winrm(&extra), refused, "{extra}");
+                let nested = serde_json::json!({ "additional_iso_files": [{ spelling: value }] });
+                assert_eq!(winrm(&nested), refused, "{nested}");
+            }
+        }
+        // Raw JSON that is numerically 22 or overflows u64 parses as a
+        // float, so it is refused rather than read as 22 or truncated.
+        for raw in ["2.2e1", "22e0", "18446744073709551638", "220e-1"] {
+            let content =
+                format!(r#"{{"builders":[{{"type":"proxmox-clone","ssh_port":{raw}}}]}}"#);
+            assert_eq!(recipe_build_refusal(&content), refused, "{content}");
+        }
+        // `communicator: none` never dials, but a stray port is still
+        // refused rather than special-cased.
+        let none = serde_json::json!({
+            "builders": [{ "type": "proxmox-clone", "communicator": "none", "ssh_port": 2222 }]
+        });
+        assert_eq!(recipe_build_refusal(&none.to_string()), refused);
+        // A forbidden option still wins over a port refusal.
+        assert_eq!(
+            ssh_builder(&serde_json::json!({ "ssh_host": "192.0.2.1", "ssh_port": 2222 })),
+            Some("recipe_communicator_forbidden_option")
+        );
+        // The publish-time path applies the same gate.
+        let mut published = recipe(
+            &serde_json::json!({ "builders": [{ "type": "proxmox-clone", "ssh_port": 2222 }] })
+                .to_string(),
+        );
+        assert!(published.validate().is_err());
+        published.content =
+            serde_json::json!({ "builders": [{ "type": "proxmox-clone", "ssh_port": 22 }] })
+                .to_string();
+        assert!(published.validate().is_ok());
     }
 
     #[test]
