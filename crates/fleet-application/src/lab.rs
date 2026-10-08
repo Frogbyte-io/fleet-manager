@@ -1940,13 +1940,12 @@ impl Lab {
             provision.readiness_deadline_at = Some(now.saturating_add(
                 i64::from(version.content.readiness_deadline_seconds).saturating_mul(1_000),
             ));
-            self.provisions
-                .update(&provision)
-                .await
-                .map_err(|detail| LabUseCaseError::Backend {
+            self.provisions.update(&provision).await.map_err(|detail| {
+                LabUseCaseError::Backend {
                     context: "provisions",
                     detail,
-                })?;
+                }
+            })?;
         }
         let changed = self
             .attach_lease_provision(lease.as_ref(), &provision)
