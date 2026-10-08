@@ -325,7 +325,7 @@ Until you re-arm it, `cleanup_failed` stays put: `lab release` refuses it, and F
 
 An orphan is a Fleet-named guest (`fm-lab-*`) that no live lease or standalone provision owns.
 
-Each sweeper tick lists the `fm-lab-*` QEMU guests on every trusted account. A guest is owned when its provision record names that account and VMID, and the record is standalone, or its lease still owns the guest (any state but `released` or `failed`), or the lease was released with `keep`. The sweeper reports each unowned guest once per controller run, as the audit event `lab_orphan_guest` (resource: the guest's name; facts: `accountId`, `node`, `vmid`) and a log line (`lab sweeper: guest … has no live Lab owner`). A restarted controller reports it again.
+Each sweeper tick lists the `fm-lab-*` QEMU guests on every trusted account. A guest is owned when its provision record names that account and VMID, and the record is standalone or its lease still links back to that same record (a lease whose provision link names another record does not vouch for this guest). Such a lease owns the guest in any state but `released` or `failed`, and also when it was released with `keep`. The sweeper reports each unowned guest once per controller run, as the audit event `lab_orphan_guest` (resource: the guest's name; facts: `accountId`, `node`, `vmid`) and a log line (`lab sweeper: guest … has no live Lab owner`). A restarted controller reports it again.
 
 ```sh
 fleetctl --output json audit list --action lab.lease
