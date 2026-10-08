@@ -686,13 +686,21 @@ fn origin_of(artifact_url: &str) -> String {
 
 /// The first informative line of remote output for a failure detail.
 fn first_lines(stderr: &str, stdout: &str) -> String {
+    // Scrub before choosing and cutting the line, so a credential that
+    // straddles the 300-byte cut is redacted, never half kept.
     let pick = |text: &str| -> Option<String> {
-        text.lines()
+        let (scrubbed, _) = crate::exec::scrub_and_bound_with(text, false, str::to_owned);
+        scrubbed
+            .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map(|line| {
                 if line.len() > 300 {
-                    format!("{}…", &line[..300])
+                    let mut end = 300;
+                    while !line.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}…", &line[..end])
                 } else {
                     line.to_owned()
                 }
@@ -734,4 +742,28 @@ fn file_sha256(path: &std::path::Path) -> Result<String, String> {
             let _ = write!(text, "{byte:02x}");
             text
         }))
+}
+
+#[cfg(test)]
+mod first_lines_tests {
+    use super::first_lines;
+
+    /// #357: the first remote line is scrubbed before it is cut at the
+    /// 300-byte bound, so a credential at the bound is never half kept.
+    #[test]
+    fn a_credential_at_the_line_bound_is_redacted_not_cut() {
+        for pad in [250, 270, 285, 295, 300] {
+            let line = format!("{} https://user:hunter2pw@host.invalid/x", "x".repeat(pad));
+            let out = first_lines(&line, "");
+            assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+            assert!(!out.contains("user:"), "pad {pad}: {out}");
+        }
+    }
+
+    #[test]
+    fn stdout_is_scrubbed_when_stderr_is_empty_and_multibyte_cuts_safely() {
+        let out = first_lines("", &format!("{} user:hunter2pw@host", "é".repeat(200)));
+        assert!(!out.contains("hunter2"), "{out}");
+        assert_eq!(first_lines("", ""), "no remote output");
+    }
 }

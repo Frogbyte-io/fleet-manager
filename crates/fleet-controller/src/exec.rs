@@ -496,12 +496,23 @@ pub fn noop_only_executor() -> impl OperationExecutor {
 /// returned flag is true when the provider already truncated the output or
 /// this bound cut it.
 fn scrub_and_bound(text: &str, provider_truncated: bool) -> (String, bool) {
+    scrub_and_bound_with(text, provider_truncated, str::to_owned)
+}
+
+/// [`scrub_and_bound`] with an extra, tool-specific scrub that runs after the
+/// shared one and still before the bound. Executors that store command
+/// output use this so no credential straddling the bound is ever half kept.
+pub(crate) fn scrub_and_bound_with(
+    text: &str,
+    provider_truncated: bool,
+    extra: impl FnOnce(&str) -> String,
+) -> (String, bool) {
     // The transport allows up to 1 MiB per stream and the scrubber is not
     // linear on adversarial input, so scrub only a window that is far larger
     // than the bound. A cut window ends at whitespace, so no credential is
     // split by it, and the dropped remainder counts as truncation.
     let (window, windowed) = scrub_window(text);
-    let scrubbed = fleet_core::redact_credentials(window);
+    let scrubbed = extra(&fleet_core::redact_credentials(window));
     let (bounded, cut) = trim_to_bound(&scrubbed);
     (bounded, provider_truncated || windowed || cut)
 }
