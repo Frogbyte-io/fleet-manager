@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use fleet_application::images::{BuildAddressError, BuildAddressPort as _};
+use fleet_application::images::{
+    BUILD_ADDRESS_QUARANTINE_MILLIS, BuildAddressError, BuildAddressPort as _,
+};
 use fleet_core::BuildAddressPool;
 use fleet_storage_sqlite::{BuildAddressRepository, Store};
 
@@ -81,8 +83,8 @@ async fn an_address_is_held_by_one_operation_until_released() {
         repository.allocate("op-3", &pool, 1, NOW).await,
         Err(BuildAddressError::Exhausted)
     );
-    assert_eq!(repository.release("op-1", NOW + 1).await, Ok(1));
-    assert_eq!(repository.release("op-1", NOW + 2).await, Ok(0));
+    assert_eq!(repository.release("op-1", NOW + 1, false).await, Ok(1));
+    assert_eq!(repository.release("op-1", NOW + 2, false).await, Ok(0));
     assert_eq!(
         repository.allocate("op-3", &pool, 1, NOW + 3).await,
         Ok(vec![a(10)])
@@ -116,9 +118,9 @@ async fn reuse_prefers_the_address_released_longest_ago() {
         repository.allocate(id, &pool, 1, NOW + at).await.unwrap();
     }
     // Released in the order .11, .10, .12.
-    repository.release("op-2", NOW + 100).await.unwrap();
-    repository.release("op-1", NOW + 200).await.unwrap();
-    repository.release("op-3", NOW + 300).await.unwrap();
+    repository.release("op-2", NOW + 100, false).await.unwrap();
+    repository.release("op-1", NOW + 200, false).await.unwrap();
+    repository.release("op-3", NOW + 300, false).await.unwrap();
     operation(&store, "op-4", "running").await;
     assert_eq!(
         repository.allocate("op-4", &pool, 1, NOW + 400).await,
@@ -127,36 +129,79 @@ async fn reuse_prefers_the_address_released_longest_ago() {
 }
 
 #[tokio::test]
-async fn a_holder_that_ended_without_releasing_is_reclaimed() {
+async fn a_holder_that_ended_without_releasing_is_reclaimed_but_quarantined() {
     let (_dir, store, repository) = setup().await;
     let pool = pool(10);
-    for (id, ended) in [
+    for (round, (id, ended)) in [
         ("failed", "failed"),
         ("cancelled", "cancelled"),
         ("timed_out", "timed_out"),
         ("succeeded", "succeeded"),
-    ] {
+        ("blocked", "blocked_manual_approval"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Each round starts after the previous one's quarantine.
+        let at = NOW + 3 * BUILD_ADDRESS_QUARANTINE_MILLIS * i64::try_from(round).unwrap();
         operation(&store, id, "running").await;
         assert_eq!(
-            repository.allocate(id, &pool, 1, NOW).await,
+            repository.allocate(id, &pool, 1, at).await,
             Ok(vec![a(10)]),
             "{id}"
         );
-        // The controller died; the operation was failed by recovery.
+        // The controller died; the operation was failed by recovery. Its
+        // VM may still be up on the address, so the address is not reused
+        // for the quarantine, though the hold itself no longer counts.
         set_state(&store, id, ended).await;
-        operation(&store, &format!("next-{id}"), "running").await;
+        let next = format!("next-{id}");
+        operation(&store, &next, "running").await;
         assert_eq!(
-            repository
-                .allocate(&format!("next-{id}"), &pool, 1, NOW + 1)
-                .await,
-            Ok(vec![a(10)]),
-            "{id}: a terminal holder no longer counts"
+            repository.allocate(&next, &pool, 1, at + 1).await,
+            Err(BuildAddressError::Exhausted),
+            "{id}: quarantined"
         );
-        repository
-            .release(&format!("next-{id}"), NOW + 2)
-            .await
-            .unwrap();
+        let after = at + BUILD_ADDRESS_QUARANTINE_MILLIS + 1;
+        assert_eq!(
+            repository.allocate(&next, &pool, 1, after).await,
+            Ok(vec![a(10)]),
+            "{id}: free after the quarantine"
+        );
+        repository.release(&next, after + 1, false).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn only_an_unverified_release_is_quarantined() {
+    let (_dir, store, repository) = setup().await;
+    let pool = pool(10);
+    operation(&store, "clean", "running").await;
+    repository.allocate("clean", &pool, 1, NOW).await.unwrap();
+    assert_eq!(repository.release("clean", NOW + 1, false).await, Ok(1));
+    operation(&store, "next", "running").await;
+    assert_eq!(
+        repository.allocate("next", &pool, 1, NOW + 2).await,
+        Ok(vec![a(10)]),
+        "a verified release is reusable at once"
+    );
+    // An unverified one is held out for the quarantine, then comes back.
+    assert_eq!(repository.release("next", NOW + 3, true).await, Ok(1));
+    operation(&store, "later", "running").await;
+    assert_eq!(
+        repository.allocate("later", &pool, 1, NOW + 4).await,
+        Err(BuildAddressError::Exhausted)
+    );
+    assert_eq!(
+        repository
+            .allocate(
+                "later",
+                &pool,
+                1,
+                NOW + 3 + BUILD_ADDRESS_QUARANTINE_MILLIS + 1
+            )
+            .await,
+        Ok(vec![a(10)])
+    );
 }
 
 #[tokio::test]
@@ -195,7 +240,7 @@ async fn startup_reconciliation_releases_terminal_and_unknown_holders_only() {
         .unwrap();
     assert_eq!(repository.reconcile(NOW + 1).await, Ok(2));
     assert_eq!(repository.reconcile(NOW + 2).await, Ok(0));
-    assert_eq!(repository.release("live", NOW + 3).await, Ok(1));
+    assert_eq!(repository.release("live", NOW + 3, false).await, Ok(1));
 }
 
 #[tokio::test]
@@ -217,6 +262,12 @@ async fn a_changed_pool_moves_the_holder_into_the_new_range() {
     assert_eq!(
         repository.allocate("op-1", &moved, 1, NOW).await,
         Ok(vec![a(50)])
+    );
+    // The address it let go of may host a guest from the earlier attempt.
+    operation(&store, "op-2", "running").await;
+    assert_eq!(
+        repository.allocate("op-2", &pool(10), 1, NOW + 1).await,
+        Err(BuildAddressError::Exhausted)
     );
 }
 

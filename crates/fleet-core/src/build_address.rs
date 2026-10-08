@@ -36,16 +36,24 @@ pub const REASON_ISO_REFUSED: &str = "build_address_iso_refused";
 /// A builder is neither `proxmox-clone` nor `proxmox-iso`, so Fleet cannot say
 /// whether it can take an address; refused while a pool is configured.
 pub const REASON_BUILDER_UNSUPPORTED: &str = "build_address_builder_unsupported";
+/// A `proxmox-clone` builder has no `network_adapters`: with none, the clone
+/// keeps the template's NIC, and the plugin refuses an `ipconfig` for it.
+pub const REASON_NIC_REQUIRED: &str = "build_address_network_adapter_required";
+/// A `proxmox-clone` builder keeps a second-NIC `ipconfig` entry that could
+/// claim an address of its own.
+pub const REASON_IPCONFIG_UNSUPPORTED: &str = "build_address_ipconfig_unsupported";
 /// The allocation transaction failed.
 pub const REASON_ALLOCATION_FAILED: &str = "build_address_allocation_failed";
 /// The assignment's audit event could not be written.
 pub const REASON_AUDIT_FAILED: &str = "build_address_audit_failed";
 
 /// The stable build-time reasons of this module.
-pub const BUILD_ADDRESS_REASONS: [&str; 5] = [
+pub const BUILD_ADDRESS_REASONS: [&str; 7] = [
     REASON_POOL_EXHAUSTED,
     REASON_ISO_REFUSED,
     REASON_BUILDER_UNSUPPORTED,
+    REASON_NIC_REQUIRED,
+    REASON_IPCONFIG_UNSUPPORTED,
     REASON_ALLOCATION_FAILED,
     REASON_AUDIT_FAILED,
 ];
@@ -53,6 +61,9 @@ pub const BUILD_ADDRESS_REASONS: [&str; 5] = [
 /// A pool setting breaks a rule. Names the rule only, never the value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildAddressPoolError {
+    /// The part of the pool that failed: `cidr`, `range`, `gateway`, or
+    /// `dns`.
+    pub field: &'static str,
     /// The rule that failed.
     pub rule: &'static str,
 }
@@ -78,8 +89,8 @@ pub struct BuildAddressPool {
     refuse_iso: bool,
 }
 
-const fn err(rule: &'static str) -> BuildAddressPoolError {
-    BuildAddressPoolError { rule }
+const fn err(field: &'static str, rule: &'static str) -> BuildAddressPoolError {
+    BuildAddressPoolError { field, rule }
 }
 
 /// Address blocks a build must never be pointed at, as inclusive ranges:
@@ -98,11 +109,15 @@ fn forbidden(first: u32, last: u32) -> bool {
         .any(|&(low, high)| first <= high && last >= low)
 }
 
-fn parse_v4(text: &str, rule: &'static str) -> Result<u32, BuildAddressPoolError> {
+fn parse_v4(
+    text: &str,
+    field: &'static str,
+    rule: &'static str,
+) -> Result<u32, BuildAddressPoolError> {
     text.trim()
         .parse::<Ipv4Addr>()
         .map(u32::from)
-        .map_err(|_| err(rule))
+        .map_err(|_| err(field, rule))
 }
 
 impl BuildAddressPool {
@@ -126,17 +141,18 @@ impl BuildAddressPool {
         let (address, length) = cidr
             .trim()
             .split_once('/')
-            .ok_or(err("the pool must be a CIDR such as a.b.c.d/24"))?;
-        let address = parse_v4(address, "the pool network must be an IPv4 address")?;
+            .ok_or(err("cidr", "the pool must be a CIDR such as a.b.c.d/24"))?;
+        let address = parse_v4(address, "cidr", "the pool network must be an IPv4 address")?;
         let prefix: u8 = length
             .parse()
-            .map_err(|_| err("the pool prefix length must be a number"))?;
+            .map_err(|_| err("cidr", "the pool prefix length must be a number"))?;
         if !(8..=30).contains(&prefix) {
-            return Err(err("the pool prefix length must be from 8 to 30"));
+            return Err(err("cidr", "the pool prefix length must be from 8 to 30"));
         }
         let mask = u32::MAX << (32 - u32::from(prefix));
         if address & mask != address {
             return Err(err(
+                "cidr",
                 "the pool CIDR must name the network address (no host bits set)",
             ));
         }
@@ -145,34 +161,50 @@ impl BuildAddressPool {
         let (first, last) = range
             .trim()
             .split_once('-')
-            .ok_or(err("the pool range must be first-last"))?;
-        let first = parse_v4(first, "the pool range must hold IPv4 addresses")?;
-        let last = parse_v4(last, "the pool range must hold IPv4 addresses")?;
+            .ok_or(err("range", "the pool range must be first-last"))?;
+        let first = parse_v4(first, "range", "the pool range must hold IPv4 addresses")?;
+        let last = parse_v4(last, "range", "the pool range must hold IPv4 addresses")?;
         if first > last {
-            return Err(err("the pool range must start at or below its end"));
+            return Err(err(
+                "range",
+                "the pool range must start at or below its end",
+            ));
         }
         if first <= network || last >= broadcast {
             return Err(err(
+                "range",
                 "the pool range must lie inside the CIDR, excluding its network and broadcast addresses",
             ));
         }
         if last - first + 1 > MAX_BUILD_ADDRESS_POOL_SIZE {
-            return Err(err("the pool range is too large (at most 1024 addresses)"));
+            return Err(err(
+                "range",
+                "the pool range is too large (at most 1024 addresses)",
+            ));
         }
         if forbidden(network, broadcast) {
             return Err(err(
+                "cidr",
                 "the pool must not be the unspecified, loopback, link-local, multicast, or reserved space",
             ));
         }
-        let gateway_value = parse_v4(gateway, "the pool gateway must be an IPv4 address")?;
+        let gateway_value = parse_v4(
+            gateway,
+            "gateway",
+            "the pool gateway must be an IPv4 address",
+        )?;
         if gateway_value & mask != network || gateway_value == network || gateway_value == broadcast
         {
             return Err(err(
+                "gateway",
                 "the pool gateway must be a host address inside the CIDR",
             ));
         }
         if (first..=last).contains(&gateway_value) {
-            return Err(err("the pool gateway must lie outside the pool range"));
+            return Err(err(
+                "gateway",
+                "the pool gateway must lie outside the pool range",
+            ));
         }
         let mut servers = Vec::new();
         if let Some(list) = dns {
@@ -180,16 +212,17 @@ impl BuildAddressPool {
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|item| !item.is_empty())
             {
-                let server = parse_v4(item, "the pool DNS servers must be IPv4 addresses")?;
+                let server = parse_v4(item, "dns", "the pool DNS servers must be IPv4 addresses")?;
                 if forbidden(server, server) {
                     return Err(err(
+                        "dns",
                         "a pool DNS server must not be an unspecified, loopback, link-local, or multicast address",
                     ));
                 }
                 servers.push(Ipv4Addr::from(server));
             }
             if servers.len() > MAX_BUILD_ADDRESS_DNS_SERVERS {
-                return Err(err("the pool takes at most 3 DNS servers"));
+                return Err(err("dns", "the pool takes at most 3 DNS servers"));
             }
         }
         Ok(Self {
@@ -270,8 +303,49 @@ impl BuildAddressPool {
 /// How the pool treats a builder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuilderKind {
+    /// A `proxmox-clone` builder that connects: it takes an address.
     Clone,
+    /// A `proxmox-clone` builder with `communicator: none`: nothing connects,
+    /// so it is left as written.
+    Silent,
     Iso,
+}
+
+/// The value of a key spelled like `name` in any letter case.
+fn field_any_case<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
+    object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
+}
+
+/// What a clone builder must look like for an address to be applied: at
+/// least one `network_adapters` entry (otherwise the plugin refuses the
+/// `ipconfig`: `clone/config.go` requires a NIC per ipconfig block), and no
+/// kept second-NIC `ipconfig` entry with a static address, which could claim
+/// an address of its own.
+fn clone_ready(object: &Map<String, Value>) -> Result<(), &'static str> {
+    match field_any_case(object, "network_adapters") {
+        Some(Value::Array(nics)) if !nics.is_empty() => {}
+        _ => return Err(REASON_NIC_REQUIRED),
+    }
+    // A string or template `ipconfig` is replaced wholesale.
+    if let Some(Value::Array(entries)) = field_any_case(object, "ipconfig") {
+        for entry in entries.iter().skip(1) {
+            let dhcp_or_none = match entry {
+                Value::Object(entry) => match field_any_case(entry, "ip") {
+                    None => true,
+                    Some(Value::String(ip)) => ip == "dhcp",
+                    Some(_) => false,
+                },
+                _ => false,
+            };
+            if !dhcp_or_none {
+                return Err(REASON_IPCONFIG_UNSUPPORTED);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn builder_kind(builder: &Value) -> Result<BuilderKind, &'static str> {
@@ -285,7 +359,16 @@ fn builder_kind(builder: &Value) -> Result<BuilderKind, &'static str> {
         .filter(|(key, _)| key.eq_ignore_ascii_case("type"));
     match (types.next(), types.next()) {
         (Some((key, Value::String(kind))), None) if key == "type" => match kind.as_str() {
-            "proxmox-clone" => Ok(BuilderKind::Clone),
+            "proxmox-clone" => {
+                let silent = field_any_case(object, "communicator")
+                    .is_some_and(|value| value.as_str() == Some("none"));
+                if silent {
+                    Ok(BuilderKind::Silent)
+                } else {
+                    clone_ready(object)?;
+                    Ok(BuilderKind::Clone)
+                }
+            }
             "proxmox-iso" => Ok(BuilderKind::Iso),
             _ => Err(REASON_BUILDER_UNSUPPORTED),
         },
@@ -310,8 +393,11 @@ fn builders(root: &Value) -> Result<&[Value], &'static str> {
 /// # Errors
 /// [`REASON_BUILDER_UNSUPPORTED`] for a builder that is not literally
 /// `proxmox-clone` or `proxmox-iso` (or for content that is not a JSON object
-/// with a builder list), and [`REASON_ISO_REFUSED`] for a `proxmox-iso`
-/// builder when the pool refuses them. An ISO builder is otherwise left alone.
+/// with a builder list), [`REASON_ISO_REFUSED`] for a `proxmox-iso` builder
+/// when the pool refuses them, [`REASON_NIC_REQUIRED`] for a connecting clone
+/// builder without `network_adapters`, and [`REASON_IPCONFIG_UNSUPPORTED`]
+/// for one that keeps a static second-NIC `ipconfig` entry. An ISO builder,
+/// and a clone builder with `communicator: none`, are otherwise left alone.
 pub fn build_addresses_needed(
     content: &str,
     pool: &BuildAddressPool,
@@ -322,7 +408,7 @@ pub fn build_addresses_needed(
         match builder_kind(builder)? {
             BuilderKind::Clone => needed += 1,
             BuilderKind::Iso if pool.refuses_iso() => return Err(REASON_ISO_REFUSED),
-            BuilderKind::Iso => {}
+            BuilderKind::Iso | BuilderKind::Silent => {}
         }
     }
     Ok(needed)
@@ -408,28 +494,6 @@ pub fn with_build_addresses(
         }
     }
     serde_json::to_string(&root).map_err(|_| REASON_ALLOCATION_FAILED)
-}
-
-/// The operator-facing explanation of a build-time reason of this module.
-#[must_use]
-pub fn build_address_reason_message(reason: &str) -> &'static str {
-    match reason {
-        REASON_POOL_EXHAUSTED => {
-            "every address in the build address pool is held by another running build; \
-             retry when one finishes, or enlarge the pool"
-        }
-        REASON_ISO_REFUSED => {
-            "a proxmox-iso builder cannot be given a Fleet-assigned address (an installer \
-             picks its own), and the operator asked to refuse such builds while a build \
-             address pool is set"
-        }
-        REASON_BUILDER_UNSUPPORTED => {
-            "a build address pool is set, and the recipe has a builder that is not \
-             literally proxmox-clone or proxmox-iso"
-        }
-        REASON_AUDIT_FAILED => "the address assignment could not be recorded in the audit log",
-        _ => "the build address could not be allocated",
-    }
 }
 
 #[cfg(test)]
@@ -534,6 +598,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_error_names_the_part_that_failed() {
+        let field = |cidr, range, gateway, dns| {
+            BuildAddressPool::parse(cidr, range, gateway, dns, false)
+                .unwrap_err()
+                .field
+        };
+        let (c, r, g) = ("192.0.2.0/24", "192.0.2.10-192.0.2.20", "192.0.2.1");
+        assert_eq!(field("192.0.2.5/24", r, g, None), "cidr");
+        assert_eq!(field(c, "192.0.2.20-192.0.2.10", g, None), "range");
+        assert_eq!(field(c, r, "192.0.2.15", None), "gateway");
+        assert_eq!(field(c, r, g, Some("127.0.0.1")), "dns");
+    }
+
+    #[test]
     fn a_blank_dns_list_means_none() {
         let pool = BuildAddressPool::parse(
             "192.0.2.0/24",
@@ -577,7 +655,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let content = r#"{"builders":[{"type":"proxmox-clone","nameserver":"192.0.2.9"}]}"#;
+        let content = r#"{"builders":[{"type":"proxmox-clone","network_adapters":[{"bridge":"vmbr0"}],"nameserver":"192.0.2.9"}]}"#;
         let out = with_build_addresses(content, &pool, &[a(10)]).unwrap();
         let value: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(value["builders"][0]["nameserver"], "192.0.2.9");
@@ -585,7 +663,7 @@ mod tests {
 
     #[test]
     fn case_variants_of_the_keys_fleet_sets_are_replaced_not_duplicated() {
-        let content = r#"{"builders":[{"type":"proxmox-clone","IPCONFIG":"{{user `x`}}","NameServer":"192.0.2.9","Ssh_Host":"x"}]}"#;
+        let content = r#"{"builders":[{"type":"proxmox-clone","network_adapters":[{"bridge":"vmbr0"}],"IPCONFIG":"{{user `x`}}","NameServer":"192.0.2.9","Ssh_Host":"x"}]}"#;
         let out = with_build_addresses(content, &pool(), &[a(100)]).unwrap();
         let value: Value = serde_json::from_str(&out).unwrap();
         let keys: Vec<&String> = value["builders"][0].as_object().unwrap().keys().collect();
@@ -603,13 +681,13 @@ mod tests {
     #[test]
     fn only_the_first_nic_is_replaced_and_each_clone_builder_gets_its_own_address() {
         let content = r#"{"builders":[
-            {"type":"proxmox-clone","ipconfig":[{"ip":"dhcp"},{"ip":"192.0.2.9/24"}]},
-            {"type":"proxmox-clone"}]}"#;
+            {"type":"proxmox-clone","network_adapters":[{"bridge":"a"},{"bridge":"b"}],"ipconfig":[{"ip":"dhcp"},{"ip":"dhcp"}]},
+            {"type":"proxmox-clone","network_adapters":[{"bridge":"a"}]}]}"#;
         assert_eq!(build_addresses_needed(content, &pool()), Ok(2));
         let out = with_build_addresses(content, &pool(), &[a(100), a(102)]).unwrap();
         let value: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(value["builders"][0]["ipconfig"][0]["ip"], "192.0.2.100/24");
-        assert_eq!(value["builders"][0]["ipconfig"][1]["ip"], "192.0.2.9/24");
+        assert_eq!(value["builders"][0]["ipconfig"][1]["ip"], "dhcp");
         assert_eq!(value["builders"][1]["ssh_host"], "192.0.2.102");
     }
 
@@ -660,19 +738,59 @@ mod tests {
     }
 
     #[test]
+    fn a_clone_builder_needs_a_nic_and_may_not_keep_a_static_second_nic() {
+        for content in [
+            r#"{"builders":[{"type":"proxmox-clone"}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","network_adapters":[]}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","network_adapters":"{{user `n`}}"}]}"#,
+        ] {
+            assert_eq!(
+                build_addresses_needed(content, &pool()),
+                Err(REASON_NIC_REQUIRED),
+                "{content}"
+            );
+        }
+        let nics = r#""network_adapters":[{"bridge":"vmbr0"},{"bridge":"vmbr1"}]"#;
+        for ipconfig in [
+            r#"[{"ip":"dhcp"},{"ip":"192.0.2.101/24"}]"#,
+            r#"[{"ip":"dhcp"},{"ip":"{{user `x`}}"}]"#,
+            r#"[{"ip":"dhcp"},{"ip":7}]"#,
+            r#"[{"ip":"dhcp"},"x"]"#,
+        ] {
+            let content = format!(
+                r#"{{"builders":[{{"type":"proxmox-clone",{nics},"ipconfig":{ipconfig}}}]}}"#
+            );
+            assert_eq!(
+                build_addresses_needed(&content, &pool()),
+                Err(REASON_IPCONFIG_UNSUPPORTED),
+                "{content}"
+            );
+        }
+        // A DHCP or empty second entry is fine, and so is a replaced first one.
+        let content = format!(
+            r#"{{"builders":[{{"type":"proxmox-clone",{nics},"ipconfig":[{{"ip":"192.0.2.9/24"}},{{"ip":"dhcp"}},{{"ip6":"auto"}}]}}]}}"#
+        );
+        assert_eq!(build_addresses_needed(&content, &pool()), Ok(1));
+    }
+
+    #[test]
+    fn a_clone_builder_without_a_communicator_is_left_alone() {
+        let content = r#"{"builders":[{"type":"proxmox-clone","communicator":"none"}]}"#;
+        assert_eq!(build_addresses_needed(content, &pool()), Ok(0));
+        let out = with_build_addresses(content, &pool(), &[]).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap(),
+            serde_json::from_str::<Value>(content).unwrap()
+        );
+    }
+
+    #[test]
     fn the_address_list_must_match_the_builders_and_the_pool() {
         for addresses in [vec![], vec![a(100), a(101)], vec![a(5)]] {
             assert_eq!(
                 with_build_addresses(RUNBOOK_LIKE, &pool(), &addresses),
                 Err(REASON_ALLOCATION_FAILED)
             );
-        }
-    }
-
-    #[test]
-    fn every_reason_has_a_message() {
-        for reason in BUILD_ADDRESS_REASONS {
-            assert!(!build_address_reason_message(reason).is_empty());
         }
     }
 }

@@ -6,17 +6,22 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use async_trait::async_trait;
-use fleet_application::images::{BuildAddressError, BuildAddressPort};
+use fleet_application::images::{
+    BUILD_ADDRESS_QUARANTINE_MILLIS, BuildAddressError, BuildAddressPort,
+};
 use fleet_core::BuildAddressPool;
 use sqlx::Row as _;
 use sqlx::SqlitePool;
 
-/// Releases held rows whose operation is terminal or unknown: they no longer
-/// count. `?1` is the release time.
-const RELEASE_STALE: &str = "UPDATE image_build_addresses SET state = 'released', released_at = ?1 \
+/// Releases held rows whose operation is not live (terminal or unknown): they
+/// no longer count. The holder died without releasing, so nothing says its VM
+/// is gone, and the address is quarantined. `?1` is the release time, `?2`
+/// the end of the quarantine.
+const RELEASE_STALE: &str = "UPDATE image_build_addresses \
+     SET state = 'released', released_at = ?1, hold_until = ?2 \
      WHERE state = 'held' AND NOT EXISTS (SELECT 1 FROM operations o \
      WHERE o.id = image_build_addresses.operation_id \
-     AND o.state NOT IN ('succeeded', 'failed', 'cancelled', 'timed_out'))";
+     AND o.state IN ('pending', 'running', 'cancelling'))";
 
 /// The build address repository over a pool.
 #[derive(Debug)]
@@ -52,12 +57,13 @@ impl BuildAddressPort for BuildAddressRepository {
             .map_err(storage)?;
         sqlx::query(RELEASE_STALE)
             .bind(now_millis)
+            .bind(now_millis + BUILD_ADDRESS_QUARANTINE_MILLIS)
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
 
         // A repeat of the same request returns what the operation holds.
-        let own: Vec<String> = sqlx::query(
+        let own: Vec<Ipv4Addr> = sqlx::query(
             "SELECT address FROM image_build_addresses \
              WHERE operation_id = ?1 AND state = 'held' ORDER BY slot",
         )
@@ -66,28 +72,46 @@ impl BuildAddressPort for BuildAddressRepository {
         .await
         .map_err(storage)?
         .iter()
-        .map(|row| row.get("address"))
+        .filter_map(|row| row.get::<String, _>("address").parse().ok())
         .collect();
-        let own: Vec<Ipv4Addr> = own.iter().filter_map(|a| a.parse().ok()).collect();
         if own.len() == count && own.iter().all(|a| pool.contains(*a)) {
             tx.commit().await.map_err(storage)?;
             return Ok(own);
         }
-        // Anything else it held (another count, or a pool that changed) goes.
-        sqlx::query("DELETE FROM image_build_addresses WHERE operation_id = ?1")
-            .bind(operation_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
+        // Anything else it held (another count, or a pool that changed) is
+        // let go, with quarantine: an earlier attempt may have started a
+        // guest on it.
+        sqlx::query(
+            "UPDATE image_build_addresses \
+             SET state = 'released', released_at = ?2, hold_until = ?3 \
+             WHERE operation_id = ?1 AND state = 'held'",
+        )
+        .bind(operation_id)
+        .bind(now_millis)
+        .bind(now_millis + BUILD_ADDRESS_QUARANTINE_MILLIS)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let first_slot: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(slot) + 1, 0) FROM image_build_addresses WHERE operation_id = ?1",
+        )
+        .bind(operation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
 
-        let held: HashSet<Ipv4Addr> =
-            sqlx::query("SELECT address FROM image_build_addresses WHERE state = 'held'")
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(storage)?
-                .iter()
-                .filter_map(|row| row.get::<String, _>("address").parse().ok())
-                .collect();
+        // Unavailable: held now, or quarantined until a later time.
+        let unavailable: HashSet<Ipv4Addr> = sqlx::query(
+            "SELECT DISTINCT address FROM image_build_addresses \
+             WHERE state = 'held' OR hold_until > ?1",
+        )
+        .bind(now_millis)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?
+        .iter()
+        .filter_map(|row| row.get::<String, _>("address").parse().ok())
+        .collect();
         let released: HashMap<Ipv4Addr, i64> = sqlx::query(
             "SELECT address, MAX(released_at) AS at FROM image_build_addresses \
              WHERE state = 'released' GROUP BY address",
@@ -103,20 +127,26 @@ impl BuildAddressPort for BuildAddressRepository {
             ))
         })
         .collect();
-        let mut free: Vec<Ipv4Addr> = pool.candidates().filter(|a| !held.contains(a)).collect();
+        let mut free: Vec<Ipv4Addr> = pool
+            .candidates()
+            .filter(|a| !unavailable.contains(a))
+            .collect();
         if free.len() < count {
+            // The reclaim above is real whatever this request gets: keep it,
+            // so the quarantine of a dead holder starts when it was noticed.
+            tx.commit().await.map_err(storage)?;
             return Err(BuildAddressError::Exhausted);
         }
         // Never-used first, then the longest since release, then by address.
         free.sort_by_key(|a| (released.get(a).copied().unwrap_or(i64::MIN), u32::from(*a)));
         free.truncate(count);
-        for (slot, address) in free.iter().enumerate() {
+        for (offset, address) in free.iter().enumerate() {
             sqlx::query(
                 "INSERT INTO image_build_addresses \
                  (operation_id, slot, address, state, created_at) VALUES (?1, ?2, ?3, 'held', ?4)",
             )
             .bind(operation_id)
-            .bind(i64::try_from(slot).map_err(storage)?)
+            .bind(first_slot + i64::try_from(offset).map_err(storage)?)
             .bind(address.to_string())
             .bind(now_millis)
             .execute(&mut *tx)
@@ -127,13 +157,20 @@ impl BuildAddressPort for BuildAddressRepository {
         Ok(free)
     }
 
-    async fn release(&self, operation_id: &str, now_millis: i64) -> Result<usize, String> {
+    async fn release(
+        &self,
+        operation_id: &str,
+        now_millis: i64,
+        quarantine: bool,
+    ) -> Result<usize, String> {
         let done = sqlx::query(
-            "UPDATE image_build_addresses SET state = 'released', released_at = ?2 \
+            "UPDATE image_build_addresses \
+             SET state = 'released', released_at = ?2, hold_until = ?3 \
              WHERE operation_id = ?1 AND state = 'held'",
         )
         .bind(operation_id)
         .bind(now_millis)
+        .bind(quarantine.then_some(now_millis + BUILD_ADDRESS_QUARANTINE_MILLIS))
         .execute(&self.pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -143,6 +180,7 @@ impl BuildAddressPort for BuildAddressRepository {
     async fn reconcile(&self, now_millis: i64) -> Result<usize, String> {
         let done = sqlx::query(RELEASE_STALE)
             .bind(now_millis)
+            .bind(now_millis + BUILD_ADDRESS_QUARANTINE_MILLIS)
             .execute(&self.pool)
             .await
             .map_err(|e| e.to_string())?;

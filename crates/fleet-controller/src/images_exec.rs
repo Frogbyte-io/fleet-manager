@@ -212,9 +212,16 @@ impl ImagesExecutor {
     pub async fn reconcile_build_addresses(
         port: &dyn fleet_application::images::BuildAddressPort,
     ) -> usize {
-        port.reconcile(fleet_core::SystemClock::now_unix_millis())
+        match port
+            .reconcile(fleet_core::SystemClock::now_unix_millis())
             .await
-            .unwrap_or(0)
+        {
+            Ok(released) => released,
+            Err(error) => {
+                eprintln!("image build address reconciliation failed: {error}");
+                0
+            }
+        }
     }
 
     /// Records that the build was assigned its address(es), before
@@ -593,6 +600,9 @@ impl OperationExecutor for ImagesExecutor {
         // No provider invocation is allowed until the immutable input snapshot
         // commits. A duplicate delivery cannot silently overwrite old evidence.
         self.versions.start_build(&record).await?;
+        // Whether Packer's build child was lost without a report on its VM
+        // (#337), so the build's address must stay out of use for a while.
+        let mut build_lost = false;
         let result = if let Some(reason) = target_resolution_failed {
             Err(reason)
         } else if operations
@@ -613,6 +623,7 @@ impl OperationExecutor for ImagesExecutor {
                 &version,
                 &mut record,
                 stop_rx,
+                &mut build_lost,
             );
             tokio::pin!(work);
             let mut cancel = None;
@@ -633,10 +644,22 @@ impl OperationExecutor for ImagesExecutor {
         // be terminal, and a held address of a terminal operation no longer
         // counts (the next allocation or startup reconciles it).
         if let Some(assigned) = &self.build_addresses {
-            let _ = assigned
+            // Quarantined when Packer could not report that its VM is gone:
+            // the VM may still answer on the address.
+            let quarantine = build_lost || result.as_ref().err().is_some_and(|r| unverified_end(r));
+            if let Err(error) = assigned
                 .port
-                .release(&operation.id, record.ended_at.unwrap_or(record.started_at))
-                .await;
+                .release(
+                    &operation.id,
+                    record.ended_at.unwrap_or(record.started_at),
+                    quarantine,
+                )
+                .await
+            {
+                eprintln!(
+                    "image build address release failed (reclaimed at the next allocation): {error}"
+                );
+            }
         }
         match result {
             Ok(template) => {
@@ -713,7 +736,10 @@ impl ImagesExecutor {
                 fleet_application::images::BuildAddressError::Exhausted => {
                     fleet_core::REASON_POOL_EXHAUSTED
                 }
-                fleet_application::images::BuildAddressError::Storage(_) => {
+                fleet_application::images::BuildAddressError::Storage(detail) => {
+                    // The reason is all the record keeps; the detail is for
+                    // the controller's log (a storage error, no recipe data).
+                    eprintln!("image build address allocation failed: {detail}");
                     fleet_core::REASON_ALLOCATION_FAILED
                 }
             })?;
@@ -721,6 +747,7 @@ impl ImagesExecutor {
         Ok((content, addresses))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_build(
         &self,
         operations: &Operations,
@@ -729,6 +756,7 @@ impl ImagesExecutor {
         version: &RecipeVersion,
         record: &mut ImageBuildRecord,
         stop: tokio::sync::watch::Receiver<bool>,
+        build_lost: &mut bool,
     ) -> Result<ImageBuildTemplate, &'static str> {
         if record.account_id.as_deref().is_none_or(str::is_empty) {
             return Err("target_account_missing");
@@ -910,7 +938,12 @@ impl ImagesExecutor {
                 stop,
             )
             .await
-            .map_err(|_| "build_failed")?;
+            .map_err(|_| {
+                // The child was lost without a report: Packer's cleanup of
+                // its VM cannot be vouched for.
+                *build_lost = true;
+                "build_failed"
+            })?;
         let built = stoppable.outcome;
         // A cancel interrupted the build: only Packer's own clean-cancel
         // report says the plugin removed its VM.
@@ -939,6 +972,20 @@ impl ImagesExecutor {
         let id = stream.artifact_id().ok_or("artifact_missing")?;
         output_template(id, version).ok_or("artifact_missing")
     }
+}
+
+/// Whether a build ended without Packer reporting that its VM was removed
+/// (#337): killed at the deadline, interrupted without the clean-cancel
+/// report, or a cancel whose outcome could not be read. The VM may still
+/// answer on the build's address.
+fn unverified_end(reason: &str) -> bool {
+    matches!(
+        reason,
+        "deadline_killed"
+            | "deadline_interrupted_unverified"
+            | "cancelled_unverified"
+            | "cancel_poll_failed"
+    )
 }
 
 /// The build's terminal result, given how a cancel (if any) was seen and
@@ -3074,6 +3121,9 @@ mod tests {
 
     // Build addresses (#337) ---------------------------------------------
 
+    /// A clone recipe with a NIC, which a build address needs.
+    const POOL_CONTENT: &str = r#"{"builders":[{"type":"proxmox-clone","node":"pve","disks":[{"type":"scsi","storage_pool":"local-lvm","disk_size":"8G"}],"network_adapters":[{"model":"virtio","bridge":"vmbr0"}],"vm_name":"ubuntu-base","proxmox_url":"https://pve.example.test:8006/api2/json"}],"provisioners":[{"type":"shell","inline":["echo ready"]}]}"#;
+
     fn address_pool(refuse_iso: bool) -> fleet_core::BuildAddressPool {
         fleet_core::BuildAddressPool::parse(
             "192.0.2.0/24",
@@ -3119,7 +3169,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_pool_packer_reads_the_stored_recipe_unchanged() {
         let (dir, _store, repository, operations, operation, transport) = setup(
-            CONTENT,
+            POOL_CONTENT,
             serde_json::json!({}),
             build_replies(reply("1,proxmox-clone,artifact,0,id,120", Some(0), false)),
             false,
@@ -3143,14 +3193,14 @@ mod tests {
         let seen = transport.saw_recipe.lock().unwrap().clone();
         assert_eq!(seen.len(), 2);
         for (_, content) in seen {
-            assert_eq!(content, CONTENT);
+            assert_eq!(content, POOL_CONTENT);
         }
     }
 
     #[tokio::test]
     async fn a_clone_build_gets_a_fleet_assigned_address_that_is_audited_and_released() {
         let (dir, store, repository, operations, operation, transport) = setup(
-            CONTENT,
+            POOL_CONTENT,
             serde_json::json!({}),
             build_replies(reply("1,proxmox-clone,artifact,0,id,120", Some(0), false)),
             false,
@@ -3189,7 +3239,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             repository.get_version(&stored).await.unwrap().content,
-            CONTENT
+            POOL_CONTENT
         );
         // The assignment is on the audit ledger, before the build, and the
         // address went back to the pool.
@@ -3213,7 +3263,7 @@ mod tests {
             reply("", None, true),
         ] {
             let (dir, store, repository, operations, operation, transport) = setup(
-                CONTENT,
+                POOL_CONTENT,
                 serde_json::json!({}),
                 build_replies(outcome),
                 false,
@@ -3242,7 +3292,7 @@ mod tests {
     #[tokio::test]
     async fn an_exhausted_pool_fails_the_build_before_any_secret() {
         let (dir, store, repository, operations, operation, transport) = setup(
-            CONTENT,
+            POOL_CONTENT,
             serde_json::json!({"secretVars": [{"name": "token", "reference": "unavailable"}]}),
             probes(),
             false,
@@ -3287,7 +3337,7 @@ mod tests {
 
     #[tokio::test]
     async fn iso_builds_keep_the_residual_risk_or_are_refused_when_the_pool_says_so() {
-        let iso = CONTENT.replace("proxmox-clone", "proxmox-iso");
+        let iso = POOL_CONTENT.replace("proxmox-clone", "proxmox-iso");
         // Not refused: the recipe is built as written and takes no address.
         let (dir, store, repository, operations, operation, transport) = setup(
             &iso,
@@ -3355,7 +3405,7 @@ mod tests {
             }
         }
         let (dir, store, repository, operations, operation, transport) = setup(
-            CONTENT,
+            POOL_CONTENT,
             serde_json::json!({}),
             // Validate runs; build must not.
             {
@@ -3397,6 +3447,84 @@ mod tests {
         assert_eq!(held_addresses(&store).await, 0);
     }
 
+    #[tokio::test]
+    async fn only_a_build_that_ended_without_a_report_on_its_vm_quarantines_the_address() {
+        for (outcome, quarantined) in [
+            (reply("", Some(1), false), false),
+            (
+                reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+                false,
+            ),
+            (reply("", None, true), true),
+            (Err("fixture-secret-token".to_owned()), true),
+            (reply("1,,ui,say,build interrupted", Some(1), true), true),
+            (
+                reply(
+                    "1,,ui,say,Cleanly cancelled builds after being interrupted.",
+                    Some(1),
+                    true,
+                ),
+                false,
+            ),
+        ] {
+            let (dir, store, repository, operations, operation, transport) = setup(
+                POOL_CONTENT,
+                serde_json::json!({}),
+                build_replies(outcome),
+                false,
+            )
+            .await;
+            let executor = with_pool(
+                repository.clone(),
+                transport,
+                &store,
+                dir.path().join("work"),
+                address_pool(false),
+            );
+            assert!(
+                operations
+                    .execute_claimed(&executor, operation.clone())
+                    .await
+            );
+            assert_eq!(held_addresses(&store).await, 0);
+            sqlx::query("INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at) VALUES ('next', 'image.build', 'running', 0, 1, 1)")
+                .execute(store.pool()).await.unwrap();
+            let next = fleet_application::images::BuildAddressPort::allocate(
+                &fleet_storage_sqlite::BuildAddressRepository::new(store.pool().clone()),
+                "next",
+                &address_pool(false),
+                1,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await;
+            assert_eq!(next.is_err(), quarantined, "{next:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clone_recipe_without_a_nic_is_refused_before_any_probe() {
+        let (dir, store, repository, operations, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), Vec::new(), false).await;
+        let executor = with_pool(
+            repository.clone(),
+            transport,
+            &store,
+            dir.path().join("work"),
+            address_pool(false),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("build_address_network_adapter_required")
+        );
+        assert_eq!(held_addresses(&store).await, 0);
+    }
+
     #[test]
     fn the_runbook_recipes_take_a_build_address() {
         // #337: with a pool configured, the documented SSH recipe is
@@ -3405,12 +3533,18 @@ mod tests {
         const RUNBOOK: &str = include_str!("../../../docs/operations/lab.md");
         let pool = address_pool(true);
         for (line, _, content) in runbook_recipes(RUNBOOK) {
+            // A recipe with `communicator: none` never connects, so it takes
+            // no address; the documented SSH recipe takes one.
+            let silent = content.contains("\"communicator\": \"none\"");
             assert_eq!(
                 fleet_core::build_addresses_needed(content.as_str(), &pool),
-                Ok(1),
+                Ok(usize::from(!silent)),
                 "line {}",
                 line + 1
             );
+            if silent {
+                continue;
+            }
             let rewritten = fleet_core::with_build_addresses(
                 &content,
                 &pool,

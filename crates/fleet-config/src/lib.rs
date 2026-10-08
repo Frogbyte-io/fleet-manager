@@ -759,7 +759,12 @@ fn layer_address_pool(
     )
     .map(Some)
     .map_err(|error| ConfigError::ImageBuildAddressPoolInvalid {
-        setting: IMAGE_BUILD_ADDRESS_POOL_VAR,
+        setting: match error.field {
+            "range" => IMAGE_BUILD_ADDRESS_POOL_RANGE_VAR,
+            "gateway" => IMAGE_BUILD_ADDRESS_POOL_GATEWAY_VAR,
+            "dns" => IMAGE_BUILD_ADDRESS_POOL_DNS_VAR,
+            _ => IMAGE_BUILD_ADDRESS_POOL_VAR,
+        },
         rule: error.rule,
     })
 }

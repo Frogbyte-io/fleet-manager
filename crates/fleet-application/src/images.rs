@@ -924,6 +924,11 @@ impl Images {
     }
 }
 
+/// How long an address stays out of allocation after a build that did not
+/// end verifiably (24 hours). Packer removes its VM on a clean failure or
+/// cancel; when it could not report that, the VM may still hold the address.
+pub const BUILD_ADDRESS_QUARANTINE_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
 /// A build address allocation failed (#337).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildAddressError {
@@ -973,12 +978,24 @@ pub trait BuildAddressPort: fmt::Debug + Send + Sync {
 
     /// Releases every address the operation holds. Idempotent.
     ///
+    /// With `quarantine`, the addresses also stay out of allocation for
+    /// [`BUILD_ADDRESS_QUARANTINE_MILLIS`]. Use it when the build did not
+    /// end verifiably: Packer may not have removed its VM, which may still
+    /// answer on the address, and the next build would connect to it.
+    ///
     /// # Errors
     /// Fails on a storage error.
-    async fn release(&self, operation_id: &str, now_millis: i64) -> Result<usize, String>;
+    async fn release(
+        &self,
+        operation_id: &str,
+        now_millis: i64,
+        quarantine: bool,
+    ) -> Result<usize, String>;
 
     /// Releases every held address whose operation is terminal or unknown,
-    /// for startup. Returns how many were released.
+    /// for startup. The holder died without releasing, so nothing says its
+    /// VM is gone: these addresses are quarantined. Returns how many were
+    /// released.
     ///
     /// # Errors
     /// Fails on a storage error.
