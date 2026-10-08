@@ -97,6 +97,39 @@ struct BuildEnvs {
     build: SecretEnv,
 }
 
+/// An empty `SSH_AUTH_SOCK`, for every Packer child (#333). The SDK
+/// forwards the agent to the build guest unless a recipe sets
+/// `ssh_disable_agent_forwarding`, which would hand the recipe's own
+/// provisioner shell the controller's Lab and fleet keys. With an empty
+/// value the SDK's Unix `GetSSHAgentConnection` fails, so neither
+/// forwarding nor agent authentication reaches the agent, for stored
+/// versions too. (The SDK's Windows build dials a named pipe instead, so
+/// builds are refused on Windows controllers.)
+fn no_ssh_agent() -> (String, fleet_core::SensitiveString) {
+    (
+        "SSH_AUTH_SOCK".to_owned(),
+        fleet_core::SensitiveString::new(String::new()),
+    )
+}
+
+/// The child environment for a controller without account credentials
+/// wired: the controller's environment as before, including its ambient
+/// `PROXMOX_*` credentials, but never its SSH agent. [`SecretEnv`] only
+/// sets variables on an isolating env, which removes ambient `PROXMOX_*`
+/// first, so they are carried over explicitly.
+fn inherited_env() -> SecretEnv {
+    let mut vars: Vec<(String, fleet_core::SensitiveString)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let value = value.into_string().ok()?;
+            key.starts_with("PROXMOX_")
+                .then(|| (key, fleet_core::SensitiveString::new(value)))
+        })
+        .collect();
+    vars.push(no_ssh_agent());
+    SecretEnv::new(vars)
+}
+
 /// The work-directory entries that carry the pinned trust to Packer.
 const TLS_DIR: &str = "tls";
 /// The pinned leaf, PEM-encoded: `SSL_CERT_FILE`.
@@ -145,11 +178,12 @@ impl ImagesExecutor {
 
     /// The version probes' environment: no Proxmox credential at all once
     /// builds get their account's token, rather than the controller's own.
+    /// Never the controller's SSH agent.
     fn probe_env(&self) -> SecretEnv {
         if self.credentials.is_some() {
-            SecretEnv::isolated()
+            SecretEnv::new(vec![no_ssh_agent()])
         } else {
-            SecretEnv::default()
+            inherited_env()
         }
     }
 
@@ -170,8 +204,8 @@ impl ImagesExecutor {
             (&self.accounts, &self.credentials, &self.certificates)
         else {
             return Ok(BuildEnvs {
-                validate: SecretEnv::default(),
-                build: SecretEnv::default(),
+                validate: inherited_env(),
+                build: inherited_env(),
             });
         };
         let account_id = account_id.ok_or("target_account_missing")?;
@@ -231,18 +265,7 @@ impl ImagesExecutor {
                     )
                 })
                 .collect();
-            // No controller SSH agent for Packer (#333). The SDK forwards
-            // `SSH_AUTH_SOCK` to the build guest unless a recipe sets
-            // `ssh_disable_agent_forwarding`, which would hand the
-            // recipe's own provisioner shell the controller's Lab and fleet
-            // keys. An empty value makes the SDK's `GetSSHAgentConnection`
-            // fail, so neither forwarding nor agent authentication can use
-            // it, for stored versions too. The recipe gate refuses the
-            // agent options outright.
-            vars.push((
-                "SSH_AUTH_SOCK".to_owned(),
-                fleet_core::SensitiveString::new(String::new()),
-            ));
+            vars.push(no_ssh_agent());
             vars.push((
                 "PROXMOX_USERNAME".to_owned(),
                 fleet_core::SensitiveString::new(username),
@@ -483,6 +506,13 @@ impl ImagesExecutor {
         // resolved.
         if let Some(reason) = fleet_core::recipe_build_refusal(&version.content) {
             return Err(reason);
+        }
+        // The SDK's Windows build reaches the controller's SSH agent over a
+        // named pipe, ignoring the empty `SSH_AUTH_SOCK` every Packer child
+        // gets (#333); pinned builds are refused there already
+        // (`certificate_pin_unsupported`), and this covers the rest.
+        if cfg!(windows) {
+            return Err("controller_platform_unsupported");
         }
         // Skipping TLS verification sends the token to whatever answers at
         // the recipe's address: only a version published with the audited
@@ -1579,18 +1609,130 @@ mod tests {
         assert!(!ran.work.exists());
     }
 
+    /// Every fenced block in the operator runbook that holds a recipe (any
+    /// block mentioning `"builders"`), with its start line, its info
+    /// string, and its `<placeholder>` tokens filled in: numbers where the
+    /// token is a bare JSON value, plain text inside strings.
+    fn runbook_recipes(runbook: &str) -> Vec<(usize, String, String)> {
+        let mut recipes = Vec::new();
+        let mut lines = runbook.lines().enumerate();
+        while let Some((start, line)) = lines.next() {
+            let Some(info) = line.trim_start().strip_prefix("```") else {
+                continue;
+            };
+            let mut body = String::new();
+            for (_, line) in lines.by_ref() {
+                if line.trim_start().starts_with("```") {
+                    break;
+                }
+                body.push_str(line);
+                body.push('\n');
+            }
+            if !body.contains("\"builders\"") {
+                continue;
+            }
+            let mut filled = String::with_capacity(body.len());
+            let mut chars = body.chars().peekable();
+            let mut in_string = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' if in_string => {
+                        filled.push(c);
+                        filled.extend(chars.next());
+                    }
+                    '"' => {
+                        in_string = !in_string;
+                        filled.push(c);
+                    }
+                    '<' if chars.peek().is_some_and(char::is_ascii_lowercase) => {
+                        let mut token = String::new();
+                        for next in chars.by_ref() {
+                            if next == '>' {
+                                break;
+                            }
+                            token.push(next);
+                        }
+                        assert!(
+                            token.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+                            "unexpected placeholder <{token}>"
+                        );
+                        filled.push_str(if in_string { "placeholder" } else { "9100" });
+                    }
+                    _ => filled.push(c),
+                }
+            }
+            recipes.push((start, info.to_owned(), filled));
+        }
+        recipes
+    }
+
+    #[test]
+    fn the_runbook_recipes_pass_every_build_time_check() {
+        // #333: the documented temporary-key SSH recipe ("The image") and
+        // the first-run recipe must keep passing the gate, the provisioner
+        // allowlist, and the frozen-target check.
+        const RUNBOOK: &str = include_str!("../../../docs/operations/lab.md");
+        let heading = RUNBOOK
+            .lines()
+            .position(|line| line.trim() == "#### Building an SSH-ready image from a DHCP template")
+            .expect("the runbook's SSH-ready image heading");
+        let recipes = runbook_recipes(RUNBOOK);
+        assert_eq!(recipes.len(), 2, "{recipes:?}");
+        let ssh: Vec<_> = recipes
+            .iter()
+            .filter(|(_, _, content)| content.contains("\"communicator\": \"ssh\""))
+            .collect();
+        assert_eq!(ssh.len(), 1, "{recipes:?}");
+        assert!(ssh[0].0 > heading, "the SSH recipe sits under its heading");
+        for (line, info, content) in &recipes {
+            // A variant fence (`JSON`, `jsonc`, trailing text) is found, and
+            // fails here rather than being skipped.
+            assert_eq!(info, "json", "line {}", line + 1);
+            serde_json::from_str::<serde_json::Value>(content)
+                .unwrap_or_else(|error| panic!("line {}: {error}", line + 1));
+            assert_eq!(fleet_core::recipe_build_refusal(content), None, "{content}");
+            assert!(!has_external_assets(content), "{content}");
+            let structured = fleet_core::StructuredRecipe::from_raw(content).expect("structured");
+            let recipe = fleet_core::RecipeContent {
+                name: "lab-base".to_owned(),
+                description: String::new(),
+                node: structured.node.clone(),
+                storage_pool: Some("local-lvm".to_owned()),
+                source: structured.source,
+                content: content.clone(),
+            };
+            assert!(recipe.validate().is_ok(), "{content}");
+            let version = RecipeVersion {
+                id: "v".to_owned(),
+                recipe_id: "r".to_owned(),
+                name: recipe.name,
+                content_digest: "digest".to_owned(),
+                description: String::new(),
+                content: content.clone(),
+                source: structured.source,
+                node: structured.node,
+                storage_pool: "local-lvm".to_owned(),
+                published_at: 1,
+                promoted_at: None,
+                promoted_by: None,
+                promoted_build_id: None,
+                allow_insecure_tls: false,
+            };
+            assert!(version.has_frozen_build_target(), "{content}");
+        }
+    }
+
     #[tokio::test]
-    async fn validate_and_build_get_no_controller_ssh_agent() {
+    async fn no_packer_child_gets_the_controller_ssh_agent() {
         // #333: the SDK forwards `SSH_AUTH_SOCK` to the guest by default.
         let ran = run_case(Case::pinned_and_presented(&leaf(&["pve.example.test"]))).await;
         assert_eq!(ran.record.outcome, "succeeded", "{:?}", ran.record.reason);
-        let children: Vec<_> = ran
-            .agent
-            .iter()
-            .filter(|(args, _)| args.starts_with("validate") || args.contains(" build "))
-            .collect();
-        assert_eq!(children.len(), 2, "{:?}", ran.agent);
-        for (args, agent) in children {
+        assert!(
+            ran.agent.iter().any(|(args, _)| args.contains(" build ")),
+            "{:?}",
+            ran.agent
+        );
+        for (args, agent) in &ran.agent {
             assert_eq!(agent.as_deref(), Some(""), "{args}");
         }
     }
@@ -1767,8 +1909,12 @@ mod tests {
         ]);
         let (dir, _store, repository, operations, operation, transport) =
             setup(CONTENT, serde_json::json!({}), replies, false).await;
-        let executor =
-            ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            None,
+            dir.path().join("work"),
+        );
         assert!(
             operations
                 .execute_claimed(&executor, operation.clone())
@@ -1777,6 +1923,12 @@ mod tests {
         let record = repository.get_build(&operation.id).await.unwrap();
         assert_eq!(record.outcome, "succeeded");
         assert_eq!(record.packer_version.as_deref(), Some("1.15"));
+        // Without account credentials, too, no child gets the agent (#333).
+        let agent = transport.saw_agent.lock().unwrap().clone();
+        assert!(agent.iter().any(|(args, _)| args.contains(" build ")));
+        for (args, agent) in &agent {
+            assert_eq!(agent.as_deref(), Some(""), "{args}");
+        }
         let mut version = repository.get_version(&record.version_id).await.unwrap();
         version.content = CONTENT.replace("ubuntu-base", "ubuntu_base");
         assert!(output_template("120", &version).is_none());

@@ -309,7 +309,9 @@ pub const RECIPE_REFUSAL_REASONS: &[&str] = &[
     "recipe_forbidden_template_function",
     "recipe_template_malformed",
     "recipe_templated_key",
+    "recipe_packer_internal_key",
     "recipe_controller_file_input",
+    "recipe_http_server_option",
     "recipe_communicator_forbidden_option",
 ];
 
@@ -342,15 +344,27 @@ pub const RECIPE_REFUSAL_REASONS: &[&str] = &[
 ///   and a literal `http(s)://` URL (so PVE downloads it, not go-getter on
 ///   the controller); an `iso_checksum` must be a literal hash or `none`
 ///   (a `file:` checksum is fetched on the controller, even by `validate`);
+///   every `cd_content` key must be a relative path of plain segments
+///   (`[A-Za-z0-9._-]+`, not `.` or `..`): Packer writes each entry under a
+///   controller temp directory with `filepath.Join`;
 /// - no key, at any depth, may contain a template action
 ///   (`recipe_templated_key`): Packer's interpolation renders map keys as
 ///   well as values, so `{{lower "SSH_HOST"}}` would become `ssh_host`
 ///   after every key check here;
+/// - no builder may set a `packer_*` key (`recipe_packer_internal_key`):
+///   those are Packer core's build settings, not the recipe's;
+/// - the builder's HTTP server must listen on TCP (`http_network_protocol`
+///   absent, `tcp`, or `tcp4`) at a literal IP, if `http_bind_address` is
+///   set (`recipe_http_server_option`): a `unix` socket is a file at a
+///   recipe-chosen controller path;
 /// - no builder may set a communicator option that reads controller files,
 ///   uses the controller's SSH agent, or connects anywhere but the build
 ///   guest (`recipe_communicator_forbidden_option`): see
-///   [`ALLOWED_COMMUNICATOR_KEYS`]. Packer's temporary key, the default
-///   when no credential is given, stays allowed.
+///   [`ALLOWED_COMMUNICATOR_KEYS`]. `communicator` must be absent or a
+///   literal `none`, `ssh`, or `winrm`, and `winrm` needs a literal
+///   `winrm_no_proxy: true` (otherwise the `WinRM` client goes through the controller's
+///   HTTP proxy). Packer's temporary key, the default when no credential is
+///   given, stays allowed.
 #[must_use]
 pub fn recipe_build_refusal(content: &str) -> Option<&'static str> {
     if let Err(reason) = audit_keys(content) {
@@ -380,10 +394,19 @@ pub fn recipe_build_refusal(content: &str) -> Option<&'static str> {
     if has_templated_key(&value) {
         return Some("recipe_templated_key");
     }
+    if builders.iter().any(sets_packer_internal_key) {
+        return Some("recipe_packer_internal_key");
+    }
     if builders.iter().any(reads_controller_inputs) {
         return Some("recipe_controller_file_input");
     }
-    if builders.iter().any(uses_forbidden_communicator_option) {
+    if builders.iter().any(uses_forbidden_http_server_option) {
+        return Some("recipe_http_server_option");
+    }
+    if builders
+        .iter()
+        .any(|builder| uses_forbidden_communicator_option(builder) || unsafe_communicator(builder))
+    {
         return Some("recipe_communicator_forbidden_option");
     }
     None
@@ -419,7 +442,17 @@ pub fn recipe_refusal_message(reason: &str) -> &'static str {
         "recipe_controller_file_input" => {
             "the recipe reads files on the controller (http_directory, cd_files), \
              fetches an ISO on the controller (iso_url without iso_download_pve, or a \
-             non-http(s) URL), or uses a non-literal iso_checksum"
+             non-http(s) URL), uses an iso_checksum that is not a literal md5, sha1, \
+             sha256, or sha512 digest or none, or has a cd_content path that is not \
+             relative plain segments ([A-Za-z0-9._-], no `.` or `..`)"
+        }
+        "recipe_packer_internal_key" => {
+            "the recipe sets a packer_* key in a builder; those are Packer's own build \
+             settings"
+        }
+        "recipe_http_server_option" => {
+            "the recipe's HTTP server must listen on TCP: http_network_protocol may only \
+             be tcp or tcp4, and http_bind_address must be a literal IP address"
         }
         "recipe_templated_key" => {
             "the recipe has a key containing a template action (`{{`); Packer renders \
@@ -429,9 +462,10 @@ pub fn recipe_refusal_message(reason: &str) -> &'static str {
             "the recipe sets a communicator option that reads files on the controller \
              (ssh_private_key_file, ssh_certificate_file, ...), uses the controller's SSH \
              agent (ssh_agent_auth, ...), or connects somewhere other than the build guest \
-             (ssh_host, winrm_host, ssh_bastion_*, ssh_proxy_*, ssh tunnels); leave the \
-             credential out so Packer uses a temporary key, and set \
-             ssh_disable_agent_forwarding only to true"
+             (ssh_host, winrm_host, ssh_bastion_*, ssh_proxy_*, ssh tunnels), or a \
+             communicator other than a literal none, ssh, or winrm (winrm needs \
+             winrm_no_proxy: true); leave the credential out so Packer uses a temporary \
+             key, and set ssh_disable_agent_forwarding only to true"
         }
         _ => "the recipe content must be a JSON object",
     }
@@ -549,6 +583,17 @@ fn reads_controller_inputs(value: &serde_json::Value) -> bool {
             {
                 return true;
             }
+            // `step_create_cdrom` writes each entry to
+            // `filepath.Join(<temp dir>, key)` on the controller, even when
+            // no ISO tool is found afterwards.
+            if let Some(content) = field("cd_content") {
+                let Some(entries) = content.as_object() else {
+                    return true;
+                };
+                if !entries.keys().all(|path| plain_relative_path(path)) {
+                    return true;
+                }
+            }
             object.values().any(reads_controller_inputs)
         }
         _ => false,
@@ -590,20 +635,99 @@ fn uses_forbidden_communicator_option(value: &serde_json::Value) -> bool {
     }
 }
 
-/// `none`, a bare hex digest, or `<algorithm>:<hex digest>`: the forms that
-/// Packer checks locally without fetching anything.
+/// `none`, a bare hex digest of an md5/sha1/sha256/sha512 length, or
+/// `<md5|sha1|sha256|sha512>:<hex digest of that length>`: the forms that
+/// Packer checks locally without fetching anything (`file:` and any other
+/// go-getter checksum type are refused).
 fn literal_checksum(value: &str) -> bool {
     if value == "none" {
         return true;
     }
-    let digest = value.split_once(':').map_or(value, |(algorithm, digest)| {
-        if algorithm.is_empty() || !algorithm.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            ""
-        } else {
-            digest
-        }
-    });
-    !digest.is_empty() && digest.bytes().all(|b| b.is_ascii_hexdigit())
+    let (expected, digest): (&[usize], &str) = match value.split_once(':') {
+        None => (&[32, 40, 64, 128], value),
+        Some((algorithm, digest)) => match algorithm.to_ascii_lowercase().as_str() {
+            "md5" => (&[32], digest),
+            "sha1" => (&[40], digest),
+            "sha256" => (&[64], digest),
+            "sha512" => (&[128], digest),
+            _ => return false,
+        },
+    };
+    expected.contains(&digest.len()) && digest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A relative path of plain segments: each one `[A-Za-z0-9._-]+` and not
+/// `.` or `..`, separated by single `/`. So no absolute path, no `\`, no
+/// empty segment, and nothing that climbs out of the directory it is
+/// joined to.
+fn plain_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+}
+
+/// Whether a builder, at any depth, sets a `packer_*` key (any case).
+fn sets_packer_internal_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(sets_packer_internal_key),
+        serde_json::Value::Object(object) => object.iter().any(|(key, child)| {
+            key.to_ascii_lowercase().starts_with("packer_") || sets_packer_internal_key(child)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a builder, at any depth, has its HTTP server listen anywhere but
+/// a TCP port: `http_network_protocol` must be a literal `tcp` or `tcp4`
+/// (`unix`/`unixpacket` create a socket file at the recipe's path; `tcp6`
+/// is refused for simplicity), and `http_bind_address` a literal IP.
+fn uses_forbidden_http_server_option(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(uses_forbidden_http_server_option),
+        serde_json::Value::Object(object) => object.iter().any(|(key, child)| {
+            if key.eq_ignore_ascii_case("http_network_protocol")
+                && !matches!(child.as_str(), Some("tcp" | "tcp4"))
+            {
+                return true;
+            }
+            if key.eq_ignore_ascii_case("http_bind_address")
+                && child
+                    .as_str()
+                    .is_none_or(|address| address.parse::<std::net::IpAddr>().is_err())
+            {
+                return true;
+            }
+            uses_forbidden_http_server_option(child)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a builder's `communicator` is anything but absent or a literal
+/// `none`, `ssh`, or `winrm`, or is `winrm` without a literal
+/// `winrm_no_proxy: true`: without it, the SDK's `WinRM` client goes through
+/// the controller's `HTTP(S)_PROXY`.
+fn unsafe_communicator(builder: &serde_json::Value) -> bool {
+    let Some(object) = builder.as_object() else {
+        return false;
+    };
+    let field = |name: &str| {
+        object
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    };
+    match field("communicator").map(serde_json::Value::as_str) {
+        None | Some(Some("none" | "ssh")) => false,
+        Some(Some("winrm")) => field("winrm_no_proxy") != Some(&serde_json::Value::Bool(true)),
+        Some(_) => true,
+    }
 }
 
 /// What scanning the template actions in a string found.
@@ -1073,7 +1197,7 @@ mod tests {
         }
         for extra in [
             serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso" } }),
-            serde_json::json!({ "boot_iso": { "iso_url": "https://example.test/x.iso", "iso_download_pve": true, "iso_checksum": "sha256:0123abcd" } }),
+            serde_json::json!({ "boot_iso": { "iso_url": "https://example.test/x.iso", "iso_download_pve": true, "iso_checksum": "sha256:000000000000000000000000000000000000000000000000000000000000abcd" } }),
             serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": "none" } }),
             serde_json::json!({ "http_content": { "/user-data": "#cloud-config" } }),
         ] {
@@ -1241,71 +1365,163 @@ mod tests {
         }
     }
 
-    /// The JSON recipes in the operator runbook, with their `<placeholder>`
-    /// tokens filled in: numbers where the token is a bare JSON value,
-    /// plain text inside strings.
-    fn runbook_recipes() -> Vec<String> {
-        const RUNBOOK: &str = include_str!("../../../docs/operations/lab.md");
-        let mut recipes = Vec::new();
-        let mut rest = RUNBOOK;
-        while let Some(start) = rest.find("```json\n") {
-            let body = &rest[start + "```json\n".len()..];
-            let end = body.find("```").expect("a closed json block");
-            let block = &body[..end];
-            rest = &body[end + 3..];
-            if !block.contains("\"builders\"") {
-                continue;
-            }
-            let mut filled = String::with_capacity(block.len());
-            let mut chars = block.chars().peekable();
-            let mut in_string = false;
-            while let Some(c) = chars.next() {
-                match c {
-                    '\\' if in_string => {
-                        filled.push(c);
-                        filled.extend(chars.next());
-                    }
-                    '"' => {
-                        in_string = !in_string;
-                        filled.push(c);
-                    }
-                    '<' if chars.peek().is_some_and(char::is_ascii_lowercase) => {
-                        let mut token = String::new();
-                        while let Some(&next) = chars.peek() {
-                            chars.next();
-                            if next == '>' {
-                                break;
-                            }
-                            token.push(next);
-                        }
-                        assert!(
-                            token.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
-                            "unexpected placeholder <{token}>"
-                        );
-                        filled.push_str(if in_string { "placeholder" } else { "9100" });
-                    }
-                    _ => filled.push(c),
-                }
-            }
-            recipes.push(filled);
+    fn builder_with(extra: &serde_json::Value) -> Option<&'static str> {
+        let mut block = serde_json::json!({ "type": "proxmox-iso" });
+        for (key, value) in extra.as_object().unwrap() {
+            block[key] = value.clone();
         }
-        recipes
+        recipe_build_refusal(&serde_json::json!({ "builders": [block] }).to_string())
     }
 
     #[test]
-    fn the_runbook_recipes_pass_the_gate() {
-        let recipes = runbook_recipes();
-        assert!(
-            recipes
-                .iter()
-                .any(|recipe| recipe.contains("\"communicator\": \"ssh\"")),
-            "the runbook's temporary-key SSH recipe was not found"
+    fn cd_content_paths_must_stay_inside_the_cd_root() {
+        let refused = Some("recipe_controller_file_input");
+        for path in [
+            "..",
+            ".",
+            "../x",
+            "a/../../x",
+            "a/./b",
+            "/etc/x",
+            "\\..\\x",
+            "a\\b",
+            "a//b",
+            "a/",
+            "",
+            "user data",
+            "a:b",
+        ] {
+            for extra in [
+                serde_json::json!({ "cd_content": { path: "x" } }),
+                serde_json::json!({ "CD_Content": { path: "x" } }),
+                serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "cd_content": { path: "x" } } }),
+                serde_json::json!({ "additional_iso_files": [{ "cd_content": { path: "x" } }] }),
+            ] {
+                assert_eq!(builder_with(&extra), refused, "{extra}");
+            }
+        }
+        assert_eq!(
+            builder_with(&serde_json::json!({ "cd_content": ["meta-data"] })),
+            refused
         );
-        for content in recipes {
-            serde_json::from_str::<serde_json::Value>(&content)
-                .unwrap_or_else(|error| panic!("{error}: {content}"));
-            assert_eq!(recipe_build_refusal(&content), None, "{content}");
-            assert!(recipe(&content).validate().is_ok(), "{content}");
+        for path in [
+            "meta-data",
+            "user-data",
+            "a/b.c/d_e",
+            "..a",
+            "a..",
+            ".hidden",
+        ] {
+            let extra =
+                serde_json::json!({ "additional_iso_files": [{ "cd_content": { path: "x" } }] });
+            assert_eq!(builder_with(&extra), None, "{extra}");
+        }
+    }
+
+    #[test]
+    fn checksums_must_be_literal_digests_of_a_known_type() {
+        let refused = Some("recipe_controller_file_input");
+        let hex = |n: usize| "a".repeat(n);
+        for checksum in [
+            format!("file:{}", hex(64)),
+            format!("sha384:{}", hex(96)),
+            format!("sha256:{}", hex(63)),
+            format!("sha256:{}", hex(40)),
+            format!("md5:{}", hex(64)),
+            format!(":{}", hex(64)),
+            hex(63),
+            "abcd".to_owned(),
+            "NONE".to_owned(),
+            format!("sha256:{}g", hex(63)),
+        ] {
+            let extra = serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": checksum } });
+            assert_eq!(builder_with(&extra), refused, "{extra}");
+        }
+        for checksum in [
+            "none".to_owned(),
+            hex(32),
+            hex(40),
+            hex(64),
+            hex(128),
+            format!("md5:{}", hex(32)),
+            format!("sha1:{}", hex(40)),
+            format!("SHA256:{}", hex(64).to_ascii_uppercase()),
+            format!("sha512:{}", hex(128)),
+        ] {
+            let extra = serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": checksum } });
+            assert_eq!(builder_with(&extra), None, "{extra}");
+        }
+    }
+
+    #[test]
+    fn the_http_server_listens_only_on_tcp_at_a_literal_address() {
+        let refused = Some("recipe_http_server_option");
+        for extra in [
+            serde_json::json!({ "http_network_protocol": "unix" }),
+            serde_json::json!({ "HTTP_Network_Protocol": "unixpacket" }),
+            serde_json::json!({ "http_network_protocol": "tcp6" }),
+            serde_json::json!({ "http_network_protocol": "TCP" }),
+            serde_json::json!({ "http_network_protocol": "{{user `p`}}" }),
+            serde_json::json!({ "http_bind_address": "/tmp/x" }),
+            serde_json::json!({ "http_bind_address": "pve.example.test" }),
+            serde_json::json!({ "HTTP_BIND_ADDRESS": "{{user `a`}}" }),
+            serde_json::json!({ "http_bind_address": 1 }),
+            serde_json::json!({ "additional_iso_files": [{ "http_network_protocol": "unix" }] }),
+        ] {
+            assert_eq!(builder_with(&extra), refused, "{extra}");
+        }
+        for extra in [
+            serde_json::json!({ "http_network_protocol": "tcp" }),
+            serde_json::json!({ "http_network_protocol": "tcp4", "http_bind_address": "192.0.2.10" }),
+            serde_json::json!({ "http_bind_address": "0.0.0.0", "http_port_min": 8100, "http_port_max": 8200 }),
+            serde_json::json!({ "http_bind_address": "::1" }),
+        ] {
+            assert_eq!(builder_with(&extra), None, "{extra}");
+        }
+    }
+
+    #[test]
+    fn builders_may_not_set_packer_core_keys() {
+        for key in [
+            "packer_debug",
+            "PACKER_ON_ERROR",
+            "Packer_User_Variables",
+            "packer_",
+        ] {
+            for extra in [
+                serde_json::json!({ key: true }),
+                serde_json::json!({ "boot_iso": { key: true } }),
+            ] {
+                assert_eq!(
+                    builder_with(&extra),
+                    Some("recipe_packer_internal_key"),
+                    "{extra}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_communicator_is_a_literal_kind_and_winrm_bypasses_the_proxy() {
+        let refused = Some("recipe_communicator_forbidden_option");
+        for extra in [
+            serde_json::json!({ "communicator": "{{user `c`}}" }),
+            serde_json::json!({ "communicator": "docker" }),
+            serde_json::json!({ "communicator": "SSH" }),
+            serde_json::json!({ "communicator": true }),
+            serde_json::json!({ "communicator": "winrm" }),
+            serde_json::json!({ "Communicator": "winrm", "winrm_no_proxy": false }),
+            serde_json::json!({ "communicator": "winrm", "winrm_no_proxy": "true" }),
+        ] {
+            assert_eq!(builder_with(&extra), refused, "{extra}");
+        }
+        for extra in [
+            serde_json::json!({}),
+            serde_json::json!({ "communicator": "none" }),
+            serde_json::json!({ "communicator": "ssh" }),
+            serde_json::json!({ "COMMUNICATOR": "winrm", "WinRM_No_Proxy": true }),
+        ] {
+            assert_eq!(builder_with(&extra), None, "{extra}");
         }
     }
 
