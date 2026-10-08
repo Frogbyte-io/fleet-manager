@@ -11,12 +11,7 @@ use std::time::Duration;
 
 use std::process::Command;
 mod common;
-use common::{TestSshd, start_sshd, whoami};
-use tokio::sync::Mutex;
-
-/// The stub CLI and its install location are shared machine state; the
-/// tests serialize their installation and removal.
-static CLI_LOCK: Mutex<()> = Mutex::const_new(());
+use common::{TestSshd, start_sshd, start_sshd_with_home, whoami};
 
 /// The composed fixture: store, operations, skills executor, and a
 /// verified endpoint.
@@ -148,10 +143,10 @@ fn install_stub_cli(home: &str, sha_of_stub: Option<&str>) -> String {
     std::fs::create_dir_all(&bin_dir).unwrap();
     let path = format!("{bin_dir}/skills-manager-cli");
     let stub = r#"#!/usr/bin/env bash
-echo "$@" >> /tmp/fleet-stub-cli.log
-printf '%q\n' "$@" >> /tmp/fleet-stub-argv.log
+echo "$@" >> "$HOME/stub-cli.log"
+printf '%q\n' "$@" >> "$HOME/stub-argv.log"
 [ "$1" = "--json" ] && shift
-[ -e /tmp/fleet-stub-fail-deploy ] && [ "$1" = skills ] && [ "$2" = deploy ] && { echo "deploy refused" >&2; exit 1; }
+[ -e "$HOME/stub-fail-deploy" ] && [ "$1" = skills ] && [ "$2" = deploy ] && { echo "deploy refused" >&2; exit 1; }
 case "$1" in
   --version) echo '{"version":"1.40.0"}' ;;
   agents) echo '[{"id":"claude_code","name":"Claude Code","skillsDir":"/secret/agent/path"}]' ;;
@@ -211,13 +206,13 @@ fn sha256_of(path: &str) -> String {
 
 #[tokio::test]
 async fn the_probe_answers_presence_version_and_agents() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
-    std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
-    std::fs::remove_file("/tmp/fleet-stub-argv.log").ok();
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -251,13 +246,15 @@ async fn the_probe_answers_presence_version_and_agents() {
 
 #[tokio::test]
 async fn an_absent_cli_answers_honestly() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
     // Run the probe through a shell whose PATH lacks the CLI: use a
     // dedicated stub-free PATH by pointing the probe at a root? The probe
     // scans `command -v`; instead remove the stub if present.
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _ = std::fs::remove_file(format!("{home}/.local/bin/skills-manager-cli"));
 
     let payload = serde_json::json!({
@@ -281,12 +278,13 @@ async fn an_absent_cli_answers_honestly() {
 
 #[tokio::test]
 async fn deploy_reaches_the_stub_with_an_argument_array() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
-    std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -306,7 +304,7 @@ async fn deploy_reaches_the_stub_with_an_argument_array() {
         "each agent arrives as its own --agent pair, not a marker token"
     );
 
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains("skills deploy db --agent claude_code --agent codex"),
         "the arguments arrive as an array: {log}"
@@ -316,13 +314,13 @@ async fn deploy_reaches_the_stub_with_an_argument_array() {
 
 #[tokio::test]
 async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
-    std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
-    std::fs::remove_file("/tmp/fleet-stub-argv.log").ok();
 
     let base = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -346,7 +344,7 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     install["syncPreset"] = serde_json::json!("default");
     let (state, _, error) = fixture.run_kind("skills.install", install).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains(
             "skills install org/repo/skill one --git --name Friendly Skill --sync-preset default"
@@ -364,7 +362,7 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     remove["dryRun"] = serde_json::json!(true);
     let (state, _, error) = fixture.run_kind("skills.remove", remove).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains("skills remove skill-id --yes --dry-run"),
         "{log}"
@@ -381,12 +379,12 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     });
     let (state, _, error) = fixture.run_kind("skills.remove", bulk_remove).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains("skills remove skill-a skill b --yes --dry-run"),
         "{log}"
     );
-    let argv = std::fs::read_to_string("/tmp/fleet-stub-argv.log").unwrap();
+    let argv = std::fs::read_to_string(format!("{home}/stub-argv.log")).unwrap();
     assert!(
         argv.lines()
             .collect::<Vec<_>>()
@@ -408,7 +406,7 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     });
     let (state, _, error) = fixture.run_kind("skills.adopt", adopt).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains("skills adopt /tmp/one /tmp/two --git-url https://example.invalid/org/repo --git-subpath skills/sub --dry-run"),
         "{log}"
@@ -441,7 +439,7 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
     });
     let (state, _, error) = fixture.run_kind("presets.update", preset_update).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains("presets update preset --name Renamed --description Safe text --icon book"),
         "{log}"
@@ -450,12 +448,13 @@ async fn install_and_confirmed_remove_use_the_pinned_cli_argv_contract() {
 
 #[tokio::test]
 async fn a_dry_run_stays_a_dry_run() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
-    std::fs::remove_file("/tmp/fleet-stub-cli.log").ok();
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -468,7 +467,7 @@ async fn a_dry_run_stays_a_dry_run() {
     });
     let (state, _result, error) = fixture.run_kind("skills.deploy", payload).await;
     assert_eq!(state, "succeeded", "{error:?}");
-    let log = std::fs::read_to_string("/tmp/fleet-stub-cli.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/stub-cli.log")).unwrap();
     assert!(
         log.contains("--dry-run"),
         "the dry run reaches the CLI: {log}"
@@ -495,14 +494,16 @@ async fn a_leading_dash_id_is_refused_before_any_ssh_work() {
 
 #[tokio::test]
 async fn the_pinned_install_verifies_the_checksum() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _ = std::fs::remove_file(format!("{home}/.local/bin/skills-manager-cli"));
     // The stub serves as the "release artifact" served over a local file
     // URL; its digest pins the install.
-    let staged = format!("/tmp/fleet-sm-release-{}", std::process::id());
+    let staged = format!("{home}/release-artifact");
     install_stub_cli(&home, None);
     std::fs::copy(format!("{home}/.local/bin/skills-manager-cli"), &staged).unwrap();
     let digest = sha256_of(&staged);
@@ -560,10 +561,12 @@ async fn the_pinned_install_verifies_the_checksum() {
 
 #[tokio::test]
 async fn credential_shaped_cli_output_is_redacted() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     // A stub that fails with a credential-bearing message.
     let bin_dir = format!("{home}/.local/bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
@@ -615,10 +618,12 @@ async fn builtin_version(fixture: &Fixture) -> String {
 #[tokio::test]
 async fn a_verified_catalog_rollout_records_the_installed_version_and_a_failed_one_does_not() {
     use fleet_application::catalog_installs::CatalogInstallPort as _;
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
     let version = builtin_version(&fixture).await;
     let payload = serde_json::json!({
@@ -632,11 +637,11 @@ async fn a_verified_catalog_rollout_records_the_installed_version_and_a_failed_o
     });
 
     // The CLI refuses the deploy: nothing verified, nothing recorded.
-    std::fs::write("/tmp/fleet-stub-fail-deploy", "").unwrap();
+    std::fs::write(format!("{home}/stub-fail-deploy"), "").unwrap();
     let (state, _, error) = fixture
         .run_kind("skills.catalog-rollout", payload.clone())
         .await;
-    std::fs::remove_file("/tmp/fleet-stub-fail-deploy").ok();
+    std::fs::remove_file(format!("{home}/stub-fail-deploy")).ok();
     assert_eq!(state, "failed", "{error:?}");
     assert!(
         fixture
@@ -666,10 +671,12 @@ async fn a_verified_catalog_rollout_records_the_installed_version_and_a_failed_o
 #[tokio::test]
 async fn a_probe_prunes_installs_for_skills_no_longer_deployed() {
     use fleet_application::catalog_installs::{CatalogInstall, CatalogInstallPort as _};
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its logs and the fail flag
+    // never touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home, None);
     let install = |skill: &str, agent: &str| CatalogInstall {
         machine_id: fixture.machine_id.clone(),
