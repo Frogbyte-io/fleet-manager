@@ -1000,7 +1000,7 @@ mod tests {
 
     #[test]
     fn the_scenarios_match_the_runner() {
-        assert_eq!(SCENARIOS.len(), 7);
+        assert_eq!(SCENARIOS.len(), 8);
         assert!(SCENARIOS.iter().all(|id| !id.contains(' ')));
         assert_ne!(RESULT_MARKER, proxmox_live_support::RESULT_MARKER);
     }
