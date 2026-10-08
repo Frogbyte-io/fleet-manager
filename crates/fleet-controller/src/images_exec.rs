@@ -1161,7 +1161,15 @@ mod tests {
             // Packer resolves its path arguments against its own working
             // directory (#312): each must be absolute (a relative path
             // would be joined onto that directory) and exist.
-            if let Some(recipe) = command.args.last().filter(|a| a.ends_with("recipe.json")) {
+            if command.args.iter().any(|a| a == "validate" || a == "build") {
+                let recipe = command
+                    .args
+                    .last()
+                    .expect("validate and build end in the recipe");
+                assert!(
+                    recipe.ends_with("recipe.json"),
+                    "the recipe is the last argument"
+                );
                 assert!(
                     std::path::Path::new(recipe).is_absolute()
                         && command.work_dir.join(recipe).is_file(),

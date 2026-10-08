@@ -51,8 +51,14 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
     // Child processes (Packer, SSH) run in their own working directories,
     // so a relative `data_dir` (the default is `./data`) must not leak
     // into any path handed to them (#312).
-    if let Ok(absolute) = std::path::absolute(&config.data_dir) {
-        config.data_dir = absolute;
+    match std::path::absolute(&config.data_dir) {
+        Ok(absolute) => config.data_dir = absolute,
+        Err(error) => {
+            eprintln!(
+                "fleet-controller: refusing to start: the data directory cannot be resolved to an absolute path: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
     }
     let settings = Settings {
         listen: config.listen,
