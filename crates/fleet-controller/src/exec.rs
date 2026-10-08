@@ -71,6 +71,9 @@ pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 /// The bound for the operation's public result; output is trimmed to fit.
 pub(crate) const RESULT_STRING_BOUND: usize = 3_000;
 
+/// How much of a stream is scrubbed before it is bounded.
+const SCRUB_WINDOW: usize = 16 * 1024;
+
 /// The kind-dispatching executor.
 #[derive(Debug)]
 pub struct ScriptExecutor {
@@ -493,9 +496,34 @@ pub fn noop_only_executor() -> impl OperationExecutor {
 /// returned flag is true when the provider already truncated the output or
 /// this bound cut it.
 fn scrub_and_bound(text: &str, provider_truncated: bool) -> (String, bool) {
-    let scrubbed = fleet_core::redact_credentials(text);
+    // The transport allows up to 1 MiB per stream and the scrubber is not
+    // linear on adversarial input, so scrub only a window that is far larger
+    // than the bound. A cut window ends at whitespace, so no credential is
+    // split by it, and the dropped remainder counts as truncation.
+    let (window, windowed) = scrub_window(text);
+    let scrubbed = fleet_core::redact_credentials(window);
     let (bounded, cut) = trim_to_bound(&scrubbed);
-    (bounded, provider_truncated || cut)
+    (bounded, provider_truncated || windowed || cut)
+}
+
+/// The prefix of `text` that is scrubbed, and whether text was left out.
+fn scrub_window(text: &str) -> (&str, bool) {
+    if text.len() <= SCRUB_WINDOW {
+        return (text, false);
+    }
+    let mut end = SCRUB_WINDOW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end]
+        .rfind(char::is_whitespace)
+        .filter(|&space| space >= RESULT_STRING_BOUND)
+        .unwrap_or(RESULT_STRING_BOUND);
+    let mut end = end;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
 }
 
 fn trim_to_bound(text: &str) -> (String, bool) {
@@ -552,6 +580,30 @@ mod tests {
         );
         assert!(!text.contains("pppp"), "no part of the password survives");
         assert!(truncated);
+    }
+
+    #[test]
+    fn huge_adversarial_output_is_scrubbed_in_bounded_time() {
+        let started = std::time::Instant::now();
+        let (text, truncated) = scrub_and_bound(&"@".repeat(1024 * 1024), false);
+        assert!(truncated);
+        assert!(text.len() <= RESULT_STRING_BOUND + 4);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let emails = "abc@example.com,".repeat(64 * 1024);
+        let (_, truncated) = scrub_and_bound(&emails, false);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn a_window_cut_never_splits_a_credential() {
+        let filler = "x ".repeat(RESULT_STRING_BOUND);
+        let tail = format!(
+            "{filler}{}https://user:secret@host.invalid/r",
+            "y ".repeat(16 * 1024)
+        );
+        let (text, truncated) = scrub_and_bound(&tail, false);
+        assert!(truncated);
+        assert!(!text.contains("secret"), "{text}");
     }
 
     #[test]

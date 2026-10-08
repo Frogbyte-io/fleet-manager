@@ -13,7 +13,14 @@ pub fn redact_url_credentials(text: &str) -> String {
     while let Some(position) = rest.find("://") {
         let (before, after) = rest.split_at(position + 3);
         result.push_str(before);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        // A URL authority never contains whitespace, quotes or angle
+        // brackets: stop there, so a bare URL in multi-line output cannot
+        // swallow the lines up to a later '@'.
+        let authority_end = after
+            .find(|c: char| {
+                matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>') || c.is_whitespace()
+            })
+            .unwrap_or(after.len());
         let authority = &after[..authority_end];
         let tail = &after[authority_end..];
         // The authority's LAST '@' separates userinfo from host: a
@@ -133,6 +140,12 @@ mod tests {
             !redacted.contains("one") && !redacted.contains("two"),
             "{redacted}"
         );
+    }
+
+    #[test]
+    fn a_bare_url_does_not_swallow_following_lines() {
+        let text = "see https://example.com\nmail bob@corp.example\nmore";
+        assert_eq!(redact_url_credentials(text), text);
     }
 
     #[test]
