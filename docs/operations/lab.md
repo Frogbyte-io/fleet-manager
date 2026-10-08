@@ -331,7 +331,7 @@ Each sweeper tick lists the `fm-lab-*` QEMU guests on every trusted account. A g
 fleetctl --output json audit list --action lab.lease
 ```
 
-The sweeper skips an account it cannot read (unconfirmed, no stored token, or unreachable) without a log line. For such an account, or with the sweeper disabled, find orphans by hand. Compare the account's guests with the provision records:
+The sweeper skips an account it cannot read (unconfirmed, no stored token, or unreachable) without a log line. A controller without a secret store skips step 4 entirely. For such an account, without a secret store, or with the sweeper disabled, find orphans by hand. Compare the account's guests with the provision records:
 
 ```sh
 fleetctl --output json proxmox guests <lab-account-id>
