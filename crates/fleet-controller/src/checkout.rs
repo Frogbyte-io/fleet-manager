@@ -33,7 +33,7 @@ use fleet_provider_ssh::{
     ExecutionLimiter, ScriptMetadata, SshAuth, SshConnectionSpec, SshProvider,
 };
 
-use crate::exec::{MAX_SCRIPT_TIMEOUT, RESULT_STRING_BOUND, resolve_ssh_endpoint};
+use crate::exec::{MAX_SCRIPT_TIMEOUT, resolve_ssh_endpoint};
 
 /// The deadline bound for one checkout action.
 pub const MAX_GIT_TIMEOUT: u64 = MAX_SCRIPT_TIMEOUT;
@@ -750,17 +750,7 @@ fn decode_status_line(line: &serde_json::Value) -> serde_json::Value {
 /// Redacts credential-shaped userinfo and control noise from tool output
 /// before it becomes a public result.
 fn redact_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let bounded = if trimmed.len() > RESULT_STRING_BOUND {
-        let mut end = RESULT_STRING_BOUND;
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        &trimmed[..end]
-    } else {
-        trimmed
-    };
-    redact_remote_credential(bounded)
+    crate::exec::scrub_and_bound_with(text.trim(), false, redact_remote_credential).0
 }
 
 /// The test hook for the redaction path; production goes through
@@ -867,6 +857,27 @@ impl OperationExecutor for CheckoutDispatch {
             | "projects.status"
             | "projects.write-config" => self.checkout.execute(operations, operation).await,
             _ => self.fallback.execute(operations, operation).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod redact_bound_tests {
+    /// #357: a credential that straddles the result bound is redacted
+    /// before the bound cuts, never half kept.
+    #[test]
+    fn a_credential_at_the_bound_is_redacted_not_cut() {
+        for secret_line in [
+            "https://user:hunter2pw@host.invalid/repo.git",
+            "user:hunter2pw@host.invalid",
+        ] {
+            for pad in [2_970, 2_985, 2_995, 3_000] {
+                let text = format!("{} {secret_line}\n", "x".repeat(pad));
+                let out = super::redact_output(&text);
+                assert!(!out.contains("hunter2"), "pad {pad}: {out}");
+                assert!(!out.contains("user:"), "pad {pad}: {out}");
+                assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
+            }
         }
     }
 }
