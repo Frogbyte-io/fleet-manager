@@ -97,7 +97,9 @@ pub struct InstallPayload {
     pub connect_wait_seconds: Option<u64>,
     /// Extra environment for the installer, e.g. the layout overrides
     /// (`FLEETD_STATE_DIR`, `FLEETD_SYSTEMCTL`, …) containers and tests use.
-    /// Never carries secrets: this rides the argv-visible metadata blob.
+    /// Never carries secrets: this rides the argv-visible metadata blob. A
+    /// value whose key names a secret (token, password, key, ...) is still
+    /// scrubbed literally from failure details, as defense in depth.
     #[serde(default)]
     pub installer_env: Vec<(String, String)>,
 }
@@ -684,18 +686,33 @@ fn origin_of(artifact_url: &str) -> String {
     format!("{scheme}://{authority}")
 }
 
-/// Secrets shorter than this are not scrubbed literally: a value such as
-/// `1` or `true` would mangle ordinary output and is not a credential.
-const MIN_SECRET_LEN: usize = 4;
+/// Secrets shorter than this are not scrubbed literally: a short value would
+/// mangle ordinary output and is not a credential.
+const MIN_SECRET_LEN: usize = 8;
 
-/// The values this install knows to be secret: the enrollment token and the
-/// installer environment values. They are not `user:password@` shaped, so the
-/// pattern scrub cannot see them if install.sh echoes them.
+/// Whether an installer environment name says its value is a secret.
+fn is_secret_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
+/// The values this install knows to be secret: the enrollment token (never
+/// `user:password@` shaped, so the pattern scrub cannot see it if install.sh
+/// echoes it) and installer environment values whose names say they are
+/// secrets. Layout overrides such as `FLEETD_STATE_DIR` are not secrets and
+/// stay readable in failure details.
 fn known_secrets(token: Option<&str>, installer_env: &[(String, String)]) -> Vec<String> {
     token
         .into_iter()
         .map(str::to_owned)
-        .chain(installer_env.iter().map(|(_, value)| value.clone()))
+        .chain(
+            installer_env
+                .iter()
+                .filter(|(name, _)| is_secret_name(name))
+                .map(|(_, value)| value.clone()),
+        )
         .filter(|value| value.len() >= MIN_SECRET_LEN)
         .collect()
 }
@@ -801,28 +818,32 @@ mod first_lines_tests {
         assert_eq!(first_lines("", "", &[]), "no remote output");
     }
 
-    /// #381: the enrollment token and installer env values are not
-    /// `user:password@` shaped; they are scrubbed literally, also at the cut.
+    /// #381: the enrollment token and secret-named installer env values are
+    /// not `user:password@` shaped; they are scrubbed literally, also at the
+    /// cut. Layout overrides stay readable.
     #[test]
     fn known_secrets_are_scrubbed_literally_even_at_the_bound() {
         let secrets = known_secrets(
             Some("tok_AbC123xyz"),
             &[
                 ("API_KEY".to_owned(), "k-9f8e7d6c".to_owned()),
-                ("X".to_owned(), "1".to_owned()),
+                ("FLEETD_STATE_DIR".to_owned(), "/var/lib/fleetd".to_owned()),
+                ("FLEETD_SYSTEMCTL".to_owned(), "/bin/true".to_owned()),
+                ("SHORT_TOKEN".to_owned(), "abc".to_owned()),
             ],
         );
-        assert_eq!(
-            secrets.len(),
-            2,
-            "short values are not secrets: {secrets:?}"
-        );
+        assert_eq!(secrets.len(), 2, "only secrets are scrubbed: {secrets:?}");
         for pad in [250, 285, 295, 300] {
-            let line = format!("{} echo tok_AbC123xyz k-9f8e7d6c 1", "x".repeat(pad));
+            let line = format!(
+                "{} echo tok_AbC123xyz k-9f8e7d6c /var/lib/fleetd",
+                "x".repeat(pad)
+            );
             let out = first_lines(&line, "", &secrets);
             assert!(!out.contains("AbC123"), "pad {pad}: {out}");
             assert!(!out.contains("9f8e7d"), "pad {pad}: {out}");
         }
+        let out = first_lines("mkdir /var/lib/fleetd/state: denied", "", &secrets);
+        assert!(out.contains("/var/lib/fleetd"), "{out}");
         assert_eq!(scrub_known("a tok_AbC123xyz b", &secrets), "a [redacted] b");
     }
 }
