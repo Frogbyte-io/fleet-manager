@@ -435,7 +435,7 @@ async fn every_lab_exec_keeps_its_redacted_output_as_an_exec_log() {
             .audit_events()
             .await
             .iter()
-            .any(|event| event.contains("lab_artifact_recorded"))
+            .any(|event| event.contains("lab_artifact_recording"))
     );
 
     // Listing pages newest first with a cursor.

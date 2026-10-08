@@ -561,11 +561,10 @@ fn the_lab_artifact_settings_default_layer_and_refuse_zero() {
         config.lab_artifact_max_bytes,
         fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES
     );
-    assert!(
-        config
-            .summary()
-            .contains("lab_artifact_max_bytes = 67108864")
-    );
+    assert!(config.summary().contains(&format!(
+        "lab_artifact_max_bytes = {}",
+        fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES
+    )));
 
     let dir = tempfile::tempdir().unwrap();
     let file = write_config(

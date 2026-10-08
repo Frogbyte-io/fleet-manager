@@ -3812,7 +3812,9 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
     assert!(refused.contains("400"), "{refused}");
     let detail: serde_json::Value =
         serde_json::from_str(&run(&["lab", "status", &lease_id]).unwrap()).unwrap();
-    assert!(detail["data"]["collectionFailure"].is_null());
+    // The detail carries the field, empty while nothing failed.
+    assert!(detail.get("collectionFailure").is_some(), "{detail}");
+    assert!(detail["collectionFailure"].is_null());
 }
 
 #[test]

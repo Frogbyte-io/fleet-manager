@@ -667,6 +667,27 @@ impl LabArtifacts {
             Some(lease_id),
         )?;
         let lease = self.lease(lease_id).await?;
+        // The audit intent precedes every mutation.
+        let digest = {
+            use sha2::Digest as _;
+            sha2::Sha256::digest(log.as_bytes()).iter().fold(
+                String::with_capacity(64),
+                |mut text, byte| {
+                    use std::fmt::Write as _;
+                    let _ = write!(text, "{byte:02x}");
+                    text
+                },
+            )
+        };
+        self.audit_recording(
+            principal,
+            lease_id,
+            operation_id,
+            ArtifactKind::ExecLog,
+            log.len() as u64,
+            &digest,
+        )
+        .await?;
         let artifact = {
             let _guard = self.blob_lock.lock().await;
             let blob = self.blobs.put(log.as_bytes()).await.map_err(blob_refused)?;
@@ -693,7 +714,6 @@ impl LabArtifacts {
                 }
             }
         };
-        self.audit_recorded(principal, &artifact).await?;
         Ok(artifact)
     }
 
@@ -728,6 +748,16 @@ impl LabArtifacts {
                 }));
             }
             let lease = self.lease(lease_id).await?;
+            // The audit intent precedes every mutation.
+            self.audit_recording(
+                principal,
+                lease_id,
+                operation_id,
+                ArtifactKind::File,
+                staged.size_bytes,
+                &staged.sha256,
+            )
+            .await?;
             let _guard = self.blob_lock.lock().await;
             let blob = self.blobs.commit(staged).await.map_err(blob_refused)?;
             let location = blob.location.clone();
@@ -751,15 +781,10 @@ impl LabArtifacts {
             inserted.map_err(backend)
         }
         .await;
-        let artifact = match recorded {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.blobs.discard(staged).await;
-                return Err(error);
-            }
-        };
-        self.audit_recorded(principal, &artifact).await?;
-        Ok(artifact)
+        if recorded.is_err() {
+            self.blobs.discard(staged).await;
+        }
+        recorded
     }
 
     /// Discards staged bytes that will not be recorded.
@@ -857,26 +882,8 @@ impl LabArtifacts {
         principal: &ActingPrincipal,
         artifact: &LabArtifact,
     ) -> Result<bool, String> {
-        {
-            let _guard = self.blob_lock.lock().await;
-            // The bytes go first and the metadata last: a failure in between
-            // leaves the row, so the next pass retries, and removing bytes
-            // that are already gone succeeds.
-            if self
-                .artifacts
-                .location_references(&artifact.location)
-                .await?
-                <= 1
-            {
-                self.blobs
-                    .remove(&artifact.location)
-                    .await
-                    .map_err(|error| format!("its bytes were not removed: {error}"))?;
-            }
-            if !self.artifacts.delete(&artifact.id).await? {
-                return Ok(false);
-            }
-        }
+        // The audit intent precedes the deletion: a refused audit deletes
+        // nothing and the next pass retries.
         self.audit_event(
             principal,
             &artifact.id,
@@ -889,7 +896,22 @@ impl LabArtifacts {
         )
         .await
         .map_err(|error| error.to_string())?;
-        Ok(true)
+        let _guard = self.blob_lock.lock().await;
+        // The bytes go first and the metadata last: a failure in between
+        // leaves the row, so the next pass retries, and removing bytes that
+        // are already gone succeeds.
+        if self
+            .artifacts
+            .location_references(&artifact.location)
+            .await?
+            <= 1
+        {
+            self.blobs
+                .remove(&artifact.location)
+                .await
+                .map_err(|error| format!("its bytes were not removed: {error}"))?;
+        }
+        self.artifacts.delete(&artifact.id).await
     }
 
     /// Removes committed bytes that no artifact references, after their
@@ -923,20 +945,24 @@ impl LabArtifacts {
         })
     }
 
-    async fn audit_recorded(
+    async fn audit_recording(
         &self,
         principal: &ActingPrincipal,
-        artifact: &LabArtifact,
+        lease_id: &str,
+        operation_id: &str,
+        kind: ArtifactKind,
+        size_bytes: u64,
+        sha256: &str,
     ) -> Result<(), LabUseCaseError> {
         self.audit_event(
             principal,
-            &artifact.id,
-            "lab_artifact_recorded",
+            lease_id,
+            "lab_artifact_recording",
             &[
-                ("leaseId", artifact.lease_id.clone()),
-                ("kind", artifact.kind.id().to_owned()),
-                ("sizeBytes", artifact.size_bytes.to_string()),
-                ("sha256", artifact.sha256.clone()),
+                ("operationId", operation_id.to_owned()),
+                ("kind", kind.id().to_owned()),
+                ("sizeBytes", size_bytes.to_string()),
+                ("sha256", sha256.to_owned()),
             ],
         )
         .await

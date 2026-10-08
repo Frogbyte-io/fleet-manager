@@ -68,8 +68,20 @@ impl FsArtifactStore {
             }
         }
         let root = root.canonicalize()?;
+        // Stale staging files are reclaimed best-effort: one unreadable
+        // entry must not take the whole artifact store down.
         for leftover in std::fs::read_dir(root.join(STAGING_DIR))? {
-            let _ = std::fs::remove_file(leftover?.path());
+            match leftover {
+                Ok(entry) => {
+                    if let Err(error) = std::fs::remove_file(entry.path()) {
+                        eprintln!(
+                            "lab artifacts: cannot remove stale staging file {}: {error}",
+                            entry.path().display()
+                        );
+                    }
+                }
+                Err(error) => eprintln!("lab artifacts: cannot read a staging entry: {error}"),
+            }
         }
         Ok(Self { root, max_bytes })
     }
@@ -218,8 +230,9 @@ impl FsArtifactStore {
                 BlobError::Io(format!("cannot create a blob directory: {error}"))
             })?;
         }
-        // Identical content already stored: the staged copy is redundant.
-        if target.is_file() {
+        // Identical content already stored, and still intact: the staged
+        // copy is redundant. A damaged blob is replaced by the staged copy.
+        if target.is_file() && verify_blob(&target, &staged.sha256, staged.size_bytes).is_ok() {
             let _ = std::fs::remove_file(&source);
         } else {
             std::fs::rename(&source, &target)
@@ -247,12 +260,20 @@ impl FsArtifactStore {
             .write_all(bytes)
             .map_err(|error| BlobError::Io(format!("cannot stage an artifact: {error}")))?;
         let staged = self.finish(staging)?;
-        self.commit_blocking(&staged)
+        self.commit_blocking(&staged).inspect_err(|_| {
+            // A failed commit leaves no staging file behind.
+            if let Ok(path) = self.staged_path(&staged.token) {
+                let _ = std::fs::remove_file(path);
+            }
+        })
     }
 }
 
-/// Re-hashes a stored blob against its recorded size and digest.
-fn verify_blob(path: &Path, sha256: &str, size_bytes: u64) -> Result<(), BlobError> {
+/// Re-hashes a stored blob against its recorded size and digest, and
+/// answers the same open handle rewound, so what is served is exactly what
+/// was verified.
+fn verify_blob(path: &Path, sha256: &str, size_bytes: u64) -> Result<std::fs::File, BlobError> {
+    use std::io::Seek as _;
     let mut file = std::fs::File::open(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => BlobError::Missing,
         _ => BlobError::Io(format!("cannot open a blob: {error}")),
@@ -270,7 +291,9 @@ fn verify_blob(path: &Path, sha256: &str, size_bytes: u64) -> Result<(), BlobErr
             detail: "the stored bytes do not match the recorded sha256".to_owned(),
         });
     }
-    Ok(())
+    file.rewind()
+        .map_err(|error| BlobError::Io(format!("cannot rewind a blob: {error}")))?;
+    Ok(file)
 }
 
 #[async_trait]
@@ -297,18 +320,13 @@ impl ArtifactBlobPort for FsArtifactStore {
         size_bytes: u64,
     ) -> Result<ArtifactReader, BlobError> {
         let path = self.resolve(location)?;
-        let verify_path = path.clone();
         let sha256 = sha256.to_owned();
-        tokio::task::spawn_blocking(move || verify_blob(&verify_path, &sha256, size_bytes))
+        let file = tokio::task::spawn_blocking(move || verify_blob(&path, &sha256, size_bytes))
             .await
             .map_err(|error| BlobError::Io(format!("the verification thread failed: {error}")))??;
-        let file = tokio::fs::File::open(&path)
-            .await
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => BlobError::Missing,
-                _ => BlobError::Io(format!("cannot open a blob: {error}")),
-            })?;
-        Ok(Box::new(file))
+        // The location must still resolve inside the root after the open.
+        self.resolve(location)?;
+        Ok(Box::new(tokio::fs::File::from_std(file)))
     }
 
     async fn remove(&self, location: &str) -> Result<(), BlobError> {
@@ -663,7 +681,9 @@ impl LabArtifactDispatch {
         let mut collected = Vec::new();
         let mut failures: Vec<(String, &'static str)> = Vec::new();
         for (index, path) in paths.iter().enumerate() {
-            operations
+            // Progress is advisory: a failed write must not skip the
+            // remaining paths or their failure record.
+            if let Err(error) = operations
                 .record_progress(
                     &operation.id,
                     Some(i64::try_from(index).unwrap_or(i64::MAX)),
@@ -671,7 +691,12 @@ impl LabArtifactDispatch {
                     Some(&format!("copying {} of {total}", index + 1)),
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                eprintln!(
+                    "lab artifacts: progress of collection {} not recorded: {error}",
+                    operation.id
+                );
+            }
             let remaining = COLLECT_DEADLINE.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 failures.push((path.clone(), "deadline_exceeded"));
@@ -920,6 +945,11 @@ mod tests {
             store.open(&first.location, DIGEST, 4).await.err(),
             Some(BlobError::Corrupt { .. })
         ));
+
+        // Storing the same content again repairs the damaged blob instead of
+        // trusting it.
+        assert_eq!(store.put(b"test").await.unwrap(), first);
+        assert!(store.open(&first.location, DIGEST, 4).await.is_ok());
 
         store.remove(&first.location).await.unwrap();
         assert!(matches!(

@@ -3234,21 +3234,12 @@ fn follow_lab(
             ..
         } => {
             let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
-            let finished = wait_for_operation(
+            let (data, output) = wait_for_operation_output(
                 client,
                 invocation,
                 &operation_id,
                 timeout.unwrap_or(60).saturating_add(60),
             )?;
-            let data = &finished["data"];
-            let parse = |field: &str| {
-                data[field]
-                    .as_str()
-                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            };
-            let output = parse("resultJson")
-                .or_else(|| parse("errorJson"))
-                .unwrap_or(Value::Null);
             Ok(serde_json::json!({ "data": {
                 "operationId": operation_id,
                 "state": data["state"],
@@ -3267,17 +3258,12 @@ fn follow_lab(
             ..
         } => {
             let operation_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
-            let finished =
-                wait_for_operation(client, invocation, &operation_id, timeout.unwrap_or(660))?;
-            let data = &finished["data"];
-            let parse = |field: &str| {
-                data[field]
-                    .as_str()
-                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            };
-            let output = parse("resultJson")
-                .or_else(|| parse("errorJson"))
-                .unwrap_or(Value::Null);
+            let (data, output) = wait_for_operation_output(
+                client,
+                invocation,
+                &operation_id,
+                timeout.unwrap_or(660),
+            )?;
             Ok(serde_json::json!({ "data": {
                 "operationId": operation_id,
                 "state": data["state"],
@@ -6188,6 +6174,27 @@ fn send(
 /// Polls one operation to a terminal state, answering its body. Polling
 /// ends at the caller's bound; a still-running operation is an error, not a
 /// hang.
+/// Polls an operation to a terminal state and answers its data with its
+/// decoded `resultJson` (or, on failure, `errorJson`).
+fn wait_for_operation_output(
+    client: &reqwest::blocking::Client,
+    invocation: &Invocation,
+    operation_id: &str,
+    timeout_secs: u64,
+) -> Result<(Value, Value), CliError> {
+    let finished = wait_for_operation(client, invocation, operation_id, timeout_secs)?;
+    let data = finished["data"].clone();
+    let parse = |field: &str| {
+        data[field]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+    };
+    let output = parse("resultJson")
+        .or_else(|| parse("errorJson"))
+        .unwrap_or(Value::Null);
+    Ok((data, output))
+}
+
 fn wait_for_operation(
     client: &reqwest::blocking::Client,
     invocation: &Invocation,
@@ -6243,7 +6250,11 @@ fn download_artifact(
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let expected_size = metadata["data"]["sizeBytes"].as_u64().unwrap_or(u64::MAX);
+    let expected_size = metadata["data"]["sizeBytes"]
+        .as_u64()
+        .ok_or_else(|| CliError {
+            message: format!("the artifact {artifact_id} has no recorded size"),
+        })?;
     let mut response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3_600))
         .build()
@@ -6336,8 +6347,14 @@ fn write_verified(
         if read == 0 {
             break;
         }
-        hasher.update(&chunk[..read]);
         size += read as u64;
+        // Never write more than the artifact's recorded size.
+        if size > expected_size {
+            return Err(fail(format!(
+                "the controller sent more than the artifact's {expected_size} bytes; nothing was written to {out}"
+            )));
+        }
+        hasher.update(&chunk[..read]);
         file.write_all(&chunk[..read])
             .map_err(|error| fail(format!("cannot write {}: {error}", partial.display())))?;
     }

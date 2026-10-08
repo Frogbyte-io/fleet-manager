@@ -115,7 +115,8 @@ pub struct ControllerConfig {
     /// How often the Lab sweeper expires leases, queues due cleanups, and
     /// reconciles Lab guests, in seconds; `0` disables it.
     pub lab_sweep_interval_seconds: u64,
-    /// Where Lab artifact bytes live (FM-721). Created during validation.
+    /// Where Lab artifact bytes live (FM-721). The controller prepares it at
+    /// startup and serves without Lab artifacts when it cannot.
     pub lab_artifacts_dir: PathBuf,
     /// How long a Lab artifact is kept, in seconds; the Lab sweeper deletes
     /// it afterwards.
@@ -214,13 +215,6 @@ pub enum ConfigError {
         /// The value that failed to parse.
         value: String,
     },
-    /// The Lab artifact directory could not be created or is not one.
-    LabArtifactsDirUnavailable {
-        /// The directory path that is unusable.
-        path: PathBuf,
-        /// Why it is unusable.
-        error: std::io::Error,
-    },
     /// The Tailscale Serve listener is not the documented IPv4 loopback target.
     TailscaleServeListenerNotLoopback {
         /// The configured address.
@@ -306,11 +300,6 @@ impl fmt::Display for ConfigError {
             Self::LabArtifactSettingInvalid { setting, value } => write!(
                 f,
                 "{setting} (or its config-file key) must be a whole, positive number, not {value:?}"
-            ),
-            Self::LabArtifactsDirUnavailable { path, error } => write!(
-                f,
-                "Lab artifact directory {} is unavailable: {error}",
-                path.display()
             ),
             Self::TailscaleServeListenInvalid { value } => write!(
                 f,
@@ -630,19 +619,6 @@ impl ControllerConfig {
                 });
             }
         }
-        std::fs::create_dir_all(&self.lab_artifacts_dir).map_err(|error| {
-            ConfigError::LabArtifactsDirUnavailable {
-                path: self.lab_artifacts_dir.clone(),
-                error,
-            }
-        })?;
-        if !self.lab_artifacts_dir.is_dir() {
-            return Err(ConfigError::LabArtifactsDirUnavailable {
-                path: self.lab_artifacts_dir.clone(),
-                error: std::io::Error::other("not a directory"),
-            });
-        }
-
         if let Some(serve_listen) = self.tailscale_serve_listen {
             if serve_listen.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
                 return Err(ConfigError::TailscaleServeListenerNotLoopback {
