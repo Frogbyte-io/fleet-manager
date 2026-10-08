@@ -586,16 +586,19 @@ impl Drop for DefaultKey {
 /// #362: agent authentication falls back to the controller user's default
 /// identity file, as plain OpenSSH does. The sshd authorizes only that file's
 /// key, so a login proves it was offered whatever agent the test runs under.
+/// Opt-in: it writes a throwaway key into the real `~/.ssh` (OpenSSH resolves
+/// `~` from the passwd entry, so a temporary `HOME` cannot redirect it). Set
+/// `FLEET_TEST_REAL_SSH_HOME=1` to run it. By default the suite never writes
+/// under the real `~/.ssh`; the config-level fallback is covered by the
+/// `agent_auth_offers_agent_keys_and_default_files` unit test.
 #[test]
 fn agent_auth_falls_back_to_the_default_identity_file() {
-    let Some(key) = DefaultKey::install() else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "CI must be able to install the default key"
-        );
-        eprintln!("skipped: ~/.ssh/id_ecdsa is in use or the home directory is unusable");
+    if std::env::var("FLEET_TEST_REAL_SSH_HOME").as_deref() != Ok("1") {
+        eprintln!("skipped: set FLEET_TEST_REAL_SSH_HOME=1 to write a throwaway key into ~/.ssh");
         return;
-    };
+    }
+    let key = DefaultKey::install()
+        .expect("FLEET_TEST_REAL_SSH_HOME=1 needs ~/.ssh/id_ecdsa free and the home usable");
     let sshd = start_sshd();
     std::fs::write(
         sshd.keys_dir.path().join("authorized_keys"),

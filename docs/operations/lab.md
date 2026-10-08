@@ -98,6 +98,8 @@ For Lab exec, collect, and the SSH connection test, the controller runs OpenSSH 
 
 The agent can hold several keys. The guest sees each offered key until one is accepted, and `sshd` limits attempts with `MaxAuthTries` (default 6), so keep the agent to the keys Lab needs. Default key files count toward the same limit, and a default security-key file (`id_ed25519_sk`, `id_ecdsa_sk`) can wait for a touch until the command deadline. A key lying in `~/.ssh` is now offered to the guest, which is a deliberate widening to match plain OpenSSH; use identity-file authentication to offer exactly one key.
 
+Developer note: the real-sshd test `agent_auth_falls_back_to_the_default_identity_file` in `fleet-provider-ssh` must write a throwaway `~/.ssh/id_ecdsa` (OpenSSH resolves `~` from the passwd entry, so a temporary `HOME` cannot redirect it). It is opt-in and skipped by default, in CI as well: set `FLEET_TEST_REAL_SSH_HOME=1` to run it. The default fallback is also covered without touching `~/.ssh` by the `agent_auth_offers_agent_keys_and_default_files` config test.
+
 Cloud images (Debian, Ubuntu) break these requirements in ways that show up only on a clone:
 
 - **No `/etc/machine-id`.** A template whose `/etc/machine-id` is *missing* (not empty) leaves `systemd-networkd` unable to start its DHCP client (`Failed to configure DHCPv4 client: No such file or directory`). The guest has only loopback and IPv6 link-local. Leave an empty file instead (`truncate -s 0 /etc/machine-id`): the clone generates an ID on its first boot. Never boot the template again after you empty it.
