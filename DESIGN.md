@@ -101,6 +101,11 @@ word (uppercase); color never carries meaning alone.
 | Lab lease | `ready` | `--fc-ok` | `READY` |
 | Lab lease | `releasing`,`released` | `--fc-muted` | (API word) |
 | Lab lease | `failed`,`cleanup_failed` | `--fc-err` | (API word) |
+| Lab guest fate | `present` | `--fc-ok` | `PRESENT` |
+| Lab guest fate | `kept`,`returned_to_pool` | `--fc-info` | (API word) |
+| Lab guest fate | `quarantined_in_pool` | `--fc-warn` | (API word) |
+| Lab guest fate | `destroyed` | `--fc-muted` | `DESTROYED` |
+| Lab guest fate | `not_allocated`, unknown | `--fc-faint` | (API word) |
 | Operation | `pending`,`running`,`cancelling` | `--fc-info` | (API word) |
 | Operation | `succeeded` | `--fc-ok` | `SUCCEEDED` |
 | Operation | `failed`,`timed_out` | `--fc-err` | (API word) |
