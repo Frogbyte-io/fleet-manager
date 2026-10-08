@@ -161,6 +161,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 events.clone(),
             ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (image_sweep_shutdown, image_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // FM-721: Lab artifact bytes live in the configured directory; the
         // database keeps their metadata. Without the directory the Lab
         // still runs, without artifacts.
@@ -469,27 +470,58 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                         store.pool().clone(),
                     ));
+                let build = std::sync::Arc::new(
+                    fleet_controller::images_exec::ImagesExecutor::new(
+                        versions,
+                        std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
+                        secrets.clone(),
+                        config.data_dir.join("image-builds"),
+                    )
+                    // #272: each build gets its own account's token, in
+                    // Packer's child environment only; #284: unless the
+                    // version carries the audited insecure-TLS opt-in,
+                    // with the account's confirmed certificate as its
+                    // only TLS root, captured through the shared
+                    // transport.
+                    .with_account_credentials(
+                        proxmox_accounts.clone(),
+                        proxmox_credentials.clone(),
+                        pve_transport.clone(),
+                    ),
+                );
+                // #314: a build that was cut short by a crash or reboot
+                // leaves its work directory, and the owner-only var file in
+                // it, behind. Sweep before the worker claims anything, then
+                // on a timer: a build the dead controller left `running`
+                // keeps its directory until lease recovery fails it. Only
+                // counts are logged.
+                let log_sweep = |report: fleet_controller::images_exec::SweepReport| {
+                    if report != fleet_controller::images_exec::SweepReport::default() {
+                        eprintln!(
+                            "image build work directories swept: {} removed, {} not removable",
+                            report.removed, report.failed
+                        );
+                    }
+                };
+                log_sweep(build.sweep_orphaned_work_dirs(&worker_operations).await);
+                {
+                    let build = build.clone();
+                    let operations = worker_operations.clone();
+                    tokio::spawn(async move {
+                        let mut stop = std::pin::pin!(image_sweep_shutdown_rx);
+                        loop {
+                            tokio::select! {
+                                _ = &mut stop => break,
+                                () = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                                    log_sweep(build.sweep_orphaned_work_dirs(&operations).await);
+                                }
+                            }
+                        }
+                    });
+                }
                 std::sync::Arc::new(fleet_controller::images_exec::ImagesDispatch::new(
                     with_proxmox.clone(),
-                    std::sync::Arc::new(
-                        fleet_controller::images_exec::ImagesExecutor::new(
-                            versions,
-                            std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
-                            secrets.clone(),
-                            config.data_dir.join("image-builds"),
-                        )
-                        // #272: each build gets its own account's token, in
-                        // Packer's child environment only; #284: unless the
-                        // version carries the audited insecure-TLS opt-in,
-                        // with the account's confirmed certificate as its
-                        // only TLS root, captured through the shared
-                        // transport.
-                        .with_account_credentials(
-                            proxmox_accounts.clone(),
-                            proxmox_credentials.clone(),
-                            pve_transport.clone(),
-                        ),
-                    ),
+                    build,
                 ))
             };
             // The Lab provision executor drives the FM-710 saga's external
@@ -886,6 +918,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         if let Some(handle) = sweeper_handle {
             let _ = handle.await;
         }
+        let _ = image_sweep_shutdown.send(());
         let _ = worker_shutdown.send(());
         let _ = worker_handle.await;
         store.close().await;
