@@ -346,8 +346,8 @@ impl SshProvider {
     }
 
     /// Writes the isolated config for one authentication method. Each method
-    /// has its own file so concurrent operations with different methods never
-    /// overwrite each other.
+    /// has its own file, and each write is an atomic rename, so concurrent
+    /// operations never read a partial config.
     ///
     /// The identity policy is explicit:
     ///
@@ -368,21 +368,33 @@ impl SshProvider {
         // The known-hosts path must be absolute: the ssh process runs with
         // the controller's working directory, not this crate's directory.
         let known_hosts = self.known_hosts_path().display().to_string();
-        std::fs::write(
-            &path,
-            format!(
-                "StrictHostKeyChecking yes\n\
-                 UserKnownHostsFile {known_hosts}\n\
-                 HashKnownHosts yes\n\
-                 BatchMode yes\n\
-                 LogLevel ERROR\n\
-                 PreferredAuthentications publickey\n\
-                 {identity}"
-            ),
-        )
-        .map_err(|error| SshProviderError::Setup {
-            detail: format!("cannot write the isolated config: {error}"),
-        })?;
+        let contents = format!(
+            "StrictHostKeyChecking yes\n\
+             UserKnownHostsFile {known_hosts}\n\
+             HashKnownHosts yes\n\
+             BatchMode yes\n\
+             LogLevel ERROR\n\
+             PreferredAuthentications publickey\n\
+             {identity}"
+        );
+        // Write a private temporary file and rename it into place: a
+        // concurrent `ssh -F` sees the old or the new complete file, never
+        // an empty or truncated one (which would silently drop the host-key
+        // pinning and the identity policy).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let temporary = self.work_dir.join(format!(
+            "{name}.{}.{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&temporary, contents)
+            .and_then(|()| std::fs::rename(&temporary, &path))
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&temporary);
+                SshProviderError::Setup {
+                    detail: format!("cannot write the isolated config: {error}"),
+                }
+            })?;
         Ok(path)
     }
 }
