@@ -524,7 +524,7 @@ pub(crate) fn scrub_and_bound_with(
 /// The prefix of `text` that is scrubbed, and whether text was left out. A
 /// cut window always ends at whitespace, so no token (and no credential) is
 /// split by it; a window with no whitespace at all keeps nothing.
-fn scrub_window(text: &str) -> (&str, bool) {
+pub(crate) fn scrub_window(text: &str) -> (&str, bool) {
     if text.len() <= SCRUB_WINDOW {
         return (text, false);
     }

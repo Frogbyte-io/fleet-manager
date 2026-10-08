@@ -97,7 +97,9 @@ pub struct InstallPayload {
     pub connect_wait_seconds: Option<u64>,
     /// Extra environment for the installer, e.g. the layout overrides
     /// (`FLEETD_STATE_DIR`, `FLEETD_SYSTEMCTL`, …) containers and tests use.
-    /// Never carries secrets: this rides the argv-visible metadata blob.
+    /// Never carries secrets: this rides the argv-visible metadata blob. A
+    /// value whose key names a secret (token, password, key, ...) is still
+    /// scrubbed literally from failure details, as defense in depth.
     #[serde(default)]
     pub installer_env: Vec<(String, String)>,
 }
@@ -323,9 +325,9 @@ impl InstallExecutor {
             .run_install_script(
                 &spec,
                 &script,
-                &artifact_url,
-                &artifact_sha256,
+                (&artifact_url, &artifact_sha256),
                 &payload,
+                &known_secrets(token.as_deref(), &payload.installer_env),
                 deadline,
             )
             .await
@@ -548,9 +550,9 @@ impl InstallExecutor {
         &self,
         spec: &fleet_provider_ssh::SshConnectionSpec,
         script: &str,
-        artifact_url: &str,
-        artifact_sha256: &str,
+        (artifact_url, artifact_sha256): (&str, &str),
         payload: &InstallPayload,
+        secrets: &[String],
         deadline: Duration,
     ) -> Result<(), String> {
         let metadata = fleet_provider_ssh::ScriptMetadata {
@@ -590,7 +592,7 @@ impl InstallExecutor {
                 detail: format!("the install thread failed: {join_error}"),
             })
         });
-        let result = outcome.map_err(|error| error.to_string())?;
+        let result = outcome.map_err(|error| scrub_known(&error.to_string(), secrets))?;
         if result.killed_by_deadline {
             return Err(
                 "the local ssh process was killed at the deadline; the remote install's fate is unknown"
@@ -603,7 +605,7 @@ impl InstallExecutor {
                 result
                     .exit_code
                     .map_or_else(|| "with no exit code".to_owned(), |code| code.to_string()),
-                first_lines(&result.stderr, &result.stdout),
+                first_lines(&result.stderr, &result.stdout, secrets),
             ));
         }
         Ok(())
@@ -684,13 +686,55 @@ fn origin_of(artifact_url: &str) -> String {
     format!("{scheme}://{authority}")
 }
 
+/// Secrets shorter than this are not scrubbed literally: a short value would
+/// mangle ordinary output and is not a credential.
+const MIN_SECRET_LEN: usize = 8;
+
+/// Whether an installer environment name says its value is a secret.
+fn is_secret_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL"]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
+/// The values this install knows to be secret: the enrollment token (never
+/// `user:password@` shaped, so the pattern scrub cannot see it if install.sh
+/// echoes it) and installer environment values whose names say they are
+/// secrets. Layout overrides such as `FLEETD_STATE_DIR` are not secrets and
+/// stay readable in failure details.
+fn known_secrets(token: Option<&str>, installer_env: &[(String, String)]) -> Vec<String> {
+    token
+        .into_iter()
+        .map(str::to_owned)
+        .chain(
+            installer_env
+                .iter()
+                .filter(|(name, _)| is_secret_name(name))
+                .map(|(_, value)| value.clone()),
+        )
+        .filter(|value| value.len() >= MIN_SECRET_LEN)
+        .collect()
+}
+
+/// Replaces every literal occurrence of a known secret, longest first so a
+/// secret that contains another is not left half visible.
+fn scrub_known(text: &str, secrets: &[String]) -> String {
+    let mut ordered: Vec<&String> = secrets.iter().collect();
+    ordered.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    ordered.into_iter().fold(text.to_owned(), |text, secret| {
+        text.replace(secret.as_str(), "[redacted]")
+    })
+}
+
 /// The first informative line of remote output for a failure detail.
-fn first_lines(stderr: &str, stdout: &str) -> String {
+fn first_lines(stderr: &str, stdout: &str, secrets: &[String]) -> String {
     // Scrub before choosing and cutting the line, so a credential that
     // straddles the 300-byte cut is redacted, never half kept.
     let pick = |text: &str| -> Option<String> {
-        let (scrubbed, _) =
-            crate::exec::scrub_and_bound_with(text.trim_start(), false, str::to_owned);
+        let (scrubbed, _) = crate::exec::scrub_and_bound_with(text.trim_start(), false, |text| {
+            scrub_known(text, secrets)
+        });
         scrubbed
             .lines()
             .map(str::trim)
@@ -747,7 +791,7 @@ fn file_sha256(path: &std::path::Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod first_lines_tests {
-    use super::first_lines;
+    use super::{first_lines, known_secrets, scrub_known};
 
     /// #357: the first remote line is scrubbed before it is cut at the
     /// 300-byte bound, so a credential at the bound is never half kept.
@@ -755,7 +799,7 @@ mod first_lines_tests {
     fn a_credential_at_the_line_bound_is_redacted_not_cut() {
         for pad in [250, 270, 285, 295, 300] {
             let line = format!("{} https://user:hunter2pw@host.invalid/x", "x".repeat(pad));
-            let out = first_lines(&line, "");
+            let out = first_lines(&line, "", &[]);
             assert!(!out.contains("hunter2"), "pad {pad}: {out}");
             assert!(!out.contains("user:"), "pad {pad}: {out}");
         }
@@ -763,14 +807,43 @@ mod first_lines_tests {
 
     #[test]
     fn leading_blank_output_does_not_hide_the_first_line() {
-        let out = first_lines(&format!("{}\nreal failure", " \n".repeat(3_000)), "");
+        let out = first_lines(&format!("{}\nreal failure", " \n".repeat(3_000)), "", &[]);
         assert_eq!(out, "real failure");
     }
 
     #[test]
     fn stdout_is_scrubbed_when_stderr_is_empty_and_multibyte_cuts_safely() {
-        let out = first_lines("", &format!("{} user:hunter2pw@host", "é".repeat(200)));
+        let out = first_lines("", &format!("{} user:hunter2pw@host", "é".repeat(200)), &[]);
         assert!(!out.contains("hunter2"), "{out}");
-        assert_eq!(first_lines("", ""), "no remote output");
+        assert_eq!(first_lines("", "", &[]), "no remote output");
+    }
+
+    /// #381: the enrollment token and secret-named installer env values are
+    /// not `user:password@` shaped; they are scrubbed literally, also at the
+    /// cut. Layout overrides stay readable.
+    #[test]
+    fn known_secrets_are_scrubbed_literally_even_at_the_bound() {
+        let secrets = known_secrets(
+            Some("tok_AbC123xyz"),
+            &[
+                ("API_KEY".to_owned(), "k-9f8e7d6c".to_owned()),
+                ("FLEETD_STATE_DIR".to_owned(), "/var/lib/fleetd".to_owned()),
+                ("FLEETD_SYSTEMCTL".to_owned(), "/bin/true".to_owned()),
+                ("SHORT_TOKEN".to_owned(), "abc".to_owned()),
+            ],
+        );
+        assert_eq!(secrets.len(), 2, "only secrets are scrubbed: {secrets:?}");
+        for pad in [250, 285, 295, 300] {
+            let line = format!(
+                "{} echo tok_AbC123xyz k-9f8e7d6c /var/lib/fleetd",
+                "x".repeat(pad)
+            );
+            let out = first_lines(&line, "", &secrets);
+            assert!(!out.contains("AbC123"), "pad {pad}: {out}");
+            assert!(!out.contains("9f8e7d"), "pad {pad}: {out}");
+        }
+        let out = first_lines("mkdir /var/lib/fleetd/state: denied", "", &secrets);
+        assert!(out.contains("/var/lib/fleetd"), "{out}");
+        assert_eq!(scrub_known("a tok_AbC123xyz b", &secrets), "a [redacted] b");
     }
 }
