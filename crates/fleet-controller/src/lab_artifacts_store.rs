@@ -641,7 +641,7 @@ impl LabArtifactDispatch {
                         operation,
                         &lease_id,
                         "lease_unavailable",
-                        &detail,
+                        &logged(&lease_id, "the lease", &detail),
                     )
                     .await;
             }
@@ -661,7 +661,7 @@ impl LabArtifactDispatch {
                             operation,
                             &lease_id,
                             "provision_unavailable",
-                            &detail,
+                            &logged(&lease_id, "the lease's provision record", &detail),
                         )
                         .await;
                 }
@@ -807,6 +807,12 @@ impl LabArtifactDispatch {
             Ok(FetchOutcome::TooLarge) => Some("too_large"),
             Ok(FetchOutcome::DeadlineKilled) => Some("deadline_exceeded"),
             Ok(FetchOutcome::Failed { .. }) => Some("copy_failed"),
+            Ok(FetchOutcome::SinkFailed { detail }) => {
+                eprintln!(
+                    "lab artifacts: storing a file copied from lease {lease_id} failed: {detail}"
+                );
+                Some("store_failed")
+            }
             Err(error) => {
                 eprintln!("lab artifacts: copying from lease {lease_id} failed: {error}");
                 Some("transfer_failed")
@@ -894,6 +900,13 @@ impl OperationExecutor for LabArtifactDispatch {
             _ => self.inner.execute(operations, operation).await,
         }
     }
+}
+
+/// Logs a store failure's raw detail and answers the fixed message that is
+/// recorded and served instead: backend text never reaches `lab.read`.
+fn logged(lease_id: &str, what: &str, detail: &str) -> String {
+    eprintln!("lab artifacts: collecting from lease {lease_id}: reading {what} failed: {detail}");
+    format!("{what} could not be read; the detail is in the controller log")
 }
 
 fn payload_lease(operation: &Operation) -> String {

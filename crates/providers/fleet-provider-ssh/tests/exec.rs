@@ -416,3 +416,66 @@ fn a_file_copies_byte_for_byte_and_refusals_are_outcomes() {
     assert_eq!(fetch(guest.path(), 10).0, FetchOutcome::NotAFile);
     assert_eq!(limiter.held(), 0, "every copy releases its permit");
 }
+
+/// A sink that refuses writes after a few bytes, like a full disk.
+struct FullDisk(usize);
+
+impl std::io::Write for FullDisk {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0 == 0 {
+            return Err(std::io::Error::other("no space left on device"));
+        }
+        let take = buf.len().min(self.0);
+        self.0 -= take;
+        Ok(take)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// FM-721: a sink failure kills the session at once (instead of leaving the
+/// remote side blocked on a full pipe until the deadline) and is reported
+/// as its own outcome; the session slot is released.
+#[test]
+fn a_sink_failure_ends_the_copy_at_once() {
+    use fleet_provider_ssh::{FetchOutcome, fetch_file};
+
+    let sshd = start_sshd();
+    let dir = tempfile::tempdir().unwrap();
+    let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
+    provider
+        .pin(
+            &provider
+                .probe_host_key("127.0.0.1", sshd.port, Duration::from_secs(10))
+                .unwrap(),
+        )
+        .unwrap();
+    let guest = tempfile::tempdir().unwrap();
+    // Far more than a pipe buffer, so the remote side would block.
+    let big = guest.path().join("big.bin");
+    std::fs::write(&big, vec![1_u8; 8 * 1024 * 1024]).unwrap();
+    let limiter = ExecutionLimiter::new(1);
+    let started = std::time::Instant::now();
+    let outcome = fetch_file(
+        &provider,
+        &limiter,
+        &spec(&sshd),
+        &big.display().to_string(),
+        64 * 1024 * 1024,
+        Duration::from_secs(60),
+        &mut FullDisk(1024),
+    )
+    .unwrap();
+    assert!(
+        matches!(&outcome, FetchOutcome::SinkFailed { detail } if detail.contains("no space")),
+        "{outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the session was not killed: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(limiter.held(), 0, "the copy releases its permit");
+}

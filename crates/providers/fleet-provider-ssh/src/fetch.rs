@@ -36,6 +36,12 @@ pub enum FetchOutcome {
     TooLarge,
     /// The local `ssh` process was killed at the deadline.
     DeadlineKilled,
+    /// The sink refused the bytes (for example, a full disk); the session
+    /// was killed at once.
+    SinkFailed {
+        /// The sink's error.
+        detail: String,
+    },
     /// The remote copy failed some other way.
     Failed {
         /// The remote exit code, when there was one.
@@ -110,6 +116,86 @@ fn fetch_inner(
     sink: &mut (dyn Write + Send),
 ) -> Result<FetchOutcome, SshProviderError> {
     let started = Instant::now();
+    let mut child = spawn_copy(provider, endpoint, path, max_bytes, deadline)?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let overflow = AtomicBool::new(false);
+    let sink_failed = AtomicBool::new(false);
+    let (status, killed, copied, stderr) = std::thread::scope(|scope| {
+        let overflow = &overflow;
+        let sink_failed = &sink_failed;
+        let reader = scope.spawn(move || {
+            let copied = copy_bounded(stdout, sink, max_bytes, overflow);
+            if copied.is_err() {
+                sink_failed.store(true, Ordering::Release);
+            }
+            copied
+        });
+        let errors = scope.spawn(move || drain_stderr(stderr));
+        let mut killed = false;
+        let status = loop {
+            if started.elapsed() >= deadline {
+                // A session that already finished is not a deadline kill.
+                if let Ok(Some(status)) = child.try_wait() {
+                    break Some(status);
+                }
+                killed = true;
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            if overflow.load(Ordering::Acquire) {
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            // The sink refused the bytes: nothing drains the pipe any more,
+            // so the remote side would block until the deadline holding a
+            // session slot. Kill it now.
+            if sink_failed.load(Ordering::Acquire) {
+                let _ = child.kill();
+                break child.wait().ok();
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => std::thread::sleep(POLL),
+                Err(_) => {
+                    let _ = child.kill();
+                    break child.wait().ok();
+                }
+            }
+        };
+        let copied = reader
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("the copy thread panicked")));
+        let stderr = errors.join().unwrap_or_default();
+        (status, killed, copied, stderr)
+    });
+
+    if killed {
+        return Ok(FetchOutcome::DeadlineKilled);
+    }
+    if overflow.load(Ordering::Acquire) {
+        return Ok(FetchOutcome::TooLarge);
+    }
+    let bytes = match copied {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(FetchOutcome::SinkFailed {
+                detail: error.to_string(),
+            });
+        }
+    };
+    outcome_for(status.and_then(|status| status.code()), bytes, &stderr)
+}
+
+/// Starts the copy session: the fixed script on stdin, the path and cap in
+/// the shell-inert metadata blob.
+fn spawn_copy(
+    provider: &SshProvider,
+    endpoint: &SshConnectionSpec,
+    path: &str,
+    max_bytes: u64,
+    deadline: Duration,
+) -> Result<std::process::Child, SshProviderError> {
     let config_path = provider.write_config()?;
     let blob = encode_metadata(&ScriptMetadata {
         working_directory: String::new(),
@@ -152,55 +238,7 @@ fn fetch_inner(
             detail: format!("cannot send the script: {error}"),
         })?;
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let overflow = AtomicBool::new(false);
-    let (status, killed, copied, stderr) = std::thread::scope(|scope| {
-        let overflow = &overflow;
-        let reader = scope.spawn(move || copy_bounded(stdout, sink, max_bytes, overflow));
-        let errors = scope.spawn(move || drain_stderr(stderr));
-        let mut killed = false;
-        let status = loop {
-            if started.elapsed() >= deadline {
-                // A session that already finished is not a deadline kill.
-                if let Ok(Some(status)) = child.try_wait() {
-                    break Some(status);
-                }
-                killed = true;
-                let _ = child.kill();
-                break child.wait().ok();
-            }
-            if overflow.load(Ordering::Acquire) {
-                let _ = child.kill();
-                break child.wait().ok();
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => std::thread::sleep(POLL),
-                Err(_) => {
-                    let _ = child.kill();
-                    break child.wait().ok();
-                }
-            }
-        };
-        let copied = reader
-            .join()
-            .unwrap_or_else(|_| Err(std::io::Error::other("the copy thread panicked")));
-        let stderr = errors.join().unwrap_or_default();
-        (status, killed, copied, stderr)
-    });
-
-    if killed {
-        return Ok(FetchOutcome::DeadlineKilled);
-    }
-    if overflow.load(Ordering::Acquire) {
-        return Ok(FetchOutcome::TooLarge);
-    }
-    let bytes = copied.map_err(|error| SshProviderError::Tool {
-        tool: "ssh",
-        detail: format!("cannot store the copied bytes: {error}"),
-    })?;
-    outcome_for(status.and_then(|status| status.code()), bytes, &stderr)
+    Ok(child)
 }
 
 /// Maps the remote script's exit code (see [`FETCH_SCRIPT`]) to an outcome;

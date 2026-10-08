@@ -381,7 +381,7 @@ Lab artifacts are exec logs and guest files you collect. They outlive the lease.
   fleetctl --output json lab collect <lease-id> /var/log/syslog /tmp/report.xml --wait
   ```
 
-  Name 1 to 16 absolute paths of regular files. A path with `.`, `..`, or empty components is refused. Each file must fit `FLEET_LAB_ARTIFACT_MAX_BYTES` (default 64 MiB). The controller copies over the lease machine's verified SSH endpoint. A path that fails (`missing`, `not_a_file`, `unreadable`, `too_large`, `deadline_exceeded`, `copy_failed`, `transfer_failed`) fails the operation. The paths that did copy are kept, and the lease detail shows the failure as `collectionFailure`. Collection never changes the lease and never holds up its release or cleanup. Collect before you release: a collection that runs after release fails with `lease_not_ready`.
+  Name 1 to 16 absolute paths of regular files. A path with `.`, `..`, or empty components is refused. Each file must fit `FLEET_LAB_ARTIFACT_MAX_BYTES` (default 64 MiB). The controller copies over the lease machine's verified SSH endpoint. A path that fails (`missing`, `not_a_file`, `unreadable`, `too_large`, `deadline_exceeded`, `copy_failed`, `transfer_failed`, `store_failed`) fails the operation. The paths that did copy are kept, and the lease detail shows the failure as `collectionFailure`. Collection never changes the lease and never holds up its release or cleanup. Collect before you release: a collection that runs after release fails with `lease_not_ready`.
 - **Listing and download.**
 
   ```sh

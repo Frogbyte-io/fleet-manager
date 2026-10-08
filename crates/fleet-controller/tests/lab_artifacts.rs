@@ -872,3 +872,35 @@ async fn collection_requests_are_validated_authorized_and_audited() {
         Some(fleet_application::lab::LabUseCaseError::Conflict { .. })
     ));
 }
+
+#[tokio::test]
+async fn a_store_failure_is_recorded_without_its_backend_text() {
+    let fixture = Fixture::new().await;
+    // The lease points at a provision record that cannot be read.
+    let mut lease = fixture.leases.get(&fixture.lease_id).await.unwrap();
+    lease.provision_id = Some("record-that-does-not-exist".to_owned());
+    fixture.leases.update(&lease).await.unwrap();
+
+    let refused = fixture.collect(&["/var/log/syslog"]).await;
+    assert_eq!(refused.state, "failed");
+    let error = refused.error_json.unwrap();
+    assert!(error.contains("provision_unavailable"), "{error}");
+    assert!(!error.contains("record-that-does-not-exist"), "{error}");
+    let failure = fixture
+        .artifacts
+        .collection_failure(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &Fixture::principal(),
+            &fixture.lease_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failure.reason, "provision_unavailable");
+    assert!(
+        failure.detail.contains("controller log"),
+        "{}",
+        failure.detail
+    );
+    assert!(!failure.detail.contains("not found"), "{}", failure.detail);
+}
