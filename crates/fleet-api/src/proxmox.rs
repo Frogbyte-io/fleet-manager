@@ -1434,6 +1434,11 @@ pub struct StartReviewedProxmoxOperationRequest {
             description = "The caller may not operate Proxmox guests destructively.",
             body = crate::error::ApiError
         ),
+        (
+            status = 409,
+            description = "The guest is a Lab pool member (`pool_member`): destroy and snapshot-delete are refused until it is drained.",
+            body = crate::error::ApiError
+        ),
     )
 )]
 pub async fn start_reviewed_proxmox_operation(

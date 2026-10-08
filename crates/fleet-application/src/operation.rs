@@ -307,6 +307,15 @@ pub enum OperationUseCaseError {
         /// What is wrong, safe to print.
         detail: String,
     },
+    /// A policy refusal with a stable machine-readable reason (for example
+    /// `pool_member`). The request was well-formed and authorized, but the
+    /// target is protected; retrying cannot help until that changes.
+    Refused {
+        /// The stable reason id.
+        reason: &'static str,
+        /// What was refused, safe to print.
+        detail: String,
+    },
     /// The port or audit sink failed.
     Backend {
         /// The failing half.
@@ -322,6 +331,7 @@ impl fmt::Display for OperationUseCaseError {
             Self::Denied(decision) => write!(f, "denied: {decision}"),
             Self::NotFound { what } => write!(f, "not found: {what}"),
             Self::Invalid { detail } => write!(f, "invalid request: {detail}"),
+            Self::Refused { reason, detail } => write!(f, "refused ({reason}): {detail}"),
             Self::Backend { context, detail } => write!(f, "operation {context} failed: {detail}"),
         }
     }
@@ -558,7 +568,39 @@ pub struct Operations {
     pub(crate) port: Arc<dyn OperationPort>,
     audit: Arc<dyn AuditPort>,
     catalog_rollout_targets: Option<Arc<dyn CatalogRolloutTargetPort>>,
+    pool_members: Option<Arc<dyn PoolMemberLookup>>,
     pub(crate) events: Option<Arc<crate::events::EventHub>>,
+}
+
+/// The stable reason a destroy or snapshot delete of a Lab pool member is
+/// refused with.
+pub const POOL_MEMBER_REASON: &str = "pool_member";
+
+/// The narrow view of Lab pools the operator Proxmox routes need: whether a
+/// guest is a current pool member.
+#[async_trait]
+pub trait PoolMemberLookup: fmt::Debug + Send + Sync {
+    /// The pool the guest is a member of on this account, when any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when membership cannot be read; the caller refuses then.
+    async fn pool_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String>;
+}
+
+/// [`PoolMemberLookup`] over the Lab pool storage port.
+#[derive(Debug)]
+pub struct PoolMembership(pub Arc<dyn crate::lab_pool::LabPoolPort>);
+
+#[async_trait]
+impl PoolMemberLookup for PoolMembership {
+    async fn pool_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String> {
+        self.0
+            .member_by_vmid(account_id, vmid)
+            .await
+            .map(|member| member.map(|member| member.pool_id))
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -626,6 +668,7 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: None,
+            pool_members: None,
             events: None,
         }
     }
@@ -641,6 +684,7 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: None,
+            pool_members: None,
             events: Some(events),
         }
     }
@@ -656,6 +700,7 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: Some(targets),
+            pool_members: None,
             events: None,
         }
     }
@@ -672,8 +717,103 @@ impl Operations {
             port,
             audit,
             catalog_rollout_targets: Some(targets),
+            pool_members: None,
             events: Some(events),
         }
+    }
+
+    /// Supplies the Lab pool membership lookup. With it, `destroy` and
+    /// `snapshot-delete` refuse a pool member (`pool_member`).
+    #[must_use]
+    pub fn with_pool_members(mut self, pool_members: Arc<dyn PoolMemberLookup>) -> Self {
+        self.pool_members = Some(pool_members);
+        self
+    }
+
+    /// Refuses a destroy or snapshot delete of a current Lab pool member,
+    /// and audits the refusal. A membership that cannot be read fails the
+    /// request as a backend error (fail closed, retryable).
+    /// Runs after authorization, so a caller who may not operate Proxmox
+    /// cannot probe membership.
+    async fn refuse_pool_member(
+        &self,
+        principal_id: &str,
+        new: &NewOperation,
+    ) -> Result<(), OperationUseCaseError> {
+        let Some(lookup) = &self.pool_members else {
+            return Ok(());
+        };
+        if !matches!(
+            new.kind.as_str(),
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+        ) {
+            return Ok(());
+        }
+        let payload = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .unwrap_or_default();
+        let (Some(account_id), Some(vmid)) = (
+            payload["accountId"].as_str(),
+            payload["vmid"]
+                .as_u64()
+                .and_then(|vmid| u32::try_from(vmid).ok()),
+        ) else {
+            return Ok(());
+        };
+        // An unreadable membership is a backend failure, not a statement
+        // that the guest is a member: the request fails closed as retryable.
+        let pool_id = match lookup.pool_of(account_id, vmid).await {
+            Ok(None) => return Ok(()),
+            Ok(Some(pool_id)) => pool_id,
+            Err(detail) => {
+                return Err(OperationUseCaseError::Backend {
+                    context: "pool_membership",
+                    detail,
+                });
+            }
+        };
+        let detail =
+            format!("VMID {vmid} is a member of Lab pool {pool_id}; drain it from the pool first");
+        let vmid_text = vmid.to_string();
+        let mut metadata = AuditMetadata::default();
+        let facts = [
+            ("event", "proxmox_pool_member_refused"),
+            ("outcome", "refused"),
+            ("reason", POOL_MEMBER_REASON),
+            ("poolId", pool_id.as_str()),
+            ("vmid", vmid_text.as_str()),
+            ("kind", new.kind.as_str()),
+            ("accountId", account_id),
+        ];
+        for (key, value) in facts {
+            metadata
+                .insert(key, value)
+                .map_err(|error| OperationUseCaseError::Backend {
+                    context: "refusal_audit",
+                    detail: error.to_string(),
+                })?;
+        }
+        self.audit
+            .record_intent(&crate::audit::AuditIntent {
+                actor: principal_id.to_owned(),
+                action: Permission::ProxmoxDestructive.id().to_owned(),
+                resource: Some(format!("{account_id}/{vmid}")),
+                decision: Decision::allow(),
+                correlation_id: new.correlation_id.clone(),
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "refusal_audit",
+                detail,
+            })?;
+        Err(OperationUseCaseError::Refused {
+            reason: POOL_MEMBER_REASON,
+            detail,
+        })
     }
 
     pub(crate) fn publish_operation(&self, operation: &Operation, completed: bool) {
@@ -1214,6 +1354,7 @@ impl Operations {
                 },
             )
             .map_err(OperationUseCaseError::Denied)?;
+            self.refuse_pool_member(principal_id, new).await?;
         }
         let operation = self
             .port
@@ -1650,8 +1791,9 @@ mod catalog_rollout_authorization_tests {
     use async_trait::async_trait;
 
     use super::{
-        AuditPort, CatalogRolloutTargetPort, NewOperation, Operation, OperationPort, Operations,
-        PortFailure, QueueDepths,
+        AuditPort, CatalogRolloutTargetPort, NewOperation, Operation, OperationPort,
+        OperationUseCaseError, Operations, PoolMemberLookup, PortFailure, QueueDepths,
+        review_token_for,
     };
     use crate::audit::{AuditIntent, AuditOutcome};
     use crate::authz::{AccessRequest, Authorizer, Decision, Permission, ReasonId};
@@ -1966,5 +2108,123 @@ mod catalog_rollout_authorization_tests {
             Err(super::OperationUseCaseError::Invalid { .. })
         ));
         assert!(port.0.lock().unwrap().is_empty());
+    }
+
+    #[derive(Debug)]
+    struct Members(Result<Option<String>, String>);
+
+    #[async_trait]
+    impl PoolMemberLookup for Members {
+        async fn pool_of(&self, _: &str, _: u32) -> Result<Option<String>, String> {
+            self.0.clone()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingAudit(Mutex<Vec<AuditIntent>>);
+
+    #[async_trait]
+    impl AuditPort for CountingAudit {
+        async fn record_intent(&self, intent: &AuditIntent) -> Result<(), String> {
+            self.0.lock().unwrap().push(intent.clone());
+            Ok(())
+        }
+        async fn record_outcome(&self, _: &str, _: AuditOutcome) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn reviewed(kind: &str) -> NewOperation {
+        let payload = serde_json::json!({
+            "accountId": "account-1", "node": "pve1", "vmid": 700,
+            "timeoutSeconds": 300, "params": {"snapshot": "baseline"}
+        })
+        .to_string();
+        NewOperation {
+            kind: kind.to_owned(),
+            review_token: Some(review_token_for(kind, &payload)),
+            payload_json: Some(payload),
+            ..NewOperation::default()
+        }
+    }
+
+    fn permit() -> Policy {
+        Policy {
+            deny: None,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_and_snapshot_delete_refuse_a_pool_member_with_an_audit_record() {
+        for kind in ["proxmox.guest.destroy", "proxmox.guest.snapshot-delete"] {
+            let port = Arc::new(RecordingPort::default());
+            let audit = Arc::new(CountingAudit::default());
+            let operations = Operations::new(port.clone(), audit.clone())
+                .with_pool_members(Arc::new(Members(Ok(Some("pool-1".to_owned())))));
+            let result = operations
+                .create(&permit(), "operator", &reviewed(kind))
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(OperationUseCaseError::Refused {
+                        reason: "pool_member",
+                        ..
+                    })
+                ),
+                "{kind}: {result:?}"
+            );
+            assert!(port.0.lock().unwrap().is_empty(), "nothing was queued");
+            let intents = audit.0.lock().unwrap();
+            assert_eq!(intents.len(), 1);
+            let metadata: Vec<_> = intents[0].metadata.entries().collect();
+            assert!(metadata.contains(&("reason", "pool_member")));
+            assert!(metadata.contains(&("poolId", "pool-1")));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_member_and_other_kinds_are_not_refused() {
+        let port = Arc::new(RecordingPort::default());
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit))
+            .with_pool_members(Arc::new(Members(Ok(None))));
+        operations
+            .create(&permit(), "operator", &reviewed("proxmox.guest.destroy"))
+            .await
+            .unwrap();
+        // A member's snapshot or revert is not a delete; the lookup is not
+        // even consulted.
+        let operations = Operations::new(port.clone(), Arc::new(RecordingAudit))
+            .with_pool_members(Arc::new(Members(Err("down".to_owned()))));
+        operations
+            .create(&permit(), "operator", &reviewed("proxmox.guest.snapshot"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_membership_fails_closed_and_a_denied_caller_learns_nothing() {
+        let port = Arc::new(RecordingPort::default());
+        let audit = Arc::new(CountingAudit::default());
+        let operations = Operations::new(port.clone(), audit.clone())
+            .with_pool_members(Arc::new(Members(Err("down".to_owned()))));
+        let result = operations
+            .create(&permit(), "operator", &reviewed("proxmox.guest.destroy"))
+            .await;
+        assert!(matches!(result, Err(OperationUseCaseError::Backend { .. })));
+        assert!(port.0.lock().unwrap().is_empty());
+        let denied = Policy {
+            deny: Some(Permission::ProxmoxDestructive),
+            seen: Mutex::new(Vec::new()),
+        };
+        let result = operations
+            .create(&denied, "operator", &reviewed("proxmox.guest.destroy"))
+            .await;
+        assert!(matches!(result, Err(OperationUseCaseError::Denied(_))));
+        assert!(
+            audit.0.lock().unwrap().is_empty(),
+            "no refusal was recorded"
+        );
     }
 }

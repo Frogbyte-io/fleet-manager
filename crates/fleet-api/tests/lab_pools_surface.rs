@@ -13,7 +13,7 @@ use fleet_application::authz::{AccessRequest, Authorizer, Decision, Permission, 
 use fleet_application::lab::{
     ImagePinValidator, Lab, LabTemplate, LabTemplatePort as _, LabTemplateVersion, NewLabTemplate,
 };
-use fleet_application::lab_pool::LabPools;
+use fleet_application::lab_pool::{FillResult, LabPoolPort as _, LabPools};
 use fleet_application::operation::Operations;
 use fleet_application::proxmox::{NewProxmoxAccount, ProxmoxAccountPort as _};
 use fleet_core::{CleanupStrategy, LabTemplateContent, ReadinessProbe};
@@ -89,6 +89,7 @@ struct World {
     lab: Arc<Lab>,
     operations: Arc<Operations>,
     account_id: String,
+    pools: Arc<LabPoolRepository>,
 }
 
 impl World {
@@ -174,10 +175,18 @@ impl World {
         )));
         Self {
             _dir: dir,
-            operations: Arc::new(Operations::new(
-                Arc::new(OperationRepository::new(pool.clone())),
-                audit.clone(),
-            )),
+            operations: Arc::new(
+                Operations::new(
+                    Arc::new(OperationRepository::new(pool.clone())),
+                    audit.clone(),
+                )
+                .with_pool_members(Arc::new(
+                    fleet_application::operation::PoolMembership(Arc::new(LabPoolRepository::new(
+                        pool.clone(),
+                    ))),
+                )),
+            ),
+            pools: Arc::new(LabPoolRepository::new(pool.clone())),
             lab: Arc::new(lab),
             account_id: account.id,
             audit: audit.clone(),
@@ -416,4 +425,96 @@ async fn pool_mutations_are_authorized_before_anything_changes() {
     let no_read = world.state(Arc::new(Without(Permission::LabRead)));
     let (status, _) = call(&no_read, "GET", "/lab/pools", None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// Reviews and runs one destructive Proxmox action through the real routes.
+async fn run_destructive(
+    state: &Arc<ApiState>,
+    account_id: &str,
+    vmid: u32,
+    action: &str,
+    params: &serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let base = format!("/proxmox/accounts/{account_id}/guests/{vmid}/{action}");
+    let (status, review) = call(
+        state,
+        "POST",
+        &format!("{base}/review"),
+        Some(serde_json::json!({ "node": "pve1", "params": params })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    call(
+        state,
+        "POST",
+        &format!("{base}/run"),
+        Some(serde_json::json!({
+            "node": "pve1",
+            "reviewToken": review["data"]["reviewToken"],
+            "params": params,
+            "timeoutSeconds": 300,
+        })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn operator_destroy_and_snapshot_delete_refuse_a_pool_member_until_it_is_drained() {
+    let world = World::new().await;
+    let state = world.state(Arc::new(Permit));
+    let (_, body) = call(
+        &state,
+        "POST",
+        "/lab/pools",
+        Some(create_body("version-revert", &world.account_id)),
+    )
+    .await;
+    let pool_id = body["data"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &state,
+        "POST",
+        &format!("/lab/pools/{pool_id}/fill"),
+        Some(serde_json::json!({ "vmids": [700] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    // Make the member settled, so a drain removes it at once.
+    let member = &world.pools.members(&pool_id).await.unwrap()[0];
+    world
+        .pools
+        .finish_fill(
+            &member.id,
+            &FillResult::Available {
+                node: "pve1".to_owned(),
+                name: "fm-lab-pool-700".to_owned(),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+
+    let destroy = serde_json::json!({});
+    let snapshot = serde_json::json!({ "snapshot": "baseline" });
+    for (action, params) in [("destroy", &destroy), ("snapshot-delete", &snapshot)] {
+        let (status, body) = run_destructive(&state, &world.account_id, 700, action, params).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{action}: {body}");
+        assert_eq!(body["code"], "pool_member", "{action}: {body}");
+    }
+    assert_eq!(world.audit_events("proxmox_pool_member_refused"), 2);
+    // Another guest on the account is not affected.
+    let (status, body) = run_destructive(&state, &world.account_id, 701, "destroy", &destroy).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+
+    let (status, body) = call(
+        &state,
+        "POST",
+        &format!("/lab/pools/{pool_id}/drain"),
+        Some(serde_json::json!({ "vmids": [700] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for (action, params) in [("destroy", &destroy), ("snapshot-delete", &snapshot)] {
+        let (status, body) = run_destructive(&state, &world.account_id, 700, action, params).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{action} after drain: {body}");
+    }
 }
