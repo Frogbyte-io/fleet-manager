@@ -736,6 +736,27 @@ impl LabPools {
         Ok(out)
     }
 
+    /// The member registered for a guest, in any pool and state, for the
+    /// provision read model (#327). The caller has authorized the read.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    pub async fn member_for_guest(
+        &self,
+        account_id: &str,
+        vmid: u32,
+    ) -> Result<Option<PoolMember>, String> {
+        self.pools
+            .member_by_vmid(account_id, vmid)
+            .await
+            .map_err(|error| match error {
+                PoolStoreError::NotFound(detail)
+                | PoolStoreError::Conflict(detail)
+                | PoolStoreError::Backend(detail) => detail,
+            })
+    }
+
     /// Reads one pool and its members.
     ///
     /// # Errors

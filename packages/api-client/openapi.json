@@ -12766,7 +12766,7 @@
                 },
                 "guest": {
                   "type": "string",
-                  "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool`. The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
+                  "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool` or `quarantined_in_pool` (a pool member, not an\norphan). The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
                 },
                 "guestIpv4": {
                   "type": [
@@ -13423,7 +13423,7 @@
           },
           "guest": {
             "type": "string",
-            "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool`. The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
+            "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool` or `quarantined_in_pool` (a pool member, not an\norphan). The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
           },
           "guestIpv4": {
             "type": [
@@ -16232,7 +16232,7 @@
               },
               "guest": {
                 "type": "string",
-                "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool`. The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
+                "description": "What became of the guest: `not_allocated`, `present`, `destroyed`\n(cleanup removed it), `kept` (released with keep), or\n`returned_to_pool` or `quarantined_in_pool` (a pool member, not an\norphan). The node and VMID stay as history after it is\ngone, so `state` alone does not say the guest still exists."
               },
               "guestIpv4": {
                 "type": [

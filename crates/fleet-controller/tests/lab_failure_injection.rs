@@ -384,6 +384,32 @@ async fn a_released_lease_reports_its_guest_as_destroyed_or_kept() {
     );
 }
 
+/// #327: a lease the saga failed is compensated releasing -> released; its
+/// record ends `never_ready` and the guest reads destroyed, not present.
+#[tokio::test]
+async fn a_compensated_lease_reports_its_guest_as_destroyed() {
+    let world = World::new(SHORT_READINESS_SECONDS).await;
+    // A start that fails: the clone landed, so cleanup destroyed a guest.
+    let (controller, lease) = provision_with(&world, Step::Start, Fault::TaskError, 1).await;
+    assert_released(&world, &controller, &lease).await;
+    assert_eq!(
+        controller.provision_view(&lease).await,
+        (
+            "never_ready".to_owned(),
+            "destroyed".to_owned(),
+            Some("released".to_owned())
+        )
+    );
+    // A refused clone left no guest to destroy; the reserved VMID stays as
+    // history on the record.
+    let world = World::new(SHORT_READINESS_SECONDS).await;
+    let (controller, lease) = provision_with(&world, Step::Clone, Fault::Forbidden, 1).await;
+    assert_released(&world, &controller, &lease).await;
+    let (_, guest, lease_state) = controller.provision_view(&lease).await;
+    assert_eq!(guest, "destroyed");
+    assert_eq!(lease_state.as_deref(), Some("released"));
+}
+
 #[tokio::test]
 async fn provider_errors_at_the_start_end_ready_or_cleaned_up() {
     // 403: nothing started, the provision fails at boot.

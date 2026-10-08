@@ -2994,7 +2994,8 @@ export type PageProvisionRecordDtoItemsItem = {
   /**
      * What became of the guest: `not_allocated`, `present`, `destroyed`
      * (cleanup removed it), `kept` (released with keep), or
-     * `returned_to_pool`. The node and VMID stay as history after it is
+     * `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+     * orphan). The node and VMID stay as history after it is
      * gone, so `state` alone does not say the guest still exists.
      */
   guest: string;
@@ -3411,7 +3412,8 @@ export interface ProvisionRecordDto {
   /**
      * What became of the guest: `not_allocated`, `present`, `destroyed`
      * (cleanup removed it), `kept` (released with keep), or
-     * `returned_to_pool`. The node and VMID stay as history after it is
+     * `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+     * orphan). The node and VMID stay as history after it is
      * gone, so `state` alone does not say the guest still exists.
      */
   guest: string;
@@ -5038,7 +5040,8 @@ export type ResourceProvisionRecordDtoData = {
   /**
      * What became of the guest: `not_allocated`, `present`, `destroyed`
      * (cleanup removed it), `kept` (released with keep), or
-     * `returned_to_pool`. The node and VMID stay as history after it is
+     * `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+     * orphan). The node and VMID stay as history after it is
      * gone, so `state` alone does not say the guest still exists.
      */
   guest: string;

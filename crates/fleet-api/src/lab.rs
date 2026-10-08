@@ -9,8 +9,7 @@ use axum::{
     http::StatusCode,
 };
 use fleet_application::lab::{
-    LabTemplate, LabTemplateVersion, LabUseCaseError, NewLabTemplate, ProvisionRecord,
-    ProvisionView, provision_guest,
+    LabTemplate, LabTemplateVersion, LabUseCaseError, NewLabTemplate, ProvisionView,
 };
 use std::str::FromStr as _;
 
@@ -263,22 +262,12 @@ pub struct ProvisionRecordDto {
     pub updated_at: i64,
     /// What became of the guest: `not_allocated`, `present`, `destroyed`
     /// (cleanup removed it), `kept` (released with keep), or
-    /// `returned_to_pool`. The node and VMID stay as history after it is
+    /// `returned_to_pool` or `quarantined_in_pool` (a pool member, not an
+    /// orphan). The node and VMID stay as history after it is
     /// gone, so `state` alone does not say the guest still exists.
     pub guest: String,
     /// The linked lease's state, when a lease links back to the record.
     pub lease_state: Option<String>,
-}
-
-impl From<ProvisionRecord> for ProvisionRecordDto {
-    fn from(record: ProvisionRecord) -> Self {
-        ProvisionView {
-            guest: provision_guest(&record, None),
-            lease_state: None,
-            record,
-        }
-        .into()
-    }
 }
 
 impl From<ProvisionView> for ProvisionRecordDto {
@@ -658,7 +647,9 @@ pub async fn start_lab_provision(
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
-    Ok((StatusCode::CREATED, Json(Resource::new(record.into()))))
+    // A standalone provision has no lease to speak for its guest.
+    let view = ProvisionView::new(record, None, None);
+    Ok((StatusCode::CREATED, Json(Resource::new(view.into()))))
 }
 
 /// How to provision a lease: through an explicit Proxmox account, or through

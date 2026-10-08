@@ -502,7 +502,7 @@ Each sweeper tick lists the `fm-lab-*` QEMU guests on every trusted account. A g
 fleetctl --output json audit list --action lab.lease
 ```
 
-The sweeper skips an account it cannot read (unconfirmed, no stored token, or unreachable) without a log line. A controller without a secret store skips step 4 entirely. For such an account, without a secret store, or with the sweeper disabled, find orphans by hand. Compare the account's guests with the provision records. A record's `state` is its saga state and stays `ready` after the guest is gone, with its node and VMID kept as history; read its `guest` field for what became of the guest: `present` (it exists, or its cleanup is still owed), `destroyed` (cleanup removed it), `kept` (released with `keep`; it stays, out of Lab ownership), `returned_to_pool` (a pooled member reverted), or `not_allocated`. Only `present` and `kept` records can name a live guest. `leaseState` is the linked lease's state:
+The sweeper skips an account it cannot read (unconfirmed, no stored token, or unreachable) without a log line. A controller without a secret store skips step 4 entirely. For such an account, without a secret store, or with the sweeper disabled, find orphans by hand. Compare the account's guests with the provision records. A record's `state` is its saga state and stays `ready` after the guest is gone, with its node and VMID kept as history; read its `guest` field for what became of the guest: `present` (it exists, or its cleanup is still owed, as for a `failed` lease until compensation releases it), `destroyed` (cleanup removed it), `kept` (released with `keep`; it stays, out of Lab ownership), `returned_to_pool` or `quarantined_in_pool` (a pool member: a pooled lease reverts its member whatever strategy it recorded, and a pooled `keep` or a failed revert leaves it quarantined, so the guest is never destroyed), or `not_allocated`. Only `present`, `kept`, and the two pool values can name a live guest, and the pool values name a live pool member, not an orphan. If the member is drained from its pool after the release, the field falls back to the lease's recorded strategy. `leaseState` is the linked lease's state:
 
 ```sh
 fleetctl --output json proxmox guests <lab-account-id>
@@ -512,7 +512,7 @@ fleetctl --output json lab provisions
 Fleet **never** deletes an orphan. To remove one:
 
 1. Confirm in PVE that nothing else uses it.
-2. Check `fleetctl --output json lab provisions` and `fleetctl --output json lab leases` for a record with `guest` `present` or `kept` that still owns that VMID (a `destroyed` record keeps its old VMID, which PVE reuses). A guest released with `keep` is owned on purpose.
+2. Check `fleetctl --output json lab provisions` and `fleetctl --output json lab leases` for a record with `guest` `present` or `kept` that still owns that VMID (a `destroyed` record keeps its old VMID, which PVE reuses; a `returned_to_pool` or `quarantined_in_pool` VMID is a live pool member, listed by `fleetctl lab pool show`, and never an orphan). A guest released with `keep` is owned on purpose.
 3. Destroy it with `fleetctl --output json proxmox destroy <account> <node> <vmid> --wait`, or with `qm destroy` on the host.
 
 ### Capacity

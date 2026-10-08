@@ -313,6 +313,25 @@ impl Harness {
             .map(|member| (member.state, member.lease_id))
     }
 
+    /// What the provision read model reports for the lease's guest (#327):
+    /// the claimed record must carry the shape that marks it pooled.
+    async fn fate(&self, lease_id: &str) -> &'static str {
+        let lease = self.leases.get(lease_id).await.unwrap();
+        let record = ProvisionPort::get(self.labs.as_ref(), lease.provision_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            fleet_application::lab::may_be_pooled(&record),
+            "a claimed record names the member's account and VMID and never cloned: {record:?}"
+        );
+        let member = self
+            .pools
+            .member_by_vmid(record.account_id.as_deref().unwrap(), record.vmid.unwrap())
+            .await
+            .unwrap();
+        fleet_application::lab::provision_guest(&record, Some(&lease), member.as_ref()).id()
+    }
+
     async fn audit_events(&self, event: &str) -> usize {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE metadata_json LIKE ?1")
@@ -346,6 +365,7 @@ async fn a_verified_revert_returns_the_member_and_releases_the_lease() {
     assert!(harness.destroyer.ran.lock().unwrap().is_empty());
     assert_eq!(harness.audit_events("lab_pool_member_returned").await, 1);
     assert_eq!(harness.audit_events("lab_lease_released").await, 1);
+    assert_eq!(harness.fate(&lease).await, "returned_to_pool");
 }
 
 #[tokio::test]
@@ -439,6 +459,8 @@ async fn a_pooled_lease_that_says_destroy_reverts_and_never_destroys() {
         harness.member(vmid).await,
         Some((MemberState::Available, None))
     );
+    // Recorded `destroy`, but the member went back to its pool.
+    assert_eq!(harness.fate(&lease).await, "returned_to_pool");
 }
 
 #[tokio::test]
@@ -512,6 +534,7 @@ async fn keep_releases_the_lease_and_takes_the_member_out_of_rotation() {
         harness.member(vmid).await,
         Some((MemberState::Quarantined, None))
     );
+    assert_eq!(harness.fate(&lease).await, "quarantined_in_pool");
 }
 
 #[tokio::test]

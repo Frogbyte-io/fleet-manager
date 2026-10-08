@@ -2142,13 +2142,31 @@ impl Lab {
             .iter()
             .filter_map(|lease| lease.provision_id.as_deref().map(|id| (id, lease)))
             .collect();
-        Ok(records
-            .into_iter()
-            .map(|record| {
-                let lease = by_provision.get(record.id.as_str()).copied();
-                ProvisionView::new(record, lease)
-            })
-            .collect())
+        let mut views = Vec::with_capacity(records.len());
+        for record in records {
+            let lease = by_provision.get(record.id.as_str()).copied();
+            // Only a released pooled lease needs its member; the lookup
+            // failing fails the read rather than reading a member as gone.
+            let member = match (&self.pools, lease) {
+                (Some(pools), Some(lease))
+                    if lease.state == LeaseState::Released && may_be_pooled(&record) =>
+                {
+                    match (record.account_id.as_deref(), record.vmid) {
+                        (Some(account), Some(vmid)) => pools
+                            .member_for_guest(account, vmid)
+                            .await
+                            .map_err(|detail| LabUseCaseError::Backend {
+                                context: "pool members",
+                                detail,
+                            })?,
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            views.push(ProvisionView::new(record, lease, member.as_ref()));
+        }
+        Ok(views)
     }
 
     /// Reads one provisioning record.
@@ -2486,24 +2504,31 @@ pub fn guest_owned(
         })
 }
 
-/// What became of a provision's guest, derived from the record and its
-/// linked lease (#327). The lease is authoritative for ownership; the
-/// provision keeps its state, node, and VMID as history, so a record that
-/// reads `ready` for a guest cleanup destroyed is told apart by this.
+/// What became of a provision's guest, derived from the record, its linked
+/// lease and, for a pooled guest, its pool member (#327). The lease is
+/// authoritative for ownership; the provision keeps its state, node, and
+/// VMID as history, so a record that reads `ready` for a guest cleanup
+/// destroyed is told apart by this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProvisionGuest {
     /// No guest was cloned for the record (yet, or ever).
     NotAllocated,
-    /// The guest exists, or its cleanup is still owed.
+    /// The guest exists, or its cleanup is still owed (a `failed` lease
+    /// included: its compensation is queued, so the guest still stands).
     Present,
     /// Cleanup destroyed the guest: the lease was released with `destroy`.
     Destroyed,
     /// The lease was released with `keep`: the guest stays, out of Lab
     /// ownership.
     Kept,
-    /// The lease was released with `revert`: the guest went back to its
-    /// pool.
+    /// The guest is a pool member and went back to its pool (a pooled lease
+    /// reverts its member whatever strategy it recorded). The VMID is a
+    /// live pool member, not an orphan.
     ReturnedToPool,
+    /// The guest is a pool member that the release left quarantined (a
+    /// pooled `keep`, or a failed revert). The VMID is a live pool member,
+    /// not an orphan.
+    QuarantinedInPool,
 }
 
 impl ProvisionGuest {
@@ -2516,29 +2541,59 @@ impl ProvisionGuest {
             Self::Destroyed => "destroyed",
             Self::Kept => "kept",
             Self::ReturnedToPool => "returned_to_pool",
+            Self::QuarantinedInPool => "quarantined_in_pool",
         }
     }
 }
 
-/// The fate of `record`'s guest. Only a lease that links back to the record
-/// speaks for it, as in [`guest_owned`]; a lease released with `destroy`
-/// means the guest is gone, with `keep` that it was kept, with `revert` that
-/// it returned to its pool. Any other lease state, or no lease, leaves a
-/// cloned guest `present`.
+/// Whether the record may name a pool member: a pooled provision records the
+/// member's VMID and account but never started a clone, so it carries no
+/// clone task. The caller still has to find the member.
 #[must_use]
-pub fn provision_guest(record: &ProvisionRecord, lease: Option<&Lease>) -> ProvisionGuest {
+pub fn may_be_pooled(record: &ProvisionRecord) -> bool {
+    record.vmid.is_some() && record.account_id.is_some() && record.clone_upid.is_none()
+}
+
+/// The fate of `record`'s guest. Only a lease that links back to the record
+/// speaks for it, as in [`guest_owned`]. A pooled guest (`member`, found by
+/// the record's account and VMID for a record that [`may_be_pooled`]) is
+/// never destroyed, whatever strategy the lease recorded: released, it went
+/// back to its pool, or is quarantined there. Otherwise a lease released
+/// with `destroy` means the guest is gone, with `keep` that it was kept.
+/// Any other lease state, or no lease, leaves a cloned guest `present`,
+/// including a `failed` lease, whose guest stands until its compensation
+/// releases it (where [`guest_owned`] answers a different question: whether
+/// Lab still vouches for the guest).
+///
+/// A member drained from its pool after the release is no longer found, so
+/// the fate then falls back to the lease's recorded strategy.
+#[must_use]
+pub fn provision_guest(
+    record: &ProvisionRecord,
+    lease: Option<&Lease>,
+    member: Option<&crate::lab_pool::PoolMember>,
+) -> ProvisionGuest {
     if record.vmid.is_none() {
         return ProvisionGuest::NotAllocated;
     }
-    match lease
+    let Some(cleanup) = lease
         .filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()))
         .filter(|lease| lease.state == LeaseState::Released)
         .map(|lease| lease.cleanup)
-    {
-        Some(CleanupStrategy::Destroy) => ProvisionGuest::Destroyed,
-        Some(CleanupStrategy::Keep) => ProvisionGuest::Kept,
-        Some(CleanupStrategy::Revert) => ProvisionGuest::ReturnedToPool,
-        None => ProvisionGuest::Present,
+    else {
+        return ProvisionGuest::Present;
+    };
+    if let Some(member) = member.filter(|_| may_be_pooled(record)) {
+        return if member.state == crate::lab_pool::MemberState::Quarantined {
+            ProvisionGuest::QuarantinedInPool
+        } else {
+            ProvisionGuest::ReturnedToPool
+        };
+    }
+    match cleanup {
+        CleanupStrategy::Destroy => ProvisionGuest::Destroyed,
+        CleanupStrategy::Keep => ProvisionGuest::Kept,
+        CleanupStrategy::Revert => ProvisionGuest::ReturnedToPool,
     }
 }
 
@@ -2554,10 +2609,17 @@ pub struct ProvisionView {
 }
 
 impl ProvisionView {
-    fn new(record: ProvisionRecord, lease: Option<&Lease>) -> Self {
+    /// Derives the view from the record, the lease that may link back to it,
+    /// and its pool member, when it is pooled.
+    #[must_use]
+    pub fn new(
+        record: ProvisionRecord,
+        lease: Option<&Lease>,
+        member: Option<&crate::lab_pool::PoolMember>,
+    ) -> Self {
         let lease = lease.filter(|lease| lease.provision_id.as_deref() == Some(record.id.as_str()));
         Self {
-            guest: provision_guest(&record, lease),
+            guest: provision_guest(&record, lease, member),
             lease_state: lease.map(|lease| lease.state),
             record,
         }
@@ -2870,15 +2932,15 @@ mod tests {
         let cloned = record(Some(900), Some("l1"));
         let released = |cleanup| lease(LeaseState::Released, cleanup, "r1");
         assert_eq!(
-            provision_guest(&cloned, Some(&released(CleanupStrategy::Destroy))),
+            provision_guest(&cloned, Some(&released(CleanupStrategy::Destroy)), None),
             ProvisionGuest::Destroyed
         );
         assert_eq!(
-            provision_guest(&cloned, Some(&released(CleanupStrategy::Keep))),
+            provision_guest(&cloned, Some(&released(CleanupStrategy::Keep)), None),
             ProvisionGuest::Kept
         );
         assert_eq!(
-            provision_guest(&cloned, Some(&released(CleanupStrategy::Revert))),
+            provision_guest(&cloned, Some(&released(CleanupStrategy::Revert)), None),
             ProvisionGuest::ReturnedToPool
         );
         // A guest whose cleanup is owed, or whose lease is live, is present.
@@ -2889,7 +2951,11 @@ mod tests {
             LeaseState::CleanupFailed,
         ] {
             assert_eq!(
-                provision_guest(&cloned, Some(&lease(state, CleanupStrategy::Destroy, "r1"))),
+                provision_guest(
+                    &cloned,
+                    Some(&lease(state, CleanupStrategy::Destroy, "r1")),
+                    None
+                ),
                 ProvisionGuest::Present,
                 "{state:?}"
             );
@@ -2898,18 +2964,89 @@ mod tests {
         assert_eq!(
             provision_guest(
                 &cloned,
-                Some(&lease(LeaseState::Released, CleanupStrategy::Destroy, "r2"))
+                Some(&lease(LeaseState::Released, CleanupStrategy::Destroy, "r2")),
+                None
             ),
             ProvisionGuest::Present
         );
-        assert_eq!(provision_guest(&cloned, None), ProvisionGuest::Present);
+        assert_eq!(
+            provision_guest(&cloned, None, None),
+            ProvisionGuest::Present
+        );
         // Nothing cloned, nothing to destroy.
         assert_eq!(
             provision_guest(
                 &record(None, Some("l1")),
-                Some(&released(CleanupStrategy::Destroy))
+                Some(&released(CleanupStrategy::Destroy)),
+                None
             ),
             ProvisionGuest::NotAllocated
+        );
+    }
+
+    #[test]
+    fn a_pooled_guest_is_never_reported_destroyed() {
+        use super::{ProvisionGuest, provision_guest};
+        use fleet_core::{CleanupStrategy, LeaseState};
+        let released = |cleanup| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state: LeaseState::Released,
+            cleanup,
+            provision_id: Some("r1".to_owned()),
+            ..fleet_core::Lease::default()
+        };
+        // A pooled guest (no clone task, a member found) is never destroyed,
+        // whatever strategy the lease recorded.
+        let mut pooled = record(Some(901), Some("l1"));
+        pooled.clone_upid = None;
+        let member = |state| crate::lab_pool::PoolMember {
+            id: "m1".to_owned(),
+            pool_id: "p1".to_owned(),
+            account_id: "a1".to_owned(),
+            vmid: 901,
+            node: None,
+            name: None,
+            state,
+            lease_id: None,
+            draining: false,
+            detail: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        for strategy in [
+            CleanupStrategy::Destroy,
+            CleanupStrategy::Revert,
+            CleanupStrategy::Keep,
+        ] {
+            assert_eq!(
+                provision_guest(
+                    &pooled,
+                    Some(&released(strategy)),
+                    Some(&member(crate::lab_pool::MemberState::Available))
+                ),
+                ProvisionGuest::ReturnedToPool,
+                "{strategy:?}"
+            );
+            assert_eq!(
+                provision_guest(
+                    &pooled,
+                    Some(&released(strategy)),
+                    Some(&member(crate::lab_pool::MemberState::Quarantined))
+                ),
+                ProvisionGuest::QuarantinedInPool,
+                "{strategy:?}"
+            );
+        }
+        // A clone that started never reads as a member, even at its VMID.
+        let mut cloned_at_member = pooled.clone();
+        cloned_at_member.clone_upid = Some("UPID:pve:1:2:3:qmclone:120:u:".to_owned());
+        assert_eq!(
+            provision_guest(
+                &cloned_at_member,
+                Some(&released(CleanupStrategy::Destroy)),
+                Some(&member(crate::lab_pool::MemberState::Available))
+            ),
+            ProvisionGuest::Destroyed
         );
     }
 
