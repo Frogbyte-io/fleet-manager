@@ -843,6 +843,12 @@ async fn provisioning_starts_with_a_record_in_provisioning_state() {
         .unwrap();
     assert_eq!(record.state, fleet_core::GuestState::Provisioning);
     assert_eq!(record.template_version_id, version.id);
+    // The readiness deadline is recorded before any step (#302): the
+    // template's 300 s plus the pre-boot allowance.
+    assert_eq!(
+        record.readiness_deadline_at,
+        Some(NOW + 2 + 300_000 + fleet_application::lab::PRE_BOOT_ALLOWANCE_MILLIS)
+    );
 
     // The record is readable and listed.
     let fetched = lab

@@ -3374,9 +3374,23 @@ impl ProvisionExecutor {
         } else {
             record.readiness_deadline_at = Some(boot_deadline);
         }
+        // The sweeper may have compensated the lease while the clone ran
+        // (#302); a lease that left the saga must not be booted.
+        let mut booting_lease = self.leases.get(&lease_id).await?;
+        if !matches!(
+            booting_lease.state,
+            fleet_core::LeaseState::Provisioning
+                | fleet_core::LeaseState::Booting
+                | fleet_core::LeaseState::Bootstrapping
+                | fleet_core::LeaseState::Ready
+        ) {
+            return Err(format!(
+                "lease {lease_id} is {} and no longer awaiting its guest",
+                booting_lease.state.id()
+            ));
+        }
         record.state = fleet_core::GuestState::Booting;
         self.provisions.update(&record).await?;
-        let mut booting_lease = self.leases.get(&lease_id).await?;
         if booting_lease.state != fleet_core::LeaseState::Ready {
             booting_lease.state = fleet_core::LeaseState::Booting;
             self.leases.update(&booting_lease).await?;
