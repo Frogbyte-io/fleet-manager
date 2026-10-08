@@ -512,6 +512,17 @@ impl ImageArtifactPort for Artifacts {
 #[derive(Debug)]
 struct LocalLvm;
 
+/// An image whose storage pool Fleet does not know.
+#[derive(Debug)]
+struct NoStorage;
+
+#[async_trait]
+impl ImageStoragePort for NoStorage {
+    async fn template_storage(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
 #[async_trait]
 impl ImageStoragePort for LocalLvm {
     async fn template_storage(&self, _: &str) -> Result<Option<String>, String> {
@@ -698,6 +709,20 @@ impl Harness {
 
     /// FM-715: the executor with placement enabled over the real capacity
     /// repository.
+    /// How many audit intents carry `event` in their metadata. The
+    /// operation's completion appends an outcome row to its latest intent,
+    /// so outcome rows are not counted.
+    async fn audit_events(&self, event: &str) -> usize {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE outcome IS NULL AND metadata_json LIKE ?1",
+        )
+        .bind(format!("%\"{event}\"%"))
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        usize::try_from(count).unwrap()
+    }
+
     fn placed_executor(
         &self,
         pve: &Arc<Pve>,
@@ -2473,6 +2498,44 @@ async fn a_reservation_on_another_node_refuses_the_resumed_clone() {
     assert_eq!(reason, "reservation_mismatch", "{detail}");
     assert!(pve.clones().is_empty());
     assert_eq!(stored.vmid, None);
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn an_unknown_storage_pool_refuses_and_is_audited() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_placement(
+        Arc::new(CapacityRepository::new(harness.pool.clone())),
+        Arc::new(NoStorage),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+        PlacementPolicy::default(),
+    );
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            executor,
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "storage_unknown", "{detail}");
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert!(
+        CapacityRepository::new(harness.pool.clone())
+            .for_lease(&lease_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
 }
 
 #[tokio::test]

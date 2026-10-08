@@ -1886,6 +1886,30 @@ struct Placement {
     policy: fleet_application::lab_placement::PlacementPolicy,
 }
 
+/// Attempts the best-effort `lab_placement_refused` audit for a refusal
+/// decided before the reservation transaction runs (FM-715).
+async fn audit_placement_refusal(
+    placement: &Placement,
+    lease_id: &str,
+    operation_id: &str,
+    node: &str,
+    refusal: &Refusal,
+) {
+    let _ = placement
+        .audit
+        .record_intent(&fleet_application::lab_placement::reservation_audit(
+            fleet_auth::LAN_PRINCIPAL_ID,
+            lease_id,
+            Some(operation_id),
+            "lab_placement_refused",
+            &[
+                ("node", node.to_owned()),
+                ("reason", refusal.reason.to_owned()),
+            ],
+        ))
+        .await;
+}
+
 /// A classified provisioning failure: the operation completes as failed
 /// with this reason and detail instead of erroring.
 struct Refusal {
@@ -2690,13 +2714,15 @@ impl ProvisionExecutor {
             // will run: the template version (and so the demand) is
             // immutable, but the template can move between nodes.
             if existing.node != node || existing.account_id != account_id {
-                return Ok(Err(Refusal::new(
+                let refusal = Refusal::new(
                     "reservation_mismatch",
                     format!(
                         "the lease holds capacity on {} but the template is now on {node}; release the lease and request a new one",
                         existing.node
                     ),
-                )));
+                );
+                audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+                return Ok(Err(refusal));
             }
             return Ok(Ok(()));
         }
@@ -2706,13 +2732,15 @@ impl ProvisionExecutor {
             .await
             .map_err(|detail| format!("the image's storage pool is unreadable: {detail}"))?
         else {
-            return Ok(Err(Refusal::new(
+            let refusal = Refusal::new(
                 "storage_unknown",
                 format!(
                     "the storage pool of the pinned image version {} is unknown; refusing to place without it",
                     content.image_version_id
                 ),
-            )));
+            );
+            audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+            return Ok(Err(refusal));
         };
         // A failed or partial refresh is not fatal and replaces nothing: the
         // stored observation decides, and the transaction refuses it once it

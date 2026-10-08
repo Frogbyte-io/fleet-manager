@@ -335,6 +335,134 @@ async fn an_unknown_image_version_has_no_template_storage() {
     );
 }
 
+/// Publishes image version `v1` declaring `pool`.
+async fn publish_version(pool: &sqlx::SqlitePool, storage_pool: &str) {
+    sqlx::query(
+        "INSERT INTO image_recipe_versions \
+         (id, recipe_id, name, content_digest, content, source, node, storage_pool, published_at) \
+         VALUES ('v1', 'r1', 'base', 'sha256:abc', '{}', 'iso', 'pve1', ?1, 1)",
+    )
+    .bind(storage_pool)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Records a build of `v1` on the version's then-declared pool. The build
+/// trigger requires the version's pool, so a test that wants builds on
+/// different pools changes the declared pool between builds.
+async fn record_build(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    storage_pool: &str,
+    started_at: i64,
+    succeeded: bool,
+) {
+    sqlx::query("UPDATE image_recipe_versions SET storage_pool = ?1 WHERE id = 'v1'")
+        .bind(storage_pool)
+        .execute(pool)
+        .await
+        .unwrap();
+    let operation = format!("op-{id}");
+    sqlx::query(
+        "INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at) \
+         VALUES (?1, 'image.build', 'running', 0, ?2, ?2)",
+    )
+    .bind(&operation)
+    .bind(started_at)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO image_build_records \
+         (id, operation_id, recipe_id, version_id, content_digest, asset_digests, account_id, \
+          node, storage_pool, started_at, outcome) \
+         VALUES (?1, ?2, 'r1', 'v1', 'sha256:abc', '[]', 'account-1', 'pve1', ?3, ?4, 'running')",
+    )
+    .bind(id)
+    .bind(&operation)
+    .bind(storage_pool)
+    .bind(started_at)
+    .execute(pool)
+    .await
+    .unwrap();
+    let completion = if succeeded {
+        "UPDATE image_build_records SET outcome = 'succeeded', ended_at = started_at + 1, \
+         packer_version = '1.11.0', proxmox_plugin_version = '1.2.0', template_node = 'pve1', \
+         template_vmid = 9000, template_name = 'base' WHERE id = ?1"
+    } else {
+        "UPDATE image_build_records SET outcome = 'failed', ended_at = started_at + 1, \
+         reason = 'packer_failed' WHERE id = ?1"
+    };
+    sqlx::query(completion)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn template_storage_prefers_the_pinned_build() {
+    let (_dir, store) = setup().await;
+    let pool = store.pool();
+    let capacity = CapacityRepository::new(pool.clone());
+    publish_version(pool, "pool-declared").await;
+    record_build(pool, "b-pinned", "pool-pinned", 10, true).await;
+    record_build(pool, "b-newer", "pool-newer", 20, true).await;
+    sqlx::query("UPDATE image_recipe_versions SET storage_pool = 'pool-declared', promoted_build_id = 'b-pinned' WHERE id = 'v1'")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        capacity.template_storage("v1").await.unwrap().as_deref(),
+        Some("pool-pinned"),
+        "the pin wins over a newer successful build and the declared pool"
+    );
+}
+
+#[tokio::test]
+async fn template_storage_without_a_pin_uses_the_newest_successful_build() {
+    let (_dir, store) = setup().await;
+    let pool = store.pool();
+    let capacity = CapacityRepository::new(pool.clone());
+    publish_version(pool, "pool-declared").await;
+    record_build(pool, "b-old", "pool-old", 10, true).await;
+    record_build(pool, "b-new", "pool-new", 20, true).await;
+    // A newer failed build is evidence of nothing Lab clones.
+    record_build(pool, "b-failed", "pool-failed", 30, false).await;
+    sqlx::query("UPDATE image_recipe_versions SET storage_pool = 'pool-declared' WHERE id = 'v1'")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        capacity.template_storage("v1").await.unwrap().as_deref(),
+        Some("pool-new")
+    );
+}
+
+#[tokio::test]
+async fn template_storage_without_a_successful_build_uses_the_declared_pool() {
+    let (_dir, store) = setup().await;
+    let pool = store.pool();
+    let capacity = CapacityRepository::new(pool.clone());
+    publish_version(pool, "pool-declared").await;
+    assert_eq!(
+        capacity.template_storage("v1").await.unwrap().as_deref(),
+        Some("pool-declared"),
+        "a version with no build records falls back to its declared pool"
+    );
+    record_build(pool, "b-failed", "pool-failed", 10, false).await;
+    sqlx::query("UPDATE image_recipe_versions SET storage_pool = 'pool-declared' WHERE id = 'v1'")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        capacity.template_storage("v1").await.unwrap().as_deref(),
+        Some("pool-declared"),
+        "a failed build is not a source of the pool"
+    );
+}
+
 #[tokio::test]
 async fn a_finished_leases_held_row_never_counts_even_without_its_release_write() {
     use fleet_core::LeaseState;
