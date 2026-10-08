@@ -807,6 +807,126 @@ pub async fn promote_image_version(
     Ok(Json(Resource::new(version.into())))
 }
 
+/// One build address that is out of allocation (#402).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildAddressDto {
+    /// The IPv4 address.
+    pub address: String,
+    /// `held` by a running build, or `quarantined` after a build that did
+    /// not end verifiably.
+    pub status: String,
+    /// The operation that holds the address, or held it when it was
+    /// quarantined.
+    pub operation_id: String,
+    /// When the address was taken or quarantined, Unix milliseconds.
+    pub since: i64,
+    /// When a quarantine ends on its own, Unix milliseconds; absent while
+    /// held.
+    pub until: Option<i64>,
+}
+
+/// The result of clearing a quarantine.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearedBuildAddressDto {
+    /// The address that can be allocated again.
+    pub address: String,
+}
+
+/// Lists the build addresses that are held or quarantined.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal or backend failure.
+#[utoipa::path(
+    get,
+    path = "/images/build-addresses",
+    tag = "images",
+    operation_id = "listImageBuildAddresses",
+    responses(
+        (status = 200, description = "The complete list of addresses out of allocation, by address. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null. Empty without a build address pool.", body = Page<BuildAddressDto>),
+        (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
+    )
+)]
+pub async fn list_image_build_addresses(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+) -> Result<Json<Page<BuildAddressDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let records = images
+        .list_build_addresses(
+            state.authorizer.as_ref(),
+            &principal,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    let items: Vec<BuildAddressDto> = records
+        .into_iter()
+        .map(|record| BuildAddressDto {
+            address: record.address.to_string(),
+            status: record.status.as_str().to_owned(),
+            operation_id: record.operation_id,
+            since: record.since,
+            until: record.until,
+        })
+        .collect();
+    let limit = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    Ok(Json(Page {
+        page: PageInfo {
+            next_cursor: None,
+            limit,
+        },
+        items,
+    }))
+}
+
+/// Ends the quarantine of one build address early. Remove the stranded VM
+/// first; Fleet does not probe for it.
+///
+/// # Errors
+///
+/// Returns the public error envelope on refusal, a malformed address, an
+/// address that is not quarantined, or an address a running build holds.
+#[utoipa::path(
+    post,
+    path = "/images/build-addresses/{address}/clear",
+    tag = "images",
+    operation_id = "clearImageBuildAddress",
+    params(("address" = String, Path, description = "The quarantined IPv4 address.")),
+    responses(
+        (status = 200, description = "The quarantine was cleared.", body = Resource<ClearedBuildAddressDto>),
+        (status = 400, description = "The address is not an IPv4 address.", body = crate::error::ApiError),
+        (status = 403, description = "The caller may not configure the image surface.", body = crate::error::ApiError),
+        (status = 404, description = "The address is not quarantined.", body = crate::error::ApiError),
+        (status = 409, description = "A running build holds the address.", body = crate::error::ApiError),
+    )
+)]
+pub async fn clear_image_build_address(
+    State(state): State<Arc<crate::operations::ApiState>>,
+    principal: Option<Extension<crate::ActingPrincipal>>,
+    Extension(correlation_id): Extension<CorrelationId>,
+    Path(address): Path<String>,
+) -> Result<Json<Resource<ClearedBuildAddressDto>>, ApiErrorResponse> {
+    let images = images_or_error(&state, correlation_id)?;
+    let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    let cleared = images
+        .clear_build_address(
+            state.authorizer.as_ref(),
+            &principal,
+            &address,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .map_err(|error| map_images_error(&error, correlation_id))?;
+    Ok(Json(Resource::new(ClearedBuildAddressDto {
+        address: cleared.to_string(),
+    })))
+}
+
 /// Reads one published version with its structured view.
 ///
 /// # Errors

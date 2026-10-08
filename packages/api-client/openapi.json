@@ -838,6 +838,111 @@
         }
       }
     },
+    "/api/v1/images/build-addresses": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Lists the build addresses that are held or quarantined.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listImageBuildAddresses",
+        "responses": {
+          "200": {
+            "description": "The complete list of addresses out of allocation, by address. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null. Empty without a build address pool.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_BuildAddressDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/images/build-addresses/{address}/clear": {
+      "post": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Ends the quarantine of one build address early. Remove the stranded VM\nfirst; Fleet does not probe for it.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a malformed address, an\naddress that is not quarantined, or an address a running build holds.",
+        "operationId": "clearImageBuildAddress",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "description": "The quarantined IPv4 address.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The quarantine was cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_ClearedBuildAddressDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The address is not an IPv4 address.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the image surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The address is not quarantined.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A running build holds the address.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/builds": {
       "get": {
         "tags": [
@@ -7901,6 +8006,43 @@
           }
         }
       },
+      "BuildAddressDto": {
+        "type": "object",
+        "description": "One build address that is out of allocation (#402).",
+        "required": [
+          "address",
+          "status",
+          "operationId",
+          "since"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The IPv4 address."
+          },
+          "operationId": {
+            "type": "string",
+            "description": "The operation that holds the address, or held it when it was\nquarantined."
+          },
+          "since": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the address was taken or quarantined, Unix milliseconds."
+          },
+          "status": {
+            "type": "string",
+            "description": "`held` by a running build, or `quarantined` after a build that did\nnot end verifiably."
+          },
+          "until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a quarantine ends on its own, Unix milliseconds; absent while\nheld."
+          }
+        }
+      },
       "BuildImageRequest": {
         "type": "object",
         "description": "The build request: which version to build and the deadline.",
@@ -8329,6 +8471,19 @@
           "source": {
             "type": "string",
             "description": "What observed it."
+          }
+        }
+      },
+      "ClearedBuildAddressDto": {
+        "type": "object",
+        "description": "The result of clearing a quarantine.",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The address that can be allocated again."
           }
         }
       },
@@ -11387,6 +11542,61 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "Append-only ledger sequence."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_BuildAddressDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One build address that is out of allocation (#402).",
+              "required": [
+                "address",
+                "status",
+                "operationId",
+                "since"
+              ],
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "description": "The IPv4 address."
+                },
+                "operationId": {
+                  "type": "string",
+                  "description": "The operation that holds the address, or held it when it was\nquarantined."
+                },
+                "since": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the address was taken or quarantined, Unix milliseconds."
+                },
+                "status": {
+                  "type": "string",
+                  "description": "`held` by a running build, or `quarantined` after a build that did\nnot end verifiably."
+                },
+                "until": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When a quarantine ends on its own, Unix milliseconds; absent while\nheld."
                 }
               }
             },
@@ -14680,6 +14890,28 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "Publication time."
+              }
+            }
+          }
+        }
+      },
+      "Resource_ClearedBuildAddressDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The result of clearing a quarantine.",
+            "required": [
+              "address"
+            ],
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "The address that can be allocated again."
               }
             }
           }

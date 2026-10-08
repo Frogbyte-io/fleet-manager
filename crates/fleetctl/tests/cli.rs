@@ -2691,6 +2691,51 @@ fn parsing_walks_the_promotion_forms() {
 }
 
 #[test]
+fn parsing_walks_the_build_address_forms() {
+    let parse = |words: &[&str]| {
+        let args: Vec<String> = words.iter().map(ToString::to_string).collect();
+        fleetctl::parse(&args).map(|parsed| parsed.command)
+    };
+    assert!(matches!(
+        parse(&["images", "addresses"]).unwrap(),
+        fleetctl::Command::ImagesAddresses
+    ));
+    assert!(matches!(
+        parse(&["images", "address-clear", "192.0.2.10"]).unwrap(),
+        fleetctl::Command::ImagesAddressClear { address } if address == "192.0.2.10"
+    ));
+    assert!(parse(&["images", "address-clear"]).is_err());
+    // The path segment is a validated IPv4, never free text.
+    for bad in ["../x", "192.0.2.10/clear", "::1", "nonsense"] {
+        assert!(parse(&["images", "address-clear", bad]).is_err(), "{bad}");
+    }
+    assert!(parse(&["images", "addresses", "extra"]).is_err());
+}
+
+#[test]
+fn text_output_renders_build_addresses() {
+    let page = json!({
+        "items": [{"address": "192.0.2.10", "status": "quarantined",
+                   "operationId": "op-1", "since": 1_800_000_000_000_i64,
+                   "until": 1_800_086_400_000_i64}],
+        "page": {"limit": 1, "nextCursor": null}
+    });
+    let text = fleetctl::render_build_addresses_for_test(&page);
+    assert!(
+        text.contains("192.0.2.10") && text.contains("quarantined"),
+        "{text}"
+    );
+    assert!(text.contains("2027-01-15 08:00:00"), "{text}");
+    assert!(text.contains("2027-01-16 08:00:00"), "{text}");
+    let empty = json!({"items": [], "page": {"limit": 0, "nextCursor": null}});
+    let text = fleetctl::render_build_addresses_for_test(&empty);
+    assert!(
+        text.contains("(no held or quarantined build addresses)"),
+        "{text}"
+    );
+}
+
+#[test]
 fn text_output_renders_lab_templates_and_provisions() {
     let page = json!({
         "items": [

@@ -6,7 +6,8 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use fleet_application::images::{
-    BUILD_ADDRESS_QUARANTINE_MILLIS, BuildAddressError, BuildAddressPort as _,
+    BUILD_ADDRESS_QUARANTINE_MILLIS, BuildAddressError, BuildAddressPort as _, BuildAddressStatus,
+    ClearQuarantine,
 };
 use fleet_core::BuildAddressPool;
 use fleet_storage_sqlite::{BuildAddressRepository, Store};
@@ -300,4 +301,114 @@ async fn racing_builds_never_share_an_address() {
     }
     assert_eq!(won.len(), 8, "the pool holds eight addresses");
     assert_eq!(refused, 8);
+}
+
+#[tokio::test]
+async fn an_operator_clears_a_quarantine_early_but_never_a_live_hold() {
+    let (_dir, store, repository) = setup().await;
+    let pool = pool(10);
+    operation(&store, "op-1", "running").await;
+    operation(&store, "op-2", "running").await;
+    assert_eq!(
+        repository.allocate("op-1", &pool, 1, NOW).await,
+        Ok(vec![a(10)])
+    );
+    // Held by a live operation: listed, and not clearable.
+    let listed = repository.list_unavailable(NOW + 1).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].address, a(10));
+    assert_eq!(listed[0].status, BuildAddressStatus::Held);
+    assert_eq!(listed[0].operation_id, "op-1");
+    assert_eq!(listed[0].until, None);
+    assert_eq!(
+        repository.clear_quarantine(a(10), NOW + 2).await,
+        Ok(ClearQuarantine::Held {
+            operation_id: "op-1".to_owned()
+        })
+    );
+    // An unverified end quarantines it.
+    repository.release("op-1", NOW + 3, true).await.unwrap();
+    assert_eq!(
+        repository.allocate("op-2", &pool, 1, NOW + 4).await,
+        Err(BuildAddressError::Exhausted)
+    );
+    let listed = repository.list_unavailable(NOW + 5).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].status, BuildAddressStatus::Quarantined);
+    assert_eq!(
+        listed[0].until,
+        Some(NOW + 3 + BUILD_ADDRESS_QUARANTINE_MILLIS)
+    );
+    // A different address, or a repeat, has nothing to clear.
+    assert_eq!(
+        repository.clear_quarantine(a(11), NOW + 6).await,
+        Ok(ClearQuarantine::NotQuarantined)
+    );
+    assert_eq!(
+        repository.clear_quarantine(a(10), NOW + 7).await,
+        Ok(ClearQuarantine::Cleared {
+            operation_id: "op-1".to_owned()
+        })
+    );
+    assert_eq!(
+        repository.clear_quarantine(a(10), NOW + 8).await,
+        Ok(ClearQuarantine::NotQuarantined)
+    );
+    assert!(
+        repository
+            .list_unavailable(NOW + 9)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repository.allocate("op-2", &pool, 1, NOW + 10).await,
+        Ok(vec![a(10)])
+    );
+}
+
+#[tokio::test]
+async fn a_dead_holders_address_can_be_cleared_in_one_step() {
+    let (_dir, store, repository) = setup().await;
+    let pool = pool(10);
+    operation(&store, "op-1", "running").await;
+    repository.allocate("op-1", &pool, 1, NOW).await.unwrap();
+    set_state(&store, "op-1", "failed").await;
+    // Still `held` on disk, but its operation is dead: clearing reclaims it
+    // and ends the quarantine it would have got.
+    // Listed as quarantined already, as reclaim would make it.
+    let listed = repository.list_unavailable(NOW + 1).await.unwrap();
+    assert_eq!(listed[0].status, BuildAddressStatus::Quarantined);
+    assert_eq!(
+        listed[0].until,
+        Some(NOW + 1 + BUILD_ADDRESS_QUARANTINE_MILLIS)
+    );
+    assert_eq!(
+        repository.clear_quarantine(a(10), NOW + 1).await,
+        Ok(ClearQuarantine::Cleared {
+            operation_id: "op-1".to_owned()
+        })
+    );
+    assert!(
+        repository
+            .list_unavailable(NOW + 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_lapsed_quarantine_is_not_listed_or_clearable() {
+    let (_dir, store, repository) = setup().await;
+    let pool = pool(10);
+    operation(&store, "op-1", "running").await;
+    repository.allocate("op-1", &pool, 1, NOW).await.unwrap();
+    repository.release("op-1", NOW + 1, true).await.unwrap();
+    let after = NOW + 2 + BUILD_ADDRESS_QUARANTINE_MILLIS;
+    assert!(repository.list_unavailable(after).await.unwrap().is_empty());
+    assert_eq!(
+        repository.clear_quarantine(a(10), after).await,
+        Ok(ClearQuarantine::NotQuarantined)
+    );
 }
