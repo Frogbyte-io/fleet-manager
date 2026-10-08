@@ -731,7 +731,8 @@ impl Operations {
     }
 
     /// Refuses a destroy or snapshot delete of a current Lab pool member,
-    /// and audits the refusal. A membership that cannot be read refuses too.
+    /// and audits the refusal. A membership that cannot be read fails the
+    /// request as a backend error (fail closed, retryable).
     /// Runs after authorization, so a caller who may not operate Proxmox
     /// cannot probe membership.
     async fn refuse_pool_member(
@@ -761,23 +762,28 @@ impl Operations {
         ) else {
             return Ok(());
         };
-        let (pool_id, detail) = match lookup.pool_of(account_id, vmid).await {
+        // An unreadable membership is a backend failure, not a statement
+        // that the guest is a member: the request fails closed as retryable.
+        let pool_id = match lookup.pool_of(account_id, vmid).await {
             Ok(None) => return Ok(()),
-            Ok(Some(pool_id)) => {
-                let detail = format!(
-                    "VMID {vmid} is a member of Lab pool {pool_id}; drain it from the pool first"
-                );
-                (Some(pool_id), detail)
+            Ok(Some(pool_id)) => pool_id,
+            Err(detail) => {
+                return Err(OperationUseCaseError::Backend {
+                    context: "pool_membership",
+                    detail,
+                });
             }
-            Err(_) => (
-                None,
-                format!("the pool membership of VMID {vmid} could not be read"),
-            ),
         };
+        let detail =
+            format!("VMID {vmid} is a member of Lab pool {pool_id}; drain it from the pool first");
+        let vmid_text = vmid.to_string();
         let mut metadata = AuditMetadata::default();
         let facts = [
             ("event", "proxmox_pool_member_refused"),
+            ("outcome", "refused"),
             ("reason", POOL_MEMBER_REASON),
+            ("poolId", pool_id.as_str()),
+            ("vmid", vmid_text.as_str()),
             ("kind", new.kind.as_str()),
             ("accountId", account_id),
         ];
@@ -788,10 +794,6 @@ impl Operations {
                     context: "refusal_audit",
                     detail: error.to_string(),
                 })?;
-        }
-        let _ = metadata.insert("vmid", &vmid.to_string());
-        if let Some(pool_id) = &pool_id {
-            let _ = metadata.insert("poolId", pool_id);
         }
         self.audit
             .record_intent(&crate::audit::AuditIntent {
@@ -2202,7 +2204,7 @@ mod catalog_rollout_authorization_tests {
     }
 
     #[tokio::test]
-    async fn an_unreadable_membership_refuses_and_a_denied_caller_learns_nothing() {
+    async fn an_unreadable_membership_fails_closed_and_a_denied_caller_learns_nothing() {
         let port = Arc::new(RecordingPort::default());
         let audit = Arc::new(CountingAudit::default());
         let operations = Operations::new(port.clone(), audit.clone())
@@ -2210,13 +2212,8 @@ mod catalog_rollout_authorization_tests {
         let result = operations
             .create(&permit(), "operator", &reviewed("proxmox.guest.destroy"))
             .await;
-        assert!(matches!(
-            result,
-            Err(OperationUseCaseError::Refused {
-                reason: "pool_member",
-                ..
-            })
-        ));
+        assert!(matches!(result, Err(OperationUseCaseError::Backend { .. })));
+        assert!(port.0.lock().unwrap().is_empty());
         let denied = Policy {
             deny: Some(Permission::ProxmoxDestructive),
             seen: Mutex::new(Vec::new()),
@@ -2225,6 +2222,9 @@ mod catalog_rollout_authorization_tests {
             .create(&denied, "operator", &reviewed("proxmox.guest.destroy"))
             .await;
         assert!(matches!(result, Err(OperationUseCaseError::Denied(_))));
-        assert_eq!(audit.0.lock().unwrap().len(), 1, "only the first refusal");
+        assert!(
+            audit.0.lock().unwrap().is_empty(),
+            "no refusal was recorded"
+        );
     }
 }
