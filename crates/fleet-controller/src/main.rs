@@ -47,7 +47,13 @@ fn parse_args() -> Result<Args, String> {
 
 /// The serve command: open the store, open the secret store, start the
 /// worker, serve until shutdown, then drain in reverse order.
-fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
+fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
+    // Child processes (Packer, SSH) run in their own working directories,
+    // so a relative `data_dir` (the default is `./data`) must not leak
+    // into any path handed to them (#312).
+    if let Ok(absolute) = std::path::absolute(&config.data_dir) {
+        config.data_dir = absolute;
+    }
     let settings = Settings {
         listen: config.listen,
         tailscale_serve_listen: config.tailscale_serve_listen,
