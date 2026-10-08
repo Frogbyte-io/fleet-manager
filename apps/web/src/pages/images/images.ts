@@ -69,7 +69,7 @@ function parse(raw: string): { doc: JsonObject, builder: JsonObject } | { reason
     doc = JSON.parse(raw) as Json
   }
   catch {
-    return { reason: 'The content is not JSON (for example a .pkr.hcl template), so only the raw editor applies.' }
+    return { reason: 'The content is not JSON, so there is no structured view. Fleet publishes only JSON recipes (.pkr.json) that pass its structural gate, and refuses anything else.' }
   }
   if (!isObject(doc))
     return { reason: 'The template is not a JSON object.' }

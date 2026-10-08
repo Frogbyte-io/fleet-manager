@@ -240,7 +240,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         ),
         (
             name = "images",
-            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content is stored verbatim, but Fleet refuses recipes that fail the structural gate described in docs/architecture/lab.md (legacy JSON with an allowlisted structure) at publish and again before every build; Packer's own fields are otherwise not re-validated."
         ),
         (
             name = "lab",
@@ -248,7 +248,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         ),
         (
             name = "images",
-            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content passes through verbatim; Fleet never re-validates Packer's own fields."
+            description = "Image recipes and their immutable published versions, built over the operator-installed Packer CLI. The content is stored verbatim, but Fleet refuses recipes that fail the structural gate described in docs/architecture/lab.md (legacy JSON with an allowlisted structure) at publish and again before every build; Packer's own fields are otherwise not re-validated."
         ),
         (
             name = "proxmox",
