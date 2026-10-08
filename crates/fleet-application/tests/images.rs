@@ -506,7 +506,9 @@ async fn a_conflicting_name_is_a_conflict() {
             &AllowAll,
             &principal(),
             NewRecipe {
-                content: recipe_content("ubuntu-base", "{\"other\":true}"),
+                // A structurally valid recipe, so the name-uniqueness check
+                // (not the #313 recipe-structure gate) is what refuses it.
+                content: recipe_content("ubuntu-base", "{\"builders\":[]}"),
             },
             NOW,
         )
