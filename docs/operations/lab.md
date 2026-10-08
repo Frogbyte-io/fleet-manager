@@ -391,7 +391,7 @@ Lab artifacts are exec logs and guest files you collect. They outlive the lease.
 
   `artifact-get` writes the file only after its size and sha256 match the artifact's record. The controller also re-hashes the bytes before it sends them, and refuses (409) bytes that changed on disk.
 - **Retention.** The Lab sweeper deletes artifacts older than `FLEET_LAB_ARTIFACT_RETENTION_SECONDS` (default 7 days). Expiry needs the background sweeper: with `FLEET_LAB_SWEEP_INTERVAL_SECONDS=0`, artifacts stay until it runs. The audit event is `lab_artifact_expired`. Identical content is stored once, and its bytes go when the last artifact that uses them expires.
-- **Sizing.** Plan for the retention window's worth of collected files. One file is at most the size cap.
+- **Sizing.** Size the volume that holds `FLEET_LAB_ARTIFACTS_DIR` for one retention window of collected files, plus one size cap of headroom for each collection in progress: a file is staged under the directory's `tmp/` before it is committed, and leftover staging files are removed at startup. Exec logs are small (two bounded streams and a header). For example, 20 files of 5 MiB a day kept for the default 7 days need about 700 MiB, plus 64 MiB of staging headroom. When the volume is full, collection fails with `store_failed` and the lease is not affected. Each artifact's deletion deadline is fixed when it is stored, so a shorter retention or a lower size cap (both need a controller restart) only applies to artifacts stored afterwards; free space now by growing the volume.
 - **Permissions.** Collecting and downloading need `lab.artifacts`. Listing needs `lab.read`.
 
 What else uses space:
