@@ -2926,27 +2926,37 @@ fn help_text(words: &[&str]) -> Option<String> {
         .filter(|line| line.starts_with("  "))
         .filter(|line| word_at(line, 0).iter().any(|word| word == group))
         .collect();
-    let verb = args.first().filter(|word| !word.starts_with('-'));
-    let narrowed: Vec<&str> = verb.map_or_else(Vec::new, |verb| {
-        in_group
+    if in_group.is_empty() {
+        // An unknown command group is the ordinary unknown-command error.
+        return None;
+    }
+    // Narrow by each leading word that names a verb (`lab pool create`),
+    // stopping at the first that matches no usage line (an id, a flag).
+    let mut shown = in_group;
+    for (depth, word) in args.iter().enumerate() {
+        if word.starts_with('-') {
+            break;
+        }
+        let narrowed: Vec<&str> = shown
             .iter()
             .copied()
             .filter(|line| {
-                word_at(line, 1).iter().any(|word| {
-                    word == verb
+                word_at(line, depth + 1).iter().any(|name| {
+                    name == word
                         // `lab create` is also the deprecated alias of `lab template-create`.
-                        || (*group == "lab" && *verb == "create" && word == "template-create")
+                        || (depth == 0
+                            && *group == "lab"
+                            && *word == "create"
+                            && name == "template-create")
                 })
             })
-            .collect()
-    });
-    let shown = if !narrowed.is_empty() {
-        narrowed
-    } else if !in_group.is_empty() {
-        in_group
-    } else {
-        return Some(full);
-    };
+            .collect();
+        if narrowed.is_empty() {
+            break;
+        }
+        shown = narrowed;
+    }
+    shown.dedup();
     Some(format!("Usage:\n{}", shown.join("\n")))
 }
 
@@ -4012,10 +4022,18 @@ mod event_output_tests {
                     );
                     let (text, code) = super::run_with_exit(&invocation).unwrap();
                     assert_eq!(code, 0, "{args:?}");
+                    assert!(text.starts_with("Usage:\n  lab "), "{args:?}: {text}");
                     assert!(
-                        text.contains(&format!("fleetctl lab {sub}").replace("fleetctl ", "")),
+                        text.lines().skip(1).all(|line| line.starts_with("  lab ")),
                         "{args:?}: {text}"
                     );
+                    assert!(text.lines().count() <= 7, "{args:?}: not narrowed: {text}");
+                    let exact = text.lines().skip(1).any(|line| {
+                        line.split_whitespace()
+                            .nth(1)
+                            .is_some_and(|word| word.split('|').any(|name| name == sub))
+                    });
+                    assert!(exact, "{args:?}: {text}");
                 }
             }
         }
@@ -4056,6 +4074,50 @@ mod event_output_tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn help_is_narrowed_to_the_verb_and_unknown_groups_still_fail() {
+        let help = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            match parse(&argv).unwrap().command {
+                Command::Help { text } => text,
+                other => panic!("{args:?}: {other:?}"),
+            }
+        };
+        let destroy = help(&["lab", "destroy", "--help"]);
+        assert_eq!(
+            destroy,
+            "Usage:\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]"
+        );
+        assert_eq!(help(&["lab", "leases", "-h"]).lines().count(), 2);
+        assert_eq!(help(&["lab", "pool", "create", "-h"]).lines().count(), 2);
+        assert!(help(&["lab", "-h"]).lines().count() > 10);
+        assert_eq!(help(&["images", "version", "-h"]).lines().count(), 2);
+        assert!(help(&["proxmox", "tasks", "-h"]).contains("proxmox tasks"));
+        // A typo plus `-h` is the ordinary unknown-command error.
+        let argv: Vec<String> = ["bogus", "-h"].map(str::to_owned).into();
+        assert!(parse(&argv).is_err());
+        // After `--` the words belong to the remote command.
+        let exec = parse(
+            &[
+                "frogenv",
+                "run",
+                "m",
+                "--root",
+                "/r",
+                "--endpoint",
+                "e",
+                "--auth",
+                "agent",
+                "--",
+                "ls",
+                "-h",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(!matches!(exec.command, Command::Help { .. }));
     }
 
     #[test]
