@@ -315,7 +315,7 @@ impl SshProvider {
         endpoint: &SshConnectionSpec,
         timeout: Duration,
     ) -> Result<(), SshProviderError> {
-        let config_path = self.write_config()?;
+        let config_path = self.write_config(&endpoint.auth)?;
         let mut command = Command::new("ssh");
         command
             .arg("-F")
@@ -323,9 +323,7 @@ impl SshProvider {
             .arg("-o")
             .arg(format!("ConnectTimeout={}", timeout.as_secs()))
             .arg("-p")
-            .arg(endpoint.port.to_string())
-            .arg("-o")
-            .arg("IdentitiesOnly=yes");
+            .arg(endpoint.port.to_string());
         match &endpoint.auth {
             SshAuth::Agent => {}
             SshAuth::IdentityFile { path } => {
@@ -347,8 +345,26 @@ impl SshProvider {
         })
     }
 
-    fn write_config(&self) -> Result<PathBuf, SshProviderError> {
-        let path = self.work_dir.join("config");
+    /// Writes the isolated config for one authentication method. Each method
+    /// has its own file so concurrent operations with different methods never
+    /// overwrite each other.
+    ///
+    /// The identity policy is explicit:
+    ///
+    /// - [`SshAuth::IdentityFile`]: `IdentitiesOnly yes` (with `-i` on the
+    ///   command line), so the configured file is the only identity offered.
+    /// - [`SshAuth::Agent`]: `IdentitiesOnly no` offers every key the agent
+    ///   holds, because with `yes` and no identity file OpenSSH offers only
+    ///   agent keys that match a default `~/.ssh/id_*` file. `IdentityFile
+    ///   none` keeps those default files out of the offer, so a key lying in
+    ///   `~/.ssh` is never offered unless the operator loaded it into the
+    ///   agent.
+    fn write_config(&self, auth: &SshAuth) -> Result<PathBuf, SshProviderError> {
+        let (name, identity) = match auth {
+            SshAuth::Agent => ("config-agent", AGENT_IDENTITY_POLICY),
+            SshAuth::IdentityFile { .. } => ("config-identity-file", IDENTITY_FILE_POLICY),
+        };
+        let path = self.work_dir.join(name);
         // The known-hosts path must be absolute: the ssh process runs with
         // the controller's working directory, not this crate's directory.
         let known_hosts = self.known_hosts_path().display().to_string();
@@ -361,7 +377,7 @@ impl SshProvider {
                  BatchMode yes\n\
                  LogLevel ERROR\n\
                  PreferredAuthentications publickey\n\
-                 IdentitiesOnly yes\n"
+                 {identity}"
             ),
         )
         .map_err(|error| SshProviderError::Setup {
@@ -370,6 +386,11 @@ impl SshProvider {
         Ok(path)
     }
 }
+
+/// Offers every key the agent holds and none of the default key files.
+const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\nIdentityFile none\n";
+/// Offers only the identity file passed with `-i`.
+const IDENTITY_FILE_POLICY: &str = "IdentitiesOnly yes\n";
 
 pub(crate) fn add_ssh_destination(command: &mut Command, endpoint: &SshConnectionSpec) {
     command
@@ -469,8 +490,79 @@ pub(crate) fn redact_failure(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SshAuth, SshConnectionSpec, add_ssh_destination, add_ssh_keyscan_host};
+    use super::{
+        SshAuth, SshConnectionSpec, SshProvider, add_ssh_destination, add_ssh_keyscan_host,
+    };
     use std::process::Command;
+
+    fn effective_options(config: &std::path::Path, extra: &[&str]) -> Vec<String> {
+        let output = Command::new("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(config)
+            .args(extra)
+            .args(["--", "user@host.invalid"])
+            .output()
+            .expect("ssh -G runs");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn agent_auth_offers_agent_keys_but_no_default_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let config = provider.write_config(&SshAuth::Agent).expect("config");
+        let text = std::fs::read_to_string(&config).expect("config text");
+        assert!(text.contains("IdentitiesOnly no\n"), "{text}");
+        assert!(!text.contains("IdentitiesOnly yes"), "{text}");
+        let options = effective_options(&config, &[]);
+        assert!(
+            options.contains(&"identitiesonly no".to_owned()),
+            "{options:?}"
+        );
+        let identities: Vec<_> = options
+            .iter()
+            .filter(|line| line.starts_with("identityfile "))
+            .collect();
+        assert_eq!(identities, ["identityfile none"], "no default key file");
+    }
+
+    #[test]
+    fn identity_file_auth_pins_its_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = dir.path().join("key");
+        std::fs::write(&key, "not a real key").expect("write key");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let auth = SshAuth::IdentityFile {
+            path: key.display().to_string(),
+        };
+        let config = provider.write_config(&auth).expect("config");
+        let options = effective_options(&config, &["-i", &key.display().to_string()]);
+        assert!(
+            options.contains(&"identitiesonly yes".to_owned()),
+            "{options:?}"
+        );
+        assert!(
+            options.contains(&format!("identityfile {}", key.display())),
+            "{options:?}"
+        );
+    }
+
+    #[test]
+    fn auth_methods_use_separate_config_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
+        let agent = provider.write_config(&SshAuth::Agent).expect("agent");
+        let file = provider
+            .write_config(&SshAuth::IdentityFile {
+                path: "k".to_owned(),
+            })
+            .expect("file");
+        assert_ne!(agent, file);
+    }
 
     #[test]
     fn ssh_destination_is_after_the_option_terminator() {

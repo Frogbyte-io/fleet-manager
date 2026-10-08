@@ -196,7 +196,7 @@ fn spawn_copy(
     max_bytes: u64,
     deadline: Duration,
 ) -> Result<std::process::Child, SshProviderError> {
-    let config_path = provider.write_config()?;
+    let config_path = provider.write_config(&endpoint.auth)?;
     let blob = encode_metadata(&ScriptMetadata {
         working_directory: String::new(),
         environment: Vec::new(),

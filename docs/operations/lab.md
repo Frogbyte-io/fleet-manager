@@ -80,9 +80,18 @@ pvesh set /cluster/options --next-id lower=9000,upper=9010   # 9000 to 9009
 A Lab image must contain:
 
 - `qemu-guest-agent`, enabled in the guest and in the VM (`--agent enabled=1`). Readiness polls the agent for every template, whatever its probe.
-- The controller's SSH public key, authorized for the template's SSH user (default `root`). The controller authenticates with its own SSH agent (`SSH_AUTH_SOCK`); Fleet never installs keys.
+- The controller's SSH public key, authorized for the template's SSH user (default `root`). The controller authenticates with its own SSH agent (`SSH_AUTH_SOCK`); Fleet never installs keys. Fleet offers every key the agent holds and no key file from `~/.ssh` that is not loaded into the agent, so authorize the key you load into the agent, and load only keys you are willing to offer to Lab guests (see [which keys are offered](#which-keys-the-controller-offers)).
 - A way to get an IPv4 address on every clone. Lab readiness (`guest_agent`) needs a non-loopback IPv4 address, and a lease that never gets one fails at step `guest_ip`.
 - SSH host keys of its own on every clone, present by the time `sshd` starts. At `bootstrapping` the controller trusts the guest's host key on first contact, so a guest without `sshd` never becomes ready, and clones that share keys cannot be told apart.
+
+### Which keys the controller offers
+
+For Lab exec, collect, and the SSH connection test, the controller runs OpenSSH with an isolated config:
+
+- **Agent authentication (the Lab default).** Fleet sets `IdentitiesOnly no` and `IdentityFile none`. OpenSSH offers every key the controller's agent (`SSH_AUTH_SOCK`) holds, including keys loaded from any path, a hardware or gpg agent, or a forwarded agent. It does not try the default key files (`~/.ssh/id_rsa`, `id_ed25519`, and so on) unless the same key is in the agent. A key that merely lies in `~/.ssh` is never offered. With `IdentitiesOnly yes` and no identity file, OpenSSH would offer only agent keys that match those default files, so an agent-only key would never authenticate ([#326](https://github.com/Frogbyte-io/fleet-manager/issues/326), [`ssh_config(5)`](https://man.openbsd.org/ssh_config#IdentitiesOnly)).
+- **Identity-file authentication.** Fleet sets `IdentitiesOnly yes` and passes `-i <path>`, so that file is the only identity offered.
+
+The agent can hold several keys. The guest sees each offered key until one is accepted, and `sshd` limits attempts with `MaxAuthTries` (default 6), so keep the agent to the keys Lab needs.
 
 Cloud images (Debian, Ubuntu) break these requirements in ways that show up only on a clone:
 
@@ -128,7 +137,6 @@ This is the recipe the M7 exit-gate run ([#266](https://github.com/Frogbyte-io/f
       "sudo cloud-init status --wait || true",
       "sudo install -d -m 700 /root/.ssh",
       "echo '<controller-agent-public-key>' | sudo tee -a /root/.ssh/authorized_keys >/dev/null",
-      "echo '<controller-user-default-public-key>' | sudo tee -a /root/.ssh/authorized_keys >/dev/null",
       "sudo chmod 600 /root/.ssh/authorized_keys",
       "printf 'network:\\n  version: 2\\n  ethernets:\\n    lan:\\n      match:\\n        name: \"e*\"\\n      dhcp4: true\\n' | sudo tee /etc/netplan/60-fleet-dhcp.yaml >/dev/null",
       "sudo chmod 600 /etc/netplan/60-fleet-dhcp.yaml",
@@ -148,7 +156,7 @@ This is the recipe the M7 exit-gate run ([#266](https://github.com/Frogbyte-io/f
 Notes:
 
 - **Wait for cloud-init first.** `cloud-init status --wait` lets the build VM's first-boot cloud-init finish before anything else runs, so a later `apt-get` does not race it.
-- **Authorize a key that exists as a file on the controller.** The SSH provider forces `IdentitiesOnly yes` without an identity file, so OpenSSH never offers an agent-only key ([#326](https://github.com/Frogbyte-io/fleet-manager/issues/326)). Authorize the controller user's default public key (for example `~/.ssh/id_ed25519.pub`) as well as the agent's key; that is why the recipe has two `authorized_keys` lines. With only an agent key, the lease becomes `ready` but `lab exec` fails with `Permission denied (publickey)`. Public keys are not secrets, but they are recorded with the recipe.
+- **Authorize the agent's key.** The controller offers exactly the keys in its SSH agent ([which keys are offered](#which-keys-the-controller-offers)), so one `authorized_keys` line for the key you load into the agent is enough. Public keys are not secrets, but they are recorded with the recipe.
 - **Order matters at the end.** Enable the host-key unit before removing the keys, and run `cloud-init clean`, the key removal, and the machine-ID reset last. Packer shuts the VM down through the API right after the provisioner, so the template never boots again before it is converted.
 - **Keep `ssh_timeout` at 15 minutes.** A nested or slow host can take several minutes to boot the clone. If the build VM never gets an address, the build fails with `build_failed` only after this timeout.
 - **Use a different name from `fm-lab-`.** Fleet reserves that prefix for its Lab guests, and the sweeper reports a build VM with it as an orphan.
