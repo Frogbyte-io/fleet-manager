@@ -220,3 +220,32 @@ preserves both defaults. A missing config is PVE's HTTP 500 with the exact
 concurrent delete wins. Generic HTTP 404/500 failures are not absence.
 The upstream [license](https://github.com/proxmox/qemu-server/blob/master/debian/copyright)
 is AGPL-3+; this integration calls the public API and copies no upstream code.
+
+### Lab clone protection (issue #290)
+
+The contract tests in `../clone_protection.rs` use synthetic, sanitized
+responses, inline like the destroy tests. They cover the QEMU config read
+(`GET /nodes/{node}/qemu/{vmid}/config`) and the synchronous config update
+(`PUT …/config`) that the Lab provision executor uses to clear the
+`protection` flag a clone copies from a protected template. The shapes were
+read from qemu-server `src/PVE/API2/Qemu.pm` on
+[`stable-bookworm`](https://github.com/proxmox/qemu-server/blob/stable-bookworm/src/PVE/API2/Qemu.pm)
+(8.x) and [`master`](https://github.com/proxmox/qemu-server/blob/master/src/PVE/API2/Qemu.pm)
+(9.x), which agree on every point below:
+
+- `clone_vm` copies every source option into the new config except
+  snapshot state, `unused` disks, and MACs, so `protection: 1` is copied.
+  While it copies disks, the target's config holds `lock: clone` (first as a
+  temporary file with only the lock, later with the name); the lock is
+  removed when the clone finishes.
+- `update_vm` (`PUT`) is synchronous and answers `{"data": null}`. Its schema
+  accepts any `VM.Config.*` privilege on `/vms/{vmid}`;
+  `$check_vm_modify_config_perm` then checks `VM.Config.Options` for
+  `protection`, a general option. `$update_vm_api` refuses a stale `digest`
+  ("checksum mismatch (file change by other user?)") and a locked guest
+  ("VM is locked (clone)") before it writes.
+- Flags in the config read are integers; the JSON formatter may answer them
+  as strings, so both are accepted.
+
+The upstream license is AGPL-3+; this integration calls the public API and
+copies no upstream code.

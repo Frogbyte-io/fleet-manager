@@ -32,9 +32,9 @@ The published controller image (`deploy/controller.Dockerfile`) does not contain
 
 Fleet talks to PVE with privilege-separated API tokens. Follow the [token guide](proxmox-token.md) for roles and ACLs, then register and confirm each account ([step 6](proxmox-token.md#6-register-the-token-in-fleet)). Fleet sends no credentials to an account until you confirm its certificate fingerprint.
 
-- **Lab.** Grant `FleetLab` on the image template's VMID, the clone storage, the bridge, and every clone-target VMID. On 8.x, also grant `FleetAgent8`, but only on the clone-target VMIDs: its `VM.Monitor` allows agent exec inside the guest. See [why clone and Lab need more than the pool](proxmox-token.md#why-clone-and-lab-need-more-than-the-pool).
+- **Lab.** Grant `FleetLab` on the image template's VMID, the clone storage, the bridge, and every clone-target VMID. Also grant `FleetLabTarget` on the clone-target VMIDs only (see protected templates below). On 8.x, also grant `FleetAgent8`, but only on the clone-target VMIDs: its `VM.Monitor` allows agent exec inside the guest. See [why clone and Lab need more than the pool](proxmox-token.md#why-clone-and-lab-need-more-than-the-pool).
 - **Cleanup.** Lab cleanup deletes clones through Fleet's reviewed guest-destroy primitive (FM-712). That needs `VM.PowerMgmt` (to stop the guest) and `VM.Allocate` on `/vms/<newid>`. `FleetLab` on the clone-target VMIDs already holds both.
-- **Protected templates.** The token guide recommends `qm set <template> --protection 1`. Clones inherit that flag, and Fleet's destroy does not clear it today. A protected clone makes every cleanup attempt fail, and the lease ends `cleanup_failed`. Either leave the image template unprotected and rely on Fleet's cleanup guard, which refuses to destroy templates and promoted image artifacts, or keep the flag and expect to remove each clone by hand (`qm set <vmid> --protection 0`, then destroy).
+- **Protected templates.** The token guide recommends `qm set <template> --protection 1`. PVE copies that flag into every clone, and refuses to delete a protected guest. Lab clears the copied flag itself: after the clone finishes and before the guest starts, the provision executor sets `protection=0` on its own `fm-lab-*` guest, never on the template. That needs the `FleetLabTarget` role (`VM.Config.Options`) on the clone-target VMIDs, and only there, so the token still cannot unprotect the template. See [token guide step 5](proxmox-token.md#5-acls) and [clone targets](proxmox-token.md#why-clone-and-lab-need-more-than-the-pool). Without the role, a clone of a protected template fails its provision at step `unprotect` (reason `unprotect_failed`) before it starts, and its cleanup cannot delete it.
 - **Builds.** Packer calls the PVE API itself. Fleet's privilege table does not cover the plugin's calls, so `fleetctl proxmox privileges` does not evaluate them. Use a separate account for builds, scoped to the source template and the build VMIDs, and prove it with a test build.
 
 Check the Lab account:
@@ -258,7 +258,7 @@ Look for the event `lab_lease_cleanup_failed`, and read the failed `lab.cleanup`
 
 To resolve it:
 
-1. Find the cause. Common ones are a protected clone (see [Proxmox accounts and privileges](#proxmox-accounts-and-privileges)), a missing `VM.Allocate` or `VM.PowerMgmt` on the clone VMID, an unconfirmed account, or an unreachable host.
+1. Find the cause. Common ones are a protected clone whose flag Lab could not clear (a missing `FleetLabTarget`; see [Proxmox accounts and privileges](#proxmox-accounts-and-privileges)), a missing `VM.Allocate` or `VM.PowerMgmt` on the clone VMID, an unconfirmed account, or an unreachable host.
 2. Check whether the guest still exists. It may already be gone if only the machine-record removal failed.
 3. Remove the guest. Fleet's reviewed destroy stops it first, and refuses templates and promoted image artifacts:
 
@@ -266,7 +266,7 @@ To resolve it:
    fleetctl --output json proxmox destroy <lab-account-id> <node> <vmid> --wait
    ```
 
-   For a protected clone, run `qm set <vmid> --protection 0` on the host first.
+   A clone that is still protected (its provision failed at step `unprotect`) refuses deletion. Grant `FleetLabTarget` for the future, and for this guest run `qm set <vmid> --protection 0` on the host before the destroy.
 
 `cleanup_failed` is terminal. `lab release` refuses it, and no Fleet command re-arms cleanup today. The lease stays as the record that a guest was owned and needed a human. `fleetctl` cannot remove the guest's Lab machine record yet either.
 

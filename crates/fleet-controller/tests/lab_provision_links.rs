@@ -32,6 +32,9 @@ const START_UPID: &str = "UPID:pve:00155300:0C6DF600:6AAFE1F0:qmstart:104:root@p
 #[derive(Debug, Default)]
 struct Transport {
     paths: Mutex<Vec<String>>,
+    /// The name the clone request gave the new guest, which its config
+    /// then carries.
+    clone_name: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -39,8 +42,12 @@ impl PveTransport for Transport {
     async fn execute_with_body(
         &self,
         request: PveHttpRequest,
-        _body: Vec<u8>,
+        body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError> {
+        if request.path.ends_with("/clone") {
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            *self.clone_name.lock().unwrap() = body["name"].as_str().map(str::to_owned);
+        }
         self.execute(request).await
     }
 
@@ -59,6 +66,10 @@ impl PveTransport for Transport {
             format!(r#"{{"data":"{CLONE_UPID}"}}"#)
         } else if path.ends_with("/status/start") {
             format!(r#"{{"data":"{START_UPID}"}}"#)
+        } else if path == "/api2/json/nodes/pve/qemu/104/config" {
+            // The finished clone, without an inherited protection flag.
+            let name = self.clone_name.lock().unwrap().clone().unwrap();
+            serde_json::json!({ "data": { "name": name, "digest": "0123abcd" } }).to_string()
         } else {
             // The agent probe and anything else: refused, so the guest
             // never reports ready.

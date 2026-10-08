@@ -84,7 +84,8 @@ pub struct PveHttpRequest {
     /// The credentials for the call.
     pub credentials: Arc<PveCredentials>,
     /// The HTTP method; `GET` for reads, `POST` for mutations. PVE's
-    /// lifecycle endpoints require `POST`.
+    /// lifecycle endpoints require `POST`; its synchronous config update
+    /// is `PUT`.
     pub method: PveHttpMethod,
 }
 
@@ -96,6 +97,8 @@ pub enum PveHttpMethod {
     Get,
     /// A mutation.
     Post,
+    /// A synchronous update (`PUT …/qemu/{vmid}/config`).
+    Put,
     /// A removal.
     Delete,
 }
@@ -402,6 +405,7 @@ impl ReqwestPveTransport {
         let request_builder = match request.method {
             PveHttpMethod::Get => client.get(&url),
             PveHttpMethod::Post => client.post(&url),
+            PveHttpMethod::Put => client.put(&url),
             PveHttpMethod::Delete => client.delete(&url),
         };
         let request_builder = request_builder.header(
@@ -1112,6 +1116,22 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
     ) -> Result<Vec<PveSnapshot>, PveApiError>;
 }
 
+/// The config facts the Lab executor checks on a fresh clone before it
+/// clears the clone's inherited `protection` flag (issue #290).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PveQemuConfigFlags {
+    /// The guest's name, bounded.
+    pub name: Option<String>,
+    /// Whether the guest is a template (`template: 1`).
+    pub template: bool,
+    /// Whether PVE refuses to remove the guest (`protection: 1`).
+    pub protection: bool,
+    /// The config lock, such as `clone` while a clone is still running.
+    pub lock: Option<String>,
+    /// The config digest, for a conditional update.
+    pub digest: Option<String>,
+}
+
 /// One guest snapshot, normalized.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PveSnapshot {
@@ -1152,9 +1172,21 @@ impl ProxmoxClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, PveApiError> {
+        self.call_method_with_body(request, PveHttpMethod::Post, path, body)
+            .await
+    }
+
+    /// One call with a JSON body (`POST` or `PUT`), unwrapping the envelope.
+    async fn call_method_with_body(
+        &self,
+        request: PveHttpRequest,
+        method: PveHttpMethod,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, PveApiError> {
         let mut request = request;
         request.path = path.to_owned();
-        request.method = PveHttpMethod::Post;
+        request.method = method;
         let response = self
             .transport
             .execute_with_body(request, body.to_string().into_bytes())
@@ -2154,6 +2186,103 @@ impl ProxmoxClient {
                 type_name_of(&data)
             ),
         })
+    }
+
+    /// The few facts of one QEMU guest's current config
+    /// (`GET /nodes/{node}/qemu/{vmid}/config`) that the Lab executor
+    /// checks before it changes a fresh clone (issue #290). Needs
+    /// `VM.Audit` on `/vms/{vmid}`.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including a config that is not an object
+    /// or whose `template`/`protection` flags are unreadable.
+    pub async fn qemu_config_flags(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<PveQemuConfigFlags, PveApiError> {
+        let config = self
+            .call(PveHttpRequest {
+                path: format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+                method: PveHttpMethod::Get,
+                ..request
+            })
+            .await?;
+        if !config.is_object() {
+            return Err(PveApiError::InvalidPayload {
+                detail: format!(
+                    "the guest config is not an object (it is a {})",
+                    type_name_of(&config)
+                ),
+            });
+        }
+        let flag = |key: &str| match config.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(_) => match loose_number(&config, key) {
+                Some(0) => Ok(false),
+                Some(1) => Ok(true),
+                _ => Err(PveApiError::InvalidPayload {
+                    detail: format!("the guest config's {key} flag is unreadable"),
+                }),
+            },
+        };
+        // Over-long values are a payload error, never truncated: they feed
+        // the clone-identity check and the conditional update.
+        let text = |key: &str, limit: usize| {
+            bounded_str(&config, key, limit)
+                .map_err(|detail| PveApiError::InvalidPayload { detail })
+        };
+        Ok(PveQemuConfigFlags {
+            name: text("name", MAX_ID_CHARS)?,
+            template: flag("template")?,
+            protection: flag("protection")?,
+            // A present lock that is not a string is unreadable, never
+            // "no lock": the caller would treat the guest as settled.
+            lock: match config.get("lock") {
+                None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => {
+                    text("lock", 32)?
+                }
+                Some(_) => {
+                    return Err(PveApiError::InvalidPayload {
+                        detail: "the guest config's lock field is unreadable".to_owned(),
+                    });
+                }
+            },
+            digest: text("digest", 64)?,
+        })
+    }
+
+    /// Clears the `protection` flag of one QEMU guest
+    /// (`PUT /nodes/{node}/qemu/{vmid}/config` with `protection=0`), which
+    /// PVE answers synchronously. Needs `VM.Config.Options` on
+    /// `/vms/{vmid}`. The update is always conditional on `digest` (from
+    /// [`Self::qemu_config_flags`]): PVE refuses it when the config changed
+    /// since that read. The caller decides
+    /// which guest may be unprotected; Lab clears it only on its own fresh
+    /// clones, never on a template (issue #290).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`PveApiError`], including PVE's refusal of a locked guest
+    /// or a stale digest.
+    pub async fn qemu_clear_protection(
+        &self,
+        request: PveHttpRequest,
+        node: &str,
+        vmid: u32,
+        digest: &str,
+    ) -> Result<(), PveApiError> {
+        let body = serde_json::json!({ "protection": 0, "digest": digest });
+        self.call_method_with_body(
+            request,
+            PveHttpMethod::Put,
+            &format!("/api2/json/nodes/{}/qemu/{vmid}/config", urlencode(node)),
+            &body,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Reads one task's status.

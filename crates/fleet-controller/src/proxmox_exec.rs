@@ -29,6 +29,11 @@ use serde::Deserialize;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// The maximum lifecycle timeout the executor accepts from a payload.
 pub const MAX_LIFECYCLE_TIMEOUT: u64 = 600;
+/// How long the Lab executor waits for a fresh clone's config lock to clear
+/// (a full clone copies every disk) before it gives up on the clone.
+const CLONE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3_600);
+/// How often the Lab executor records progress while it waits for a clone.
+const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The payload every lifecycle kind carries: the machine-scoped shape plus
 /// the account, the guest, and its node.
@@ -2264,6 +2269,173 @@ impl ProvisionExecutor {
 }
 
 impl ProvisionExecutor {
+    /// Step 1b (issue #290): a PVE clone copies the template's
+    /// `protection` flag, and PVE refuses to delete a protected guest, so
+    /// cleanup could never destroy a clone of a protected template. Once
+    /// the clone has landed (its config lock is gone; PVE refuses config
+    /// changes under a lock), the executor clears the flag on this
+    /// provision's own `fm-lab-<record>` guest. It never touches a
+    /// template or another guest, and a clone that carries no flag (an
+    /// unprotected template, or a resumed record already cleared) is left
+    /// alone, so a resume repeats nothing. The update carries the config
+    /// digest it was checked against; when PVE refuses it with a server
+    /// error (a config rewritten after the read: stale digest, or a brief
+    /// lock), the executor re-reads and re-checks the config and tries once
+    /// more.
+    async fn unprotect_clone(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+        record_id: &str,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<(), Refusal>, String> {
+        let name = format!("fm-lab-{record_id}");
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let config = match self
+                .settled_clone_config(operations, operation_id, request, node, vmid)
+                .await?
+            {
+                Ok(config) => config,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+            if config.template || config.name.as_deref() != Some(name.as_str()) {
+                return Ok(Err(Refusal::new(
+                    "conflict",
+                    format!(
+                        "{node}/qemu/{vmid} is {} named {}, not this provision's clone; its config is left unchanged",
+                        if config.template {
+                            "a template"
+                        } else {
+                            "a guest"
+                        },
+                        config.name.as_deref().unwrap_or("nothing")
+                    ),
+                )));
+            }
+            if !config.protection {
+                return Ok(Ok(()));
+            }
+            // Never an unconditional update: the digest binds the write to
+            // the config whose identity was just checked.
+            let Some(digest) = config.digest.as_deref() else {
+                return Ok(Err(Refusal::new(
+                    "unprotect_failed",
+                    format!(
+                        "the config of {node}/qemu/{vmid} carries no digest, so its protection flag is not cleared unconditionally; until it is cleared, PVE refuses to destroy the guest"
+                    ),
+                )));
+            };
+            match self
+                .client
+                .qemu_clear_protection(request.clone(), node, vmid, digest)
+                .await
+            {
+                Ok(()) => return Ok(Ok(())),
+                Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                    if (500..600).contains(&status) && attempt < 2 => {}
+                Err(error) => {
+                    let cause = match &error {
+                        fleet_provider_proxmox::PveApiError::Auth
+                        | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                            format!("the token needs VM.Config.Options on /vms/{vmid} ({error})")
+                        }
+                        _ => format!(
+                            "PVE refused the update; the config may still be locked or changing ({error})"
+                        ),
+                    };
+                    return Ok(Err(Refusal::new(
+                        "unprotect_failed",
+                        format!(
+                            "the clone {node}/qemu/{vmid} inherited the template's protection flag, which could not be cleared: {cause}. Until the flag is cleared, PVE refuses to destroy the guest"
+                        ),
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Reads the new guest's config until it exists and carries no lock,
+    /// bounded by [`CLONE_SETTLE_TIMEOUT`], honoring cancellation, and
+    /// recording progress about once a minute while it waits.
+    async fn settled_clone_config(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<fleet_provider_proxmox::PveQemuConfigFlags, Refusal>, String> {
+        let started = std::time::Instant::now();
+        let mut reported: Option<std::time::Instant> = None;
+        loop {
+            if operations
+                .cancel_requested(operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Err(Refusal::new(
+                    "cancelled",
+                    format!(
+                        "cancelled while waiting for the clone {node}/qemu/{vmid} to finish; the guest is retained for cleanup"
+                    ),
+                )));
+            }
+            // PVE writes the target's config inside the forked qmclone
+            // worker, after the clone call returns: an early read can find
+            // no config yet (HTTP 500) or miss the node. Those are retried
+            // within the bound; a refused token or an unreadable answer
+            // fails at once.
+            let waiting_on = match self
+                .client
+                .qemu_config_flags(request.clone(), node, vmid)
+                .await
+            {
+                Ok(config) => match config.lock.clone() {
+                    None => return Ok(Ok(config)),
+                    Some(lock) => format!("{lock} lock"),
+                },
+                Err(
+                    error @ (fleet_provider_proxmox::PveApiError::Http { .. }
+                    | fleet_provider_proxmox::PveApiError::Transport(
+                        fleet_provider_proxmox::PveTransportError::Connect { .. },
+                    )),
+                ) => format!("config not readable yet: {error}"),
+                Err(error) => {
+                    return Err(format!("the clone's config is unreadable: {error}"));
+                }
+            };
+            if started.elapsed() >= CLONE_SETTLE_TIMEOUT {
+                return Ok(Err(Refusal::new(
+                    "clone_unsettled",
+                    format!(
+                        "{node}/qemu/{vmid} has not settled after {} seconds ({waiting_on}); the guest is retained for cleanup",
+                        CLONE_SETTLE_TIMEOUT.as_secs()
+                    ),
+                )));
+            }
+            if reported.is_none_or(|at| at.elapsed() >= CLONE_PROGRESS_INTERVAL) {
+                reported = Some(std::time::Instant::now());
+                operations
+                    .record_progress(
+                        operation_id,
+                        Some(1),
+                        Some(3),
+                        Some(&format!(
+                            "waiting for the clone {node}/qemu/{vmid} to finish ({waiting_on}; {} s so far)",
+                            started.elapsed().as_secs()
+                        )),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn execute_linked(
         &self,
@@ -2446,6 +2618,38 @@ impl ProvisionExecutor {
             .await
             .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
 
+        // Step 1b: the clone has landed and carries no inherited
+        // protection flag before anything starts it.
+        if let Err(refusal) = self
+            .unprotect_clone(operations, &operation.id, &request, &record.id, &node, vmid)
+            .await?
+        {
+            let step = if refusal.reason == "unprotect_failed" {
+                "unprotect"
+            } else {
+                "clone"
+            };
+            self.persist_failure(&record.id, step).await?;
+            // The same {reason, step, detail} shape as `fail`.
+            return operations
+                .complete(
+                    &operation.id,
+                    "failed",
+                    None,
+                    Some(
+                        &serde_json::json!({
+                            "reason": refusal.reason,
+                            "step": step,
+                            "detail": refusal.detail,
+                        })
+                        .to_string(),
+                    ),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+
         let mut record = record;
         record.readiness_deadline_at.get_or_insert_with(|| {
             fleet_core::SystemClock::now_unix_millis()
@@ -2459,7 +2663,17 @@ impl ProvisionExecutor {
             self.leases.update(&booting_lease).await?;
         }
 
-        // Step 2: start the guest (idempotent when already running).
+        // Step 2: start the guest (idempotent when already running), unless
+        // the provision was cancelled since the clone settled.
+        if operations
+            .cancel_requested(&operation.id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return self
+                .fail(operations, &operation.id, &record.id, "cancelled", "boot")
+                .await;
+        }
         operations
             .record_progress(
                 &operation.id,

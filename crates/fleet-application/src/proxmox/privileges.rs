@@ -660,6 +660,30 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "Checked for every netN bridge of the template.",
     },
     PrivilegeRequirement {
+        id: "lab.provision.clone-config",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "GET /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Audit"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "After the clone the executor reads the new guest's config: it waits for the clone lock to clear and checks the guest's Fleet name and protection flag.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.unprotect",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.Options"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "A clone copies the template's protection flag, and PVE refuses to delete a protected guest; the executor clears it (protection=0, a general option) on its own new guest so cleanup can destroy it (issue #290).",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.start",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,
@@ -1293,6 +1317,33 @@ mod tests {
     }
 
     #[test]
+    fn lab_reads_and_unprotects_only_its_new_guest_on_both_majors() {
+        // Issue #290: a clone inherits the template's protection flag. The
+        // executor clears it on the new guest, never on the template.
+        for major in [8, 9] {
+            for (id, privilege) in [
+                ("lab.provision.clone-config", "VM.Audit"),
+                ("lab.provision.unprotect", "VM.Config.Options"),
+            ] {
+                let row = requirements_for_major(major)
+                    .find(|row| row.id == id)
+                    .unwrap();
+                assert_eq!(row.privileges, &[privilege]);
+                assert_eq!(row.tier, PrivilegeTier::Lab);
+                assert_eq!(row.scope, PrivilegeScope::NewGuest);
+                assert!(row.required);
+            }
+            assert!(
+                requirements_for_major(major)
+                    .filter(|row| row.tier == PrivilegeTier::Lab
+                        && row.scope != PrivilegeScope::NewGuest)
+                    .all(|row| !row.privileges.contains(&"VM.Config.Options")),
+                "{major}.x: Lab never needs VM.Config.Options outside its new guests"
+            );
+        }
+    }
+
+    #[test]
     fn versions_key_the_table_by_major() {
         assert_eq!(rules_major_for("9.2.2"), Some((9, None)));
         assert_eq!(rules_major_for("8.4.1"), Some((8, None)));
@@ -1459,7 +1510,8 @@ mod tests {
     #[test]
     fn lab_provision_needs_vm_audit_to_find_its_template() {
         // Every lab privilege except VM.Audit, propagated from the root:
-        // /cluster/resources would hide the template, so lab is missing.
+        // /cluster/resources would hide the template (and the config read
+        // after the clone would fail, issue #290), so lab is missing.
         let without_audit: Vec<(&str, bool)> = PROXMOX_PRIVILEGE_TABLE
             .iter()
             .filter(|r| r.tier == PrivilegeTier::Lab)
@@ -1473,24 +1525,48 @@ mod tests {
             assert_eq!(lab.status, PrivilegeStatus::Missing, "{major}.x");
             assert_eq!(
                 lab.missing,
-                vec![MissingPrivileges {
-                    privileges: vec!["VM.Audit".to_owned()],
-                    any_of: false,
-                    path: "/vms/{vmid}".to_owned(),
-                    capabilities: vec!["lab.provision".to_owned()],
-                }],
+                ["/vms/{vmid}", "/vms/{newid}"]
+                    .map(|path| MissingPrivileges {
+                        privileges: vec!["VM.Audit".to_owned()],
+                        any_of: false,
+                        path: path.to_owned(),
+                        capabilities: vec!["lab.provision".to_owned()],
+                    })
+                    .to_vec(),
                 "{major}.x"
             );
 
-            // VM.Audit on the template itself makes it visible.
-            let tiers = evaluate_tiers(
-                major,
-                &map(&[("/", &without_audit), ("/vms/9000", &[("VM.Audit", false)])]),
+            // The template (120, existing) and the reserved clone target
+            // (9000, free) are distinct VMIDs. VM.Audit on the template
+            // alone makes it visible, but the post-clone config read still
+            // lacks VM.Audit on the clone target.
+            let in_use = BTreeMap::from([(120, true), (9000, false)]);
+            let template_only = map(&[("/", &without_audit), ("/vms/120", &[("VM.Audit", false)])]);
+            let tiers = evaluate_tiers_with_vmids(major, &template_only, Some(&in_use));
+            let lab = tier(&tiers, PrivilegeTier::Lab);
+            assert_eq!(lab.status, PrivilegeStatus::Missing, "{major}.x");
+            assert_eq!(
+                check(lab, "lab.provision.template-lookup").granted_on,
+                ["/vms/120"]
             );
+            assert!(
+                check(lab, "lab.provision.clone-config")
+                    .granted_on
+                    .is_empty(),
+                "{major}.x"
+            );
+
+            // VM.Audit on the clone target as well grants the tier.
+            let both = map(&[
+                ("/", &without_audit),
+                ("/vms/120", &[("VM.Audit", false)]),
+                ("/vms/9000", &[("VM.Audit", false)]),
+            ]);
+            let tiers = evaluate_tiers_with_vmids(major, &both, Some(&in_use));
             let lab = tier(&tiers, PrivilegeTier::Lab);
             assert_eq!(lab.status, PrivilegeStatus::Granted, "{major}.x");
             assert_eq!(
-                check(lab, "lab.provision.template-lookup").granted_on,
+                check(lab, "lab.provision.clone-config").granted_on,
                 ["/vms/9000"]
             );
         }
