@@ -512,7 +512,11 @@ pub(crate) fn scrub_and_bound_with(
     // than the bound. A cut window ends at whitespace, so no credential is
     // split by it, and the dropped remainder counts as truncation.
     let (window, windowed) = scrub_window(text);
-    let scrubbed = extra(&fleet_core::redact_credentials(window));
+    // Control characters (terminal escapes, NULs) become spaces first: they
+    // are hostile as terminal output and each JSON-escapes to up to six
+    // bytes, which could push a result past its stored size limit.
+    let flattened = fleet_core::flatten_control_characters(window);
+    let scrubbed = extra(&fleet_core::redact_credentials(&flattened));
     let (mut bounded, cut) = trim_to_bound(&scrubbed);
     if windowed && !cut {
         // The window dropped the rest; say so in the text as well as the flag.
@@ -536,16 +540,22 @@ pub(crate) fn scrub_window(text: &str) -> (&str, bool) {
     (&text[..end], true)
 }
 
+/// Cuts `text` so its JSON-escaped form is within [`RESULT_STRING_BOUND`]
+/// bytes: `"`, `\` and newlines escape to two bytes, so a stream made of them
+/// would otherwise double. Two such streams then still fit the stored result
+/// limit.
 fn trim_to_bound(text: &str) -> (String, bool) {
-    if text.len() <= RESULT_STRING_BOUND {
-        (text.to_owned(), false)
-    } else {
-        let mut end = RESULT_STRING_BOUND;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+    let mut escaped = 0;
+    for (index, c) in text.char_indices() {
+        escaped += match c {
+            '"' | '\\' | '\n' => 2,
+            other => other.len_utf8(),
+        };
+        if escaped > RESULT_STRING_BOUND {
+            return (format!("{}…", &text[..index]), true);
         }
-        (format!("{}…", &text[..end]), true)
     }
+    (text.to_owned(), false)
 }
 
 #[cfg(test)]
@@ -642,5 +652,27 @@ mod tests {
         assert!(text.ends_with('…'));
         let (_, clean) = scrub_and_bound("short", false);
         assert!(!clean);
+    }
+
+    /// #382: control characters are flattened and the bound counts escaped
+    /// bytes, so both streams together always fit the stored result limit.
+    #[test]
+    fn control_characters_and_escapes_cannot_exceed_the_stored_limit() {
+        for filler in ["\u{1}", "\u{1b}", "\"", "\\", "\n", "\0"] {
+            let stream = filler.repeat(RESULT_STRING_BOUND);
+            let (stdout, _) = scrub_and_bound(&stream, false);
+            let (stderr, _) = scrub_and_bound(&stream, false);
+            assert!(!stdout.chars().any(|c| c.is_control() && c != '\n'));
+            let record = serde_json::json!({
+                "exitCode": 1, "stdout": stdout, "stderr": stderr,
+                "truncatedStdout": true, "truncatedStderr": true,
+            })
+            .to_string();
+            assert!(
+                record.len() <= fleet_storage_sqlite::operations::MAX_RESULT_JSON,
+                "{filler:?}: {}",
+                record.len()
+            );
+        }
     }
 }
