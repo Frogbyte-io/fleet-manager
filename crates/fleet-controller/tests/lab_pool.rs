@@ -228,6 +228,7 @@ impl Harness {
                 template_version_id: "template-version-1".to_owned(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             now,
         )
@@ -489,6 +490,7 @@ async fn a_clone_lease_naming_a_pool_member_is_never_destroyed() {
             template_version_id: "template-version-2".to_owned(),
             lease_id: Some(lease.id.clone()),
             idempotency_key: None,
+            readiness_deadline_at: None,
         },
         now,
     )

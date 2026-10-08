@@ -145,7 +145,7 @@ Cancellation and expiry transition any non-terminal state into release/compensat
 Deadlines:
 
 - Queue deadline/optional caller wait limit
-- Provisioning/readiness deadline from request (when the saga starts the provision record carries a stuck-detection deadline of the readiness window plus a 30-minute pre-boot allowance for the reservation and clone, so the sweeper compensates a saga interrupted before it booted a guest, #302; the boot step then starts the real readiness window, and refuses to boot a lease the sweeper already compensated)
+- Provisioning/readiness deadline from request (when the saga starts the provision record carries, from its insert (one write, so no crash leaves a record without it, #360), a stuck-detection deadline of the readiness window plus a 30-minute pre-boot allowance for the reservation and clone, so the sweeper compensates a saga interrupted before it booted a guest, #302; the boot step then starts the real readiness window, and refuses to boot a lease the sweeper already compensated)
 - Ready TTL beginning only when the lease reaches `ready`
 - Absolute maximum lifetime of 30 days beginning at request to cap stuck workflows
 - Ready TTL extensions can move the expiry only up to that creation-relative maximum

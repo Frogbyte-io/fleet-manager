@@ -201,6 +201,7 @@ impl Fixture {
                 template_version_id: version.id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             now,
         )

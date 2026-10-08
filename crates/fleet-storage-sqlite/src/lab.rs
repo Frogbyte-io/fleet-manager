@@ -269,14 +269,15 @@ impl ProvisionPort for LabRepository {
     async fn create(&self, new: &NewProvision, now: i64) -> Result<ProvisionRecord, String> {
         let id = Uuid::now_v7().to_string();
         let result = sqlx::query(
-            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at, lease_id) \
-             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4, ?5)",
+            "INSERT INTO lab_provisions (id, template_version_id, state, idempotency_key, created_at, updated_at, lease_id, readiness_deadline_at) \
+             VALUES (?1, ?2, 'provisioning', ?3, ?4, ?4, ?5, ?6)",
         )
         .bind(&id)
         .bind(&new.template_version_id)
         .bind(&new.idempotency_key)
         .bind(now)
         .bind(&new.lease_id)
+        .bind(new.readiness_deadline_at)
         .execute(&self.pool)
         .await;
         match result {

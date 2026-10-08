@@ -711,6 +711,7 @@ impl Harness {
                 template_version_id: self.version_id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             now,
         )

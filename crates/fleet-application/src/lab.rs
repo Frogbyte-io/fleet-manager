@@ -194,6 +194,9 @@ pub struct NewProvision {
     pub lease_id: Option<String>,
     /// The caller-scoped idempotency key, when one was supplied.
     pub idempotency_key: Option<String>,
+    /// The absolute readiness deadline (epoch millis), written with the
+    /// record itself so a crash cannot leave one without it (#360).
+    pub readiness_deadline_at: Option<i64>,
 }
 
 /// The provisioning storage port.
@@ -1975,13 +1978,23 @@ impl Lab {
                 .await?;
             return Ok((existing, changed));
         }
-        let mut provision = self
+        // The readiness deadline runs from the request (lab.md): part of the
+        // insert, so the sweeper can compensate a saga the controller died
+        // in before it booted a guest (#302) with no second write to lose
+        // (#360).
+        let readiness_deadline_at = now.saturating_add(
+            i64::from(version.content.readiness_deadline_seconds)
+                .saturating_mul(1_000)
+                .saturating_add(PRE_BOOT_ALLOWANCE_MILLIS),
+        );
+        let provision = self
             .provisions
             .create(
                 &NewProvision {
                     template_version_id: version_id.to_owned(),
                     lease_id: lease_id.map(str::to_owned),
                     idempotency_key: scoped_key,
+                    readiness_deadline_at: Some(readiness_deadline_at),
                 },
                 now,
             )
@@ -1990,24 +2003,6 @@ impl Lab {
                 context: "provisions",
                 detail,
             })?;
-        // The readiness deadline runs from the request (lab.md): recorded
-        // before any step, so the sweeper can compensate a saga the
-        // controller died in before it booted a guest (#302).
-        if provision.readiness_deadline_at.is_none() {
-            provision.readiness_deadline_at = Some(
-                now.saturating_add(
-                    i64::from(version.content.readiness_deadline_seconds)
-                        .saturating_mul(1_000)
-                        .saturating_add(PRE_BOOT_ALLOWANCE_MILLIS),
-                ),
-            );
-            self.provisions.update(&provision).await.map_err(|detail| {
-                LabUseCaseError::Backend {
-                    context: "provisions",
-                    detail,
-                }
-            })?;
-        }
         let changed = self
             .attach_lease_provision(lease.as_ref(), &provision)
             .await?;

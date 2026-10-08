@@ -648,6 +648,7 @@ async fn a_failed_lease_whose_guest_was_allocated_still_counts() {
                 template_version_id: "template-version-1".to_owned(),
                 lease_id: Some(holder.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             NOW,
         )
