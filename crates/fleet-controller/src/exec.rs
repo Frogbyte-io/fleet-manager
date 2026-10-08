@@ -507,12 +507,17 @@ pub(crate) fn scrub_and_bound_with(
     provider_truncated: bool,
     extra: impl FnOnce(&str) -> String,
 ) -> (String, bool) {
-    // The transport allows up to 1 MiB per stream and the scrubber is not
-    // linear on adversarial input, so scrub only a window that is far larger
-    // than the bound. A cut window ends at whitespace, so no credential is
+    // The transport allows up to 1 MiB per stream, so scrub only a window
+    // that is far larger than the bound (the shared scrubber is linear, but
+    // tool-specific ones need not be). A cut window ends at whitespace, so no credential is
     // split by it, and the dropped remainder counts as truncation.
     let (window, windowed) = scrub_window(text);
-    let scrubbed = extra(&fleet_core::redact_credentials(window));
+    // Scrub credentials first (a credential wrapped in terminal colour codes
+    // is still one token then), then flatten control characters: terminal
+    // escapes are hostile as output, and each JSON-escapes to up to six
+    // bytes, which could push a result past its stored size limit.
+    let scrubbed =
+        fleet_core::flatten_control_characters(&extra(&fleet_core::redact_credentials(window)));
     let (mut bounded, cut) = trim_to_bound(&scrubbed);
     if windowed && !cut {
         // The window dropped the rest; say so in the text as well as the flag.
@@ -536,16 +541,22 @@ pub(crate) fn scrub_window(text: &str) -> (&str, bool) {
     (&text[..end], true)
 }
 
+/// Cuts `text` so its JSON-escaped form is within [`RESULT_STRING_BOUND`]
+/// bytes: `"`, `\` and newlines escape to two bytes, so a stream made of them
+/// would otherwise double. Two such streams then still fit the stored result
+/// limit.
 fn trim_to_bound(text: &str) -> (String, bool) {
-    if text.len() <= RESULT_STRING_BOUND {
-        (text.to_owned(), false)
-    } else {
-        let mut end = RESULT_STRING_BOUND;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+    let mut escaped = 0;
+    for (index, c) in text.char_indices() {
+        escaped += match c {
+            '"' | '\\' | '\n' => 2,
+            other => other.len_utf8(),
+        };
+        if escaped > RESULT_STRING_BOUND {
+            return (format!("{}…", &text[..index]), true);
         }
-        (format!("{}…", &text[..end]), true)
     }
+    (text.to_owned(), false)
 }
 
 #[cfg(test)]
@@ -621,6 +632,22 @@ mod tests {
         assert!(truncated);
     }
 
+    /// A credential wrapped in terminal colour codes is still redacted:
+    /// scrubbing runs before control characters become spaces.
+    #[test]
+    fn a_credential_wrapped_in_terminal_escapes_is_redacted() {
+        for text in [
+            "remote: \u{1b}[1muser:secretpw\u{1b}[0m@host.invalid",
+            "https://\u{1b}[1muser:secretpw\u{1b}[0m@host.invalid/x",
+            "user:sec\0retpw@host.invalid",
+        ] {
+            let (out, _) = scrub_and_bound(text, false);
+            assert!(!out.contains("secretpw"), "{out:?}");
+            assert!(!out.contains("sec retpw"), "{out:?}");
+            assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        }
+    }
+
     #[test]
     fn a_window_cut_never_splits_a_credential() {
         let filler = "x ".repeat(RESULT_STRING_BOUND);
@@ -642,5 +669,27 @@ mod tests {
         assert!(text.ends_with('…'));
         let (_, clean) = scrub_and_bound("short", false);
         assert!(!clean);
+    }
+
+    /// #382: control characters are flattened and the bound counts escaped
+    /// bytes, so both streams together always fit the stored result limit.
+    #[test]
+    fn control_characters_and_escapes_cannot_exceed_the_stored_limit() {
+        for filler in ["\u{1}", "\u{1b}", "\"", "\\", "\n", "\0"] {
+            let stream = filler.repeat(RESULT_STRING_BOUND);
+            let (stdout, _) = scrub_and_bound(&stream, false);
+            let (stderr, _) = scrub_and_bound(&stream, false);
+            assert!(!stdout.chars().any(|c| c.is_control() && c != '\n'));
+            let record = serde_json::json!({
+                "exitCode": 1, "stdout": stdout, "stderr": stderr,
+                "truncatedStdout": true, "truncatedStderr": true,
+            })
+            .to_string();
+            assert!(
+                record.len() <= fleet_storage_sqlite::operations::MAX_RESULT_JSON,
+                "{filler:?}: {}",
+                record.len()
+            );
+        }
     }
 }

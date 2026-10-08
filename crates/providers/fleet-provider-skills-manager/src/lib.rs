@@ -404,5 +404,7 @@ fn bound_chars(scrubbed: String) -> String {
 /// from CLI output before it becomes an observation or audit detail.
 #[must_use]
 pub fn redact(text: &str) -> String {
-    fleet_core::redact_credentials(&fleet_core::flatten_control_characters(text))
+    // Credentials first, so a credential wrapped in control characters is
+    // still one token; then flatten control noise.
+    fleet_core::flatten_control_characters(&fleet_core::redact_credentials(text))
 }

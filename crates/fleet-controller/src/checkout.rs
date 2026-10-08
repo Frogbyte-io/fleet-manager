@@ -760,71 +760,11 @@ pub fn redact_output_for_test(text: &str) -> String {
     redact_output(text)
 }
 
-/// Replaces `user:password@` and `user@` userinfo in URLs with a marker.
+/// Replaces `user[:password]@` userinfo in URLs and `user:password@`
+/// patterns anywhere else with a marker, through the shared scrubber: one
+/// linear implementation instead of a private copy.
 fn redact_remote_credential(text: &str) -> String {
-    let mut redacted = String::with_capacity(text.len());
-    for (index, line) in text.split('\n').enumerate() {
-        if index > 0 {
-            redacted.push('\n');
-        }
-        redacted.push_str(&redact_line(line));
-    }
-    redacted
-}
-
-fn redact_line(line: &str) -> String {
-    // Scheme URLs: scheme://user[:pass]@host → scheme://***@host
-    let mut result = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(position) = rest.find("://") {
-        let (before, after) = rest.split_at(position + 3);
-        result.push_str(before);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        let authority = &after[..authority_end];
-        let tail = &after[authority_end..];
-        match authority.split_once('@') {
-            Some((_userinfo, host)) => {
-                result.push_str("***@");
-                result.push_str(host);
-            }
-            None => result.push_str(authority),
-        }
-        rest = tail;
-    }
-    result.push_str(rest);
-    // Anywhere else a `user:password@` pattern survives (scp-style remotes,
-    // error text), redact the password part in place.
-    while let Some(position) = find_credential(&result) {
-        let end = result[position..]
-            .find('@')
-            .map(|at| position + at)
-            .unwrap_or(result.len());
-        result.replace_range(position..end, "***");
-    }
-    result
-}
-
-/// Finds the next `user:password@` pattern's start, where the userinfo is
-/// not already redacted. The token begins after the nearest whitespace,
-/// slash, or quote before the `@`.
-fn find_credential(text: &str) -> Option<usize> {
-    let mut search = 0;
-    while let Some(offset) = text[search..].find('@') {
-        let at = search + offset;
-        let token_start = text[..at]
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"')
-            .map_or(0, |(index, c)| index + c.len_utf8());
-        let token = &text[token_start..at];
-        if token.split_once(':').is_some_and(|(user, password)| {
-            !user.is_empty() && !password.is_empty() && !token.ends_with("***")
-        }) {
-            return Some(token_start);
-        }
-        search = at + 1;
-    }
-    None
+    fleet_core::redact_credentials(text)
 }
 
 /// Validates an absolute checkout root: absolute-shaped, bounded, no `..`
@@ -879,5 +819,13 @@ mod redact_bound_tests {
                 assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
             }
         }
+    }
+
+    /// The private scrubber looped forever on `a:'b@a:'b@c`; the shared one
+    /// terminates and redacts.
+    #[test]
+    fn quote_delimited_credentials_terminate_and_are_redacted() {
+        let out = super::redact_output("a:'b@a:'b@c user:hunter2pw@host");
+        assert!(!out.contains("hunter2"), "{out}");
     }
 }
