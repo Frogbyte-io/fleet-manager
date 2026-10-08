@@ -176,6 +176,22 @@ async fn provision_completion_marks_linked_lease_ready_and_starts_its_ttl() {
         .expect("the provision must be created");
     // The deadline is part of the insert (#360).
     assert_eq!(provision.readiness_deadline_at, Some(NOW + 600_000));
+    // A concurrent retry with the same key gets the winner's record, deadline
+    // included, and never a second record.
+    let replay = provisions
+        .create(
+            &NewProvision {
+                template_version_id: lease.template_version_id.clone(),
+                lease_id: Some(lease.id.clone()),
+                idempotency_key: Some("operator:lease-1".to_owned()),
+                readiness_deadline_at: Some(NOW + 999_000),
+            },
+            NOW + 1,
+        )
+        .await
+        .expect("the replay must answer the winner's record");
+    assert_eq!(replay.id, provision.id);
+    assert_eq!(replay.readiness_deadline_at, Some(NOW + 600_000));
     assert_eq!(
         leases
             .attach_provision(&lease.id, &provision.id)
