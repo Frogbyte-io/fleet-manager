@@ -507,16 +507,17 @@ pub(crate) fn scrub_and_bound_with(
     provider_truncated: bool,
     extra: impl FnOnce(&str) -> String,
 ) -> (String, bool) {
-    // The transport allows up to 1 MiB per stream and the scrubber is not
-    // linear on adversarial input, so scrub only a window that is far larger
-    // than the bound. A cut window ends at whitespace, so no credential is
+    // The transport allows up to 1 MiB per stream, so scrub only a window
+    // that is far larger than the bound (the shared scrubber is linear, but
+    // tool-specific ones need not be). A cut window ends at whitespace, so no credential is
     // split by it, and the dropped remainder counts as truncation.
     let (window, windowed) = scrub_window(text);
-    // Control characters (terminal escapes, NULs) become spaces first: they
-    // are hostile as terminal output and each JSON-escapes to up to six
+    // Scrub credentials first (a credential wrapped in terminal colour codes
+    // is still one token then), then flatten control characters: terminal
+    // escapes are hostile as output, and each JSON-escapes to up to six
     // bytes, which could push a result past its stored size limit.
-    let flattened = fleet_core::flatten_control_characters(window);
-    let scrubbed = extra(&fleet_core::redact_credentials(&flattened));
+    let scrubbed =
+        fleet_core::flatten_control_characters(&extra(&fleet_core::redact_credentials(window)));
     let (mut bounded, cut) = trim_to_bound(&scrubbed);
     if windowed && !cut {
         // The window dropped the rest; say so in the text as well as the flag.
@@ -629,6 +630,22 @@ mod tests {
         let emails = "abc@example.com,".repeat(64 * 1024);
         let (_, truncated) = scrub_and_bound(&emails, false);
         assert!(truncated);
+    }
+
+    /// A credential wrapped in terminal colour codes is still redacted:
+    /// scrubbing runs before control characters become spaces.
+    #[test]
+    fn a_credential_wrapped_in_terminal_escapes_is_redacted() {
+        for text in [
+            "remote: \u{1b}[1muser:secretpw\u{1b}[0m@host.invalid",
+            "https://\u{1b}[1muser:secretpw\u{1b}[0m@host.invalid/x",
+            "user:sec\0retpw@host.invalid",
+        ] {
+            let (out, _) = scrub_and_bound(text, false);
+            assert!(!out.contains("secretpw"), "{out:?}");
+            assert!(!out.contains("sec retpw"), "{out:?}");
+            assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        }
     }
 
     #[test]

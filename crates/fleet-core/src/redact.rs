@@ -161,7 +161,9 @@ mod tests {
 
     #[test]
     fn the_linear_scan_matches_the_reference_on_random_text() {
-        let alphabet = ['a', 'b', ':', '@', '@', ' ', '/', '"', '\'', 'é', '\n'];
+        let alphabet = [
+            'a', 'b', ':', '@', '@', ' ', '/', '"', '\'', 'é', '\n', '\u{3000}', '\t',
+        ];
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         for _ in 0..20_000 {
             state = state
