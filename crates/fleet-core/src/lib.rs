@@ -47,7 +47,8 @@ pub use operation::{
 };
 pub use project::{CheckoutFact, NormalizedRemote, Project, ProjectView};
 pub use redact::{
-    flatten_control_characters, redact_schemeless_credentials, redact_url_credentials,
+    flatten_control_characters, redact_credentials, redact_schemeless_credentials,
+    redact_url_credentials,
 };
 pub use sensitive::{SecretReference, SensitiveString};
 pub use skill_catalog::{

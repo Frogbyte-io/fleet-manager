@@ -411,9 +411,7 @@ pub fn exec_log_text(
     } else {
         output.get("partialOutput")?
     };
-    let scrub = |text: &str| {
-        fleet_core::redact_schemeless_credentials(&fleet_core::redact_url_credentials(text))
-    };
+    let scrub = fleet_core::redact_credentials;
     let stream = |name: &str| scrub(streams[name].as_str().unwrap_or_default());
     let exit = output["exitCode"]
         .as_i64()

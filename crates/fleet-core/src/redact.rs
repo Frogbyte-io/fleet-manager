@@ -75,6 +75,14 @@ pub fn redact_schemeless_credentials(text: &str) -> String {
     result
 }
 
+/// Redacts every credential shape this module knows: URL userinfo, then
+/// schemeless `user:password@`. The single entry point for output that is
+/// stored or returned (command output, logs), so a fix lands once.
+#[must_use]
+pub fn redact_credentials(text: &str) -> String {
+    redact_schemeless_credentials(&redact_url_credentials(text))
+}
+
 /// Flattens control characters (except newlines) to spaces: hostile
 /// terminal output stays data.
 #[must_use]
@@ -116,6 +124,15 @@ mod tests {
         let schemeless = redact_schemeless_credentials("reach user:p@ss@host:repo now");
         assert!(!schemeless.contains("p@ss"), "{schemeless}");
         assert!(schemeless.contains("***@host:repo"), "{schemeless}");
+    }
+
+    #[test]
+    fn redact_credentials_applies_both_passes() {
+        let redacted = redact_credentials("a https://u:one@h.invalid/x b scp u:two@h.invalid:r c");
+        assert!(
+            !redacted.contains("one") && !redacted.contains("two"),
+            "{redacted}"
+        );
     }
 
     #[test]
