@@ -148,6 +148,11 @@ impl ImagesExecutor {
         secrets: Option<Arc<fleet_secrets::SecretStore>>,
         work_root: PathBuf,
     ) -> Self {
+        // Packer runs with its working directory set to the operation's
+        // work directory, so every path handed to it as an argument must
+        // be absolute (#312). Resolved once here, against the controller's
+        // own working directory, without touching the file system.
+        let work_root = std::path::absolute(&work_root).unwrap_or(work_root);
         Self {
             versions,
             transport,
@@ -1153,8 +1158,31 @@ mod tests {
                     .iter()
                     .all(|a| !a.contains("fixture-secret-token"))
             );
+            // Packer resolves its path arguments against its own working
+            // directory (#312): each must be absolute (a relative path
+            // would be joined onto that directory) and exist.
+            if command.args.iter().any(|a| a == "validate" || a == "build") {
+                let recipe = command
+                    .args
+                    .last()
+                    .expect("validate and build end in the recipe");
+                assert!(
+                    recipe.ends_with("recipe.json"),
+                    "the recipe is the last argument"
+                );
+                assert!(
+                    std::path::Path::new(recipe).is_absolute()
+                        && command.work_dir.join(recipe).is_file(),
+                    "the recipe path must resolve from the work directory"
+                );
+            }
             if let Some(index) = command.args.iter().position(|a| a == "-var-file") {
                 let path = &command.args[index + 1];
+                assert!(
+                    std::path::Path::new(path).is_absolute()
+                        && command.work_dir.join(path).is_file(),
+                    "the var file path must resolve from the work directory"
+                );
                 let contents = std::fs::read_to_string(path).unwrap();
                 assert!(contents.contains("fixture-secret-token"));
                 *self.saw_var_file.lock().unwrap() = Some(path.clone());
@@ -2185,6 +2213,65 @@ mod tests {
                 "no token was handed to any child: {seen:?}"
             );
         }
+    }
+
+    /// #312: the controller's default `data_dir` is the relative `./data`;
+    /// Packer's recipe and var-file arguments must still resolve from the
+    /// work directory it runs in. The scripted transport asserts exactly
+    /// that on every validate and build.
+    #[tokio::test]
+    async fn a_relative_work_root_still_hands_packer_resolvable_paths() {
+        let mut replies = probes();
+        replies.extend([
+            reply("", Some(0), false),
+            reply("1,proxmox-clone,artifact,0,id,120", Some(0), false),
+        ]);
+        let (dir, store, repository, operations, mut operation, transport) =
+            setup(CONTENT, serde_json::json!({}), replies, false).await;
+        let key = dir.path().join("master.key");
+        std::fs::write(
+            &key,
+            "1 0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let secrets =
+            Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
+        let secret = secrets
+            .create("build-token", "fixture-secret-token".into())
+            .await
+            .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(operation.payload_json.as_deref().unwrap()).unwrap();
+        payload["secretVars"] = serde_json::json!([{"name": "token", "reference": secret.id}]);
+        operation.payload_json = Some(payload.to_string());
+        // The work root as a path relative to the test's working
+        // directory, so no stray directory appears in the source tree.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        let relative = relative.join(dir.path().strip_prefix("/").unwrap().join("work"));
+        assert!(relative.is_relative());
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            Some(secrets),
+            relative,
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
+        assert!(transport.saw_var_file.lock().unwrap().is_some());
     }
 
     #[tokio::test]
