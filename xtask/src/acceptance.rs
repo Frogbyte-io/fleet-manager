@@ -8,7 +8,9 @@
 //! Every expected scenario/target pair that never reported is a failure,
 //! never a silent pass, and the run exits non-zero when anything failed.
 //! Without `FLEET_PVE_LIVE=1` every scenario reports skipped and no PVE is
-//! needed. `cargo xtask verify` never runs a live suite.
+//! needed. `cargo xtask verify` compiles and runs these test targets but
+//! does not set the gate, so they skip unless `FLEET_PVE_LIVE=1` is already
+//! in its environment.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -198,6 +200,26 @@ impl Summary {
                     },
                     duration_ms: 0,
                 }));
+            }
+        }
+        // A pair reported more than once has no single verdict: fail it
+        // rather than let the last report silently win.
+        for result in &mut results {
+            let repeats: Vec<&ResultRow> = reported
+                .iter()
+                .filter(|row| row.scenario == result.scenario && row.target == result.target)
+                .collect();
+            if repeats.len() > 1 {
+                let verdicts: Vec<String> = repeats
+                    .iter()
+                    .map(|row| format!("{}: {}", row.status.id(), row.reason))
+                    .collect();
+                result.status = Status::Fail;
+                result.reason = format!(
+                    "reported {} times ({}); each scenario must report once per target",
+                    repeats.len(),
+                    verdicts.join("; ")
+                );
             }
         }
         // A row the matrix has no cell for is drift between the suite and
@@ -1143,6 +1165,27 @@ mod tests {
         ] {
             assert_eq!(parse_result_line(SPEC.marker, &line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn a_pair_reported_twice_fails_instead_of_keeping_the_last_verdict() {
+        let reported = vec![
+            row("trust", Some("PVE9"), Status::Fail, "first"),
+            row("trust", Some("PVE9"), Status::Pass, ""),
+        ];
+        let summary = Summary::build(SPEC, true, None, &["PVE9".to_owned()], &reported, true);
+        let trust = summary
+            .results
+            .iter()
+            .find(|row| row.scenario == "trust")
+            .unwrap();
+        assert_eq!(trust.status, Status::Fail);
+        assert!(
+            trust.reason.contains("reported 2 times"),
+            "{}",
+            trust.reason
+        );
+        assert!(trust.reason.contains("first"));
     }
 
     #[test]
