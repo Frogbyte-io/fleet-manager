@@ -699,9 +699,16 @@ enum FrogenvProbe {
 /// (normally the stored normalized identity; see
 /// [`fleet_core::NormalizedRemote::clone_url`]).
 fn clone_remote(remote: &str) -> Result<String, String> {
-    fleet_core::NormalizedRemote::parse(remote)
-        .map(|normalized| normalized.clone_url())
-        .map_err(|detail| format!("invalid_project_remote: {detail}"))
+    let normalized = fleet_core::NormalizedRemote::parse(remote)
+        .map_err(|detail| format!("invalid_project_remote: {detail}"))?;
+    // A query or fragment is never part of a repository path; refuse it
+    // rather than let a `?token=` ride into the clone URL.
+    if normalized.as_str().contains(['?', '#']) {
+        return Err(
+            "invalid_project_remote: the remote path carries a query or fragment".to_owned(),
+        );
+    }
+    Ok(normalized.clone_url())
 }
 
 /// The workflow's generic failure reason, for a step that ran and failed.
