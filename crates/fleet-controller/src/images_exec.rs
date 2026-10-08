@@ -250,10 +250,12 @@ impl ImagesExecutor {
                 .map_err(|_| format!("the secret {} is not UTF-8", var.name))?;
             object.insert(var.name.clone(), serde_json::Value::String(text));
         }
-        std::fs::write(
+        // Owner-only from its first byte (#308): never written, then chmodded.
+        create_private_file(
             &path,
             serde_json::to_string_pretty(&serde_json::Value::Object(object))
-                .map_err(|error| format!("the var file cannot be serialized: {error}"))?,
+                .map_err(|error| format!("the var file cannot be serialized: {error}"))?
+                .as_bytes(),
         )
         .map_err(|error| format!("the var file cannot be written: {error}"))?;
         Ok(Some(path))
@@ -263,14 +265,13 @@ impl ImagesExecutor {
     /// path. The work directory is per-operation, so concurrent builds
     /// never share state.
     fn write_recipe(&self, operation_id: &str, content: &str) -> Result<PathBuf, String> {
-        let dir = self.work_root.join(operation_id);
-        std::fs::create_dir_all(&dir)
+        let dir = prepare_operation_dir(&self.work_root, operation_id)
             .map_err(|error| format!("the work directory cannot be prepared: {error}"))?;
         // Packer auto-detects the format from the extension: `.pkr.json`
         // is HCL2, a bare `.json` is the legacy JSON template. The recipe
         // content is JSON, so the file is named accordingly.
         let path = dir.join("recipe.json");
-        std::fs::write(&path, content)
+        create_private_file(&path, content.as_bytes())
             .map_err(|error| format!("the recipe cannot be written: {error}"))?;
         Ok(path)
     }
@@ -430,7 +431,7 @@ impl ImagesExecutor {
         if insecure_tls && !version.allow_insecure_tls {
             return Err("insecure_tls_not_allowed");
         }
-        std::fs::create_dir_all(&self.work_root).map_err(|_| "work_directory_failed")?;
+        prepare_work_root(&self.work_root).map_err(|_| "work_directory_failed")?;
         let probe = self
             .transport
             .run(
@@ -634,14 +635,106 @@ fn write_pinned_roots(
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
+    create_private_file(&file, pem.as_bytes())?;
+    // Packer runs inside the work directory, so a relative data directory
+    // would make relative paths resolve beneath it: export absolute ones.
+    Ok((file.canonicalize()?, empty.canonicalize()?))
+}
+
+/// Prepares the work root as an owner-only directory (#308). Fleet owns
+/// it, so an existing one is tightened to exactly `0700` too; the change
+/// fails unless the controller's user owns the directory (or is root,
+/// which [`prepare_operation_dir`] catches). A symlink or anything else
+/// that is not a real directory is refused, never followed. Missing
+/// ancestors are created `0700`.
+fn prepare_work_root(work_root: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(work_root)?;
+    if !std::fs::symlink_metadata(work_root)?.is_dir() {
+        return Err(std::io::Error::other(
+            "the work root is not a directory (a symlink is refused)",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(work_root, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Creates one operation's work directory fresh and owner-only (#308): a
+/// leftover from an earlier attempt is removed first (without following
+/// symlinks), and the new directory is made by a single non-recursive
+/// `mkdir`, so nothing pre-existing at that path is ever reused. The mode
+/// is then set to exactly `0700`, whatever the umask removed. The new
+/// directory belongs to the controller's effective user, so a work root
+/// with a different owner (possible only when running as root) is refused.
+fn prepare_operation_dir(
+    work_root: &std::path::Path,
+    operation_id: &str,
+) -> std::io::Result<PathBuf> {
+    prepare_work_root(work_root)?;
+    let id = std::path::Path::new(operation_id);
+    let mut components = id.components();
+    if operation_id.contains(['/', '\\'])
+        || id.file_name() != Some(std::ffi::OsStr::new(operation_id))
+        || !matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+    {
+        return Err(std::io::Error::other(
+            "the operation id is not a single path component",
+        ));
+    }
+    let dir = work_root.join(operation_id);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&dir)?,
+        Ok(_) => std::fs::remove_file(&dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(false);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let owner = std::fs::symlink_metadata(&dir)?.uid();
+        if std::fs::symlink_metadata(work_root)?.uid() != owner {
+            std::fs::remove_dir(&dir)?;
+            return Err(std::io::Error::other(
+                "the work root belongs to another user",
+            ));
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
+/// Creates a new owner-only file with `contents` (#308). The file is created
+/// atomically with mode `0600` (`create_new` refuses an existing path,
+/// symlinks included) and its mode is fixed to exactly `0600` through the
+/// open handle before any byte is written. Elsewhere it inherits the
+/// directory's access control.
+fn create_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    std::io::Write::write_all(&mut options.open(&file)?, pem.as_bytes())?;
-    // Packer runs inside the work directory, so a relative data directory
-    // would make relative paths resolve beneath it: export absolute ones.
-    Ok((file.canonicalize()?, empty.canonicalize()?))
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::io::Write::write_all(&mut file, contents)
 }
 
 /// Removes one operation's private work directory after a terminal
@@ -1843,6 +1936,167 @@ mod tests {
         let record = repository.get_build(&operation.id).await.unwrap();
         assert_eq!(record.outcome, "cancelled");
         assert_eq!(record.reason.as_deref(), Some("cancelled_unverified"));
+    }
+
+    /// #308: the work root, the operation's directory, and the var file are
+    /// owner-only even under a permissive umask. The umask is process-wide,
+    /// so the assertions run in a child test process started under
+    /// `umask 000`; the other tests in this binary never see it.
+    #[cfg(unix)]
+    #[test]
+    fn work_directory_and_var_file_are_owner_only_under_a_permissive_umask() {
+        const CHILD: &str = "FLEET_TEST_PERMISSIVE_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(assert_owner_only_work_files());
+            return;
+        }
+        let name = format!(
+            "{}::work_directory_and_var_file_are_owner_only_under_a_permissive_umask",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"umask 000 && exec "$0" --exact "$1" --test-threads=1 --nocapture"#)
+            .arg(std::env::current_exe().unwrap())
+            .arg(&name)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The child really ran this test, not an empty filter.
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+
+    #[cfg(unix)]
+    async fn assert_owner_only_work_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &std::path::Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        let (dir, store, repository, _, operation, transport) =
+            setup(CONTENT, serde_json::json!({}), Vec::new(), false).await;
+        // The umask really is permissive here.
+        let probe = dir.path().join("umask-probe");
+        std::fs::write(&probe, "").unwrap();
+        assert_eq!(mode(&probe), 0o666);
+        let key = dir.path().join("master.key");
+        std::fs::write(
+            &key,
+            "1 0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secrets =
+            Arc::new(fleet_secrets::SecretStore::open(store.pool().clone(), &key).unwrap());
+        let secret = secrets
+            .create("build-token", "fixture-secret-token".into())
+            .await
+            .unwrap();
+        // An existing, world-writable work root is tightened, and a leftover
+        // operation directory (with a stale var file) is replaced.
+        let work = dir.path().join("work");
+        let leftover = work.join(&operation.id);
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("vars.auto.pkrvars.json"), "stale").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let executor = ImagesExecutor::new(repository, transport, Some(secrets), work.clone());
+        let recipe = executor.write_recipe(&operation.id, CONTENT).unwrap();
+        let var_file = executor
+            .write_var_file(
+                &operation.id,
+                &[SecretVar {
+                    name: "token".to_owned(),
+                    reference: secret.id,
+                }],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mode(&work), 0o700);
+        assert_eq!(mode(&leftover), 0o700);
+        assert!(std::fs::symlink_metadata(&leftover).unwrap().is_dir());
+        assert_eq!(recipe.parent(), Some(leftover.as_path()));
+        assert_eq!(var_file.parent(), Some(leftover.as_path()));
+        assert_eq!(mode(&recipe), 0o600);
+        assert_eq!(mode(&var_file), 0o600);
+        assert!(
+            std::fs::read_to_string(&var_file)
+                .unwrap()
+                .contains("fixture-secret-token")
+        );
+        // The certificate pin's files share the same rule.
+        let (pem, roots) = write_pinned_roots(&leftover, b"fixture").unwrap();
+        assert_eq!(mode(&pem), 0o600);
+        assert_eq!(mode(&roots), 0o700);
+        assert_eq!(mode(roots.parent().unwrap()), 0o700);
+    }
+
+    /// #308: an operation id never escapes the work root.
+    #[test]
+    fn operation_dir_refuses_ids_that_are_not_one_path_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        for id in ["..", ".", "", "a/b", "/abs", "a/.", "a\\b"] {
+            assert!(prepare_operation_dir(&work, id).is_err(), "{id}");
+        }
+        assert!(dir.path().exists());
+        assert!(prepare_operation_dir(&work, "op-1").unwrap().is_dir());
+    }
+
+    /// #308: a symlinked work root is refused, not followed or chmodded.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_work_root_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let work = dir.path().join("work");
+        std::os::unix::fs::symlink(&outside, &work).unwrap();
+        assert!(prepare_work_root(&work).is_err());
+        assert!(prepare_operation_dir(&work, "op-1").is_err());
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    /// #308: a leftover operation path that is a symlink is removed as a
+    /// link; whatever it points at survives untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_leftover_operation_dir_is_unlinked_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), "keep").unwrap();
+        let work = dir.path().join("work");
+        prepare_work_root(&work).unwrap();
+        std::os::unix::fs::symlink(&outside, work.join("op-1")).unwrap();
+        let fresh = prepare_operation_dir(&work, "op-1").unwrap();
+        let metadata = std::fs::symlink_metadata(&fresh).unwrap();
+        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel")).unwrap(),
+            "keep"
+        );
     }
 
     #[tokio::test]
