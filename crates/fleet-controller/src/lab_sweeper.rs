@@ -31,7 +31,8 @@ use std::time::Duration;
 use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{Decision, Permission};
 use fleet_application::lab::{
-    Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned, stuck_compensation,
+    Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned,
+    record_cleanup_failure, stuck_compensation,
 };
 use fleet_application::operation::{AuditPort, Operations};
 
@@ -133,6 +134,8 @@ pub struct TickReport {
     pub expired: usize,
     /// Cleanup attempts queued (new pending operations).
     pub cleanups_queued: usize,
+    /// Cleanup attempts interrupted by a crash, counted as failed (#301).
+    pub cleanups_abandoned: usize,
     /// Stuck leases compensated.
     pub compensated: usize,
     /// Guests newly reported as unowned this tick.
@@ -309,6 +312,39 @@ impl LabSweeper {
                 Ok(operation) if operation.created_at >= tick_started => {
                     self.changed();
                     report.cleanups_queued += 1;
+                }
+                // The attempt's operation already ended without releasing
+                // the lease: the controller died mid-cleanup and worker
+                // maintenance failed it, which records nothing on the lease.
+                // Count it as a failed attempt so the next one gets a fresh
+                // key, with backoff (#301).
+                Ok(operation) if abandoned_attempt(&operation) => {
+                    match self.leases.get(&lease.id).await {
+                        Ok(mut current)
+                            if current.state == fleet_core::LeaseState::Releasing
+                                && current.cleanup_attempts == lease.cleanup_attempts =>
+                        {
+                            record_cleanup_failure(
+                                &mut current,
+                                fleet_core::SystemClock::now_unix_millis(),
+                            );
+                            match self.leases.update(&current).await {
+                                Ok(()) => {
+                                    self.changed();
+                                    report.cleanups_abandoned += 1;
+                                }
+                                Err(error) => report.failures.push(format!(
+                                    "recording the abandoned cleanup of lease {}: {error}",
+                                    lease.id
+                                )),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => report.failures.push(format!(
+                            "re-reading lease {} after an abandoned cleanup: {error}",
+                            lease.id
+                        )),
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => report.failures.push(format!(
@@ -490,4 +526,13 @@ impl LabSweeper {
             }
         }
     }
+}
+
+/// Whether a cleanup operation ended without succeeding while its lease is
+/// still `releasing` at the same attempt count. The executor records its
+/// own failures on the lease before it completes the operation, so this
+/// only holds for an attempt interrupted by a crash.
+fn abandoned_attempt(operation: &fleet_application::operation::Operation) -> bool {
+    fleet_core::OperationState::from_id(&operation.state)
+        .is_ok_and(|state| state.is_terminal() && state != fleet_core::OperationState::Succeeded)
 }

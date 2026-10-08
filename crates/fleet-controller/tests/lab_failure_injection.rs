@@ -572,15 +572,13 @@ async fn interrupted_mid_destroy_nothing_is_untracked() {
         let (controller, lease) = crash_destroy(&world, step, fault).await;
         let violations = controller.ownership_violations(&world).await;
         assert!(violations.is_empty(), "{step:?} {fault:?}: {violations:#?}");
-        // The lease still names its guest, so nothing is forgotten.
+        // The record still names its guest, so nothing is forgotten.
         let record = controller.record(&lease).await;
         assert_eq!(record.vmid, Some(FIRST_LAB_VMID));
-        assert_ne!(controller.lease(&lease).await.state, LeaseState::Released);
     }
 }
 
 #[tokio::test]
-#[ignore = "#301: an interrupted cleanup is never retried"]
 async fn interrupted_mid_destroy_the_cleanup_is_retried() {
     for (step, fault) in MID_DESTROY {
         let world = World::new(READINESS_SECONDS).await;
