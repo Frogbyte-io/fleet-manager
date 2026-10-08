@@ -474,7 +474,8 @@ fn host_matches_line(line: &str, host: &str) -> bool {
     })
 }
 
-/// Picks the most informative bounded line from a tool's stderr. OpenSSH
+/// Picks the most informative line from a tool's stderr, scrubbed of
+/// credentials and control characters and bounded. OpenSSH
 /// puts banner noise (the `@@@@` warning block) before the actual reason, so
 /// a recognized failure reason wins; otherwise the last line does.
 pub(crate) fn redact_failure(text: &str) -> String {
@@ -496,9 +497,8 @@ pub(crate) fn redact_failure(text: &str) -> String {
     // Bound the scanned input first (on a char boundary) so the scrub stays
     // cheap, scrub credentials and control characters, then cut the result:
     // cutting first could split a credential and keep half of it.
-    let scrubbed = fleet_core::flatten_control_characters(&fleet_core::redact_credentials(
-        truncate_on_boundary(line, SCRUB_WINDOW),
-    ));
+    let scrubbed =
+        fleet_core::flatten_control_characters(&fleet_core::redact_credentials(scrub_window(line)));
     let limit = scrubbed
         .char_indices()
         .nth(MAX_DETAIL_CHARS)
@@ -514,14 +514,17 @@ const MAX_DETAIL_CHARS: usize = 200;
 /// Bytes of a failure line scanned for credentials.
 const SCRUB_WINDOW: usize = 4096;
 
-/// The longest prefix of `text` of at most `max` bytes that ends on a char
-/// boundary.
-fn truncate_on_boundary(text: &str, max: usize) -> &str {
-    let mut end = max.min(text.len());
+/// The prefix of `text` that is scrubbed. A cut window ends on a char
+/// boundary at whitespace, so no token (and no credential) is split by it.
+fn scrub_window(text: &str) -> &str {
+    if text.len() <= SCRUB_WINDOW {
+        return text;
+    }
+    let mut end = SCRUB_WINDOW;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    &text[..text[..end].rfind(char::is_whitespace).unwrap_or(0)]
 }
 
 #[cfg(test)]
@@ -547,8 +550,13 @@ mod tests {
         assert_eq!(detail.chars().count(), 201, "{detail}");
         assert!(detail.ends_with('…'));
         // A multibyte cut inside the scan window must not panic either.
-        let long = format!("Permission denied {}", "é".repeat(10_000));
+        // 3-byte characters after an odd-length prefix put byte 4096 inside
+        // one, so the window's boundary step-back runs.
+        let long = format!("Permission denied! {}", "€€€ ".repeat(2_000));
         assert!(redact_failure(&long).ends_with('…'));
+        // A credential cut off by the window is dropped, not kept in part.
+        let edge = format!("{} user:hunter2pw@host.invalid", "x ".repeat(2_040));
+        assert!(!redact_failure(&edge).contains("hunter2"));
     }
 
     #[test]

@@ -367,17 +367,34 @@ pub fn failure_detail(outcome: &CliOutcome) -> String {
         && value["ok"].as_bool() == Some(false)
         && let Some(message) = value["message"].as_str()
     {
-        return redact(message);
+        return bound_chars(redact(text_window(message)));
     }
     // Scrub a bounded window first, then cut the scrubbed text on a char
     // boundary: cutting raw bytes could panic mid-character or split a
     // credential.
-    let mut window = text.len().min(4096);
-    while !text.is_char_boundary(window) {
-        window -= 1;
+    bound_chars(redact(text_window(text)))
+}
+
+/// Characters kept in a failure detail.
+const MAX_DETAIL_CHARS: usize = 300;
+/// Bytes of a failure text scanned for credentials.
+const SCRUB_WINDOW: usize = 4096;
+
+/// The prefix of `text` that is scrubbed. A cut window ends on a char
+/// boundary at whitespace, so no token (and no credential) is split by it.
+fn text_window(text: &str) -> &str {
+    if text.len() <= SCRUB_WINDOW {
+        return text;
     }
-    let scrubbed = redact(&text[..window]);
-    match scrubbed.char_indices().nth(300) {
+    let mut end = SCRUB_WINDOW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..text[..end].rfind(char::is_whitespace).unwrap_or(0)]
+}
+
+fn bound_chars(scrubbed: String) -> String {
+    match scrubbed.char_indices().nth(MAX_DETAIL_CHARS) {
         Some((index, _)) => scrubbed[..index].to_owned(),
         None => scrubbed,
     }
@@ -387,64 +404,5 @@ pub fn failure_detail(outcome: &CliOutcome) -> String {
 /// from CLI output before it becomes an observation or audit detail.
 #[must_use]
 pub fn redact(text: &str) -> String {
-    let cleaned: String = text
-        .chars()
-        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
-        .collect();
-    redact_credentials(&cleaned)
-}
-
-fn redact_credentials(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(position) = rest.find("://") {
-        let (before, after) = rest.split_at(position + 3);
-        result.push_str(before);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        let authority = &after[..authority_end];
-        let tail = &after[authority_end..];
-        match authority.split_once('@') {
-            Some((_userinfo, host)) => {
-                result.push_str("***@");
-                result.push_str(host);
-            }
-            None => result.push_str(authority),
-        }
-        rest = tail;
-    }
-    result.push_str(rest);
-    redact_schemeless_credentials(&result)
-}
-
-/// Redacts `user:password@` patterns anywhere in the text — scp-style
-/// remotes and error text the URL pass cannot see.
-fn redact_schemeless_credentials(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut search = 0;
-    while let Some(offset) = text[search..].find('@') {
-        let at = search + offset;
-        let token_start = text[..at]
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '"' || *c == '\'')
-            .map_or(0, |(index, c)| index + c.len_utf8());
-        let token = &text[token_start..at];
-        let has_password = token
-            .split_once(':')
-            .is_some_and(|(user, password)| !user.is_empty() && !password.is_empty());
-        if has_password {
-            // The flush clamps to the current search position: a token
-            // already consumed by an earlier redaction must not be sliced
-            // backwards.
-            let flush_start = search.min(token_start);
-            result.push_str(&text[flush_start..token_start]);
-            result.push_str("***@");
-            search = at + 1;
-        } else {
-            result.push_str(&text[search..=at]);
-            search = at + 1;
-        }
-    }
-    result.push_str(&text[search..]);
-    result
+    fleet_core::redact_credentials(&fleet_core::flatten_control_characters(text))
 }
