@@ -219,7 +219,7 @@ describe('lease detail', () => {
     expect(q('[data-testid="reservation-node"]').textContent).toContain('pve-a')
     expect(q('[data-testid="reservation-account"]').textContent).toContain('acct-1')
     expect(q('[data-testid="reservation-pool"]').textContent).toContain('local-lvm')
-    expect(q('[data-testid="reservation-cores"]').textContent).toContain('4')
+    expect(q('[data-testid="reservation-cores"]').textContent?.trim()).toBe('4')
     expect(q('[data-testid="reservation-memory"]').textContent).toContain('2.0 GiB')
     expect(q('[data-testid="reservation-disk"]').textContent).toContain('20.0 GiB')
   })
@@ -231,6 +231,15 @@ describe('lease detail', () => {
     await settle()
     expect(q('[data-testid="lease-reservation"]').textContent).toContain('released')
     expect(q('[data-testid="reservation-memory"]').textContent).toContain('1.0 GiB')
+  })
+
+  it('says so when the reservation field is absent (an older controller)', async () => {
+    const { reservation: _omitted, ...withoutField } = detail()
+    getLabLease.mockResolvedValue(ok({ data: withoutField }))
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
+    await settle()
+    expect(q('[data-testid="reservation-none"]')).toBeTruthy()
   })
 
   it('says so when a lease has no reservation', async () => {
