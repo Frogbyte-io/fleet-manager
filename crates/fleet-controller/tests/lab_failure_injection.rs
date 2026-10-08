@@ -1008,9 +1008,17 @@ mod live {
                     None,
                 )
                 .await?;
+            if destroyed.success && destroyed.json["state"] == "released" {
+                return Err(format!(
+                    "the Lab guest {vmid} lay outside the VMID range; Fleet destroyed it"
+                ));
+            }
+            // Outside the range the harness may not delete anything, so a
+            // failed Fleet cleanup is reported as a leak for the operator.
             return Err(format!(
-                "the Lab guest {vmid} lies outside the VMID range; Fleet's destroy ended {}",
-                destroyed.json["state"]
+                "LEAK: the Lab guest {vmid} lies outside the VMID range and Fleet's destroy ended \
+                 {} ({}); remove VMID {vmid} on the host by hand",
+                destroyed.json["state"], destroyed.stderr
             ));
         }
         run.log(&format!("lease ready on guest {vmid}"));
