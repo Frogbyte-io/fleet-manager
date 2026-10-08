@@ -16,9 +16,9 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 import { relativeTime } from '../../fleet/inventory'
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
-import OperationStatus from '../../machine/components/OperationStatus.vue'
 import {
   extendCommand,
+  formatSpan,
   isTerminal,
   leaseTone,
   provisionLeaseCommand,
@@ -26,7 +26,9 @@ import {
   shortId,
 } from '../lab'
 import { LEASES_KEY, PROVISIONS_KEY } from '../useLab'
+import CleanupRetry from './CleanupRetry.vue'
 import LeaseStepper from './LeaseStepper.vue'
+import ProvisionStatus from './ProvisionStatus.vue'
 import TtlBar from './TtlBar.vue'
 
 // One lease: identity, lifecycle, TTL, and the actions its state allows.
@@ -40,6 +42,8 @@ const props = defineProps<{
   now: number
 }>()
 
+const emit = defineEmits<{ open: [leaseId: string] }>()
+
 const queryClient = useQueryClient()
 
 type Panel = 'provision' | 'extend' | 'release' | null
@@ -48,11 +52,12 @@ const busy = ref(false)
 const error = ref('')
 const operationId = ref<string | null>(null)
 
-const accountId = ref(props.accounts[0]?.id ?? '')
-// Accounts load independently of leases; keep a valid default as they arrive.
+/** '' = automatic placement: the controller picks the account. */
+const accountId = ref('')
+// An explicit account that disappears falls back to automatic placement.
 watch(() => props.accounts, (list) => {
-  if (!list.some(account => account.id === accountId.value))
-    accountId.value = list[0]?.id ?? ''
+  if (accountId.value && !list.some(account => account.id === accountId.value))
+    accountId.value = ''
 })
 const EXTEND_CHOICES = [
   { seconds: 1800, label: '+30M' },
@@ -84,12 +89,23 @@ const facts = computed(() => [
     ? [{ label: 'PROJECT', value: props.projectName ?? shortId(props.lease.projectId), verbatim: true }]
     : []),
   { label: 'CLEANUP', value: props.lease.cleanup, verbatim: false },
+  ...(props.lease.cleanupAttempts > 0
+    ? [{ label: 'FAILED ATTEMPTS', value: String(props.lease.cleanupAttempts), verbatim: false }]
+    : []),
+  ...(props.lease.cleanupNextAt
+    ? [{ label: 'NEXT ATTEMPT', value: nextAttempt(props.lease.cleanupNextAt), verbatim: false }]
+    : []),
   { label: 'REQUESTED', value: relativeTime(props.lease.createdAt, props.now), verbatim: false },
 ])
 
+function nextAttempt(at: number): string {
+  const seconds = Math.floor((at - props.now) / 1000)
+  return seconds > 0 ? `IN ${formatSpan(seconds)}` : 'DUE NOW'
+}
+
 const command = computed(() => {
   switch (panel.value) {
-    case 'provision': return accountId.value ? provisionLeaseCommand(props.lease.id, accountId.value) : null
+    case 'provision': return provisionLeaseCommand(props.lease.id, accountId.value || null)
     case 'extend': return extendCommand(props.lease.id, extendSeconds.value)
     case 'release': return releaseCommand(props.lease.id, keep.value)
     default: return null
@@ -127,10 +143,8 @@ async function run(action: () => Promise<void>) {
 }
 
 function provision() {
-  if (!accountId.value)
-    return
   return run(async () => {
-    const operation = unwrap<OperationDto>(await startLabLeaseProvision(props.lease.id, { accountId: accountId.value }), [201])
+    const operation = unwrap<OperationDto>(await startLabLeaseProvision(props.lease.id, { accountId: accountId.value || null }), [201])
     operationId.value = operation.id
   })
 }
@@ -185,6 +199,14 @@ function release() {
       </div>
       <div class="flex flex-wrap gap-1.5">
         <button
+          type="button"
+          class="h-7 rounded-sm border border-input px-2.5 text-xs hover:border-fc-muted"
+          :data-testid="`details-${lease.id}`"
+          @click="emit('open', lease.id)"
+        >
+          Details
+        </button>
+        <button
           v-if="canProvision"
           type="button"
           class="h-7 rounded-sm border border-input px-2.5 text-xs hover:border-fc-muted"
@@ -228,61 +250,70 @@ function release() {
       />
     </div>
 
-    <p
+    <div
       v-if="lease.state === 'cleanup_failed'"
-      class="mt-3 text-xs text-fc-err"
+      class="mt-3 grid gap-2"
     >
-      Cleanup failed: the lease still owns whatever the controller could not remove. The expiry sweeper retries it;
-      <span class="font-mono">Sweep expired</span> retries now.
+      <p class="text-xs text-fc-err">
+        Cleanup gave up after its attempts: the lease still owns whatever the controller could not remove, and nothing
+        retries it on its own. Fix the cause (Details shows the node and VMID), then retry.
+      </p>
+      <CleanupRetry :lease-id="lease.id" />
+    </div>
+    <p
+      v-else-if="lease.state === 'releasing' && lease.cleanupNextAt"
+      class="mt-3 text-xs text-fc-warn"
+      data-testid="cleanup-backoff"
+    >
+      Cleanup attempt {{ lease.cleanupAttempts }} failed; the next attempt is {{ nextAttempt(lease.cleanupNextAt).toLowerCase() }}.
     </p>
 
-    <!-- Provision: pick the Proxmox account whose pinned trust the clone uses. -->
+    <!-- Provision: automatic placement, or the Proxmox account whose pinned trust the clone uses. -->
     <div
       v-if="panel === 'provision'"
       class="mt-3 grid gap-2 rounded-sm border border-fc-line bg-fc-inset p-3 text-xs"
     >
-      <p
-        v-if="accounts.length === 0"
-        class="text-fc-warn"
+      <label
+        class="fc-kicker"
+        :for="`account-${lease.id}`"
+      >Proxmox account (optional)</label>
+      <select
+        :id="`account-${lease.id}`"
+        v-model="accountId"
+        class="h-8 rounded-sm border border-input bg-background px-2"
       >
-        No Proxmox account with a confirmed TLS fingerprint. Add or confirm one from Fleet → Add machine → Proxmox server.
-      </p>
-      <template v-else>
-        <label
-          class="fc-kicker"
-          :for="`account-${lease.id}`"
-        >Proxmox account</label>
-        <select
-          :id="`account-${lease.id}`"
-          v-model="accountId"
-          class="h-8 rounded-sm border border-input bg-background px-2"
+        <option value="">
+          Automatic placement
+        </option>
+        <option
+          v-for="account in accounts"
+          :key="account.id"
+          :value="account.id"
         >
-          <option
-            v-for="account in accounts"
-            :key="account.id"
-            :value="account.id"
-          >
-            {{ account.name }} · {{ account.host }}
-          </option>
-        </select>
-        <div class="flex gap-2">
-          <button
-            type="button"
-            class="fc-grad-bg h-8 rounded-sm px-3 font-semibold disabled:opacity-50"
-            :disabled="busy || !accountId"
-            @click="provision"
-          >
-            Start provisioning →
-          </button>
-          <button
-            type="button"
-            class="h-8 px-2 text-fc-muted hover:text-fc-ink"
-            @click="open(null)"
-          >
-            Cancel
-          </button>
-        </div>
-      </template>
+          {{ account.name }} · {{ account.host }}
+        </option>
+      </select>
+      <p class="text-fc-faint">
+        Without an account, the controller picks the trusted account whose cluster holds the pinned template; when it
+        cannot, the provision fails with its reason.
+      </p>
+      <div class="flex gap-2">
+        <button
+          type="button"
+          class="fc-grad-bg h-8 rounded-sm px-3 font-semibold disabled:opacity-50"
+          :disabled="busy"
+          @click="provision"
+        >
+          Start provisioning →
+        </button>
+        <button
+          type="button"
+          class="h-8 px-2 text-fc-muted hover:text-fc-ink"
+          @click="open(null)"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
 
     <!-- Extend: adds to the ready TTL; the API refuses past the lifetime cap. -->
@@ -401,10 +432,8 @@ function release() {
       v-if="operationId"
       class="mt-3"
     >
-      <OperationStatus
+      <ProvisionStatus
         :operation-id="operationId"
-        label="Provisioning"
-        dismissible
         @settled="refresh"
         @dismiss="operationId = null"
       />

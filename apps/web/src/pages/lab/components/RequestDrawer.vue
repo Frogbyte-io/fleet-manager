@@ -15,13 +15,15 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
-import { leaseCommand, provisionLeaseCommand, templateSpec } from '../lab'
+import { createCommand, leaseCommand, provisionLeaseCommand, templateSpec } from '../lab'
 import { LEASES_KEY, PROVISIONS_KEY } from '../useLab'
 
 // Request a disposable environment. A lease is created from a template's
-// published version; provisioning is a separate durable operation that needs
-// a Proxmox account, so the drawer can start it right away or leave the
-// lease requested for later.
+// published version; provisioning is a separate durable operation, so the
+// drawer can start it right away or leave the lease requested for later.
+// Provisioning takes an optional Proxmox account: without one, the
+// controller's placement picks the trusted account whose cluster holds the
+// pinned template, and explains (verbatim, on the operation) when it cannot.
 const props = defineProps<{
   open: boolean
   templates: LabTemplateDto[]
@@ -40,6 +42,7 @@ const templateId = ref('')
 const purpose = ref('')
 const projectId = ref('')
 const provisionNow = ref(true)
+/** '' = automatic placement (no `accountId` on the request). */
 const accountId = ref('')
 const busy = ref(false)
 const error = ref('')
@@ -49,31 +52,39 @@ watch(() => props.templates, (list) => {
   if (!list.some(t => t.id === templateId.value))
     templateId.value = list[0]?.id ?? ''
 }, { immediate: true })
+// An explicit account that disappears falls back to automatic placement.
 watch(() => props.accounts, (list) => {
-  if (!list.some(a => a.id === accountId.value))
-    accountId.value = list[0]?.id ?? ''
+  if (accountId.value && !list.some(a => a.id === accountId.value))
+    accountId.value = ''
 }, { immediate: true })
 
 const template = computed(() => props.templates.find(t => t.id === templateId.value) ?? null)
 const versionId = computed(() => template.value?.publishedFrom ?? null)
-const willProvision = computed(() => provisionNow.value && props.accounts.length > 0 && accountId.value !== '')
+const willProvision = computed(() => provisionNow.value)
 
 const valid = computed(() => versionId.value !== null && purpose.value.trim() !== '')
 
-const command = computed(() =>
-  versionId.value && purpose.value.trim()
-    ? leaseCommand(versionId.value, purpose.value.trim(), projectId.value || null)
-    : null,
+// `lab create --account` requests and provisions through that account.
+// Automatic placement is `lab lease`, then `lab provision-lease` without an
+// account (`lab create` alone would pick the account client-side).
+const command = computed(() => {
+  if (!versionId.value || !purpose.value.trim())
+    return null
+  const project = projectId.value || null
+  return willProvision.value && accountId.value
+    ? createCommand(versionId.value, purpose.value.trim(), project, accountId.value)
+    : leaseCommand(versionId.value, purpose.value.trim(), project)
+})
+const thenCommand = computed(() =>
+  command.value && willProvision.value && !accountId.value ? provisionLeaseCommand('LEASE_ID', null) : null,
 )
 
-// Why there is no command: nothing to lease yet, or a project the CLI cannot express.
-const missingReason = computed(() => {
-  if (versionId.value === null)
-    return 'Choose a published template to see the equivalent command.'
-  if (!purpose.value.trim())
-    return 'Enter a purpose to see the equivalent command.'
-  return 'fleetctl lab lease has no project flag yet, so a project-scoped request has no exact CLI equivalent.'
-})
+// Why there is no command yet.
+const missingReason = computed(() =>
+  versionId.value === null
+    ? 'Choose a published template to see the equivalent command.'
+    : 'Enter a purpose to see the equivalent command.',
+)
 
 // A lease created whose provisioning did not start: the drawer then retries
 // provisioning for that lease instead of creating a second one.
@@ -96,7 +107,7 @@ async function refresh() {
 /** Starts provisioning; returns the operation id, or null with `error` set. */
 async function provision(lease: LeaseDto): Promise<string | null> {
   try {
-    const operation = unwrap<OperationDto>(await startLabLeaseProvision(lease.id, { accountId: accountId.value }), [201])
+    const operation = unwrap<OperationDto>(await startLabLeaseProvision(lease.id, { accountId: accountId.value || null }), [201])
     return operation.id
   }
   catch (caught) {
@@ -252,27 +263,29 @@ async function submit() {
           <legend class="fc-kicker mb-1.5">
             Provisioning
           </legend>
-          <p
-            v-if="accounts.length === 0"
-            class="text-xs text-fc-warn"
-          >
-            No Proxmox account with a confirmed TLS fingerprint, so the lease will stay requested until one exists.
-          </p>
-          <template v-else>
-            <label class="flex items-center gap-2 text-xs">
-              <input
-                v-model="provisionNow"
-                type="checkbox"
-                class="accent-[var(--fc-g2)]"
-              >
-              Start provisioning now
-            </label>
-            <select
-              v-if="provisionNow"
-              v-model="accountId"
-              aria-label="Proxmox account"
-              class="h-9 rounded-sm border border-input bg-background px-2"
+          <label class="flex items-center gap-2 text-xs">
+            <input
+              v-model="provisionNow"
+              type="checkbox"
+              class="accent-[var(--fc-g2)]"
+              data-testid="provision-now"
             >
+            Start provisioning now
+          </label>
+          <template v-if="provisionNow">
+            <label
+              class="fc-kicker"
+              for="request-account"
+            >Proxmox account (optional)</label>
+            <select
+              id="request-account"
+              v-model="accountId"
+              class="h-9 rounded-sm border border-input bg-background px-2"
+              data-testid="request-account"
+            >
+              <option value="">
+                Automatic placement
+              </option>
               <option
                 v-for="account in accounts"
                 :key="account.id"
@@ -281,6 +294,21 @@ async function submit() {
                 {{ account.name }} · {{ account.host }}
               </option>
             </select>
+            <p class="text-xs text-fc-faint">
+              <template v-if="accountId === ''">
+                The controller places the lease on the one trusted account whose cluster holds the pinned template and
+                reserves its cores, memory, and disk there. If it cannot, the provision operation fails and its reason is shown verbatim on the Environments tab.
+              </template>
+              <template v-else>
+                The clone uses this account's pinned TLS trust; placement still checks the node's capacity.
+              </template>
+            </p>
+            <p
+              v-if="accounts.length === 0"
+              class="text-xs text-fc-warn"
+            >
+              No Proxmox account has a confirmed TLS fingerprint, so placement is likely to find no candidate.
+            </p>
           </template>
         </fieldset>
 
@@ -289,10 +317,11 @@ async function submit() {
           :missing="missingReason"
         />
         <p
-          v-if="willProvision && versionId"
-          class="-mt-2 font-mono text-[10.5px] text-fc-faint"
+          v-if="thenCommand"
+          class="-mt-2 break-all font-mono text-[10.5px] text-fc-faint"
+          data-testid="then-command"
         >
-          then: {{ provisionLeaseCommand('LEASE_ID', accountId) }}
+          then: {{ thenCommand }}
         </p>
 
         <p

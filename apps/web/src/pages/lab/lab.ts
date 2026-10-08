@@ -196,18 +196,34 @@ function fleetctl(words: string[]): string {
   return ['fleetctl', '--output', 'json', ...words].map(shellQuote).join(' ')
 }
 
-/**
- * `fleetctl lab lease <version> --purpose <text>`. The CLI has no project
- * flag, so a project-scoped request has no exact equivalent: null.
- */
-export function leaseCommand(versionId: string, purpose: string, projectId: string | null): string | null {
-  if (projectId)
-    return null
-  return fleetctl(['lab', 'lease', versionId, '--purpose', purpose])
+/** `fleetctl lab lease <version> --purpose <text> [--project <id>]`: request only. */
+export function leaseCommand(versionId: string, purpose: string, projectId: string | null): string {
+  return fleetctl(['lab', 'lease', versionId, '--purpose', purpose, ...(projectId ? ['--project', projectId] : [])])
 }
 
-export function provisionLeaseCommand(leaseId: string, accountId: string): string {
-  return fleetctl(['lab', 'provision-lease', leaseId, '--account', accountId])
+/**
+ * `fleetctl lab create <version> --purpose <text> [--project <id>] --account <id>`:
+ * request and provision through an explicit account. Only with one: without
+ * `--account`, `lab create` picks the single trusted account itself instead
+ * of the controller's placement, so automatic placement is `lab lease` then
+ * `lab provision-lease` (see `provisionLeaseCommand`).
+ */
+export function createCommand(versionId: string, purpose: string, projectId: string | null, accountId: string): string {
+  return fleetctl([
+    'lab',
+    'create',
+    versionId,
+    '--purpose',
+    purpose,
+    ...(projectId ? ['--project', projectId] : []),
+    '--account',
+    accountId,
+  ])
+}
+
+/** `fleetctl lab provision-lease <lease> [--account <id>]`; without one, placement picks. */
+export function provisionLeaseCommand(leaseId: string, accountId: string | null): string {
+  return fleetctl(['lab', 'provision-lease', leaseId, ...(accountId ? ['--account', accountId] : [])])
 }
 
 export function releaseCommand(leaseId: string, keep: boolean): string {
@@ -224,4 +240,147 @@ export function sweepCommand(): string {
 
 export function publishCommand(templateId: string): string {
   return fleetctl(['lab', 'publish', templateId])
+}
+
+export function cleanupRetryCommand(leaseId: string): string {
+  return fleetctl(['lab', 'cleanup-retry', leaseId])
+}
+
+export function statusCommand(leaseId: string): string {
+  return fleetctl(['lab', 'status', leaseId])
+}
+
+export function leasesCommand(projectId: string | null): string {
+  return fleetctl(['lab', 'leases', ...(projectId ? ['--project', projectId] : [])])
+}
+
+/**
+ * `fleetctl lab exec <lease> --timeout <s> -- sh -c <script>`. The CLI joins
+ * the words after `--` into the script, so the console's script runs through
+ * `sh -c` there: the same command, wrapped once more.
+ */
+export function execCommand(leaseId: string, script: string, timeoutSeconds: number): string {
+  return fleetctl(['lab', 'exec', leaseId, '--timeout', String(timeoutSeconds), '--', 'sh', '-c', script])
+}
+
+export function collectCommand(leaseId: string, paths: string[]): string {
+  return fleetctl(['lab', 'collect', leaseId, ...paths])
+}
+
+export function artifactsCommand(filter: { leaseId?: string | null, projectId?: string | null }): string {
+  return fleetctl([
+    'lab',
+    'artifacts',
+    ...(filter.leaseId ? ['--lease', filter.leaseId] : []),
+    ...(filter.projectId ? ['--project', filter.projectId] : []),
+  ])
+}
+
+export function artifactGetCommand(artifactId: string, out: string): string {
+  return fleetctl(['lab', 'artifact-get', artifactId, '--out', out])
+}
+
+// ---- operation results ------------------------------------------------------
+
+export interface OperationFailure {
+  /** The stable reason id, when the error names one. */
+  reason: string | null
+  /** The controller's explanation, verbatim. */
+  detail: string | null
+  /** The failed saga step, when a provision names one. */
+  step: string | null
+}
+
+/**
+ * The `{reason, detail, step}` of an operation's public error (placement
+ * refusals, provisioning and cleanup failures), read as-is. Null when the
+ * error is absent or not that shape, so the caller shows the raw JSON.
+ */
+export function operationFailure(errorJson: string | null | undefined): OperationFailure | null {
+  if (!errorJson)
+    return null
+  try {
+    const parsed = JSON.parse(errorJson) as Record<string, unknown>
+    const text = (key: string) => (typeof parsed[key] === 'string' ? parsed[key] as string : null)
+    const failure = { reason: text('reason'), detail: text('detail'), step: text('step') }
+    return failure.reason || failure.detail ? failure : null
+  }
+  catch {
+    return null
+  }
+}
+
+export interface ExecOutput {
+  /** Null when the command never reported one (killed, never ran). */
+  exitCode: number | null
+  stdout: string
+  stderr: string
+  truncatedStdout: boolean
+  truncatedStderr: boolean
+  /** Why it did not finish normally (`deadline_killed`, `connection_failed`, …). */
+  reason: string | null
+  detail: string | null
+}
+
+/**
+ * A `lab.exec` operation's bounded output. A zero exit succeeds with the
+ * output in `resultJson`; a nonzero exit fails with the same object in
+ * `errorJson`; a deadline kill fails with `partialOutput` beside its reason;
+ * a connection failure carries only a reason. Null while the operation has
+ * neither.
+ */
+export function execOutput(operation: { resultJson?: string | null, errorJson?: string | null }): ExecOutput | null {
+  const parse = (raw: string | null | undefined): Record<string, unknown> | null => {
+    if (!raw)
+      return null
+    try {
+      const value = JSON.parse(raw) as unknown
+      return value && typeof value === 'object' ? value as Record<string, unknown> : null
+    }
+    catch {
+      return null
+    }
+  }
+  const outer = parse(operation.resultJson) ?? parse(operation.errorJson)
+  if (!outer)
+    return null
+  const partial = outer.partialOutput && typeof outer.partialOutput === 'object'
+    ? outer.partialOutput as Record<string, unknown>
+    : null
+  const streams = 'stdout' in outer || 'stderr' in outer ? outer : partial ?? {}
+  const str = (from: Record<string, unknown>, key: string) => (typeof from[key] === 'string' ? from[key] as string : '')
+  const flag = (key: string) => streams[key] === true || outer[key] === true
+  return {
+    exitCode: typeof outer.exitCode === 'number' ? outer.exitCode : null,
+    stdout: str(streams, 'stdout'),
+    stderr: str(streams, 'stderr'),
+    truncatedStdout: flag('truncatedStdout'),
+    truncatedStderr: flag('truncatedStderr'),
+    reason: typeof outer.reason === 'string' ? outer.reason : null,
+    detail: typeof outer.detail === 'string' ? outer.detail : null,
+  }
+}
+
+/** Collect paths from a textarea: one per line, trimmed, blanks and repeats dropped. */
+export function parsePaths(text: string): string[] {
+  return [...new Set(text.split('\n').map(line => line.trim()).filter(Boolean))]
+}
+
+/** Bytes in binary units with explicit rounding: `512 B`, `1.5 KiB`, `12.0 MiB`. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024)
+    return `${bytes} B`
+  const units = ['KiB', 'MiB', 'GiB', 'TiB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value.toFixed(1)} ${units[unit]}`
+}
+
+/** `2026-10-08 14:03:12 UTC`: absolute timestamps in the detail timeline. */
+export function formatTimestamp(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 19).replace('T', ' ')} UTC`
 }
