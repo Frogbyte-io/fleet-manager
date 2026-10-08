@@ -136,6 +136,26 @@ impl Summary {
                 }));
             }
         }
+        // A scenario the suite reports but this runner does not list is
+        // drift, never a silent pass.
+        for row in reported {
+            if !SCENARIOS.contains(&row.scenario.as_str())
+                && !results.iter().any(|seen: &ResultRow| {
+                    seen.scenario == row.scenario && seen.target == row.target
+                })
+            {
+                results.push(ResultRow {
+                    status: Status::Fail,
+                    reason: format!(
+                        "the suite reported scenario {:?}, which lab_acceptance::SCENARIOS does not \
+                         list; add it there (status reported: {})",
+                        row.scenario,
+                        status_id(row.status)
+                    ),
+                    ..row.clone()
+                });
+            }
+        }
         Self {
             live,
             target_filter,
@@ -441,6 +461,20 @@ mod tests {
         let summary = Summary::build(true, None, &["PVE9".to_owned()], &reported, true);
         assert_eq!(summary.results.len(), 2);
         assert_eq!(summary.count(Status::Fail), 1);
+        assert!(!summary.ok());
+    }
+
+    #[test]
+    fn an_unlisted_scenario_fails_the_run() {
+        let reported = [
+            row("lease-exec-destroy", None, Status::Pass),
+            row("ttl-expiry-restart", None, Status::Pass),
+            row("new-scenario", None, Status::Pass),
+        ];
+        let summary = Summary::build(false, None, &[], &reported, true);
+        assert_eq!(summary.results.len(), 3);
+        assert_eq!(summary.count(Status::Fail), 1);
+        assert!(summary.results[2].reason.contains("SCENARIOS"));
         assert!(!summary.ok());
     }
 

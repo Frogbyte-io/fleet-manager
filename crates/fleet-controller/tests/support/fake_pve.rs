@@ -343,6 +343,26 @@ impl FakePve {
                 Self::ok(&serde_json::Value::Array(entries))
             }
             (PveHttpMethod::Get, ["cluster", "nextid"]) => {
+                // `?vmid=N` asks whether N is free: PVE answers N, or 400.
+                if let Some(requested) = query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("vmid="))
+                    .and_then(|vmid| vmid.parse::<u32>().ok())
+                {
+                    return if state.guests.contains_key(&requested) {
+                        Ok(PveHttpResponse {
+                            status: 400,
+                            body: serde_json::json!({
+                                "data": null,
+                                "errors": {"vmid": format!("VM {requested} already exists")}
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        })
+                    } else {
+                        Self::ok(&serde_json::Value::String(requested.to_string()))
+                    };
+                }
                 let next = (FIRST_LAB_VMID..)
                     .find(|vmid| !state.guests.contains_key(vmid))
                     .unwrap();

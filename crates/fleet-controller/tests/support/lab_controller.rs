@@ -960,7 +960,8 @@ impl Controller {
                 }
                 LeaseState::CleanupFailed => {
                     let visible = record.is_some_and(|record| {
-                        record.vmid.is_some()
+                        record.lease_id.as_deref() == Some(lease.id.as_str())
+                            && record.vmid.is_some()
                             && record.node.is_some()
                             && record.account_id.is_some()
                     });

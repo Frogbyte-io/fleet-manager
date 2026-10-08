@@ -996,10 +996,23 @@ mod live {
             created.stderr
         );
         let vmid = created.json["vmid"].as_u64().unwrap_or_default();
-        check!(
-            u32::try_from(vmid).is_ok_and(|vmid| run.target.range.contains(vmid)),
-            "the Lab guest {vmid} lies outside the VMID range"
-        );
+        if !u32::try_from(vmid).is_ok_and(|vmid| run.target.range.contains(vmid)) {
+            // The harness never destroys outside the range itself: Fleet's
+            // own cleanup removes the guest it just created there.
+            let id = created.json["id"].as_str().unwrap_or_default();
+            let bound = LEASE_BOUND.as_secs().to_string();
+            let destroyed = run
+                .controller
+                .fleetctl(
+                    &args(&["lab", "destroy", id, "--wait", "--timeout", &bound]),
+                    None,
+                )
+                .await?;
+            return Err(format!(
+                "the Lab guest {vmid} lies outside the VMID range; Fleet's destroy ended {}",
+                destroyed.json["state"]
+            ));
+        }
         run.log(&format!("lease ready on guest {vmid}"));
         Ok(created.json)
     }
@@ -1078,7 +1091,7 @@ mod live {
             .fleetctl(&args(&["machines", "list", "--tag", "lab"]), None)
             .await?;
         check!(
-            machines.json["items"].as_array().is_none_or(Vec::is_empty),
+            machines.success && machines.json["items"].as_array().is_some_and(Vec::is_empty),
             "the Lab machine outlived its lease: {}",
             machines.json
         );
