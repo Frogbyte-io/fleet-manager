@@ -1509,6 +1509,258 @@
         }
       }
     },
+    "/api/v1/lab/artifacts": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Lists the stored Lab artifacts, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listLabArtifacts",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "query",
+            "description": "Only artifacts from this lease.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "projectId",
+            "in": "query",
+            "description": "Only artifacts from leases serving this project.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The artifacts, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_LabArtifactDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query parameters are malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/artifacts/{artifactId}": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Reads one Lab artifact's metadata.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown artifact.",
+        "operationId": "getLabArtifact",
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "description": "The artifact's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The artifact's metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabArtifactDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The artifact does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/artifacts/{artifactId}/content": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Streams one Lab artifact's bytes. The controller re-hashes them first\nand refuses (409) bytes that no longer match the recorded size and\nsha256; the response carries the digest as `Repr-Digest`\n(`sha-256=:<base64>:`) and `ETag` (`\"sha256:<hex>\"`) so the client can\nverify what it received.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown artifact, or\nbytes that are missing or corrupt.",
+        "operationId": "downloadLabArtifact",
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "description": "The artifact's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The artifact's verified bytes.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The bytes' sha256, as `\"sha256:<hex>\"`."
+              },
+              "Repr-Digest": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The bytes' sha256, as `sha-256=:<base64>:` (RFC 9530)."
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactBytes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not download Lab artifacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The artifact does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The stored bytes are missing or no longer match their digest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no artifact store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases": {
       "get": {
         "tags": [
@@ -1736,6 +1988,99 @@
           },
           "500": {
             "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/leases/{leaseId}/artifacts/collect": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Copies declared guest files from a ready lease into the artifact store\nas a `lab.collect` operation. A path that cannot be copied fails the\noperation and is recorded on the lease (`collectionFailure`); the paths\nthat were copied stay stored. Collection never changes the lease or its\ncleanup.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease, a lease\nthat is not ready, or invalid paths.",
+        "operationId": "collectLabArtifacts",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CollectArtifactsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The copy is queued as a `lab.collect` operation; its result lists the stored artifacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is not ready or has expired, its guest has no Lab machine, or the paths are invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not collect Lab artifacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no artifact store.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6904,6 +7249,11 @@
           }
         }
       },
+      "ArtifactBytes": {
+        "type": "string",
+        "format": "binary",
+        "description": "An artifact's raw bytes, as the download route streams them."
+      },
       "AssociatedGuestDto": {
         "type": "object",
         "description": "One discovered guest with its Fleet-machine association candidates.",
@@ -7536,6 +7886,51 @@
           "source": {
             "type": "string",
             "description": "What observed it."
+          }
+        }
+      },
+      "CollectArtifactsRequest": {
+        "type": "object",
+        "description": "Guest paths to copy from a ready lease.",
+        "required": [
+          "paths"
+        ],
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "1 to 16 distinct absolute guest paths of regular files, each at most\n1024 bytes, without `.`, `..`, or empty components or control\ncharacters. Each file must fit the controller's artifact size cap."
+          }
+        }
+      },
+      "CollectionFailureDto": {
+        "type": "object",
+        "description": "A lease's last failed artifact collection.",
+        "required": [
+          "operationId",
+          "reason",
+          "detail",
+          "failedAt"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "A bounded detail naming the paths and why each failed."
+          },
+          "failedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it failed (epoch milliseconds)."
+          },
+          "operationId": {
+            "type": "string",
+            "description": "The `lab.collect` operation that failed."
+          },
+          "reason": {
+            "type": "string",
+            "description": "A stable reason id, such as `collection_partial`, `collection_failed`,\nor `lease_not_ready`."
           }
         }
       },
@@ -8673,6 +9068,82 @@
           }
         }
       },
+      "LabArtifactDto": {
+        "type": "object",
+        "description": "One stored Lab artifact's metadata.",
+        "required": [
+          "id",
+          "leaseId",
+          "owner",
+          "kind",
+          "name",
+          "sizeBytes",
+          "sha256",
+          "location",
+          "createdAt",
+          "retainUntil"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was stored (epoch milliseconds)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The artifact's identity."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`exec-log` or `file`."
+          },
+          "leaseId": {
+            "type": "string",
+            "description": "The lease it came from."
+          },
+          "location": {
+            "type": "string",
+            "description": "Where the bytes live, relative to the controller's artifact store."
+          },
+          "name": {
+            "type": "string",
+            "description": "`exec-<operation>.log` for an exec log; the guest path for a file."
+          },
+          "operationId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `lab.exec` or `lab.collect` operation that produced it."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The lease's owner."
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project that lease served, when it recorded one."
+          },
+          "retainUntil": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the retention sweep deletes it (epoch milliseconds)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The lowercase hex sha256 of the bytes."
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "LabTemplateContentDto": {
         "type": "object",
         "description": "The frozen template content.",
@@ -8968,6 +9439,17 @@
                   "null"
                 ],
                 "description": "The guest's IPv4 address, once its agent reported one."
+              },
+              "collectionFailure": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CollectionFailureDto",
+                    "description": "The lease's last failed artifact collection, when any (FM-721).\nCollection never changes the lease or holds up its cleanup."
+                  }
+                ]
               },
               "endpointId": {
                 "type": [
@@ -10616,6 +11098,100 @@
                 "versionId": {
                   "type": "string",
                   "description": "Immutable version identity."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_LabArtifactDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One stored Lab artifact's metadata.",
+              "required": [
+                "id",
+                "leaseId",
+                "owner",
+                "kind",
+                "name",
+                "sizeBytes",
+                "sha256",
+                "location",
+                "createdAt",
+                "retainUntil"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When it was stored (epoch milliseconds)."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The artifact's identity."
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "`exec-log` or `file`."
+                },
+                "leaseId": {
+                  "type": "string",
+                  "description": "The lease it came from."
+                },
+                "location": {
+                  "type": "string",
+                  "description": "Where the bytes live, relative to the controller's artifact store."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "`exec-<operation>.log` for an exec log; the guest path for a file."
+                },
+                "operationId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The `lab.exec` or `lab.collect` operation that produced it."
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "The lease's owner."
+                },
+                "projectId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The project that lease served, when it recorded one."
+                },
+                "retainUntil": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the retention sweep deletes it (epoch milliseconds)."
+                },
+                "sha256": {
+                  "type": "string",
+                  "description": "The lowercase hex sha256 of the bytes."
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "The size in bytes.",
+                  "minimum": 0
                 }
               }
             },
@@ -13451,6 +14027,91 @@
           }
         }
       },
+      "Resource_LabArtifactDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One stored Lab artifact's metadata.",
+            "required": [
+              "id",
+              "leaseId",
+              "owner",
+              "kind",
+              "name",
+              "sizeBytes",
+              "sha256",
+              "location",
+              "createdAt",
+              "retainUntil"
+            ],
+            "properties": {
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it was stored (epoch milliseconds)."
+              },
+              "id": {
+                "type": "string",
+                "description": "The artifact's identity."
+              },
+              "kind": {
+                "type": "string",
+                "description": "`exec-log` or `file`."
+              },
+              "leaseId": {
+                "type": "string",
+                "description": "The lease it came from."
+              },
+              "location": {
+                "type": "string",
+                "description": "Where the bytes live, relative to the controller's artifact store."
+              },
+              "name": {
+                "type": "string",
+                "description": "`exec-<operation>.log` for an exec log; the guest path for a file."
+              },
+              "operationId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `lab.exec` or `lab.collect` operation that produced it."
+              },
+              "owner": {
+                "type": "string",
+                "description": "The lease's owner."
+              },
+              "projectId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The project that lease served, when it recorded one."
+              },
+              "retainUntil": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the retention sweep deletes it (epoch milliseconds)."
+              },
+              "sha256": {
+                "type": "string",
+                "description": "The lowercase hex sha256 of the bytes."
+              },
+              "sizeBytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The size in bytes.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
       "Resource_LabTemplateDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -13665,6 +14326,17 @@
                       "null"
                     ],
                     "description": "The guest's IPv4 address, once its agent reported one."
+                  },
+                  "collectionFailure": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/CollectionFailureDto",
+                        "description": "The lease's last failed artifact collection, when any (FM-721).\nCollection never changes the lease or holds up its cleanup."
+                      }
+                    ]
                   },
                   "endpointId": {
                     "type": [

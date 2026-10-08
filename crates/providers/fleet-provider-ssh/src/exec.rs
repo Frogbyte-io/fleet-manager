@@ -174,7 +174,7 @@ impl ExecutionLimiter {
         })
     }
 
-    fn acquire(&self) -> bool {
+    pub(crate) fn acquire(&self) -> bool {
         let mut held = self.held.lock().unwrap();
         if *held >= self.max {
             return false;
@@ -183,7 +183,7 @@ impl ExecutionLimiter {
         true
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         let mut held = self.held.lock().unwrap();
         *held -= 1;
         self.released.notify_one();

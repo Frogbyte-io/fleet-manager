@@ -356,3 +356,62 @@ fn the_limiter_saturates_without_starting_sessions() {
     );
     assert_eq!(limiter.held(), 0, "a finished attempt releases its permit");
 }
+
+/// FM-721: a guest file arrives byte for byte, hostile paths never reach a
+/// remote shell, and the guest's refusals are outcomes, not errors.
+#[test]
+fn a_file_copies_byte_for_byte_and_refusals_are_outcomes() {
+    use fleet_provider_ssh::{FetchOutcome, fetch_file};
+
+    let sshd = start_sshd();
+    let dir = tempfile::tempdir().unwrap();
+    let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
+    provider
+        .pin(
+            &provider
+                .probe_host_key("127.0.0.1", sshd.port, Duration::from_secs(10))
+                .unwrap(),
+        )
+        .unwrap();
+    let guest = tempfile::tempdir().unwrap();
+    // Binary content, under a name a shell would mangle.
+    let hostile = guest.path().join("a b; $(touch pwned) 'q'.bin");
+    let content: Vec<u8> = (0..=255_u8).cycle().take(200_000).collect();
+    std::fs::write(&hostile, &content).unwrap();
+    let limiter = ExecutionLimiter::new(4);
+    let fetch = |path: &std::path::Path, max: u64| {
+        let mut sink = Vec::new();
+        let outcome = fetch_file(
+            &provider,
+            &limiter,
+            &spec(&sshd),
+            &path.display().to_string(),
+            max,
+            Duration::from_secs(30),
+            &mut sink,
+        )
+        .unwrap();
+        (outcome, sink)
+    };
+
+    let (outcome, bytes) = fetch(&hostile, 1_000_000);
+    assert_eq!(outcome, FetchOutcome::Fetched { bytes: 200_000 });
+    assert_eq!(bytes, content);
+    assert!(
+        !guest.path().join("pwned").exists() && !std::path::Path::new("pwned").exists(),
+        "the path reached a shell"
+    );
+
+    // Exactly at the cap is fine; one byte over is refused.
+    assert_eq!(
+        fetch(&hostile, 200_000).0,
+        FetchOutcome::Fetched { bytes: 200_000 }
+    );
+    assert_eq!(fetch(&hostile, 199_999).0, FetchOutcome::TooLarge);
+    assert_eq!(
+        fetch(&guest.path().join("absent"), 10).0,
+        FetchOutcome::Missing
+    );
+    assert_eq!(fetch(guest.path(), 10).0, FetchOutcome::NotAFile);
+    assert_eq!(limiter.held(), 0, "every copy releases its permit");
+}

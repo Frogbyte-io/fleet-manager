@@ -288,6 +288,11 @@ export interface ApplyPlanRequest {
 }
 
 /**
+ * An artifact's raw bytes, as the download route streams them.
+ */
+export type ArtifactBytes = Blob;
+
+/**
  * One guest network interface.
  */
 export interface ProviderInterfaceDto {
@@ -633,6 +638,35 @@ export interface CheckoutFactDto {
   root: string;
   /** What observed it. */
   source: string;
+}
+
+/**
+ * Guest paths to copy from a ready lease.
+ */
+export interface CollectArtifactsRequest {
+  /**
+     * 1 to 16 distinct absolute guest paths of regular files, each at most
+     * 1024 bytes, without `.`, `..`, or empty components or control
+     * characters. Each file must fit the controller's artifact size cap.
+     */
+  paths: string[];
+}
+
+/**
+ * A lease's last failed artifact collection.
+ */
+export interface CollectionFailureDto {
+  /** A bounded detail naming the paths and why each failed. */
+  detail: string;
+  /** When it failed (epoch milliseconds). */
+  failedAt: number;
+  /** The `lab.collect` operation that failed. */
+  operationId: string;
+  /**
+     * A stable reason id, such as `collection_partial`, `collection_failed`,
+     * or `lease_not_ready`.
+     */
+  reason: string;
 }
 
 /**
@@ -1212,6 +1246,45 @@ export interface ImportTailnetDeviceRequest {
 }
 
 /**
+ * One stored Lab artifact's metadata.
+ */
+export interface LabArtifactDto {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The artifact's identity. */
+  id: string;
+  /** `exec-log` or `file`. */
+  kind: string;
+  /** The lease it came from. */
+  leaseId: string;
+  /** Where the bytes live, relative to the controller's artifact store. */
+  location: string;
+  /** `exec-<operation>.log` for an exec log; the guest path for a file. */
+  name: string;
+  /**
+     * The `lab.exec` or `lab.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The lease's owner. */
+  owner: string;
+  /**
+     * The project that lease served, when it recorded one.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** When the retention sweep deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+}
+
+/**
  * The frozen template content.
  */
 export interface LabTemplateContentDto {
@@ -1434,6 +1507,7 @@ export type LeaseDetailDto = LeaseDto & ({
      * @nullable
      */
   address?: string | null;
+  collectionFailure?: null | CollectionFailureDto;
   /**
      * That machine's SSH endpoint.
      * @nullable
@@ -2228,6 +2302,58 @@ export type PageImageBuildDtoItemsItem = {
 export interface PageImageBuildDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageImageBuildDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One stored Lab artifact's metadata.
+ */
+export type PageLabArtifactDtoItemsItem = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The artifact's identity. */
+  id: string;
+  /** `exec-log` or `file`. */
+  kind: string;
+  /** The lease it came from. */
+  leaseId: string;
+  /** Where the bytes live, relative to the controller's artifact store. */
+  location: string;
+  /** `exec-<operation>.log` for an exec log; the guest path for a file. */
+  name: string;
+  /**
+     * The `lab.exec` or `lab.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The lease's owner. */
+  owner: string;
+  /**
+     * The project that lease served, when it recorded one.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** When the retention sweep deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageLabArtifactDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageLabArtifactDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -3862,6 +3988,56 @@ export interface ResourceImageBuildDto {
 }
 
 /**
+ * One stored Lab artifact's metadata.
+ */
+export type ResourceLabArtifactDtoData = {
+  /** When it was stored (epoch milliseconds). */
+  createdAt: number;
+  /** The artifact's identity. */
+  id: string;
+  /** `exec-log` or `file`. */
+  kind: string;
+  /** The lease it came from. */
+  leaseId: string;
+  /** Where the bytes live, relative to the controller's artifact store. */
+  location: string;
+  /** `exec-<operation>.log` for an exec log; the guest path for a file. */
+  name: string;
+  /**
+     * The `lab.exec` or `lab.collect` operation that produced it.
+     * @nullable
+     */
+  operationId?: string | null;
+  /** The lease's owner. */
+  owner: string;
+  /**
+     * The project that lease served, when it recorded one.
+     * @nullable
+     */
+  projectId?: string | null;
+  /** When the retention sweep deletes it (epoch milliseconds). */
+  retainUntil: number;
+  /** The lowercase hex sha256 of the bytes. */
+  sha256: string;
+  /**
+     * The size in bytes.
+     * @minimum 0
+     */
+  sizeBytes: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabArtifactDto {
+  /** One stored Lab artifact's metadata. */
+  data: ResourceLabArtifactDtoData;
+}
+
+/**
  * One template draft.
  */
 export type ResourceLabTemplateDtoData = {
@@ -3988,6 +4164,7 @@ export type ResourceLeaseDetailDtoData = LeaseDto & ({
      * @nullable
      */
   address?: string | null;
+  collectionFailure?: null | CollectionFailureDto;
   /**
      * That machine's SSH endpoint.
      * @nullable
@@ -5572,6 +5749,17 @@ limit?: number;
  * The opaque cursor: the last recipe id of the previous page.
  */
 cursor?: string;
+};
+
+export type ListLabArtifactsParams = {
+/**
+ * Only artifacts from this lease.
+ */
+leaseId?: string;
+/**
+ * Only artifacts from leases serving this project.
+ */
+projectId?: string;
 };
 
 export type ListLabLeasesParams = {
@@ -7233,6 +7421,226 @@ export const promoteImageVersion = async (versionId: string, options?: RequestIn
 
 
 
+export type listLabArtifactsResponse200 = {
+  data: PageLabArtifactDto
+  status: 200
+}
+
+export type listLabArtifactsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type listLabArtifactsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabArtifactsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listLabArtifactsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type listLabArtifactsResponseSuccess = (listLabArtifactsResponse200) & {
+  headers: Headers;
+};
+export type listLabArtifactsResponseError = (listLabArtifactsResponse400 | listLabArtifactsResponse403 | listLabArtifactsResponse500 | listLabArtifactsResponse503) & {
+  headers: Headers;
+};
+
+export type listLabArtifactsResponse = (listLabArtifactsResponseSuccess | listLabArtifactsResponseError)
+
+export const getListLabArtifactsUrl = (params?: ListLabArtifactsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/lab/artifacts?${stringifiedParams}` : `/api/v1/lab/artifacts`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the stored Lab artifacts, newest first.
+ */
+export const listLabArtifacts = async (params?: ListLabArtifactsParams, options?: RequestInit): Promise<listLabArtifactsResponse> => {
+
+  const res = await fetch(getListLabArtifactsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabArtifactsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabArtifactsResponse
+}
+
+
+
+export type getLabArtifactResponse200 = {
+  data: ResourceLabArtifactDto
+  status: 200
+}
+
+export type getLabArtifactResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getLabArtifactResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabArtifactResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getLabArtifactResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type getLabArtifactResponseSuccess = (getLabArtifactResponse200) & {
+  headers: Headers;
+};
+export type getLabArtifactResponseError = (getLabArtifactResponse403 | getLabArtifactResponse404 | getLabArtifactResponse500 | getLabArtifactResponse503) & {
+  headers: Headers;
+};
+
+export type getLabArtifactResponse = (getLabArtifactResponseSuccess | getLabArtifactResponseError)
+
+export const getGetLabArtifactUrl = (artifactId: string,) => {
+
+
+
+
+  return `/api/v1/lab/artifacts/${artifactId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown artifact.
+ * @summary Reads one Lab artifact's metadata.
+ */
+export const getLabArtifact = async (artifactId: string, options?: RequestInit): Promise<getLabArtifactResponse> => {
+
+  const res = await fetch(getGetLabArtifactUrl(artifactId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabArtifactResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabArtifactResponse
+}
+
+
+
+export type downloadLabArtifactResponse200 = {
+  data: Blob
+  status: 200
+}
+
+export type downloadLabArtifactResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type downloadLabArtifactResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type downloadLabArtifactResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type downloadLabArtifactResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type downloadLabArtifactResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type downloadLabArtifactResponseSuccess = (downloadLabArtifactResponse200) & {
+  headers: Headers;
+};
+export type downloadLabArtifactResponseError = (downloadLabArtifactResponse403 | downloadLabArtifactResponse404 | downloadLabArtifactResponse409 | downloadLabArtifactResponse500 | downloadLabArtifactResponse503) & {
+  headers: Headers;
+};
+
+export type downloadLabArtifactResponse = (downloadLabArtifactResponseSuccess | downloadLabArtifactResponseError)
+
+export const getDownloadLabArtifactUrl = (artifactId: string,) => {
+
+
+
+
+  return `/api/v1/lab/artifacts/${artifactId}/content`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown artifact, or
+ * bytes that are missing or corrupt.
+ * @summary Streams one Lab artifact's bytes. The controller re-hashes them first
+and refuses (409) bytes that no longer match the recorded size and
+sha256; the response carries the digest as `Repr-Digest`
+(`sha-256=:<base64>:`) and `ETag` (`"sha256:<hex>"`) so the client can
+verify what it received.
+ */
+export const downloadLabArtifact = async (artifactId: string, options?: RequestInit): Promise<downloadLabArtifactResponse> => {
+
+  const res = await fetch(getDownloadLabArtifactUrl(artifactId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.blob();
+  const data: downloadLabArtifactResponse['data'] = body as downloadLabArtifactResponse['data']
+  return { data, status: res.status, headers: res.headers } as downloadLabArtifactResponse
+}
+
+
+
 export type listLabLeasesResponse200 = {
   data: PageLeaseDto
   status: 200
@@ -7496,6 +7904,91 @@ export const getLabLease = async (leaseId: string, options?: RequestInit): Promi
 
   const data: getLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as getLabLeaseResponse
+}
+
+
+
+export type collectLabArtifactsResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type collectLabArtifactsResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type collectLabArtifactsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type collectLabArtifactsResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type collectLabArtifactsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type collectLabArtifactsResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type collectLabArtifactsResponseSuccess = (collectLabArtifactsResponse202) & {
+  headers: Headers;
+};
+export type collectLabArtifactsResponseError = (collectLabArtifactsResponse400 | collectLabArtifactsResponse403 | collectLabArtifactsResponse404 | collectLabArtifactsResponse500 | collectLabArtifactsResponse503) & {
+  headers: Headers;
+};
+
+export type collectLabArtifactsResponse = (collectLabArtifactsResponseSuccess | collectLabArtifactsResponseError)
+
+export const getCollectLabArtifactsUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/artifacts/collect`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready, or invalid paths.
+ * @summary Copies declared guest files from a ready lease into the artifact store
+as a `lab.collect` operation. A path that cannot be copied fails the
+operation and is recorded on the lease (`collectionFailure`); the paths
+that were copied stay stored. Collection never changes the lease or its
+cleanup.
+ */
+export const collectLabArtifacts = async (leaseId: string,
+    collectArtifactsRequest: CollectArtifactsRequest, options?: RequestInit): Promise<collectLabArtifactsResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCollectLabArtifactsUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(collectArtifactsRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: collectLabArtifactsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as collectLabArtifactsResponse
 }
 
 

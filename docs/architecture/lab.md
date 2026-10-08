@@ -140,7 +140,14 @@ The current clone step works as follows:
 
 `fleetctl lab exec` creates a normal authorized operation targeting the leased node. It validates that the caller owns/can use the lease and that the lease is ready. Command output limits and secret rules are identical to machine exec.
 
-The first Lab release guarantees command execution and bounded/redacted logs needed to operate the lease. Rich collection of declared paths, test reports, screenshots, and result bundles is a follow-on. Artifact bytes eventually live in a configured controller volume/object store while SQLite retains metadata and digest; collection failure never silently suppresses cleanup.
+Lab artifacts (FM-721) are exec logs and explicitly collected guest files that outlive their lease. SQLite (`lab_artifacts`, migration 0041) keeps each one's lease, project, owner (the lease's owner), kind (`exec-log` or `file`), name, size, sha256, store-relative location, producing operation, and retention deadline; the bytes never enter SQLite. They live in the configured controller directory (`lab_artifacts_dir`), content-addressed at `sha256/<2 hex>/<64 hex>`, so identical content is stored once. Writes stage under `tmp/` and are renamed into place; every location must have exactly that shape and canonicalize inside the store root; one artifact is capped at `lab_artifact_max_bytes`. A download re-hashes the bytes and refuses a size or digest mismatch, then streams them with `Repr-Digest` and `ETag`.
+
+- After every `lab.exec`, the controller keeps the command's bounded output (the same 3,000-byte-per-stream result machine exec returns), scrubbed of URL and `user:password@` credentials, as an `exec-log` artifact. A failure to store it is logged and never changes the exec's outcome.
+- `POST /lab/leases/{id}/artifacts/collect` (permission `lab.artifacts`, audited) queues a `lab.collect` operation for 1–16 absolute guest paths. Paths may not contain `.`, `..`, or empty components or control characters. The executor re-checks that the lease is ready, then copies each regular file over the lease machine's verified SSH endpoint through `fleet-provider-ssh` (the path rides the shell-inert metadata blob; the raw bytes stream on stdout and are cut off past the cap).
+- Collection never changes the lease. A path that cannot be copied fails the operation (`collection_partial` or `collection_failed`, with a per-path reason), keeps whatever was copied, and records the failure beside the lease (`lab_artifact_collection_failures`, shown as `collectionFailure` in the lease detail). A collection that runs after the lease left `ready` fails the same way. Release and cleanup never wait for collection, so a failed collection cannot block or skip cleanup.
+- The Lab sweeper deletes artifacts past their retention deadline (`lab_artifact_retention_seconds`, default 7 days), audited as `lab_artifact_expired`; it removes the bytes only when no other artifact still references them.
+
+Object storage, test-report parsing, screenshots, and result bundles remain follow-ons.
 
 ## Later USB and physical resources
 

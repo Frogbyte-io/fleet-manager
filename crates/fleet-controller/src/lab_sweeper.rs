@@ -16,6 +16,8 @@
 //!    trusted Proxmox account against the Lab records, and reports, once
 //!    per guest, any that no live lease or provision owns. It never deletes
 //!    a guest it cannot attribute.
+//! 5. deletes Lab artifacts past their retention deadline (FM-721), when
+//!    the artifact store is composed.
 //!
 //! The rules (what is stuck, what is owned, what is due) live in
 //! `fleet_application::lab`; this module only reads rows, applies them, and
@@ -135,6 +137,8 @@ pub struct TickReport {
     pub compensated: usize,
     /// Guests newly reported as unowned this tick.
     pub orphans: Vec<LabGuest>,
+    /// Lab artifacts deleted past their retention deadline.
+    pub artifacts_expired: usize,
     /// Per-lease steps that failed this tick (logged by the loop and
     /// retried on the next tick); the rest of the tick still ran.
     pub failures: Vec<String>,
@@ -150,6 +154,7 @@ pub struct LabSweeper {
     audit: Arc<dyn AuditPort>,
     events: Option<Arc<fleet_application::events::EventHub>>,
     inventory: Option<Arc<dyn LabGuestInventory>>,
+    artifacts: Option<Arc<fleet_application::lab_artifacts::LabArtifacts>>,
     /// Orphans already reported by this process, so each is audited once.
     reported: Mutex<HashSet<(String, u32)>>,
 }
@@ -172,6 +177,7 @@ impl LabSweeper {
             audit,
             events: None,
             inventory: None,
+            artifacts: None,
             reported: Mutex::new(HashSet::new()),
         }
     }
@@ -187,6 +193,16 @@ impl LabSweeper {
     #[must_use]
     pub fn with_inventory(mut self, inventory: Arc<dyn LabGuestInventory>) -> Self {
         self.inventory = Some(inventory);
+        self
+    }
+
+    /// Deletes Lab artifacts past their retention deadline (FM-721).
+    #[must_use]
+    pub fn with_artifacts(
+        mut self,
+        artifacts: Arc<fleet_application::lab_artifacts::LabArtifacts>,
+    ) -> Self {
+        self.artifacts = Some(artifacts);
         self
     }
 
@@ -351,6 +367,23 @@ impl LabSweeper {
                         )),
                     }
                 }
+            }
+        }
+
+        // 5. Artifact retention. Its own failures never stall the lease
+        // steps above; they are reported and retried next tick.
+        if let Some(artifacts) = &self.artifacts {
+            match artifacts
+                .sweep_retention(&fleet_auth::LanAllowAllAuthorizer, &principal, now)
+                .await
+            {
+                Ok(retention) => {
+                    report.artifacts_expired = retention.deleted;
+                    report.failures.extend(retention.failures);
+                }
+                Err(error) => report
+                    .failures
+                    .push(format!("sweeping expired artifacts: {error}")),
             }
         }
         Ok(report)

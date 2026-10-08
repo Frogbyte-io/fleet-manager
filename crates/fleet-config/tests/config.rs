@@ -331,6 +331,9 @@ fn validation_creates_the_state_directory() {
         data_dir: state.clone(),
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
+        lab_artifacts_dir: dir.path().join("lab-artifacts"),
+        lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+        lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
     };
@@ -351,6 +354,9 @@ fn an_uncreatable_state_directory_fails_validation() {
         data_dir: blocker.join("state"),
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
+        lab_artifacts_dir: dir.path().join("lab-artifacts"),
+        lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+        lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
     };
@@ -367,6 +373,9 @@ fn a_missing_master_key_file_fails_validation() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().join("absent_key")),
         lab_sweep_interval_seconds: 60,
+        lab_artifacts_dir: dir.path().join("lab-artifacts"),
+        lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+        lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
     };
@@ -383,6 +392,9 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(dir.path().to_path_buf()),
         lab_sweep_interval_seconds: 60,
+        lab_artifacts_dir: dir.path().join("lab-artifacts"),
+        lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+        lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
     };
@@ -405,6 +417,9 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             data_dir: dir.path().join("state"),
             master_key_file: Some(key.clone()),
             lab_sweep_interval_seconds: 60,
+            lab_artifacts_dir: dir.path().join("lab-artifacts"),
+            lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+            lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
         };
@@ -425,6 +440,9 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(key),
         lab_sweep_interval_seconds: 60,
+        lab_artifacts_dir: dir.path().join("lab-artifacts"),
+        lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+        lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
     };
@@ -454,6 +472,9 @@ fn no_diagnostic_surface_contains_secret_material() {
         data_dir: dir.path().join("state"),
         master_key_file: Some(key.clone()),
         lab_sweep_interval_seconds: 60,
+        lab_artifacts_dir: dir.path().join("lab-artifacts"),
+        lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+        lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
     };
@@ -521,4 +542,75 @@ fn the_lab_sweep_interval_defaults_and_layers() {
     )
     .unwrap();
     assert_eq!(overridden.lab_sweep_interval_seconds, 15);
+}
+
+#[test]
+fn the_lab_artifact_settings_default_layer_and_refuse_zero() {
+    let config = fleet_config::load(None, &|_| None).unwrap();
+    assert_eq!(
+        config.lab_artifacts_dir,
+        config
+            .data_dir
+            .join(fleet_config::DEFAULT_LAB_ARTIFACTS_SUBDIR)
+    );
+    assert_eq!(
+        config.lab_artifact_retention_seconds,
+        fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS
+    );
+    assert_eq!(
+        config.lab_artifact_max_bytes,
+        fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES
+    );
+    assert!(
+        config
+            .summary()
+            .contains("lab_artifact_max_bytes = 67108864")
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!(
+            "{VALID_FILE}lab_artifacts_dir = \"/srv/fleet-artifacts\"\nlab_artifact_retention_seconds = 3600\nlab_artifact_max_bytes = 1024\n"
+        ),
+    );
+    let from_file = fleet_config::load(Some(&file), &none_env).unwrap();
+    assert_eq!(
+        from_file.lab_artifacts_dir,
+        std::path::PathBuf::from("/srv/fleet-artifacts")
+    );
+    assert_eq!(from_file.lab_artifact_retention_seconds, 3600);
+    assert_eq!(from_file.lab_artifact_max_bytes, 1024);
+    let overridden = fleet_config::load(
+        Some(&file),
+        &env_of(&[
+            (
+                fleet_config::LAB_ARTIFACTS_DIR_VAR,
+                "/var/lib/fleet/artifacts",
+            ),
+            (fleet_config::LAB_ARTIFACT_RETENTION_VAR, "60"),
+            (fleet_config::LAB_ARTIFACT_MAX_BYTES_VAR, "2048"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        overridden.lab_artifacts_dir,
+        std::path::PathBuf::from("/var/lib/fleet/artifacts")
+    );
+    assert_eq!(overridden.lab_artifact_retention_seconds, 60);
+    assert_eq!(overridden.lab_artifact_max_bytes, 2048);
+
+    for (var, value) in [
+        (fleet_config::LAB_ARTIFACT_RETENTION_VAR, "0"),
+        (fleet_config::LAB_ARTIFACT_MAX_BYTES_VAR, "0"),
+        (fleet_config::LAB_ARTIFACT_MAX_BYTES_VAR, "lots"),
+    ] {
+        assert!(
+            matches!(
+                fleet_config::load(None, &env_of(&[(var, value)])),
+                Err(fleet_config::ConfigError::LabArtifactSettingInvalid { .. })
+            ),
+            "{var}={value} was accepted"
+        );
+    }
 }

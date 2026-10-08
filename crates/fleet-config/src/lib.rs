@@ -14,12 +14,22 @@
 //! 3. Environment variables (`FLEET_LISTEN`, `FLEET_TAILSCALE_SERVE_LISTEN`,
 //!    `FLEET_WEB_DIST`, `FLEET_DATA_DIR`, `FLEET_MASTER_KEY_FILE`,
 //!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, `FLEET_LAB_MEMORY_OVERCOMMIT`,
-//!    `FLEET_LAB_CPU_OVERCOMMIT`, `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`).
+//!    `FLEET_LAB_CPU_OVERCOMMIT`, `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`,
+//!    `FLEET_LAB_ARTIFACTS_DIR`, `FLEET_LAB_ARTIFACT_RETENTION_SECONDS`,
+//!    `FLEET_LAB_ARTIFACT_MAX_BYTES`).
 //!
 //! `FLEET_LAB_SWEEP_INTERVAL_SECONDS` (TOML `lab_sweep_interval_seconds`,
 //! default 60) is the Lab sweeper's interval; `0` disables the background
 //! sweeper and leaves the manual sweep. A value that is not a whole number
 //! of seconds fails configuration loading.
+//!
+//! Lab artifacts (FM-721) keep their bytes under `FLEET_LAB_ARTIFACTS_DIR`
+//! (TOML `lab_artifacts_dir`, default `<data_dir>/lab-artifacts`), for
+//! `FLEET_LAB_ARTIFACT_RETENTION_SECONDS` (TOML
+//! `lab_artifact_retention_seconds`, default 7 days), and refuse any one
+//! artifact above `FLEET_LAB_ARTIFACT_MAX_BYTES` (TOML
+//! `lab_artifact_max_bytes`, default 64 MiB). Both numbers must be whole and
+//! positive.
 //!
 //! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
 //! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
@@ -66,6 +76,18 @@ pub const LAB_CAPACITY_MAX_AGE_VAR: &str = "FLEET_LAB_CAPACITY_MAX_AGE_SECONDS";
 pub const MAX_LAB_OVERCOMMIT: f64 = 16.0;
 /// The largest Lab capacity observation age accepted: one day.
 pub const MAX_LAB_CAPACITY_AGE_SECONDS: u64 = 86_400;
+/// Environment variable holding the Lab artifact directory (FM-721).
+pub const LAB_ARTIFACTS_DIR_VAR: &str = "FLEET_LAB_ARTIFACTS_DIR";
+/// Environment variable holding how long Lab artifacts are kept, in seconds.
+pub const LAB_ARTIFACT_RETENTION_VAR: &str = "FLEET_LAB_ARTIFACT_RETENTION_SECONDS";
+/// Environment variable holding the largest Lab artifact, in bytes.
+pub const LAB_ARTIFACT_MAX_BYTES_VAR: &str = "FLEET_LAB_ARTIFACT_MAX_BYTES";
+/// The default Lab artifact retention: seven days.
+pub const DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
+/// The default Lab artifact size cap: 64 MiB.
+pub const DEFAULT_LAB_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The Lab artifact directory's name under the data directory by default.
+pub const DEFAULT_LAB_ARTIFACTS_SUBDIR: &str = "lab-artifacts";
 
 /// The default listen address: loopback only, because the controller is a
 /// trusted-LAN service and must not face an untrusted network by accident.
@@ -93,6 +115,13 @@ pub struct ControllerConfig {
     /// How often the Lab sweeper expires leases, queues due cleanups, and
     /// reconciles Lab guests, in seconds; `0` disables it.
     pub lab_sweep_interval_seconds: u64,
+    /// Where Lab artifact bytes live (FM-721). Created during validation.
+    pub lab_artifacts_dir: PathBuf,
+    /// How long a Lab artifact is kept, in seconds; the Lab sweeper deletes
+    /// it afterwards.
+    pub lab_artifact_retention_seconds: u64,
+    /// The largest Lab artifact the store accepts, in bytes.
+    pub lab_artifact_max_bytes: u64,
     /// The Lab placement policy (FM-715).
     pub lab_placement: LabPlacementConfig,
 }
@@ -135,6 +164,9 @@ struct ConfigFile {
     lab_memory_overcommit: Option<f64>,
     lab_cpu_overcommit: Option<f64>,
     lab_capacity_max_age_seconds: Option<u64>,
+    lab_artifacts_dir: Option<String>,
+    lab_artifact_retention_seconds: Option<u64>,
+    lab_artifact_max_bytes: Option<u64>,
 }
 
 /// A configuration problem that is safe to print: paths and expected facts,
@@ -174,6 +206,20 @@ pub enum ConfigError {
     LabSweepIntervalInvalid {
         /// The value that failed to parse.
         value: String,
+    },
+    /// A Lab artifact bound is not a whole, positive number.
+    LabArtifactSettingInvalid {
+        /// The setting's environment variable.
+        setting: &'static str,
+        /// The value that failed to parse.
+        value: String,
+    },
+    /// The Lab artifact directory could not be created or is not one.
+    LabArtifactsDirUnavailable {
+        /// The directory path that is unusable.
+        path: PathBuf,
+        /// Why it is unusable.
+        error: std::io::Error,
     },
     /// The Tailscale Serve listener is not the documented IPv4 loopback target.
     TailscaleServeListenerNotLoopback {
@@ -257,6 +303,15 @@ impl fmt::Display for ConfigError {
                 f,
                 "{LAB_SWEEP_INTERVAL_VAR} must be a whole number of seconds (0 disables the sweeper), not {value:?}"
             ),
+            Self::LabArtifactSettingInvalid { setting, value } => write!(
+                f,
+                "{setting} must be a whole, positive number, not {value:?}"
+            ),
+            Self::LabArtifactsDirUnavailable { path, error } => write!(
+                f,
+                "Lab artifact directory {} is unavailable: {error}",
+                path.display()
+            ),
             Self::TailscaleServeListenInvalid { value } => write!(
                 f,
                 "{TAILSCALE_SERVE_LISTEN_VAR} is not a socket address: {value:?}"
@@ -331,6 +386,9 @@ pub fn load(
     let mut master_key_file: Option<String> = None;
     let mut lab_sweep_interval_seconds: Option<u64> = None;
     let mut lab_placement = LabPlacementConfig::default();
+    let mut lab_artifacts_dir: Option<String> = None;
+    let mut lab_artifact_retention_seconds: Option<u64> = None;
+    let mut lab_artifact_max_bytes: Option<u64> = None;
 
     if let Some(path) = config_file {
         let raw = std::fs::read_to_string(path).map_err(|error| ConfigError::FileRead {
@@ -361,6 +419,9 @@ pub fn load(
         if let Some(age) = file.lab_capacity_max_age_seconds {
             lab_placement.capacity_max_age_seconds = age;
         }
+        lab_artifacts_dir = file.lab_artifacts_dir;
+        lab_artifact_retention_seconds = file.lab_artifact_retention_seconds;
+        lab_artifact_max_bytes = file.lab_artifact_max_bytes;
     }
 
     listen = env(LISTEN_VAR).or(listen);
@@ -377,6 +438,20 @@ pub fn load(
     }
     let lab_placement = layer_lab_placement(lab_placement, env)?;
 
+    lab_artifacts_dir = env(LAB_ARTIFACTS_DIR_VAR).or(lab_artifacts_dir);
+    let lab_artifact_retention_seconds = positive_setting(
+        LAB_ARTIFACT_RETENTION_VAR,
+        lab_artifact_retention_seconds,
+        env(LAB_ARTIFACT_RETENTION_VAR),
+        DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
+    )?;
+    let lab_artifact_max_bytes = positive_setting(
+        LAB_ARTIFACT_MAX_BYTES_VAR,
+        lab_artifact_max_bytes,
+        env(LAB_ARTIFACT_MAX_BYTES_VAR),
+        DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+    )?;
+
     let listen_raw = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     let listen: SocketAddr = listen_raw
         .parse()
@@ -389,11 +464,18 @@ pub fn load(
         None => None,
     };
 
+    let data_dir = data_dir.map_or_else(|| PathBuf::from(DEFAULT_DATA_DIR), PathBuf::from);
     Ok(ControllerConfig {
         listen,
         tailscale_serve_listen,
         web_dist: web_dist.map_or_else(|| PathBuf::from(DEFAULT_WEB_DIST), PathBuf::from),
-        data_dir: data_dir.map_or_else(|| PathBuf::from(DEFAULT_DATA_DIR), PathBuf::from),
+        lab_artifacts_dir: lab_artifacts_dir.map_or_else(
+            || data_dir.join(DEFAULT_LAB_ARTIFACTS_SUBDIR),
+            PathBuf::from,
+        ),
+        lab_artifact_retention_seconds,
+        lab_artifact_max_bytes,
+        data_dir,
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
@@ -483,6 +565,34 @@ impl LabPlacementConfig {
     }
 }
 
+/// A whole, positive Lab artifact bound: the environment's raw value wins
+/// over the file's, the default fills in, and zero is refused.
+fn positive_setting(
+    setting: &'static str,
+    value: Option<u64>,
+    raw: Option<String>,
+    default: u64,
+) -> Result<u64, ConfigError> {
+    let value =
+        match raw {
+            Some(raw) => Some(raw.trim().parse::<u64>().map_err(|_| {
+                ConfigError::LabArtifactSettingInvalid {
+                    setting,
+                    value: raw.clone(),
+                }
+            })?),
+            None => value,
+        };
+    match value {
+        Some(0) => Err(ConfigError::LabArtifactSettingInvalid {
+            setting,
+            value: "0".to_owned(),
+        }),
+        Some(value) => Ok(value),
+        None => Ok(default),
+    }
+}
+
 impl ControllerConfig {
     /// Validates every setting whose failure must happen before readiness:
     /// the state directory is usable, and a configured master key file exists,
@@ -502,6 +612,19 @@ impl ControllerConfig {
         if !self.data_dir.is_dir() {
             return Err(ConfigError::DataDirUnavailable {
                 path: self.data_dir.clone(),
+                error: std::io::Error::other("not a directory"),
+            });
+        }
+
+        std::fs::create_dir_all(&self.lab_artifacts_dir).map_err(|error| {
+            ConfigError::LabArtifactsDirUnavailable {
+                path: self.lab_artifacts_dir.clone(),
+                error,
+            }
+        })?;
+        if !self.lab_artifacts_dir.is_dir() {
+            return Err(ConfigError::LabArtifactsDirUnavailable {
+                path: self.lab_artifacts_dir.clone(),
                 error: std::io::Error::other("not a directory"),
             });
         }
@@ -559,6 +682,12 @@ impl ControllerConfig {
                     ""
                 }
             ),
+            format!("lab_artifacts_dir = {}", self.lab_artifacts_dir.display()),
+            format!(
+                "lab_artifact_retention_seconds = {}",
+                self.lab_artifact_retention_seconds
+            ),
+            format!("lab_artifact_max_bytes = {}", self.lab_artifact_max_bytes),
         ];
         if let Some(address) = self.tailscale_serve_listen {
             lines.push(format!("tailscale_serve_listen = {address}"));

@@ -829,6 +829,7 @@ pub struct Lab {
     image_pins: Arc<dyn ImagePinValidator>,
     projects: Arc<dyn ProjectPort>,
     audit: Arc<dyn AuditPort>,
+    artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
 }
 
 impl Lab {
@@ -849,7 +850,21 @@ impl Lab {
             image_pins,
             projects,
             audit,
+            artifacts: None,
         }
+    }
+
+    /// Serves the Lab artifact use cases (FM-721) beside the Lab surface.
+    #[must_use]
+    pub fn with_artifacts(mut self, artifacts: Arc<crate::lab_artifacts::LabArtifacts>) -> Self {
+        self.artifacts = Some(artifacts);
+        self
+    }
+
+    /// The Lab artifact use cases, when the controller composed them.
+    #[must_use]
+    pub fn artifacts(&self) -> Option<&Arc<crate::lab_artifacts::LabArtifacts>> {
+        self.artifacts.as_ref()
     }
 
     /// Creates a lease from a published template version: the lease

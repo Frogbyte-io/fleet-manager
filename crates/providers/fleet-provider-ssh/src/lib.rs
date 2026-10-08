@@ -35,6 +35,7 @@ use std::time::Duration;
 
 pub mod discovery;
 pub mod exec;
+pub mod fetch;
 pub mod inventory;
 
 pub use discovery::{
@@ -45,6 +46,7 @@ pub use exec::{
     ExecutionLimiter, ExecutionResult, MAX_STREAM_BYTES, ScriptMetadata, decode_metadata,
     encode_metadata, execute_script, remote_prologue,
 };
+pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
 
 /// One host's key, as observed from the network.
