@@ -330,7 +330,14 @@ impl LabCleanupExecutor {
         let now = fleet_core::SystemClock::now_unix_millis();
         let node = match reverted {
             Ok((node, _name)) => node,
-            Err(detail) => {
+            Err(crate::lab_pool::RevertFailure::Unavailable(detail)) => {
+                // Undecided: a failed attempt, but nothing condemns the
+                // member, which stays bound and out of rotation anyway.
+                return self
+                    .fail_attempt(operations, operation, lease, &detail, guest)
+                    .await;
+            }
+            Err(crate::lab_pool::RevertFailure::Refused(detail)) => {
                 // Quarantined at once: the member never returns unverified,
                 // and stays bound so the lease still owes its revert.
                 if pools

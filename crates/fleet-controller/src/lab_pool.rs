@@ -241,28 +241,53 @@ pub struct Revert<'a> {
     pub correlation_id: &'a str,
 }
 
+/// Why a member was not (verifiably) reverted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RevertFailure {
+    /// Fleet could not decide: an account, the cluster, the store, or the
+    /// child could not be read in time. Nothing says the guest is wrong, so
+    /// the member is not quarantined for it; the revert is retried.
+    Unavailable(String),
+    /// The guest must not be reverted, the rollback failed, or its result
+    /// is not the baseline: the member is quarantined.
+    Refused(String),
+}
+
+impl RevertFailure {
+    /// The failure's detail.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Unavailable(detail) | Self::Refused(detail) => detail,
+        }
+    }
+}
+
 /// Checks the guest's identity, reverts it to its baseline through the
 /// reviewed revert, and verifies the result. Answers the guest's node and
-/// name; the error is the reason the member must be quarantined.
+/// name.
 ///
 /// # Errors
 ///
-/// Answers why the guest was not (verifiably) reverted.
+/// Answers why the guest was not (verifiably) reverted, and whether that
+/// condemns the member ([`RevertFailure::Refused`]) or only the attempt.
 pub async fn revert_member(
     operations: &Operations,
     reverter: &dyn OperationExecutor,
     guests: &dyn PoolGuestPort,
     revert: Revert<'_>,
-) -> Result<(String, String), String> {
+) -> Result<(String, String), RevertFailure> {
     let observed = guests
         .observe(revert.account_id, revert.vmid, revert.baseline)
-        .await?;
+        .await
+        .map_err(RevertFailure::Unavailable)?;
     let (node, name) = member_identity(
         &observed,
         revert.vmid,
         revert.recorded_name,
         revert.baseline,
-    )?;
+    )
+    .map_err(RevertFailure::Refused)?;
     let payload = serde_json::json!({
         "accountId": revert.account_id,
         "node": node,
@@ -280,20 +305,25 @@ pub async fn revert_member(
         revert.correlation_id,
         CHILD_WAIT,
     )
-    .await?;
+    .await
+    .map_err(RevertFailure::Unavailable)?;
     if child.state != "succeeded" {
-        return Err(format!(
+        return Err(RevertFailure::Refused(format!(
             "the revert to {} ended {}: {}",
             revert.baseline,
             child.state,
             child_reason(&child)
-        ));
+        )));
     }
+    // An unreadable config after the rollback is an undecided revert: a
+    // re-run re-finds the same child by its key and reads again.
     let config = guests
         .reverted_config(revert.account_id, &node, revert.vmid)
-        .await?;
-    verify_reverted(&config, revert.baseline)
-        .map_err(|detail| format!("the revert is not verified: {detail}"))?;
+        .await
+        .map_err(RevertFailure::Unavailable)?;
+    verify_reverted(&config, revert.baseline).map_err(|detail| {
+        RevertFailure::Refused(format!("the revert is not verified: {detail}"))
+    })?;
     Ok((node, name))
 }
 
@@ -356,6 +386,7 @@ impl OperationExecutor for LabPoolFillExecutor {
         let total = i64::try_from(filling.len()).unwrap_or(i64::MAX);
         let mut available = Vec::new();
         let mut quarantined = Vec::new();
+        let mut pending = Vec::new();
         for (done, member) in filling.into_iter().enumerate() {
             let _ = operations
                 .record_progress(
@@ -381,6 +412,11 @@ impl OperationExecutor for LabPoolFillExecutor {
             .await;
             let now = fleet_core::SystemClock::now_unix_millis();
             let (result, event, facts) = match outcome {
+                Err(RevertFailure::Unavailable(detail)) => {
+                    // Undecided: the member stays filling for a re-fill.
+                    pending.push(serde_json::json!({ "vmid": member.vmid, "detail": detail }));
+                    continue;
+                }
                 Ok((node, name)) => {
                     available.push(member.vmid);
                     (
@@ -392,7 +428,7 @@ impl OperationExecutor for LabPoolFillExecutor {
                         vec![("vmid", member.vmid.to_string()), ("node", node)],
                     )
                 }
-                Err(detail) => {
+                Err(RevertFailure::Refused(detail)) => {
                     quarantined.push(member.vmid);
                     (
                         FillResult::Quarantined {
@@ -420,14 +456,30 @@ impl OperationExecutor for LabPoolFillExecutor {
             "poolId": pool.id,
             "available": available,
             "quarantined": quarantined,
+            "pending": pending,
         })
         .to_string();
-        // A quarantined member is a recorded outcome, not a failed fill.
-        operations
-            .complete(&operation.id, "succeeded", Some(&result), None)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        // A quarantined member is a recorded outcome, not a failed fill; a
+        // member left filling is: the fill must be queued again.
+        if pending.is_empty() {
+            operations
+                .complete(&operation.id, "succeeded", Some(&result), None)
+                .await
+        } else {
+            let error = serde_json::json!({
+                "reason": "fill_incomplete",
+                "detail": "some members could not be verified and are still filling; fill the pool again once the cause is fixed",
+                "available": available,
+                "quarantined": quarantined,
+                "pending": pending,
+            })
+            .to_string();
+            operations
+                .complete(&operation.id, "failed", Some(&result), Some(&error))
+                .await
+        }
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 }
 

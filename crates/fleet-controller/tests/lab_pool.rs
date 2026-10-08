@@ -72,6 +72,8 @@ impl OperationExecutor for Scripted {
 struct Cluster {
     guests: Mutex<BTreeMap<u32, GuestObservation>>,
     config: Mutex<RevertedConfig>,
+    /// Whether every read fails, as an unreachable cluster does.
+    unreachable: Mutex<bool>,
 }
 
 impl Cluster {
@@ -88,6 +90,7 @@ impl Cluster {
                 lock: None,
                 parent: Some("baseline".to_owned()),
             }),
+            unreachable: Mutex::new(false),
         })
     }
 
@@ -114,6 +117,9 @@ impl PoolGuestPort for Cluster {
         vmid: u32,
         _baseline: &str,
     ) -> Result<GuestObservation, String> {
+        if *self.unreachable.lock().unwrap() {
+            return Err("the resource listing failed: unreachable".to_owned());
+        }
         Ok(self
             .guests
             .lock()
@@ -645,5 +651,57 @@ async fn a_failed_fill_revert_quarantines_and_the_generic_route_refuses_the_kind
             )
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn an_undecided_fill_leaves_the_member_filling_for_a_refill() {
+    let harness = Harness::new(&[]).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    harness
+        .pools
+        .add_members(&harness.pool_id, &[300], now)
+        .await
+        .unwrap();
+    harness.cluster.set(300, Cluster::guest("pool-a"));
+    *harness.cluster.unreachable.lock().unwrap() = true;
+    let fill = LabPoolFillExecutor::new(
+        harness.pools.clone(),
+        harness.cluster.clone(),
+        harness.reverter.clone(),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+    );
+    let run = || async {
+        let operation = harness
+            .operations
+            .create_lab_pool_fill(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &harness.pool_id,
+                &fill_operation(&harness.pool_id, None),
+            )
+            .await
+            .unwrap();
+        harness
+            .operations
+            .claim_only_execute(&fill, &operation.id, "test")
+            .await
+            .unwrap();
+        harness.operation(&operation.id).await
+    };
+    let done = run().await;
+    assert_eq!(done.state, "failed");
+    assert!(done.error_json.unwrap().contains("fill_incomplete"));
+    assert_eq!(
+        harness.member(300).await,
+        Some((MemberState::Filling, None))
+    );
+    assert!(harness.reverter.ran.lock().unwrap().is_empty());
+    // Once the cluster answers, a re-fill finishes it.
+    *harness.cluster.unreachable.lock().unwrap() = false;
+    assert_eq!(run().await.state, "succeeded");
+    assert_eq!(
+        harness.member(300).await,
+        Some((MemberState::Available, None))
     );
 }

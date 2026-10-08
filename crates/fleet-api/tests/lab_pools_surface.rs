@@ -193,7 +193,7 @@ impl World {
         })
     }
 
-    async fn audit_events(&self, event: &str) -> usize {
+    fn audit_events(&self, event: &str) -> usize {
         self.audit
             .events
             .lock()
@@ -257,7 +257,7 @@ async fn a_pool_is_created_filled_and_drained_with_every_step_audited() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let pool_id = body["data"]["id"].as_str().unwrap().to_owned();
     assert_eq!(body["data"]["baselineSnapshot"], "baseline");
-    assert_eq!(world.audit_events("lab_pool_creating").await, 1);
+    assert_eq!(world.audit_events("lab_pool_creating"), 1);
 
     // One pool per template version.
     let (status, _) = call(
@@ -278,7 +278,7 @@ async fn a_pool_is_created_filled_and_drained_with_every_step_audited() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["data"]["kind"], "lab.pool.fill");
-    assert_eq!(world.audit_events("lab_pool_fill_requested").await, 1);
+    assert_eq!(world.audit_events("lab_pool_fill_requested"), 1);
     // Beyond the declared size is refused before anything is registered.
     let (status, _) = call(
         &state,
@@ -310,7 +310,7 @@ async fn a_pool_is_created_filled_and_drained_with_every_step_audited() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["data"]["deferred"], serde_json::json!([700, 701]));
-    assert_eq!(world.audit_events("lab_pool_draining").await, 1);
+    assert_eq!(world.audit_events("lab_pool_draining"), 1);
 }
 
 #[tokio::test]
@@ -346,7 +346,7 @@ async fn a_pool_needs_a_reverting_version_and_a_known_account() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(world.audit_events("lab_pool_creating").await, 0);
+    assert_eq!(world.audit_events("lab_pool_creating"), 0);
 }
 
 #[tokio::test]
@@ -400,9 +400,9 @@ async fn pool_mutations_are_authorized_before_anything_changes() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (_, body) = call(&permitted, "GET", &format!("/lab/pools/{pool_id}"), None).await;
     assert!(body["data"]["members"].as_array().unwrap().is_empty());
-    assert_eq!(world.audit_events("lab_pool_fill_requested").await, 0);
-    assert_eq!(world.audit_events("lab_pool_draining").await, 0);
-    assert_eq!(world.audit_events("lab_pool_deleting").await, 0);
+    assert_eq!(world.audit_events("lab_pool_fill_requested"), 0);
+    assert_eq!(world.audit_events("lab_pool_draining"), 0);
+    assert_eq!(world.audit_events("lab_pool_deleting"), 0);
     // Reading needs lab.read.
     let no_read = world.state(Arc::new(Without(Permission::LabRead)));
     let (status, _) = call(&no_read, "GET", "/lab/pools", None).await;

@@ -3400,6 +3400,7 @@ fn follow_lab(
                 "state": data["state"],
                 "available": output["available"],
                 "quarantined": output["quarantined"],
+                "pending": output["pending"],
                 "reason": output["reason"],
                 "detail": output["detail"],
             }}))
