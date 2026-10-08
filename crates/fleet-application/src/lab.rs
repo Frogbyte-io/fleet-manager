@@ -841,6 +841,7 @@ pub struct Lab {
     audit: Arc<dyn AuditPort>,
     artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
     pools: Option<Arc<crate::lab_pool::LabPools>>,
+    reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
 }
 
 impl Lab {
@@ -863,6 +864,52 @@ impl Lab {
             audit,
             artifacts: None,
             pools: None,
+            reservations: None,
+        }
+    }
+
+    /// Serves the read of a lease's capacity reservation (FM-715).
+    #[must_use]
+    pub fn with_reservations(
+        mut self,
+        reservations: Arc<dyn crate::lab_placement::CapacityReservationPort>,
+    ) -> Self {
+        self.reservations = Some(reservations);
+        self
+    }
+
+    /// The lease's capacity reservation, held or released, when it has one.
+    /// A read: it changes nothing, so it is authorized but not audited.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn lease_reservation(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        lease_id: &str,
+    ) -> Result<Option<crate::lab_placement::CapacityReservation>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: Some(lease_id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        match &self.reservations {
+            Some(reservations) => {
+                reservations
+                    .for_lease(lease_id)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "reservation",
+                        detail,
+                    })
+            }
+            None => Ok(None),
         }
     }
 

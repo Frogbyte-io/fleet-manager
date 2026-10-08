@@ -515,6 +515,8 @@ Fleet **never** deletes an orphan. To remove one:
 
 Before a provision takes a VMID, Fleet reserves the template's CPU, memory, and disk on the node that holds the template (FM-715, [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257)). Without `--account`, `lab provision-lease` places the lease on the one trusted account whose cluster holds the pinned template, and refuses when none or several do. Just before reserving, Fleet tries to refresh the node's capacity observation. If the refresh fails or comes back incomplete, the previous stored observation is used, and it is still refused once it is older than `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`. The check subtracts the reservations Fleet already holds on the node. It is not a live host guarantee: workloads started outside Fleet use headroom that only a later observation shows.
 
+To see what one lease holds, read `reservation` in the lease detail: `fleetctl --output json lab status <lease-id>` or `GET /api/v1/lab/leases/{leaseId}`. It has `node`, `accountId`, `storagePool`, `cores`, `memoryBytes`, `diskBytes`, and `state` (`held` while it counts against the node, `released` afterwards). It is `null` for a lease that reserved nothing, such as a pooled lease.
+
 Refusals fail the provision operation with a reason:
 
 | Reason | Meaning | What to do |

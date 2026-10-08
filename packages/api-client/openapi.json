@@ -10138,6 +10138,17 @@
                 ],
                 "description": "The guest's provision state, once provisioning started."
               },
+              "reservation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/LeaseReservationDto",
+                    "description": "The capacity Fleet reserved for the lease (FM-715), when it has one.\nAbsent for a pooled lease, which reserves nothing."
+                  }
+                ]
+              },
               "vmid": {
                 "type": [
                   "integer",
@@ -10244,6 +10255,55 @@
             "format": "int32",
             "description": "The template's ready TTL, in seconds.",
             "minimum": 0
+          }
+        }
+      },
+      "LeaseReservationDto": {
+        "type": "object",
+        "description": "A lease's capacity reservation: what it holds on a node.",
+        "required": [
+          "node",
+          "accountId",
+          "storagePool",
+          "cores",
+          "memoryBytes",
+          "diskBytes",
+          "state"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account the guest is cloned through."
+          },
+          "cores": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Reserved vCPU cores.",
+            "minimum": 0
+          },
+          "diskBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Reserved disk, in bytes.",
+            "minimum": 0
+          },
+          "memoryBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Reserved memory, in bytes.",
+            "minimum": 0
+          },
+          "node": {
+            "type": "string",
+            "description": "The PVE node the capacity is reserved on."
+          },
+          "state": {
+            "type": "string",
+            "description": "`held` while it counts against the node, `released` afterwards."
+          },
+          "storagePool": {
+            "type": "string",
+            "description": "The storage pool the disk is allocated on."
           }
         }
       },
@@ -15217,6 +15277,17 @@
                       "null"
                     ],
                     "description": "The guest's provision state, once provisioning started."
+                  },
+                  "reservation": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/LeaseReservationDto",
+                        "description": "The capacity Fleet reserved for the lease (FM-715), when it has one.\nAbsent for a pooled lease, which reserves nothing."
+                      }
+                    ]
                   },
                   "vmid": {
                     "type": [

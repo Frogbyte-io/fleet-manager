@@ -1629,6 +1629,35 @@ export interface LeaseDto {
 }
 
 /**
+ * A lease's capacity reservation: what it holds on a node.
+ */
+export interface LeaseReservationDto {
+  /** The Proxmox account the guest is cloned through. */
+  accountId: string;
+  /**
+     * Reserved vCPU cores.
+     * @minimum 0
+     */
+  cores: number;
+  /**
+     * Reserved disk, in bytes.
+     * @minimum 0
+     */
+  diskBytes: number;
+  /**
+     * Reserved memory, in bytes.
+     * @minimum 0
+     */
+  memoryBytes: number;
+  /** The PVE node the capacity is reserved on. */
+  node: string;
+  /** `held` while it counts against the node, `released` afterwards. */
+  state: string;
+  /** The storage pool the disk is allocated on. */
+  storagePool: string;
+}
+
+/**
  * One lease with its guest's connection details (FM-720).
  */
 export type LeaseDetailDto = LeaseDto & ({
@@ -1663,6 +1692,7 @@ export type LeaseDetailDto = LeaseDto & ({
      * @nullable
      */
   provisionState?: string | null;
+  reservation?: null | LeaseReservationDto;
   /**
      * The guest's VMID.
      * @minimum 0
@@ -4448,6 +4478,7 @@ export type ResourceLeaseDetailDtoData = LeaseDto & ({
      * @nullable
      */
   provisionState?: string | null;
+  reservation?: null | LeaseReservationDto;
   /**
      * The guest's VMID.
      * @minimum 0
