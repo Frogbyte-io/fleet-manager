@@ -2703,29 +2703,6 @@ impl ProvisionExecutor {
         else {
             return Ok(Ok(()));
         };
-        if let Some(existing) = placement
-            .reservations
-            .for_lease(lease_id)
-            .await
-            .map_err(|detail| format!("the capacity reservation is unreadable: {detail}"))?
-            && existing.state == ReservationState::Held
-        {
-            // A resumed provision keeps its reservation only where the clone
-            // will run: the template version (and so the demand) is
-            // immutable, but the template can move between nodes.
-            if existing.node != node || existing.account_id != account_id {
-                let refusal = Refusal::new(
-                    "reservation_mismatch",
-                    format!(
-                        "the lease holds capacity on node {} of account {}, but this provision would clone on node {node} of account {account_id}; release the lease and request a new one",
-                        existing.node, existing.account_id
-                    ),
-                );
-                audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
-                return Ok(Err(refusal));
-            }
-            return Ok(Ok(()));
-        }
         let Some(storage) = placement
             .storage
             .template_storage(&content.image_version_id)
@@ -2742,6 +2719,29 @@ impl ProvisionExecutor {
             audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
             return Ok(Err(refusal));
         };
+        let wanted = ReservationRequest {
+            lease_id: lease_id.to_owned(),
+            account_id: account_id.to_owned(),
+            node: node.to_owned(),
+            demand: CapacityDemand::for_template(content, &storage),
+        };
+        if let Some(existing) = placement
+            .reservations
+            .for_lease(lease_id)
+            .await
+            .map_err(|detail| format!("the capacity reservation is unreadable: {detail}"))?
+            && existing.state == ReservationState::Held
+        {
+            // A resumed provision keeps its reservation only where, and for
+            // what, the clone will run: the template can move between nodes,
+            // and a re-promotion can change the pinned build's storage pool.
+            if let Err(mismatch) = wanted.covered_by(&existing) {
+                let refusal = Refusal::new(mismatch.reason(), mismatch.to_string());
+                audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+                return Ok(Err(refusal));
+            }
+            return Ok(Ok(()));
+        }
         // A failed or partial refresh is not fatal and replaces nothing: the
         // stored observation decides, and the transaction refuses it once it
         // is stale.
@@ -2785,12 +2785,7 @@ impl ProvisionExecutor {
         let outcome = placement
             .reservations
             .reserve(
-                &ReservationRequest {
-                    lease_id: lease_id.to_owned(),
-                    account_id: account_id.to_owned(),
-                    node: node.to_owned(),
-                    demand: CapacityDemand::for_template(content, &storage),
-                },
+                &wanted,
                 &placement.policy,
                 fleet_core::SystemClock::now_unix_millis(),
             )

@@ -316,18 +316,21 @@ Fleet **never** deletes an orphan. To remove one:
 
 ### Capacity
 
-Before a provision takes a VMID, Fleet reserves the template's CPU, memory, and disk on the node that holds the template (FM-715, [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257)). Without `--account`, `lab provision-lease` places the lease on the one trusted account whose cluster holds the pinned template, and refuses when none or several do. The check runs against the node's latest capacity observation, refreshed just before reserving, minus the reservations Fleet already holds there. It is not a live host guarantee: workloads started outside Fleet consume headroom that only a later observation shows.
+Before a provision takes a VMID, Fleet reserves the template's CPU, memory, and disk on the node that holds the template (FM-715, [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257)). Without `--account`, `lab provision-lease` places the lease on the one trusted account whose cluster holds the pinned template, and refuses when none or several do. Just before reserving, Fleet tries to refresh the node's capacity observation. If the refresh fails or comes back incomplete, the previous stored observation is used, and it is still refused once it is older than `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`. The check subtracts the reservations Fleet already holds on the node. It is not a live host guarantee: workloads started outside Fleet use headroom that only a later observation shows.
 
 Refusals fail the provision operation with a reason:
 
 | Reason | Meaning | What to do |
 | --- | --- | --- |
-| `placement_no_candidate`, `placement_ambiguous`, `placement_unresolved` | No trusted account holds the template, several do, or one could not be read | Pass `--account`, or fix the unreadable account |
+| `placement_no_candidate` | No trusted account's cluster reports the pinned template | Restore the template, or the token's visibility of it. `--account` does not help: that account then fails with `template_missing` |
+| `placement_ambiguous` | Several trusted accounts report a template under the pinned VMID | Pass `--account <account-id>` to choose one |
+| `placement_unresolved` | A trusted account's cluster or credential could not be read | Fix that account, or pass `--account <account-id>`, which skips the scan |
 | `capacity_unknown` | No usable observation, or it lacks a CPU or memory figure | Check that the account can read node status (`proxmox nodes <account-id>`) |
 | `capacity_stale` | The observation is older than `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`, or dated in the future | Fix the node read or the controller clock |
 | `storage_unknown` | The image's storage pool is unknown, or the observation does not report it | Check the build's storage pool and the token's storage visibility |
-| `insufficient_memory`, `insufficient_cpu`, `insufficient_disk` | The node lacks room after held reservations | Release leases, free the node, or raise the overcommit ratio |
-| `reservation_mismatch` | A resumed provision would now clone on another node or account | Release the lease and request a new one |
+| `insufficient_memory`, `insufficient_cpu` | The node lacks memory or cores after overcommit, usage, and held reservations | Release leases, free the node, or raise `FLEET_LAB_MEMORY_OVERCOMMIT` or `FLEET_LAB_CPU_OVERCOMMIT` |
+| `insufficient_disk` | The image's storage pool on the node lacks free space after held reservations (no overcommit applies) | Free space on that pool, or release leases that hold disk on it |
+| `reservation_mismatch` | The lease's held reservation is for another node, account, demand, or storage pool. This can happen when the template moved or a re-promotion changed the pinned build's pool | Release the lease and request a new one |
 
 `FLEET_LAB_MEMORY_OVERCOMMIT` and `FLEET_LAB_CPU_OVERCOMMIT` (default `1.0`, at most 16) scale the node's total memory and CPU count; disk is never overcommitted. A lease's reservation stops counting once the lease is released, or failed without a guest. A lease in `cleanup_failed` keeps its reservation until `lab cleanup-retry` destroys the guest. [`docs/architecture/lab.md`](../architecture/lab.md) has the exact rule.
 

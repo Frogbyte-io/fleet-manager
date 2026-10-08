@@ -220,6 +220,15 @@ pub enum PlacementRefusal {
         /// The free disk after usage and reservations.
         free_gib: u64,
     },
+    /// The lease already holds a reservation for another target or demand
+    /// (the template moved, or a re-promotion changed the pinned build's
+    /// storage pool).
+    ReservationMismatch {
+        /// The held reservation's target and demand.
+        held: String,
+        /// The requested target and demand.
+        requested: String,
+    },
 }
 
 impl PlacementRefusal {
@@ -236,6 +245,7 @@ impl PlacementRefusal {
             Self::InsufficientMemory { .. } => "insufficient_memory",
             Self::InsufficientCpu { .. } => "insufficient_cpu",
             Self::InsufficientDisk { .. } => "insufficient_disk",
+            Self::ReservationMismatch { .. } => "reservation_mismatch",
         }
     }
 }
@@ -302,6 +312,10 @@ impl fmt::Display for PlacementRefusal {
             } => write!(
                 f,
                 "insufficient disk on {node} storage {storage}: need {need_gib} GiB, {free_gib} free"
+            ),
+            Self::ReservationMismatch { held, requested } => write!(
+                f,
+                "the lease holds capacity for {held}, but this provision requests {requested}; release the lease and request a new one"
             ),
         }
     }
@@ -511,6 +525,36 @@ pub struct ReservationRequest {
     pub node: String,
     /// What the lease needs.
     pub demand: CapacityDemand,
+}
+
+impl ReservationRequest {
+    /// Checks that `held`, the lease's existing reservation, covers this
+    /// request: the same account, node, and demand (cores, memory, disk, and
+    /// storage pool). A held reservation is never silently reused for
+    /// another target, since its counted capacity would not be where the
+    /// clone lands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlacementRefusal::ReservationMismatch`] naming both.
+    pub fn covered_by(&self, held: &CapacityReservation) -> Result<(), PlacementRefusal> {
+        if held.account_id == self.account_id
+            && held.node == self.node
+            && held.demand == self.demand
+        {
+            return Ok(());
+        }
+        let describe = |account: &str, node: &str, demand: &CapacityDemand| {
+            format!(
+                "node {node} of account {account} ({} cores, {} MiB, {} GiB on {})",
+                demand.cores, demand.memory_mib, demand.disk_gib, demand.storage
+            )
+        };
+        Err(PlacementRefusal::ReservationMismatch {
+            held: describe(&held.account_id, &held.node, &held.demand),
+            requested: describe(&self.account_id, &self.node, &self.demand),
+        })
+    }
 }
 
 /// The outcome of [`CapacityReservationPort::reserve`].

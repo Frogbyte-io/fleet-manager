@@ -84,12 +84,16 @@ fleetctl --output json lab release <lease-id>
 2. `lab lease` creates the lease; `lab provision-lease` builds it on the one
    Proxmox account whose cluster holds the template's image, after reserving
    its CPU, memory, and disk against the node's latest observed capacity (not
-   a live host guarantee: workloads outside Fleet can still use that room). The provision operation fails with an
-   explanation when no trusted account holds the template, when several do
-   (pass `--account <account-id>` to choose one), when the node lacks
-   capacity, or when its capacity cannot be observed or is stale. Report the
-   explanation to the user; only the several-accounts case is fixed by
-   `--account`.
+   a live host guarantee: workloads outside Fleet can still use that room).
+   The provision operation fails with an explanation when no trusted account
+   holds the template (`placement_no_candidate`), when several do
+   (`placement_ambiguous`), when a trusted account cannot be read
+   (`placement_unresolved`), when the node lacks capacity, or when its
+   capacity cannot be observed or is stale. Report the explanation to the
+   user. Passing `--account <account-id>` skips the automatic scan, so it
+   resolves `placement_ambiguous` and `placement_unresolved`. It does not
+   resolve `placement_no_candidate`: that account then fails with
+   `template_missing`.
 3. Poll `lab leases` until the lease `state` is `ready`. `lab provisions` shows
    where it landed (node, VMID, address).
 4. `lab extend` adds time up to the lease's maximum lifetime; the controller

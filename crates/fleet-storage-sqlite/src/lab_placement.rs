@@ -259,8 +259,12 @@ impl CapacityReservationPort for CapacityRepository {
             // this transaction, and the request errors like one for an
             // already released row; a finished lease is never re-reserved.
             if !release_if_finished(&mut transaction, &existing, now).await? {
-                // Nothing changed: the row still counts for a live lease.
-                return Ok(ReserveOutcome::Reserved(existing));
+                // The row still counts for a live lease: it is the lease's
+                // reservation only if it covers this request.
+                return Ok(match request.covered_by(&existing) {
+                    Ok(()) => ReserveOutcome::Reserved(existing),
+                    Err(refusal) => ReserveOutcome::Refused(refusal),
+                });
             }
             transaction
                 .commit()

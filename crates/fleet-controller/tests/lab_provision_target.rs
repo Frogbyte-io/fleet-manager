@@ -2507,6 +2507,77 @@ async fn a_reservation_on_another_node_refuses_the_resumed_clone() {
 }
 
 #[tokio::test]
+async fn a_reservation_on_another_storage_pool_refuses_the_resumed_clone() {
+    use fleet_application::lab_placement::{CapacityDemand, ReservationRequest, ReserveOutcome};
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let capacity = CapacityRepository::new(harness.pool.clone());
+    let now = fleet_core::SystemClock::now_unix_millis();
+    // An earlier run reserved on the template's node, but on the pool of a
+    // build that a re-promotion has since replaced.
+    capacity
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: "pve-b".to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "old-pool".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = capacity
+        .reserve(
+            &ReservationRequest {
+                lease_id: lease_id.clone(),
+                account_id: harness.account_id.clone(),
+                node: "pve-b".to_owned(),
+                demand: CapacityDemand {
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    storage: "old-pool".to_owned(),
+                },
+            },
+            &PlacementPolicy::default(),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReserveOutcome::Reserved(_)));
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "reservation_mismatch", "{detail}");
+    assert!(
+        detail.contains("on old-pool") && detail.contains("on local-lvm"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
 async fn an_unknown_storage_pool_refuses_and_is_audited() {
     let harness = Harness::new().await;
     let (lease_id, record) = harness.record().await;

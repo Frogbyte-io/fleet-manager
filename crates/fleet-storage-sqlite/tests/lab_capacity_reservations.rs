@@ -584,6 +584,51 @@ async fn a_finished_or_unknown_lease_gets_no_new_reservation() {
 }
 
 #[tokio::test]
+async fn a_held_reservation_is_returned_only_for_the_same_target_and_demand() {
+    let (_dir, store) = setup().await;
+    let leases = LeaseRepository::new(store.pool().clone());
+    let capacity = CapacityRepository::new(store.pool().clone());
+    capacity
+        .record_observation("account-1", &observation(16, NOW))
+        .await
+        .unwrap();
+    let policy = PlacementPolicy::default();
+    let id = lease(&leases).await;
+    let held = request(&id, 1024);
+    let ReserveOutcome::Reserved(first) = capacity.reserve(&held, &policy, NOW).await.unwrap()
+    else {
+        panic!("the first request reserves");
+    };
+    // The same request gets the same row back.
+    let ReserveOutcome::Reserved(again) = capacity.reserve(&held, &policy, NOW).await.unwrap()
+    else {
+        panic!("the same request returns the held row");
+    };
+    assert_eq!(again.id, first.id);
+    // A re-promotion moved the pinned build to another pool; a different
+    // memory demand or node is refused the same way.
+    let mut moved_pool = held.clone();
+    moved_pool.demand.storage = "ceph-pool".to_owned();
+    let mut more_memory = held.clone();
+    more_memory.demand.memory_mib = 2048;
+    let mut other_node = held.clone();
+    other_node.node = "pve2".to_owned();
+    for changed in [moved_pool, more_memory, other_node] {
+        let ReserveOutcome::Refused(refusal) =
+            capacity.reserve(&changed, &policy, NOW).await.unwrap()
+        else {
+            panic!("a held reservation is not reused for {changed:?}");
+        };
+        assert_eq!(refusal.reason(), "reservation_mismatch");
+        assert!(refusal.to_string().contains("local-lvm"), "{refusal}");
+    }
+    // The held row is untouched.
+    let row = capacity.for_lease(&id).await.unwrap().unwrap();
+    assert_eq!(row.state, ReservationState::Held);
+    assert_eq!(row.demand, held.demand);
+}
+
+#[tokio::test]
 async fn a_failed_lease_whose_guest_was_allocated_still_counts() {
     use fleet_application::lab::{NewProvision, ProvisionPort as _};
     use fleet_core::LeaseState;
