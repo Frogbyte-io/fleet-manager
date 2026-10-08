@@ -1918,7 +1918,7 @@ impl Lab {
                 .await?;
             return Ok((existing, changed));
         }
-        let provision = self
+        let mut provision = self
             .provisions
             .create(
                 &NewProvision {
@@ -1933,6 +1933,21 @@ impl Lab {
                 context: "provisions",
                 detail,
             })?;
+        // The readiness deadline runs from the request (lab.md): recorded
+        // before any step, so the sweeper can compensate a saga the
+        // controller died in before it booted a guest (#302).
+        if provision.readiness_deadline_at.is_none() {
+            provision.readiness_deadline_at = Some(now.saturating_add(
+                i64::from(version.content.readiness_deadline_seconds).saturating_mul(1_000),
+            ));
+            self.provisions
+                .update(&provision)
+                .await
+                .map_err(|detail| LabUseCaseError::Backend {
+                    context: "provisions",
+                    detail,
+                })?;
+        }
         let changed = self
             .attach_lease_provision(lease.as_ref(), &provision)
             .await?;

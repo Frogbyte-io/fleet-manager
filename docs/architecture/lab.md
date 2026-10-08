@@ -137,7 +137,7 @@ Cancellation and expiry transition any non-terminal state into release/compensat
 Deadlines:
 
 - Queue deadline/optional caller wait limit
-- Provisioning/readiness deadline from request
+- Provisioning/readiness deadline from request (persisted with the provision record when the saga starts, so the sweeper compensates a saga interrupted before it booted a guest; the boot step then starts a fresh readiness window, #302)
 - Ready TTL beginning only when the lease reaches `ready`
 - Absolute maximum lifetime of 30 days beginning at request to cap stuck workflows
 - Ready TTL extensions can move the expiry only up to that creation-relative maximum
