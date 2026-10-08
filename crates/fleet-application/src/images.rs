@@ -282,6 +282,7 @@ pub struct Images {
     recipes: Arc<dyn RecipePort>,
     audit: Arc<dyn AuditPort>,
     build_addresses: Option<Arc<dyn BuildAddressPort>>,
+    build_address_pool_configured: bool,
 }
 
 impl Images {
@@ -292,14 +293,20 @@ impl Images {
             recipes,
             audit,
             build_addresses: None,
+            build_address_pool_configured: false,
         }
     }
 
     /// Gives the service the build address pool's store, so operators can
     /// list and clear held and quarantined addresses (#402).
     #[must_use]
-    pub fn with_build_addresses(mut self, port: Arc<dyn BuildAddressPort>) -> Self {
+    pub fn with_build_addresses(
+        mut self,
+        port: Arc<dyn BuildAddressPort>,
+        pool_configured: bool,
+    ) -> Self {
         self.build_addresses = Some(port);
+        self.build_address_pool_configured = pool_configured;
         self
     }
 
@@ -362,11 +369,20 @@ impl Images {
                 detail: "the address is not an IPv4 address".to_owned(),
             })?;
         let canonical = parsed.to_string();
-        let Some(port) = &self.build_addresses else {
-            return Err(RecipeUseCaseError::NotFound {
-                what: format!("quarantined build address {canonical}"),
-            });
+        let not_quarantined = || RecipeUseCaseError::NotFound {
+            what: if self.build_address_pool_configured {
+                format!("quarantined build address {canonical}")
+            } else {
+                format!(
+                    "quarantined build address {canonical} (no build address pool is configured)"
+                )
+            },
         };
+        let Some(port) = &self.build_addresses else {
+            return Err(not_quarantined());
+        };
+        // The intent precedes the change; the outcome event follows it
+        // whatever the outcome, so a refusal leaves no orphaned intent.
         self.audit_event(
             principal,
             Permission::ImagesConfig,
@@ -375,33 +391,59 @@ impl Images {
             &[("address", canonical.as_str())],
         )
         .await?;
-        match port.clear_quarantine(parsed, now).await.map_err(|detail| {
+        let outcome = port.clear_quarantine(parsed, now).await.map_err(|detail| {
             RecipeUseCaseError::Backend {
                 context: "build addresses",
                 detail,
             }
-        })? {
-            ClearQuarantine::Cleared => {}
-            ClearQuarantine::Held => {
-                return Err(RecipeUseCaseError::Conflict {
-                    detail: format!("{canonical} is held by a running build"),
-                });
-            }
-            ClearQuarantine::NotQuarantined => {
-                return Err(RecipeUseCaseError::NotFound {
-                    what: format!("quarantined build address {canonical}"),
-                });
-            }
-        }
-        self.audit_event(
-            principal,
-            Permission::ImagesConfig,
-            Some(&canonical),
-            "image_build_address_cleared",
-            &[("address", canonical.as_str())],
-        )
-        .await
-        .map_err(|error| match error {
+        });
+        let (event, facts, result): (&str, Vec<(&str, String)>, Result<(), RecipeUseCaseError>) =
+            match &outcome {
+                Ok(ClearQuarantine::Cleared { operation_id }) => (
+                    "image_build_address_cleared",
+                    vec![
+                        ("prior_status", "quarantined".to_owned()),
+                        ("holder_operation", operation_id.clone()),
+                    ],
+                    Ok(()),
+                ),
+                Ok(ClearQuarantine::Held { operation_id }) => (
+                    "image_build_address_clear_refused",
+                    vec![
+                        ("reason", "held".to_owned()),
+                        ("prior_status", "held".to_owned()),
+                        ("holder_operation", operation_id.clone()),
+                    ],
+                    Err(RecipeUseCaseError::Conflict {
+                        detail: format!("{canonical} is held by a running build"),
+                    }),
+                ),
+                Ok(ClearQuarantine::NotQuarantined) => (
+                    "image_build_address_clear_refused",
+                    vec![("reason", "not_quarantined".to_owned())],
+                    Err(not_quarantined()),
+                ),
+                Err(_) => (
+                    "image_build_address_clear_failed",
+                    vec![("reason", "backend".to_owned())],
+                    Ok(()),
+                ),
+            };
+        let mut all = vec![("address", canonical.clone())];
+        all.extend(facts);
+        let borrowed: Vec<(&str, &str)> = all.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let audited = self
+            .audit_event(
+                principal,
+                Permission::ImagesConfig,
+                Some(&canonical),
+                event,
+                &borrowed,
+            )
+            .await;
+        outcome?;
+        result?;
+        audited.map_err(|error| match error {
             RecipeUseCaseError::Backend { context, detail } => RecipeUseCaseError::Backend {
                 context,
                 detail: format!("the quarantine was cleared but its audit failed: {detail}"),
@@ -1132,8 +1174,8 @@ pub trait BuildAddressPort: fmt::Debug + Send + Sync {
 
     /// Ends the quarantine of one address early (#402). Holds whose
     /// operation is terminal or unknown are reclaimed first, so a dead
-    /// holder's address can be cleared too. An address a live operation
-    /// holds is never cleared.
+    /// holder's address can be cleared too (the operator vouches that its
+    /// VM is gone). An address a live operation holds is never cleared.
     ///
     /// # Errors
     /// Fails on a storage error.
@@ -1180,12 +1222,18 @@ pub struct BuildAddressRecord {
 }
 
 /// The outcome of clearing one address's quarantine (#402).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClearQuarantine {
     /// The quarantine was ended; the address can be allocated again.
-    Cleared,
+    Cleared {
+        /// The operation whose build held the address.
+        operation_id: String,
+    },
     /// A live operation holds the address.
-    Held,
+    Held {
+        /// The holding operation.
+        operation_id: String,
+    },
     /// The address is not quarantined.
     NotQuarantined,
 }

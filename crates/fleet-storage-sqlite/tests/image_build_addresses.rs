@@ -322,7 +322,9 @@ async fn an_operator_clears_a_quarantine_early_but_never_a_live_hold() {
     assert_eq!(listed[0].until, None);
     assert_eq!(
         repository.clear_quarantine(a(10), NOW + 2).await,
-        Ok(ClearQuarantine::Held)
+        Ok(ClearQuarantine::Held {
+            operation_id: "op-1".to_owned()
+        })
     );
     // An unverified end quarantines it.
     repository.release("op-1", NOW + 3, true).await.unwrap();
@@ -344,7 +346,9 @@ async fn an_operator_clears_a_quarantine_early_but_never_a_live_hold() {
     );
     assert_eq!(
         repository.clear_quarantine(a(10), NOW + 7).await,
-        Ok(ClearQuarantine::Cleared)
+        Ok(ClearQuarantine::Cleared {
+            operation_id: "op-1".to_owned()
+        })
     );
     assert_eq!(
         repository.clear_quarantine(a(10), NOW + 8).await,
@@ -372,9 +376,18 @@ async fn a_dead_holders_address_can_be_cleared_in_one_step() {
     set_state(&store, "op-1", "failed").await;
     // Still `held` on disk, but its operation is dead: clearing reclaims it
     // and ends the quarantine it would have got.
+    // Listed as quarantined already, as reclaim would make it.
+    let listed = repository.list_unavailable(NOW + 1).await.unwrap();
+    assert_eq!(listed[0].status, BuildAddressStatus::Quarantined);
+    assert_eq!(
+        listed[0].until,
+        Some(NOW + 1 + BUILD_ADDRESS_QUARANTINE_MILLIS)
+    );
     assert_eq!(
         repository.clear_quarantine(a(10), NOW + 1).await,
-        Ok(ClearQuarantine::Cleared)
+        Ok(ClearQuarantine::Cleared {
+            operation_id: "op-1".to_owned()
+        })
     );
     assert!(
         repository

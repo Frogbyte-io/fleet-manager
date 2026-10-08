@@ -2477,7 +2477,7 @@ async fn build_addresses_list_and_clear_are_authorized_and_additive() {
                 )),
                 Arc::new(FakeAudit),
             )
-            .with_build_addresses(addresses.clone()),
+            .with_build_addresses(addresses.clone(), true),
         ));
         principal_router(Arc::new(state))
     };

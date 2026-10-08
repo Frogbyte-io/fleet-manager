@@ -2480,9 +2480,14 @@ fn parse_images_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> 
             _ => Err(CliError { message: usage() }),
         },
         "address-clear" => match rest {
-            [address] => Ok(Command::ImagesAddressClear {
-                address: (*address).to_owned(),
-            }),
+            [address] => {
+                let parsed: std::net::Ipv4Addr = address.parse().map_err(|_| CliError {
+                    message: "address-clear takes an IPv4 address".to_owned(),
+                })?;
+                Ok(Command::ImagesAddressClear {
+                    address: parsed.to_string(),
+                })
+            }
             _ => Err(CliError { message: usage() }),
         },
         "promote" => match rest {
@@ -7603,25 +7608,48 @@ pub fn render_build_addresses_for_test(value: &Value) -> String {
     render_build_addresses(value)
 }
 
+/// Formats Unix milliseconds as `YYYY-MM-DD HH:MM:SS` UTC.
+fn utc_from_millis(millis: i64) -> String {
+    let secs = millis.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
 /// Renders the held and quarantined build addresses (#402).
 fn render_build_addresses(value: &Value) -> String {
     let items = value.get("items").and_then(Value::as_array);
     let mut lines = vec![format!(
-        "{:<16} {:<12} {:<38} {:<15} {}",
-        "ADDRESS", "STATUS", "OPERATION", "SINCE (ms)", "UNTIL (ms)"
+        "{:<16} {:<12} {:<38} {:<20} {}",
+        "ADDRESS", "STATUS", "OPERATION", "SINCE (UTC)", "UNTIL (UTC)"
     )];
     for item in items.into_iter().flatten() {
         lines.push(format!(
-            "{:<16} {:<12} {:<38} {:<15} {}",
+            "{:<16} {:<12} {:<38} {:<20} {}",
             item["address"].as_str().unwrap_or("-"),
             item["status"].as_str().unwrap_or("-"),
             item["operationId"].as_str().unwrap_or("-"),
             item["since"]
                 .as_i64()
-                .map_or("-".to_owned(), |v| v.to_string()),
+                .map_or("-".to_owned(), utc_from_millis),
             item["until"]
                 .as_i64()
-                .map_or("-".to_owned(), |v| v.to_string()),
+                .map_or("-".to_owned(), utc_from_millis),
         ));
     }
     if items.is_none_or(Vec::is_empty) {

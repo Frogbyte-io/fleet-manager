@@ -848,7 +848,7 @@
         "operationId": "listImageBuildAddresses",
         "responses": {
           "200": {
-            "description": "The addresses out of allocation, by address. Empty without a build address pool.",
+            "description": "The complete list of addresses out of allocation, by address. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null. Empty without a build address pool.",
             "content": {
               "application/json": {
                 "schema": {

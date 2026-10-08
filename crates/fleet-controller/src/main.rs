@@ -852,9 +852,12 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 recipe_versions.clone(),
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             )
-            .with_build_addresses(std::sync::Arc::new(
-                fleet_storage_sqlite::BuildAddressRepository::new(store.pool().clone()),
-            )),
+            .with_build_addresses(
+                std::sync::Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                    store.pool().clone(),
+                )),
+                config.image_build_address_pool.is_some(),
+            ),
         );
         // The Lab surface composes over the store and the image pin
         // validator: a template cannot pin an unpromoted image version.

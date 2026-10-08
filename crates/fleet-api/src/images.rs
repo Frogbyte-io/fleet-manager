@@ -845,7 +845,7 @@ pub struct ClearedBuildAddressDto {
     tag = "images",
     operation_id = "listImageBuildAddresses",
     responses(
-        (status = 200, description = "The addresses out of allocation, by address. Empty without a build address pool.", body = Page<BuildAddressDto>),
+        (status = 200, description = "The complete list of addresses out of allocation, by address. Not paginated: `page.limit` is the item count and `page.nextCursor` is always null. Empty without a build address pool.", body = Page<BuildAddressDto>),
         (status = 403, description = "The caller may not read the image surface.", body = crate::error::ApiError),
     )
 )]

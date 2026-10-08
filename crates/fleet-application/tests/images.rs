@@ -966,7 +966,7 @@ impl fleet_application::images::BuildAddressPort for FakeAddresses {
         _now: i64,
     ) -> Result<fleet_application::images::ClearQuarantine, String> {
         self.cleared.lock().unwrap().push(address);
-        Ok(*self.outcome.lock().unwrap())
+        Ok(self.outcome.lock().unwrap().clone())
     }
 }
 
@@ -979,14 +979,16 @@ fn address_service(
     });
     let audit = Arc::new(FakeAudit::default());
     let images = Images::new(Arc::new(FakeRecipes::default()), audit.clone())
-        .with_build_addresses(addresses.clone());
+        .with_build_addresses(addresses.clone(), true);
     (images, addresses, audit)
 }
 
 #[tokio::test]
 async fn clearing_a_quarantine_is_authorized_and_audited_before_and_after() {
     use fleet_application::images::ClearQuarantine;
-    let (images, addresses, audit) = address_service(ClearQuarantine::Cleared);
+    let (images, addresses, audit) = address_service(ClearQuarantine::Cleared {
+        operation_id: "op-1".to_owned(),
+    });
     let denied = images
         .clear_build_address(&DenyAll, &principal(), "192.0.2.10", NOW)
         .await;
@@ -1017,6 +1019,12 @@ async fn clearing_a_quarantine_is_authorized_and_audited_before_and_after() {
             Some("image_build_address_cleared".to_owned())
         ]
     );
+    let facts: Vec<(&str, &str)> = intents[1].metadata.entries().collect();
+    assert!(
+        facts.contains(&("prior_status", "quarantined")),
+        "{facts:?}"
+    );
+    assert!(facts.contains(&("holder_operation", "op-1")), "{facts:?}");
     assert!(intents.iter().all(|intent| intent.action == "images.config"
         && intent.actor == "anonymous-lan-admin"
         && intent.resource.as_deref() == Some("192.0.2.10")));
@@ -1025,7 +1033,9 @@ async fn clearing_a_quarantine_is_authorized_and_audited_before_and_after() {
 #[tokio::test]
 async fn clearing_refuses_a_malformed_held_or_unquarantined_address() {
     use fleet_application::images::ClearQuarantine;
-    let (images, addresses, _) = address_service(ClearQuarantine::Held);
+    let (images, addresses, audit) = address_service(ClearQuarantine::Held {
+        operation_id: "op-1".to_owned(),
+    });
     for bad in ["nonsense", "::1", "192.0.2.256", ""] {
         assert!(matches!(
             images
@@ -1041,6 +1051,14 @@ async fn clearing_refuses_a_malformed_held_or_unquarantined_address() {
             .await,
         Err(RecipeUseCaseError::Conflict { .. })
     ));
+    {
+        // A refusal closes its intent with an outcome event naming the holder.
+        let intents = audit.intents.lock().unwrap();
+        let last: Vec<(&str, &str)> = intents.last().unwrap().metadata.entries().collect();
+        assert!(last.contains(&("event", "image_build_address_clear_refused")));
+        assert!(last.contains(&("holder_operation", "op-1")), "{last:?}");
+        assert!(last.contains(&("prior_status", "held")), "{last:?}");
+    }
     *addresses.outcome.lock().unwrap() = ClearQuarantine::NotQuarantined;
     assert!(matches!(
         images
@@ -1052,7 +1070,9 @@ async fn clearing_refuses_a_malformed_held_or_unquarantined_address() {
 
 #[tokio::test]
 async fn listing_build_addresses_needs_images_read() {
-    let (images, _, _) = address_service(fleet_application::images::ClearQuarantine::Cleared);
+    let (images, _, _) = address_service(fleet_application::images::ClearQuarantine::Cleared {
+        operation_id: "op-1".to_owned(),
+    });
     assert!(matches!(
         images
             .list_build_addresses(&DenyAll, &principal(), NOW)
@@ -1065,5 +1085,23 @@ async fn listing_build_addresses_needs_images_read() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn clearing_without_a_pool_says_so() {
+    let images = Images::new(
+        Arc::new(FakeRecipes::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let Err(RecipeUseCaseError::NotFound { what }) = images
+        .clear_build_address(&AllowAll, &principal(), "192.0.2.10", NOW)
+        .await
+    else {
+        panic!("expected not found");
+    };
+    assert!(
+        what.contains("no build address pool is configured"),
+        "{what}"
     );
 }
