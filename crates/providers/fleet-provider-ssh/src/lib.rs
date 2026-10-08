@@ -474,7 +474,8 @@ fn host_matches_line(line: &str, host: &str) -> bool {
     })
 }
 
-/// Picks the most informative bounded line from a tool's stderr. OpenSSH
+/// Picks the most informative line from a tool's stderr, scrubbed of
+/// credentials and control characters and bounded. OpenSSH
 /// puts banner noise (the `@@@@` warning block) before the actual reason, so
 /// a recognized failure reason wins; otherwise the last line does.
 pub(crate) fn redact_failure(text: &str) -> String {
@@ -493,19 +494,76 @@ pub(crate) fn redact_failure(text: &str) -> String {
         })
         .or_else(|| lines.last());
     let line = reason.copied().unwrap_or("no detail");
-    if line.len() > 200 {
-        format!("{}…", &line[..200])
-    } else {
-        (*line).to_owned()
+    // Bound the scanned input first (on a char boundary) so the scrub stays
+    // cheap, scrub credentials and control characters, then cut the result:
+    // cutting first could split a credential and keep half of it.
+    let scrubbed =
+        fleet_core::flatten_control_characters(&fleet_core::redact_credentials(scrub_window(line)));
+    let limit = scrubbed
+        .char_indices()
+        .nth(MAX_DETAIL_CHARS)
+        .map(|(index, _)| index);
+    match limit {
+        Some(index) => format!("{}…", &scrubbed[..index]),
+        None => scrubbed,
     }
+}
+
+/// Characters of a failure line kept in `connection_failed` details.
+const MAX_DETAIL_CHARS: usize = 200;
+/// Bytes of a failure line scanned for credentials.
+const SCRUB_WINDOW: usize = 4096;
+
+/// The prefix of `text` that is scrubbed. A cut window ends on a char
+/// boundary at whitespace, so no token (and no credential) is split by it.
+fn scrub_window(text: &str) -> &str {
+    if text.len() <= SCRUB_WINDOW {
+        return text;
+    }
+    let mut end = SCRUB_WINDOW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..text[..end].rfind(char::is_whitespace).unwrap_or(0)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         SshAuth, SshConnectionSpec, SshProvider, add_ssh_destination, add_ssh_keyscan_host,
+        redact_failure,
     };
     use std::process::Command;
+
+    #[test]
+    fn failure_detail_redacts_credentials() {
+        let detail = redact_failure("fatal: cannot reach https://user:hunter2@host.invalid/x.git");
+        assert!(!detail.contains("hunter2"), "{detail}");
+        let scp = redact_failure("ssh: deploy:hunter2@host.invalid: Permission denied");
+        assert!(!scp.contains("hunter2"), "{scp}");
+    }
+
+    #[test]
+    fn failure_detail_cuts_on_a_char_boundary() {
+        // 3-byte characters: byte 200 falls inside one.
+        let detail = redact_failure(&"€".repeat(500));
+        assert_eq!(detail.chars().count(), 201, "{detail}");
+        assert!(detail.ends_with('…'));
+        // A multibyte cut inside the scan window must not panic either.
+        // 3-byte characters after an odd-length prefix put byte 4096 inside
+        // one, so the window's boundary step-back runs.
+        let long = format!("Permission denied! {}", "€€€ ".repeat(2_000));
+        assert!(redact_failure(&long).ends_with('…'));
+        // A credential cut off by the window is dropped, not kept in part.
+        let edge = format!("{} user:hunter2pw@host.invalid", "x ".repeat(2_040));
+        assert!(!redact_failure(&edge).contains("hunter2"));
+    }
+
+    #[test]
+    fn failure_detail_flattens_control_characters() {
+        let detail = redact_failure("Permission denied\u{1b}[31m\u{7}");
+        assert!(!detail.chars().any(char::is_control), "{detail:?}");
+    }
 
     fn effective_options(config: &std::path::Path, extra: &[&str]) -> Vec<String> {
         let output = Command::new("ssh")
