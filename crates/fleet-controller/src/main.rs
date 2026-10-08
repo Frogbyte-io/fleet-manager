@@ -161,6 +161,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 events.clone(),
             ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (image_sweep_shutdown, image_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         // FM-721: Lab artifact bytes live in the configured directory; the
         // database keeps their metadata. Without the directory the Lab
         // still runs, without artifacts.
@@ -490,10 +491,34 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 );
                 // #314: a build that was cut short by a crash or reboot
                 // leaves its work directory, and the owner-only var file in
-                // it, behind. Sweep before the worker claims anything; only
-                // the count is logged.
-                let swept = build.sweep_orphaned_work_dirs(&worker_operations).await;
-                eprintln!("image build work directories removed at startup: {swept}");
+                // it, behind. Sweep before the worker claims anything, then
+                // on a timer: a build the dead controller left `running`
+                // keeps its directory until lease recovery fails it. Only
+                // counts are logged.
+                let log_sweep = |report: fleet_controller::images_exec::SweepReport| {
+                    if report != fleet_controller::images_exec::SweepReport::default() {
+                        eprintln!(
+                            "image build work directories swept: {} removed, {} not removable",
+                            report.removed, report.failed
+                        );
+                    }
+                };
+                log_sweep(build.sweep_orphaned_work_dirs(&worker_operations).await);
+                {
+                    let build = build.clone();
+                    let operations = worker_operations.clone();
+                    tokio::spawn(async move {
+                        let mut stop = std::pin::pin!(image_sweep_shutdown_rx);
+                        loop {
+                            tokio::select! {
+                                _ = &mut stop => break,
+                                () = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                                    log_sweep(build.sweep_orphaned_work_dirs(&operations).await);
+                                }
+                            }
+                        }
+                    });
+                }
                 std::sync::Arc::new(fleet_controller::images_exec::ImagesDispatch::new(
                     with_proxmox.clone(),
                     build,
@@ -893,6 +918,7 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         if let Some(handle) = sweeper_handle {
             let _ = handle.await;
         }
+        let _ = image_sweep_shutdown.send(());
         let _ = worker_shutdown.send(());
         let _ = worker_handle.await;
         store.close().await;

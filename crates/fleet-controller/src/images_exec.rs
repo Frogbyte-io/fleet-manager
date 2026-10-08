@@ -862,20 +862,25 @@ impl ImagesExecutor {
     /// anything that is not a directory (a symlink included) with
     /// `remove_file` on the entry itself. Nothing is followed, and a work
     /// root that is not a real directory is left alone. Returns how many
-    /// entries were removed; callers log only that count, never a path or
-    /// a name.
-    pub async fn sweep_orphaned_work_dirs(&self, operations: &Operations) -> usize {
+    /// entries were removed and how many could not be; callers log only
+    /// those counts, never a path or a name.
+    ///
+    /// A build the dead controller left `running` is kept here until the
+    /// worker's lease recovery fails it, so the controller repeats the
+    /// sweep on a timer; a later run removes that directory.
+    pub async fn sweep_orphaned_work_dirs(&self, operations: &Operations) -> SweepReport {
         use fleet_application::operation::PortFailure;
+        let mut report = SweepReport::default();
         let Ok(root) = std::fs::symlink_metadata(&self.work_root) else {
-            return 0;
+            return report;
         };
         if !root.is_dir() {
-            return 0;
+            return report;
         }
         let Ok(entries) = std::fs::read_dir(&self.work_root) else {
-            return 0;
+            report.failed += 1;
+            return report;
         };
-        let mut removed = 0;
         for entry in entries.flatten() {
             let live = match entry.file_name().to_str() {
                 // Not a valid operation id: not a live build's directory.
@@ -895,11 +900,24 @@ impl ImagesExecutor {
                 _ => std::fs::remove_file(&path),
             };
             if gone.is_ok() {
-                removed += 1;
+                report.removed += 1;
+            } else {
+                report.failed += 1;
             }
         }
-        removed
+        report
     }
+}
+
+/// What one sweep of the work root did: counts only, so the boundary can
+/// log them without a path or an operation id.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SweepReport {
+    /// Entries removed.
+    pub removed: usize,
+    /// Entries that could not be removed (or a root that could not be
+    /// read); a leftover secret file may still be on disk.
+    pub failed: usize,
 }
 
 // Only validated numeric version strings may enter public provenance.
@@ -2359,13 +2377,22 @@ mod tests {
         symlink(&outside, orphan.join("nested").join("link")).unwrap();
         symlink(&outside, work.join("dangling-link")).unwrap();
         std::fs::write(work.join("stray-file"), "x").unwrap();
+        // A name that is not valid UTF-8 cannot be an operation id.
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let odd = std::ffi::OsStr::from_bytes(b"odd-\xff-name");
+            std::fs::create_dir(work.join(odd)).unwrap();
+        }
         std::fs::set_permissions(
             work.join("stray-file"),
             std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
 
-        assert_eq!(executor.sweep_orphaned_work_dirs(&operations).await, 3);
+        assert_eq!(
+            executor.sweep_orphaned_work_dirs(&operations).await.removed,
+            4
+        );
         assert!(!orphan.exists());
         assert!(std::fs::symlink_metadata(work.join("dangling-link")).is_err());
         assert!(!work.join("stray-file").exists());
@@ -2378,7 +2405,10 @@ mod tests {
             "keep"
         );
         // A second sweep has nothing left to remove.
-        assert_eq!(executor.sweep_orphaned_work_dirs(&operations).await, 0);
+        assert_eq!(
+            executor.sweep_orphaned_work_dirs(&operations).await,
+            SweepReport::default()
+        );
         assert!(live.is_dir());
 
         // Once the build is over, its directory is an orphan too.
@@ -2386,7 +2416,10 @@ mod tests {
             .complete(&operation.id, "failed", None, Some("{}"))
             .await
             .unwrap();
-        assert_eq!(executor.sweep_orphaned_work_dirs(&operations).await, 1);
+        assert_eq!(
+            executor.sweep_orphaned_work_dirs(&operations).await.removed,
+            1
+        );
         assert!(!live.exists());
     }
 
@@ -2403,7 +2436,10 @@ mod tests {
         let work = dir.path().join("work");
         std::os::unix::fs::symlink(&target, &work).unwrap();
         let executor = ImagesExecutor::new(repository, transport, None, work);
-        assert_eq!(executor.sweep_orphaned_work_dirs(&operations).await, 0);
+        assert_eq!(
+            executor.sweep_orphaned_work_dirs(&operations).await,
+            SweepReport::default()
+        );
         assert_eq!(
             std::fs::read_to_string(target.join("sentinel")).unwrap(),
             "keep"
@@ -2415,7 +2451,10 @@ mod tests {
             None,
             dir.path().join("absent"),
         );
-        assert_eq!(missing.sweep_orphaned_work_dirs(&operations).await, 0);
+        assert_eq!(
+            missing.sweep_orphaned_work_dirs(&operations).await,
+            SweepReport::default()
+        );
     }
 
     #[tokio::test]
