@@ -159,3 +159,16 @@ fn a_deadline_kill_is_not_success() {
     assert!(!outcome.succeeded());
     assert_eq!(outcome.failure_code(), None);
 }
+
+#[test]
+fn the_failure_detail_cuts_on_a_char_boundary_after_redaction() {
+    let outcome = CliOutcome {
+        stderr: format!("https://user:hunter2@host.invalid/ {}", "€".repeat(500)),
+        stdout: String::new(),
+        exit_code: Some(1),
+        killed_by_deadline: false,
+    };
+    let detail = failure_detail(&outcome);
+    assert!(!detail.contains("hunter2"), "{detail}");
+    assert_eq!(detail.chars().count(), 300);
+}

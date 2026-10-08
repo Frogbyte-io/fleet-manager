@@ -369,8 +369,18 @@ pub fn failure_detail(outcome: &CliOutcome) -> String {
     {
         return redact(message);
     }
-    let bounded = if text.len() > 300 { &text[..300] } else { text };
-    redact(bounded)
+    // Scrub a bounded window first, then cut the scrubbed text on a char
+    // boundary: cutting raw bytes could panic mid-character or split a
+    // credential.
+    let mut window = text.len().min(4096);
+    while !text.is_char_boundary(window) {
+        window -= 1;
+    }
+    let scrubbed = redact(&text[..window]);
+    match scrubbed.char_indices().nth(300) {
+        Some((index, _)) => scrubbed[..index].to_owned(),
+        None => scrubbed,
+    }
 }
 
 /// Scrubs credential-shaped `user:password@` userinfo and control noise
