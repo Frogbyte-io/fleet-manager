@@ -1726,6 +1726,11 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
                     "machineId": record.machine_id, "endpointId": record.endpoint_id,
                     "auth": {"type": "agent"}, "remote": project.remote,
                     "root": format!("/tmp/fleet-projects/{}", project.id),
+                    // Lab bootstrap is minimal (no tools, no skills) and does
+                    // not use Frogenv: the workflow never logs a disposable
+                    // guest in or approves it, so setup would grant nothing.
+                    // The plan is clone -> verify (#330).
+                    "usesFrogenv": false,
                     "labParentOperationId": parent_id,
                     "timeoutSeconds": remaining.as_secs().clamp(1, crate::ready::MAX_WORKFLOW_TIMEOUT),
                 }).to_string()),
@@ -1854,6 +1859,91 @@ mod readiness_startup_tests {
         .await
         .unwrap();
         assert_eq!(operations.get_state(&child.id).await.unwrap(), "succeeded");
+    }
+
+    #[tokio::test]
+    async fn the_bootstrap_project_workflow_declares_no_frogenv() {
+        use fleet_application::lab::LabReadinessPort as _;
+        use fleet_application::project::ProjectPort as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let audit = Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone()));
+        let operations = Arc::new(Operations::new(
+            Arc::new(fleet_storage_sqlite::OperationRepository::new(
+                store.pool().clone(),
+            )),
+            audit.clone(),
+        ));
+        let projects = Arc::new(fleet_storage_sqlite::ProjectRepository::new(
+            store.pool().clone(),
+        ));
+        let project = projects
+            .create(&fleet_application::project::NewProject {
+                remote: "example.test/demo".to_owned(),
+                idempotency_key: None,
+                name: "demo".to_owned(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let readiness = ProvisionReadiness::new(
+            Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                store.pool().clone(),
+            )),
+            projects,
+            audit,
+            Arc::new(HeldChild {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                release: Arc::new(tokio::sync::Notify::new()),
+            }),
+            operations.clone(),
+            dir.path().join("ssh"),
+        );
+        let record = fleet_application::lab::ProvisionRecord {
+            id: "provision-1".to_owned(),
+            template_version_id: "version-1".to_owned(),
+            lease_id: None,
+            state: fleet_core::GuestState::Bootstrapping,
+            node: None,
+            vmid: None,
+            clone_upid: None,
+            guest_ipv4: None,
+            machine_id: Some("machine-1".to_owned()),
+            endpoint_id: Some("endpoint-1".to_owned()),
+            ready_project_operation_id: None,
+            readiness_deadline_at: Some(fleet_core::SystemClock::now_unix_millis() + 60_000),
+            failed_step: None,
+            account_id: None,
+            idempotency_key: None,
+            ready_at: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let child_id = readiness
+            .create_project(
+                &operations,
+                "parent-1",
+                &record,
+                &project.id,
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        let child = operations
+            .get(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &child_id,
+            )
+            .await
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(child.payload_json.as_deref().unwrap()).unwrap();
+        // #330: Lab bootstrap plans clone -> verify, never Frogenv.
+        assert_eq!(payload["usesFrogenv"], false);
+        assert!(payload.get("tools").is_none() && payload.get("skillId").is_none());
     }
 }
 

@@ -144,6 +144,12 @@ Notes:
 - **Software the guests need** (git, Node, and so on) goes into the same `inline` list, after the cloud-init wait and before the cleanup lines. Pin a checksum for anything you download, and never put credentials in the recipe.
 - **Check the result.** After promotion, a lease on a template that uses the image should reach `ready` in about 20 seconds. A lease that fails at `guest_ip` points to the machine ID or the network config above. One that gets an address but never becomes ready points to `sshd` (the host keys) or the SSH port.
 
+A template with a bootstrap project (`bootstrapProjectId`, with any probe) also needs:
+
+- `git`, because readiness clones the project into `/tmp/fleet-projects/<project-id>`. The guest must also be able to reach the project's remote.
+
+Lab bootstrap does not use Frogenv. Its readiness workflow is `clone → verify`: it installs no tools, deploys no skills, and never probes or sets up Frogenv, so the image does not need the Frogenv CLI. A stock Debian image with the packages above is enough.
+
 ## First run
 
 The walkthrough builds a linked clone of an existing cloud-image template, promotes it, and leases a guest from it. Every command uses `--output json`, the machine-readable form agents use too. It prints the resource itself (so `jq -r .id`), or a page with `items` for a list. Set the two account IDs first:

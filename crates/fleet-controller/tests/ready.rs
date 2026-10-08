@@ -1,6 +1,8 @@
 //! The ready-project workflow (FM-305): the plan executes through the
 //! composed chain, a re-run skips completed steps, a blocked ceremony is
-//! a first-class state, and a failing step stops with the story.
+//! a first-class state, and a failing step stops with the story. Frogenv
+//! is planned only when declared, and a declared project on a machine
+//! without the CLI is refused as `frogenv_missing` (#330).
 
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::Operations;
@@ -44,6 +46,23 @@ impl fleet_application::worker::OperationExecutor for StubInner {
                 .map(|(_, state)| state.clone())
         };
         match scripted.as_deref() {
+            Some("not_installed") => {
+                // The fixed status script's own "no CLI" report, as the
+                // Frogenv executor records it.
+                let error_json = serde_json::json!({
+                    "reason": "status_failed",
+                    "detail": format!(
+                        "Warning: a transport line on stderr\n{}",
+                        fleet_controller::frogenv::NOT_INSTALLED_DETAIL
+                    ),
+                })
+                .to_string();
+                operations
+                    .complete(&operation.id, "failed", None, Some(&error_json))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
             Some("failed") => {
                 let error_json = serde_json::json!({
                     "reason": "step_failed",
@@ -229,4 +248,95 @@ async fn a_failing_step_stops_with_the_story() {
         !error["remaining"].as_array().unwrap().is_empty(),
         "the remaining steps are named"
     );
+}
+
+impl Fixture {
+    fn ran(&self) -> Vec<String> {
+        self.stub.ran.lock().unwrap().clone()
+    }
+}
+
+/// The payload Lab bootstrap sends: no tools, no skill, no Frogenv.
+fn lab_bootstrap_payload() -> serde_json::Value {
+    serde_json::json!({
+        "machineId": "m-1",
+        "endpointId": "e-1",
+        "auth": {"type": "agent"},
+        "remote": "github.com/Frogbyte-io/fleet-manager",
+        "root": "/tmp/fleet-projects/project-1",
+        "usesFrogenv": false,
+        "timeoutSeconds": 600,
+    })
+}
+
+#[tokio::test]
+async fn a_project_without_frogenv_is_ready_after_clone_and_verify() {
+    // Even a machine whose Frogenv CLI is missing: the probe never runs.
+    let fixture = compose(vec![(
+        "frogenv.status".to_owned(),
+        "not_installed".to_owned(),
+    )])
+    .await;
+    let (state, result, error) = fixture.run_ready(lab_bootstrap_payload()).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(result["ready"], true);
+    assert_eq!(result["completed"], serde_json::json!(["clone", "verify"]));
+    assert!(
+        fixture
+            .ran()
+            .iter()
+            .all(|kind| !kind.starts_with("frogenv.")),
+        "no Frogenv operation is created: {:?}",
+        fixture.ran()
+    );
+}
+
+#[tokio::test]
+async fn a_frogenv_project_without_the_cli_fails_with_the_named_reason() {
+    let fixture = compose(vec![(
+        "frogenv.status".to_owned(),
+        "not_installed".to_owned(),
+    )])
+    .await;
+    let (state, _result, error) = fixture.run_ready(payload()).await;
+    assert_eq!(state, "failed");
+    let error: serde_json::Value = serde_json::from_str(&error.unwrap()).unwrap();
+    assert_eq!(error["reason"], "frogenv_missing");
+    assert_eq!(error["failedAt"], "frogenv_setup");
+    assert_eq!(
+        error["completed"],
+        serde_json::json!(["clone", "mise_install"]),
+        "the steps before Frogenv still run"
+    );
+    assert_eq!(
+        error["remaining"],
+        serde_json::json!(["deploy db to 1 agent(s)", "verify readiness"])
+    );
+    assert!(
+        !fixture.ran().iter().any(|kind| kind == "frogenv.setup"),
+        "a setup that cannot succeed is not run"
+    );
+}
+
+#[tokio::test]
+async fn an_undeclared_payload_keeps_frogenv_and_an_unknown_probe_still_runs_setup() {
+    // A payload without `usesFrogenv` (every caller before #330) plans
+    // Frogenv; a status probe that fails for another reason leaves the
+    // state unknown, so setup runs rather than being refused.
+    let fixture = compose(vec![("frogenv.status".to_owned(), "failed".to_owned())]).await;
+    let (state, result, error) = fixture.run_ready(payload()).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(
+        result["completed"],
+        serde_json::json!([
+            "clone",
+            "mise_install",
+            "frogenv_setup",
+            "skills_deploy",
+            "verify"
+        ])
+    );
+    assert!(fixture.ran().iter().any(|kind| kind == "frogenv.setup"));
 }

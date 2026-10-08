@@ -13,13 +13,20 @@
 //! Blocked/manual steps are a first-class outcome: a Frogenv approval
 //! requirement completes the workflow `blocked_manual_approval` with the
 //! remaining steps named, never a failure or a hang.
+//!
+//! Frogenv is declared, not assumed: the payload's `usesFrogenv` (default
+//! `true`) decides whether the Frogenv probe runs and its setup is
+//! planned. Lab bootstrap declares `false`. A declared project on a
+//! machine without the CLI fails `frogenv_missing` at the setup step.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::{Operation, Operations};
-use fleet_application::ready::{ObservedState, ReadyStep, ToolRequest, plan_ready};
+use fleet_application::ready::{
+    FrogenvUse, ObservedState, ReadyStep, ToolRequest, plan_ready, step_refusal,
+};
 use fleet_application::worker::OperationExecutor;
 use fleet_provider_ssh::ExecutionLimiter;
 
@@ -65,10 +72,29 @@ struct ReadyPayload {
     /// The agents the skill deploys to.
     #[serde(default)]
     agents: Vec<String>,
+    /// Whether the project uses Frogenv. Absent means `true`, the
+    /// behaviour before the declaration existed; Lab bootstrap sends
+    /// `false`.
+    #[serde(default = "uses_frogenv_by_default")]
+    uses_frogenv: bool,
     /// The deadline, in seconds, for the whole workflow. The step
     /// deadlines bound the real work; this one is the caller's ceiling.
     #[allow(dead_code)]
     timeout_seconds: u64,
+}
+
+fn uses_frogenv_by_default() -> bool {
+    true
+}
+
+impl ReadyPayload {
+    fn frogenv_use(&self) -> FrogenvUse {
+        if self.uses_frogenv {
+            FrogenvUse::Required
+        } else {
+            FrogenvUse::NotUsed
+        }
+    }
 }
 
 /// A pinned tool request inside the payload.
@@ -210,7 +236,13 @@ impl ReadyExecutor {
             .skill_id
             .as_deref()
             .map(|skill_id| (skill_id, payload.agents.as_slice()));
-        let plan = plan_ready(&payload.root, &tools, skill, &observed);
+        let plan = plan_ready(
+            &payload.root,
+            &tools,
+            skill,
+            payload.frogenv_use(),
+            &observed,
+        );
         operations
             .record_progress(
                 &operation.id,
@@ -252,9 +284,24 @@ impl ReadyExecutor {
                     operations,
                     &operation.id,
                     step,
+                    STEP_FAILED,
                     "the workflow exceeded its deadline; the completed steps are durable and a retry re-runs only the remainder",
                     &completed,
                     &plan[index..],
+                )
+                .await;
+            }
+            // A step the machine positively cannot satisfy is refused by
+            // name before it runs, instead of failing generically.
+            if let Some(refusal) = step_refusal(step, &observed) {
+                return complete_failed(
+                    operations,
+                    &operation.id,
+                    step,
+                    refusal.reason(),
+                    refusal.detail(),
+                    &completed,
+                    &plan[index + 1..],
                 )
                 .await;
             }
@@ -276,6 +323,7 @@ impl ReadyExecutor {
                         operations,
                         &operation.id,
                         step,
+                        STEP_FAILED,
                         &reason,
                         &completed,
                         &plan[index + 1..],
@@ -324,9 +372,18 @@ impl ReadyExecutor {
         if let Ok(status) = self.mise_status(payload).await {
             observed.mise_installed = status;
         }
-        // Frogenv's own status, when the CLI answers.
-        if let Ok(configured) = self.frogenv_configured(payload).await {
-            observed.frogenv_configured = Some(configured);
+        // Frogenv's own status, only when the project uses Frogenv: a
+        // project that does not never probes it, so a machine without the
+        // CLI records no failed status operation.
+        if payload.uses_frogenv {
+            match self.frogenv_configured(payload).await {
+                Ok(configured) => {
+                    observed.frogenv_installed = Some(true);
+                    observed.frogenv_configured = Some(configured);
+                }
+                Err(FrogenvProbe::NotInstalled) => observed.frogenv_installed = Some(false),
+                Err(FrogenvProbe::Unavailable) => {}
+            }
         }
         observed
     }
@@ -407,7 +464,7 @@ impl ReadyExecutor {
         Ok(installed)
     }
 
-    async fn frogenv_configured(&self, payload: &ReadyPayload) -> Result<bool, String> {
+    async fn frogenv_configured(&self, payload: &ReadyPayload) -> Result<bool, FrogenvProbe> {
         let operation = self
             .spawn_inner(
                 "frogenv.status",
@@ -419,14 +476,16 @@ impl ReadyExecutor {
                 })
                 .to_string(),
             )
-            .await?;
+            .await
+            .map_err(|_| FrogenvProbe::Unavailable)?;
         self.operations
             .claim_only_execute(
                 self.inner.as_ref(),
                 &operation.id,
                 fleet_auth::LAN_PRINCIPAL_ID,
             )
-            .await?;
+            .await
+            .map_err(|_| FrogenvProbe::Unavailable)?;
         let finished = self
             .operations
             .get(
@@ -435,13 +494,30 @@ impl ReadyExecutor {
                 &operation.id,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| FrogenvProbe::Unavailable)?;
         if finished.state != "succeeded" {
-            return Err("the frogenv status observation did not succeed".to_owned());
+            // The fixed status script's own "no CLI" report is a positive
+            // observation; any other failure leaves the state unknown.
+            let error: serde_json::Value =
+                serde_json::from_str(finished.error_json.as_deref().unwrap_or("null"))
+                    .unwrap_or_default();
+            let not_installed = finished.state == "failed"
+                && error["reason"] == "status_failed"
+                && error["detail"].as_str().is_some_and(|detail| {
+                    // Any line: the transport may add its own stderr lines.
+                    detail
+                        .lines()
+                        .any(|line| line.trim() == crate::frogenv::NOT_INSTALLED_DETAIL)
+                });
+            return Err(if not_installed {
+                FrogenvProbe::NotInstalled
+            } else {
+                FrogenvProbe::Unavailable
+            });
         }
         let result: serde_json::Value =
             serde_json::from_str(&finished.result_json.unwrap_or_default())
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| FrogenvProbe::Unavailable)?;
         Ok(result["status"]["configured"].as_bool() == Some(true))
     }
 
@@ -598,6 +674,17 @@ impl ReadyExecutor {
     }
 }
 
+/// Why the Frogenv status probe gave no configuration answer.
+enum FrogenvProbe {
+    /// The fixed status script reported no Frogenv CLI on the machine.
+    NotInstalled,
+    /// The probe did not answer; the machine's Frogenv state is unknown.
+    Unavailable,
+}
+
+/// The workflow's generic failure reason, for a step that ran and failed.
+const STEP_FAILED: &str = "step_failed";
+
 /// One checkout observation, mirroring the provider's shape.
 struct DiscoveredCheckout {
     root: String,
@@ -644,19 +731,20 @@ async fn complete_blocked(
         .map_err(|error| error.to_string())
 }
 
-/// Completes the workflow as a failure with the failing step, the
-/// completed steps, and the remaining steps named.
+/// Completes the workflow as a failure with the reason, the failing step,
+/// the completed steps, and the remaining steps named.
 async fn complete_failed(
     operations: &Operations,
     operation_id: &str,
     step: &ReadyStep,
     reason: &str,
+    detail: &str,
     completed: &[String],
     remaining: &[ReadyStep],
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
-        "reason": "step_failed",
-        "detail": reason,
+        "reason": reason,
+        "detail": detail,
         "failedAt": step.name(),
         "completed": completed,
         "remaining": remaining.iter().map(ToString::to_string).collect::<Vec<_>>(),
