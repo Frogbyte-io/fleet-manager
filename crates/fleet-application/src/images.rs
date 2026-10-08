@@ -55,6 +55,15 @@ pub struct BuildPage {
     pub limit: u32,
 }
 
+/// Options for [`Images::publish_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublishOptions {
+    /// Lets the version build with `insecure_skip_tls_verify` (#284): the
+    /// token then reaches whatever answers at the recipe's address, so
+    /// this is an explicit, audited exception to certificate pinning.
+    pub allow_insecure_tls: bool,
+}
+
 /// A stored recipe draft.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -479,6 +488,33 @@ impl Images {
         recipe_id: &str,
         now: i64,
     ) -> Result<RecipeVersion, RecipeUseCaseError> {
+        self.publish_with(
+            authorizer,
+            principal,
+            recipe_id,
+            now,
+            PublishOptions::default(),
+        )
+        .await
+    }
+
+    /// Publishes a draft with explicit publication options. The only one
+    /// today is the audited `insecure_skip_tls_verify` opt-in (#284): it is
+    /// refused for a recipe that does not skip TLS verification, recorded
+    /// on the publication's audit intent, and part of the version digest.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown recipe, a meaningless opt-in, or a
+    /// backend failure.
+    pub async fn publish_with(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        recipe_id: &str,
+        now: i64,
+        options: PublishOptions,
+    ) -> Result<RecipeVersion, RecipeUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -489,9 +525,17 @@ impl Images {
         )
         .map_err(RecipeUseCaseError::Denied)?;
         let recipe = self.require_recipe(recipe_id).await?;
+        if options.allow_insecure_tls && !fleet_core::requests_insecure_tls(&recipe.content.content)
+        {
+            return Err(RecipeUseCaseError::Invalid {
+                detail: "the recipe does not set insecure_skip_tls_verify, so allowInsecureTls \
+                         would have no effect; builds already pin the account's certificate"
+                    .to_owned(),
+            });
+        }
         let digest = recipe
             .content
-            .content_digest()
+            .version_digest(options.allow_insecure_tls)
             .map_err(|detail| RecipeUseCaseError::Invalid { detail })?;
         let version = RecipeVersion {
             id: format!("{}@{}", recipe.id, &digest[..16]),
@@ -507,13 +551,20 @@ impl Images {
             promoted_at: None,
             promoted_by: None,
             promoted_build_id: None,
+            allow_insecure_tls: options.allow_insecure_tls,
         };
+        let mut metadata = vec![("digest", version.content_digest.as_str())];
+        if version.allow_insecure_tls {
+            // The opt-in is the reviewable fact: it lands on the intent,
+            // before the version exists.
+            metadata.push(("allow_insecure_tls", "true"));
+        }
         self.audit_event(
             principal,
             Permission::ImagesConfig,
             Some(recipe_id),
             "image_recipe_publishing",
-            &[("digest", version.content_digest.as_str())],
+            &metadata,
         )
         .await?;
         self.recipes

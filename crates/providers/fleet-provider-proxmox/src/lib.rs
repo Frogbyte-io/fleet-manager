@@ -206,6 +206,57 @@ pub trait PveTransport: fmt::Debug + Send + Sync {
         request: PveHttpRequest,
         body: Vec<u8>,
     ) -> Result<PveHttpResponse, PveTransportError>;
+
+    /// Captures the host's leaf certificate without sending any request:
+    /// the observe-only policy refuses the handshake after capture, and no
+    /// `Authorization` header exists on this path at all (#284). The
+    /// caller decides what the bytes are worth by comparing their SHA-256
+    /// with a pin it already holds.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the host is unreachable or presents no certificate, or
+    /// when the transport cannot capture certificates (the default, for
+    /// fixture transports).
+    async fn observe_certificate(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<ObservedCertificate, PveTransportError> {
+        let _ = (host, port);
+        Err(PveTransportError::Connect {
+            detail: "this transport cannot capture certificates".to_owned(),
+        })
+    }
+}
+
+/// A leaf certificate one handshake presented, captured before the
+/// handshake was refused. Public material: the DER bytes and their
+/// SHA-256 fingerprint in PVE's display form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedCertificate {
+    /// The leaf's SHA-256 fingerprint, uppercase colon-separated hex.
+    pub fingerprint: String,
+    /// The leaf certificate, DER-encoded.
+    pub der: Vec<u8>,
+}
+
+/// Whether the leaf certificate is valid for `host` by RFC 6125 name
+/// rules: an IP literal must be an IP SAN, a DNS name must match a DNS
+/// SAN (wildcards included), and the subject CN is never consulted. Go's
+/// `x509.Certificate.VerifyHostname` applies the same rules, so this is
+/// the check Packer's Proxmox plugin will make against a pinned leaf; a
+/// certificate this rejects (or cannot parse) is reported as not naming
+/// the host.
+#[must_use]
+pub fn certificate_names_host(der: &[u8], host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let Ok(name) = ServerName::try_from(host) else {
+        return false;
+    };
+    let der = CertificateDer::from(der);
+    webpki::EndEntityCert::try_from(&der)
+        .is_ok_and(|cert| cert.verify_is_valid_for_subject_name(&name).is_ok())
 }
 
 /// The reqwest-backed transport: rustls with the pinned-fingerprint
@@ -239,14 +290,16 @@ enum TlsPolicy {
 
 /// The verifier shared with the rustls session. It never disables
 /// verification: every path either matches the pin or refuses. The leaf
-/// fingerprint it observed lands in `captured`, which is how the transport
-/// reports trust facts on refusal — reqwest's own error chain does not
-/// carry them.
+/// it observed lands in `captured`, which is how the transport reports
+/// trust facts on refusal — reqwest's own error chain does not carry them.
 struct PinningVerifier {
     policy: TlsPolicy,
     provider: Arc<CryptoProvider>,
-    captured: Arc<Mutex<Option<String>>>,
+    captured: Arc<Mutex<Option<ObservedCertificate>>>,
 }
+
+/// The leaf the verifier captured, shared with the transport.
+type Captured = Arc<Mutex<Option<ObservedCertificate>>>;
 
 impl PinningVerifier {
     /// Formats a digest the way PVE and the legacy client display it:
@@ -285,7 +338,10 @@ impl ServerCertVerifier for PinningVerifier {
         *self
             .captured
             .lock()
-            .expect("the capture lock is not poisoned") = Some(observed.clone());
+            .expect("the capture lock is not poisoned") = Some(ObservedCertificate {
+            fingerprint: observed.clone(),
+            der: end_entity.as_ref().to_vec(),
+        });
         match &self.policy {
             TlsPolicy::Observe => Err(rustls::Error::General(
                 "fleet observe-only trust probe: refusing after capture".to_owned(),
@@ -356,18 +412,47 @@ impl PveTransport for ReqwestPveTransport {
     async fn execute(&self, request: PveHttpRequest) -> Result<PveHttpResponse, PveTransportError> {
         self.execute_inner(request, None).await
     }
+
+    async fn observe_certificate(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<ObservedCertificate, PveTransportError> {
+        let (client, captured) = Self::client(TlsPolicy::Observe)?;
+        let authority = match host.parse::<std::net::Ipv6Addr>() {
+            Ok(_) => format!("[{host}]"),
+            Err(_) => host.to_owned(),
+        };
+        // No credential exists on this path: the request carries no
+        // `Authorization` header, and the observe policy refuses the
+        // handshake before any request byte is written.
+        let sent = client
+            .get(format!("https://{authority}:{port}/api2/json/version"))
+            .send()
+            .await;
+        let observed = captured
+            .lock()
+            .expect("the capture lock is not poisoned")
+            .take();
+        match (sent, observed) {
+            (Err(_), Some(certificate)) => Ok(certificate),
+            (Err(error), None) => Err(PveTransportError::Connect {
+                detail: error.to_string(),
+            }),
+            // The observe policy refuses every handshake; a completed
+            // request means the policy did not run. Refuse to report it.
+            (Ok(_), _) => Err(PveTransportError::Connect {
+                detail: "the observe probe must refuse; refusing to report a certificate"
+                    .to_owned(),
+            }),
+        }
+    }
 }
 
 impl ReqwestPveTransport {
-    async fn execute_inner(
-        &self,
-        request: PveHttpRequest,
-        body: Option<Vec<u8>>,
-    ) -> Result<PveHttpResponse, PveTransportError> {
-        let policy = match &request.pinned_fingerprint {
-            Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
-            None => TlsPolicy::Observe,
-        };
+    /// A client whose every handshake runs `policy`, and the capture its
+    /// verifier writes the observed leaf into.
+    fn client(policy: TlsPolicy) -> Result<(reqwest::Client, Captured), PveTransportError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let captured = Arc::new(Mutex::new(None));
         let verifier = Arc::new(PinningVerifier {
@@ -393,6 +478,19 @@ impl ReqwestPveTransport {
             .map_err(|error| PveTransportError::Connect {
                 detail: format!("the TLS configuration was rejected: {error}"),
             })?;
+        Ok((client, captured))
+    }
+
+    async fn execute_inner(
+        &self,
+        request: PveHttpRequest,
+        body: Option<Vec<u8>>,
+    ) -> Result<PveHttpResponse, PveTransportError> {
+        let policy = match &request.pinned_fingerprint {
+            Some(pinned) => TlsPolicy::Pin(normalize_fingerprint(pinned)),
+            None => TlsPolicy::Observe,
+        };
+        let (client, captured) = Self::client(policy)?;
         let url = format!(
             "https://{}:{}{}",
             request.authority(),
@@ -425,7 +523,8 @@ impl ReqwestPveTransport {
             let observed = captured
                 .lock()
                 .expect("the capture lock is not poisoned")
-                .clone();
+                .take()
+                .map(|certificate| certificate.fingerprint);
             match (observed, request.pinned_fingerprint.as_deref()) {
                 // A mismatch is only a mismatch when the fingerprints
                 // differ: a later TLS failure with a matching pin is a

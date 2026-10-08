@@ -29,7 +29,7 @@ const T0 = Date.UTC(2026, 9, 7, 12, 0)
 function version(overrides: Partial<RecipeVersionDto> = {}): RecipeVersionDto {
   return {
     id: 'r1@aaaa', recipeId: 'r1', name: 'ubuntu-24-dev', description: '', contentDigest: DIGEST, content: '{}', source: 'clone',
-    node: 'pve1', storagePool: 'local-lvm', publishedAt: T0 - 3600e3, promotedAt: null, promotedBy: null, structured: null, ...overrides,
+    node: 'pve1', storagePool: 'local-lvm', publishedAt: T0 - 3600e3, promotedAt: null, promotedBy: null, allowInsecureTls: false, structured: null, ...overrides,
   }
 }
 

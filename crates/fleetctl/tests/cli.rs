@@ -2622,8 +2622,27 @@ fn parsing_walks_the_images_forms() {
         .collect();
     assert!(matches!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::ImagesPublish { .. }
+        fleetctl::Command::ImagesPublish {
+            allow_insecure_tls: false,
+            ..
+        }
     ));
+    let args: Vec<String> = ["images", "publish", "rcp-1", "--allow-insecure-tls"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::ImagesPublish {
+            allow_insecure_tls: true,
+            ..
+        }
+    ));
+    let args: Vec<String> = ["images", "publish", "rcp-1", "--allow-insecure"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(fleetctl::parse(&args).is_err());
     let args: Vec<String> = ["images", "versions", "rcp-1"]
         .iter()
         .map(ToString::to_string)
@@ -2945,6 +2964,7 @@ async fn image_build_history_round_trips_through_the_real_api_and_json_cli() {
         promoted_at: None,
         promoted_by: None,
         promoted_build_id: None,
+        allow_insecure_tls: false,
     };
     recipes.publish(&draft.id, &version).await.unwrap();
     let operations = OperationRepository::new(store.pool().clone());
