@@ -1313,7 +1313,7 @@
           "images"
         ],
         "summary": "Publishes a draft: freezes an immutable version identified by its\ncontent digest. Idempotent by construction.",
-        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown recipe.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, a malformed body, or an\nunknown recipe.",
         "operationId": "publishImageRecipe",
         "parameters": [
           {
@@ -1326,6 +1326,22 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PublishRecipeRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "The version was published.",
@@ -1333,6 +1349,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Resource_RecipeVersionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is malformed or the opt-in has no effect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -12228,9 +12254,14 @@
                 "source",
                 "node",
                 "storagePool",
-                "publishedAt"
+                "publishedAt",
+                "allowInsecureTls"
               ],
               "properties": {
+                "allowInsecureTls": {
+                  "type": "boolean",
+                  "description": "Whether the version was published with the audited opt-in that lets\nit build with `insecure_skip_tls_verify` (#284). False for every\nversion published before the opt-in existed."
+                },
                 "content": {
                   "type": "string",
                   "description": "The frozen content."
@@ -13367,6 +13398,17 @@
           }
         }
       },
+      "PublishRecipeRequest": {
+        "type": "object",
+        "description": "The optional publish request (#284). An absent or empty body publishes\nwith every option off, as before the body existed.",
+        "properties": {
+          "allowInsecureTls": {
+            "type": "boolean",
+            "description": "Lets the version build with `insecure_skip_tls_verify`. Without it,\na build of a recipe that skips TLS verification is refused, and\nevery other build pins the account's confirmed certificate for\nPacker. Refused for a recipe that does not skip verification. The\nopt-in is audited and part of the version digest."
+          }
+        },
+        "additionalProperties": false
+      },
       "ReadyAuthDto": {
         "oneOf": [
           {
@@ -13554,9 +13596,14 @@
           "source",
           "node",
           "storagePool",
-          "publishedAt"
+          "publishedAt",
+          "allowInsecureTls"
         ],
         "properties": {
+          "allowInsecureTls": {
+            "type": "boolean",
+            "description": "Whether the version was published with the audited opt-in that lets\nit build with `insecure_skip_tls_verify` (#284). False for every\nversion published before the opt-in existed."
+          },
           "content": {
             "type": "string",
             "description": "The frozen content."
@@ -15748,9 +15795,14 @@
               "source",
               "node",
               "storagePool",
-              "publishedAt"
+              "publishedAt",
+              "allowInsecureTls"
             ],
             "properties": {
+              "allowInsecureTls": {
+                "type": "boolean",
+                "description": "Whether the version was published with the audited opt-in that lets\nit build with `insecure_skip_tls_verify` (#284). False for every\nversion published before the opt-in existed."
+              },
               "content": {
                 "type": "string",
                 "description": "The frozen content."

@@ -19,7 +19,9 @@
 //! take one of two paths, both resolved just in time: recipe secret
 //! variables ride a `-var-file` inside the operation's private work
 //! directory, and the target account's Proxmox token rides the child's
-//! environment only ([`SecretEnv`], #272).
+//! environment only ([`SecretEnv`], #272), next to the `SSL_CERT_FILE`/
+//! `SSL_CERT_DIR` pair that makes the account's pinned certificate the
+//! child's only TLS root (#284).
 #![warn(missing_docs)]
 
 use std::fmt;

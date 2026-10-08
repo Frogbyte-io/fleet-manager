@@ -381,6 +381,90 @@ async fn recipes_walk_create_edit_publish_and_reproducible_versions() {
 }
 
 #[tokio::test]
+async fn the_insecure_tls_opt_in_is_explicit_audited_and_part_of_the_version() {
+    let (images, recipes, audit) = service();
+    let opt_in = fleet_application::images::PublishOptions {
+        allow_insecure_tls: true,
+    };
+    // A recipe that verifies TLS cannot carry a meaningless opt-in.
+    let pinned = images
+        .create(
+            &AllowAll,
+            &principal(),
+            NewRecipe {
+                content: recipe_content("pinned", r#"{"builders":[{"type":"proxmox-iso"}]}"#),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let error = images
+        .publish_with(&AllowAll, &principal(), &pinned.id, NOW + 1, opt_in)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RecipeUseCaseError::Invalid { .. }),
+        "{error}"
+    );
+    assert!(!recipes.port_calls.lock().unwrap().contains(&"publish"));
+
+    let insecure = images
+        .create(
+            &AllowAll,
+            &principal(),
+            NewRecipe {
+                content: recipe_content(
+                    "insecure",
+                    r#"{"builders":[{"type":"proxmox-iso","insecure_skip_tls_verify":true}]}"#,
+                ),
+            },
+            NOW + 2,
+        )
+        .await
+        .unwrap();
+    let plain = images
+        .publish(&AllowAll, &principal(), &insecure.id, NOW + 3)
+        .await
+        .unwrap();
+    assert!(!plain.allow_insecure_tls);
+    let opted = images
+        .publish_with(&AllowAll, &principal(), &insecure.id, NOW + 4, opt_in)
+        .await
+        .unwrap();
+    assert!(opted.allow_insecure_tls);
+    // The same content with and without the opt-in are different versions,
+    // and the one without keeps the plain content digest.
+    assert_ne!(plain.id, opted.id);
+    assert_ne!(plain.content_digest, opted.content_digest);
+    assert_eq!(
+        plain.content_digest,
+        recipe_content(
+            "insecure",
+            r#"{"builders":[{"type":"proxmox-iso","insecure_skip_tls_verify":true}]}"#
+        )
+        .content_digest()
+        .unwrap()
+    );
+    let intents = audit.intents.lock().unwrap();
+    let flagged: Vec<_> = intents
+        .iter()
+        .filter(|intent| {
+            intent
+                .metadata
+                .entries()
+                .any(|(k, v)| k == "allow_insecure_tls" && v == "true")
+        })
+        .collect();
+    assert_eq!(flagged.len(), 1, "{intents:?}");
+    assert!(
+        flagged[0]
+            .metadata
+            .entries()
+            .any(|(k, v)| k == "digest" && v == opted.content_digest)
+    );
+}
+
+#[tokio::test]
 async fn malformed_recipes_are_refused_before_any_write() {
     let (images, _recipes, _audit) = service();
     for content in [

@@ -89,7 +89,6 @@ Recipes are legacy-JSON Packer templates with exactly one `proxmox-iso` or `prox
   "builders": [{
     "type": "proxmox-clone",
     "proxmox_url": "https://pve.example.test:8006/api2/json",
-    "insecure_skip_tls_verify": true,
     "node": "pve1",
     "clone_vm_id": 8000,
     "full_clone": false,
@@ -115,7 +114,11 @@ What the live runs taught:
 - **Do not add `disks` to a clone just to choose storage.** The plugin adds clone `disks` after the source's disks, so you get an extra disk. A clone without `disks` keeps the source template's storage.
 - **Provisioners are limited.** Fleet accepts `shell` with `inline` lines and `file` with inline `content`. A provisioner that reads host files is refused (`asset_snapshot_missing`), because Fleet cannot snapshot those files.
 - **Never put credentials in a recipe.** Recipes are stored and shown as written.
-- **TLS.** The plugin does its own TLS: system CA roots or `insecure_skip_tls_verify`. It cannot use the fingerprint you confirmed in Fleet. Against a default self-signed PVE certificate you need `insecure_skip_tls_verify` today. Pinning the account's certificate for Packer is **pending** ([#284](https://github.com/Frogbyte-io/fleet-manager/issues/284)).
+- **TLS: leave out `insecure_skip_tls_verify`.** Fleet gives Packer the certificate you confirmed for the account as its only trusted root, so a default self-signed PVE certificate verifies without skipping anything ([how](../architecture/lab.md#build-credentials-and-tls-trust)). The host in `proxmox_url` must appear in the certificate's SANs. PVE's `pve-ssl.pem` lists the node name, its FQDN, and the node's addresses from when the certificate was made. Check with `openssl s_client -connect <host>:8006 </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName`. These build failures happen before Packer runs and before the token leaves Fleet:
+  - `target_certificate_name_mismatch`: the host is not in the SANs. Point the account and `proxmox_url` at a name or address the certificate lists, or install a certificate that names your host (a CA-signed one, or `pvecm updatecerts --force` after fixing the node's address), then observe and confirm the new fingerprint.
+  - `target_certificate_changed`: the host now presents a different certificate than the one you confirmed, for example after a renewal. Run `fleetctl proxmox observe` and `confirm` again after checking the new fingerprint on the host.
+  - `insecure_tls_not_allowed`: the recipe sets `insecure_skip_tls_verify`. Remove it. If you really must skip verification, publish with `fleetctl images publish <recipe-id> --allow-insecure-tls`. That opt-in is audited and part of the version, and the build still refuses a changed certificate. Versions published before this release that set the field fail this way. Publishing again, with or without the opt-in, makes a new version.
+  - The pin applies to every HTTPS connection Packer makes. Let PVE fetch ISOs (`iso_file` on PVE storage, or `iso_download_pve`) rather than having Packer download them.
 
 ### 2. Create and publish the recipe
 
@@ -128,7 +131,7 @@ fleetctl --output json images publish <recipe-id> | jq -r .id   # the version id
 
 The flags must appear in exactly this order. `--node` and `--source` must match the builder. A clone without `disks` cannot show its storage, so `--storage-pool` is your declaration of the source template's storage, and Fleet cannot verify it. With `disks`, every disk must name that pool. A mismatch fails the build with `target_snapshot_mismatch`.
 
-Publishing freezes the content as an immutable version, identified by its digest. Editing a recipe and publishing again makes a new version.
+Publishing freezes the content as an immutable version, identified by its digest. Editing a recipe and publishing again makes a new version. `--allow-insecure-tls` (an audited opt-in, only for a recipe that sets `insecure_skip_tls_verify`) is part of that identity too.
 
 ### 3. Build
 
@@ -138,7 +141,7 @@ fleetctl --output json images build <version-id> --account "$BUILD_ACCOUNT" --wa
 
 - Without `--account`, exactly one account must match the recipe's `proxmox_url`. With none or several, the build fails with `target_account_missing`; pass `--account` to choose among several. An `--account` that does not match the URL fails with `target_account_resolution_failed`.
 - The build's own deadline is four hours. `--timeout` only bounds how long `fleetctl` waits; the default of 300 s is short for a build.
-- **Credentials.** Each build gets its account's token ID and secret as `PROXMOX_USERNAME` and `PROXMOX_TOKEN` in Packer's child environment, and nowhere else. Do not set `PROXMOX_*` in the controller's environment: Fleet removes every ambient `PROXMOX_*` variable from Packer's environment, including the version probes', so a build never uses a credential you did not give its account. An account whose fingerprint you have not confirmed is refused after the version checks and before `packer validate` or the build run (`target_account_untrusted`), and so is an account without a stored token (`account_credential_missing`). Other secret recipe variables travel separately: the build request's `secretVars` (API only) name secret-store references, which Fleet resolves into a `-var-file` in the build's work directory (`<FLEET_DATA_DIR>/image-builds/<operation-id>/`) and deletes with it. Fleet does not restrict that file's permissions itself; it gets the controller's umask. Keep `FLEET_DATA_DIR` readable by the controller's user only (for example `chmod 700`).
+- **Credentials.** Each build gets its account's token ID and secret as `PROXMOX_USERNAME` and `PROXMOX_TOKEN` in Packer's child environment, and nowhere else. For builds that verify TLS, Fleet also writes the account's confirmed certificate to an owner-only file in the build's work directory and points Packer at it with `SSL_CERT_FILE` and an empty `SSL_CERT_DIR`, so the plugin's API connection trusts only that certificate. Do not set `PROXMOX_*` in the controller's environment: Fleet removes every ambient `PROXMOX_*` variable from Packer's environment, including the version probes', so a build never uses a credential you did not give its account. An account whose fingerprint you have not confirmed is refused after the version checks and before `packer validate` or the build run (`target_account_untrusted`), and so is an account without a stored token (`account_credential_missing`). Other secret recipe variables travel separately: the build request's `secretVars` (API only) name secret-store references, which Fleet resolves into a `-var-file` in the build's work directory (`<FLEET_DATA_DIR>/image-builds/<operation-id>/`) and deletes with it. Fleet does not restrict that file's permissions itself; it gets the controller's umask. Keep `FLEET_DATA_DIR` readable by the controller's user only (for example `chmod 700`). The certificate pin protects only the plugin's own TLS channel to the API; it does not keep the token from recipe content. Until [#313](https://github.com/Frogbyte-io/fleet-manager/issues/313) is fixed, a recipe can still read `PROXMOX_TOKEN` from Packer's environment (an `{{env ...}}` variable default, or a `shell-local` post-processor or `error-cleanup-provisioner` running on the controller), so review recipes as privileged inputs.
 
 Read the immutable build record:
 

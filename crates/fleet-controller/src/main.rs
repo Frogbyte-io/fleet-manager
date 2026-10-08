@@ -467,10 +467,13 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                             config.data_dir.join("image-builds"),
                         )
                         // #272: each build gets its own account's token, in
-                        // Packer's child environment only.
+                        // Packer's child environment only; #284: with the
+                        // account's confirmed certificate as its only TLS
+                        // root, captured through the shared transport.
                         .with_account_credentials(
                             proxmox_accounts.clone(),
                             proxmox_credentials.clone(),
+                            pve_transport.clone(),
                         ),
                     ),
                 ))

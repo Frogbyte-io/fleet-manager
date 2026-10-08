@@ -149,6 +149,10 @@ pub struct RecipeVersionDto {
     /// it. Kept after a demotion. Null for a version never promoted, or
     /// promoted before pins were recorded and not since.
     pub promoted_build_id: Option<String>,
+    /// Whether the version was published with the audited opt-in that lets
+    /// it build with `insecure_skip_tls_verify` (#284). False for every
+    /// version published before the opt-in existed.
+    pub allow_insecure_tls: bool,
     /// The structured view of the version's content, when it carries a
     /// Proxmox builder block. `None` for non-JSON templates or builders
     /// outside the Proxmox family.
@@ -278,6 +282,7 @@ impl From<RecipeVersion> for RecipeVersionDto {
             promoted_at: version.promoted_at,
             promoted_by: version.promoted_by,
             promoted_build_id: version.promoted_build_id,
+            allow_insecure_tls: version.allow_insecure_tls,
             structured,
         }
     }
@@ -542,20 +547,37 @@ pub async fn delete_image_recipe(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The optional publish request (#284). An absent or empty body publishes
+/// with every option off, as before the body existed.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishRecipeRequest {
+    /// Lets the version build with `insecure_skip_tls_verify`. Without it,
+    /// a build of a recipe that skips TLS verification is refused, and
+    /// every other build pins the account's confirmed certificate for
+    /// Packer. Refused for a recipe that does not skip verification. The
+    /// opt-in is audited and part of the version digest.
+    #[serde(default)]
+    pub allow_insecure_tls: bool,
+}
+
 /// Publishes a draft: freezes an immutable version identified by its
 /// content digest. Idempotent by construction.
 ///
 /// # Errors
 ///
-/// Returns the public error envelope on refusal or an unknown recipe.
+/// Returns the public error envelope on refusal, a malformed body, or an
+/// unknown recipe.
 #[utoipa::path(
     post,
     path = "/images/recipes/{recipeId}/publish",
     tag = "images",
     operation_id = "publishImageRecipe",
     params(("recipeId" = String, Path, description = "The recipe's identity.")),
+    request_body = Option<PublishRecipeRequest>,
     responses(
         (status = 201, description = "The version was published.", body = Resource<RecipeVersionDto>),
+        (status = 400, description = "The body is malformed or the opt-in has no effect.", body = crate::error::ApiError),
         (status = 404, description = "The recipe does not exist.", body = crate::error::ApiError),
     )
 )]
@@ -564,15 +586,39 @@ pub async fn publish_image_recipe(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     Path(recipe_id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Resource<RecipeVersionDto>>), ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // The body is optional: clients that publish without one (or with an
+    // empty one under a JSON content type) keep the original behavior.
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        PublishRecipeRequest::default()
+    } else {
+        let invalid = |detail: String| {
+            map_images_error(&RecipeUseCaseError::Invalid { detail }, correlation_id)
+        };
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(serde_json::Value::Null) => PublishRecipeRequest::default(),
+            Ok(value @ serde_json::Value::Object(_)) => serde_json::from_value(value)
+                .map_err(|error| invalid(format!("the publish request is invalid: {error}")))?,
+            Ok(_) => return Err(invalid("the publish request must be an object".to_owned())),
+            Err(error) => {
+                return Err(invalid(format!(
+                    "the publish request is not valid JSON: {error}"
+                )));
+            }
+        }
+    };
     let version = images
-        .publish(
+        .publish_with(
             state.authorizer.as_ref(),
             &principal,
             &recipe_id,
             fleet_core::SystemClock::now_unix_millis(),
+            fleet_application::images::PublishOptions {
+                allow_insecure_tls: request.allow_insecure_tls,
+            },
         )
         .await
         .map_err(|error| map_images_error(&error, correlation_id))?;

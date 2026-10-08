@@ -188,6 +188,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         images::RecipeDto,
         images::RecipeVersionDto,
         images::SaveRecipeRequest,
+        images::PublishRecipeRequest,
         proxmox::ProviderAgentDto,
         proxmox::ProviderInterfaceDto,
         proxmox_privileges::ProxmoxPrivilegesDto,
