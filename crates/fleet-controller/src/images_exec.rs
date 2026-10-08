@@ -381,7 +381,13 @@ impl OperationExecutor for ImagesExecutor {
             .versions
             .build_target_account(&version, payload.account_id.as_deref())
             .await;
-        let target_resolution_failed = target_account.is_err();
+        let target_resolution_failed = match &target_account {
+            Ok(_) => None,
+            Err(detail) if detail == fleet_application::images::TARGET_ACCOUNT_AMBIGUOUS => {
+                Some("target_account_ambiguous")
+            }
+            Err(_) => Some("target_account_resolution_failed"),
+        };
         let mut record = ImageBuildRecord {
             id: operation.id.clone(),
             operation_id: operation.id.clone(),
@@ -403,8 +409,8 @@ impl OperationExecutor for ImagesExecutor {
         // No provider invocation is allowed until the immutable input snapshot
         // commits. A duplicate delivery cannot silently overwrite old evidence.
         self.versions.start_build(&record).await?;
-        let result = if target_resolution_failed {
-            Err("target_account_resolution_failed")
+        let result = if let Some(reason) = target_resolution_failed {
+            Err(reason)
         } else if operations
             .get_state(&operation.id)
             .await
@@ -2200,6 +2206,34 @@ mod tests {
             assert_eq!(record.reason.as_deref(), Some(reason));
             assert!(record.ended_at.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn several_matching_accounts_without_a_choice_name_the_ambiguity() {
+        let (dir, store, repository, operations, operation, transport) = setup(
+            CONTENT,
+            serde_json::json!({"accountId": null}),
+            Vec::new(),
+            false,
+        )
+        .await;
+        for id in ["one", "two"] {
+            sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES (?1, ?1, 'pve.example.test', 8006, 'fixture@pve!builder', 1)")
+                .bind(id)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let executor =
+            ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.reason.as_deref(), Some("target_account_ambiguous"));
     }
 
     #[tokio::test]

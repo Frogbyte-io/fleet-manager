@@ -88,14 +88,21 @@ pub struct NewRecipe {
     pub content: RecipeContent,
 }
 
+/// The error `RecipePort::build_target_account` returns when several accounts
+/// match the recipe's endpoint and none was requested.
+pub const TARGET_ACCOUNT_AMBIGUOUS: &str = "target_account_ambiguous";
+
 /// The recipe storage port.
 #[async_trait]
 pub trait RecipePort: fmt::Debug + Send + Sync {
     /// Resolves a unique target account from an explicit identity or the
-    /// frozen recipe endpoint. Missing/ambiguous targets remain unbound.
+    /// frozen recipe endpoint. A target that matches no account stays
+    /// unbound (`Ok(None)`).
     ///
     /// # Errors
-    /// Fails on a repository error or an unknown explicit identity.
+    /// Fails on a repository error, an explicit identity that does not match
+    /// the endpoint, or (with no explicit identity) several matching
+    /// accounts, which returns [`TARGET_ACCOUNT_AMBIGUOUS`].
     async fn build_target_account(
         &self,
         _version: &RecipeVersion,
