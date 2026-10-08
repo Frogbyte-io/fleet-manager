@@ -28,6 +28,10 @@ pub struct SuiteSpec {
     pub scenarios: &'static [&'static str],
     /// The `fleet-controller` integration test target (`--test <name>`).
     pub test_target: &'static str,
+    /// The most wall time the whole run may take, compile included. Past
+    /// it the suite's process tree is killed and every unreported pair
+    /// fails.
+    pub deadline: std::time::Duration,
 }
 
 /// The live gate and the variables the runner reads or sets.
@@ -106,10 +110,9 @@ pub fn parse_result_line(marker: &str, line: &str) -> Option<ResultRow> {
         target,
         status: Status::parse(values.get("status")?)?,
         reason: reason.to_owned(),
-        duration_ms: values
-            .get("duration_ms")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0),
+        // Required: a line without a valid duration is malformed, and a
+        // malformed line must leave its pair unreported (a failure).
+        duration_ms: values.get("duration_ms")?.parse().ok()?,
     })
 }
 
@@ -688,28 +691,28 @@ pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<S
     let stdout = child.stdout.take();
     // From here every early return drops `suite`, which kills and reaps it.
     let suite = SuiteProcess { child: Some(child) };
-    let mut reported = Vec::new();
-    if let Some(stdout) = stdout {
-        let mut stderr = std::io::stderr();
-        let mut reader = BufReader::new(stdout);
-        let mut buffer = Vec::new();
-        loop {
-            buffer.clear();
-            match reader.read_until(b'\n', &mut buffer) {
-                Ok(0) => break,
-                Ok(_) => {
-                    // Lossy: one invalid UTF-8 byte must not end the read.
-                    let text = String::from_utf8_lossy(&buffer);
-                    let text = text.trim_end_matches(['\n', '\r']);
-                    let _ = writeln!(stderr, "{text}");
-                    if let Some(row) = parse_result_line(spec.marker, text) {
-                        reported.push(row);
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(format!("reading the suite's output: {error}")),
+    let (reported, timed_out) = match stdout {
+        Some(stdout) => read_rows(spec, stdout)?,
+        None => (Vec::new(), false),
+    };
+    if timed_out {
+        let _ = writeln!(
+            std::io::stderr(),
+            "==> the suite ran past its {}-minute bound; killing it (unreported scenarios fail)",
+            spec.deadline.as_secs() / 60
+        );
+        // Dropping the wrapper freezes, kills and reaps the whole tree.
+        drop(suite);
+        let mut summary = Summary::build(*spec, live, filter, &expected, &reported, false);
+        for row in &mut summary.results {
+            if row.reason.starts_with("no result reported") {
+                row.reason = format!(
+                    "no result reported before the suite's {}-minute bound killed it",
+                    spec.deadline.as_secs() / 60
+                );
             }
         }
+        return Ok(summary);
     }
     let status = suite
         .wait()
@@ -722,6 +725,56 @@ pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<S
         &reported,
         status.success(),
     ))
+}
+
+/// Echoes the suite's output and collects its result rows until the output
+/// ends or the spec's deadline passes; answers whether it timed out.
+fn read_rows(
+    spec: &SuiteSpec,
+    stdout: impl std::io::Read + Send + 'static,
+) -> Result<(Vec<ResultRow>, bool), String> {
+    let mut reported = Vec::new();
+    // The output is read on its own thread so the deadline can end the
+    // wait; killing the tree closes the pipe and ends that thread.
+    let (lines, rows) = std::sync::mpsc::channel::<std::io::Result<Vec<u8>>>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut buffer = Vec::new();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if lines.send(Ok(buffer)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    let _ = lines.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + spec.deadline;
+    let mut stderr = std::io::stderr();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rows.recv_timeout(left) {
+            Ok(Ok(buffer)) => {
+                // Lossy: one invalid UTF-8 byte must not end the read.
+                let text = String::from_utf8_lossy(&buffer);
+                let text = text.trim_end_matches(['\n', '\r']);
+                let _ = writeln!(stderr, "{text}");
+                if let Some(row) = parse_result_line(spec.marker, text) {
+                    reported.push(row);
+                }
+            }
+            Ok(Err(error)) => return Err(format!("reading the suite's output: {error}")),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok((reported, false)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok((reported, true)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1052,6 +1105,44 @@ mod tests {
         }
         drop(SuiteProcess { child: Some(child) });
         assert_eq!(running_markers(), 0, "a forked process outlived the suite");
+    }
+
+    #[test]
+    fn a_suite_that_stops_talking_is_cut_off_at_the_deadline() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writeln!(
+            writer,
+            "{} scenario=trust target=PVE9 status=pass duration_ms=1 reason=",
+            SPEC.marker
+        )
+        .unwrap();
+        // The writer stays open: the suite hangs without closing its output.
+        let spec = SuiteSpec {
+            deadline: std::time::Duration::from_millis(300),
+            ..SPEC
+        };
+        let started = std::time::Instant::now();
+        let (rows, timed_out) = read_rows(&spec, reader).unwrap();
+        assert!(timed_out);
+        assert_eq!(rows.len(), 1, "rows before the deadline are kept");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(writer);
+    }
+
+    #[test]
+    fn a_result_line_without_a_valid_duration_is_malformed() {
+        for line in [
+            format!(
+                "{} scenario=trust target=PVE9 status=pass reason=",
+                SPEC.marker
+            ),
+            format!(
+                "{} scenario=trust target=PVE9 status=pass duration_ms=soon reason=",
+                SPEC.marker
+            ),
+        ] {
+            assert_eq!(parse_result_line(SPEC.marker, &line), None, "{line}");
+        }
     }
 
     #[test]

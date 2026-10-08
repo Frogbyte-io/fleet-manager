@@ -326,6 +326,19 @@ async fn build_ok(run: &TargetRun, version: &str, vmid: u32) -> Result<u32, Stri
     Ok(vmid)
 }
 
+/// The operation's current state.
+async fn operation_state(run: &TargetRun, id: &str) -> Result<String, String> {
+    let (status, body) = run
+        .controller
+        .get(&format!("/api/v1/operations/{id}"))
+        .await?;
+    check!(status == 200, "reading operation {id} answered {status}");
+    Ok(body["data"]["state"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned())
+}
+
 /// The version's current DTO.
 async fn version_dto(run: &TargetRun, version: &str) -> Result<Value, String> {
     let answer = run
@@ -642,15 +655,24 @@ async fn cancel_cleanup(run: &TargetRun) -> Result<Outcome, String> {
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+    // The cancel must land while the build still runs. A build that ended
+    // first says nothing about cancellation: report the timing, not #271.
+    let state_before = operation_state(run, &operation).await?;
+    check!(
+        matches!(state_before.as_str(), "pending" | "running"),
+        "the build was already {state_before} when its clone appeared, so the cancel could not land mid-build (the host built faster than this scenario assumes)"
+    );
     let answer = run
         .controller
         .fleetctl(&args(&["operations", "cancel", &operation]), None)
         .await?;
-    check!(
-        answer.success,
-        "operations cancel failed: {}",
-        answer.stderr
-    );
+    if !answer.success {
+        let state = operation_state(run, &operation).await?;
+        return Err(format!(
+            "operations cancel failed with the build {state}: {}",
+            answer.stderr
+        ));
+    }
     let data = run
         .wait_operation(&operation, Duration::from_secs(600))
         .await?;

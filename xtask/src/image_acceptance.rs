@@ -28,4 +28,5 @@ pub const SPEC: SuiteSpec = SuiteSpec {
     marker: RESULT_MARKER,
     scenarios: &SCENARIOS,
     test_target: "images_live",
+    deadline: std::time::Duration::from_hours(4),
 };

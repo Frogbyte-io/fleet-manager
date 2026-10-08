@@ -25,4 +25,5 @@ pub const SPEC: SuiteSpec = SuiteSpec {
     marker: RESULT_MARKER,
     scenarios: &SCENARIOS,
     test_target: "proxmox_live",
+    deadline: std::time::Duration::from_hours(2),
 };
