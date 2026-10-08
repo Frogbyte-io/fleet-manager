@@ -100,6 +100,8 @@ fn version(source: RecipeSource, content: String) -> RecipeVersion {
 #[test]
 fn the_structured_view_reads_the_plugin_keys_and_freezes_the_target() {
     for (label, source, content) in valid_recipes() {
+        // Every shape the editor produces passes the #313 structure gate.
+        assert_eq!(fleet_core::recipe_build_refusal(&content), None, "{label}");
         let structured = StructuredRecipe::from_raw(&content).expect(label);
         assert_eq!(structured.node, "pve1", "{label}");
         assert_eq!(structured.bridge.as_deref(), Some("vmbr0"), "{label}");

@@ -1062,6 +1062,8 @@ mod tests {
         }
         // TLS is verified against the pinned leaf, never skipped (#284).
         assert!(!fleet_core::requests_insecure_tls(&content.to_string()));
+        // The acceptance recipe passes the #313 recipe-structure gate.
+        assert_eq!(fleet_core::recipe_build_refusal(&content.to_string()), None);
     }
 
     #[test]

