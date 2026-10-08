@@ -281,7 +281,7 @@ To resolve it:
    fleetctl --output json lab cleanup-retry <lease-id> --wait
    ```
 
-   The lease goes back to `releasing` and one new `lab.cleanup` attempt is queued at once. A guest that is already gone counts as destroyed, so a guest you removed by hand resolves the lease to `released`, and the cleanup removes the guest's Lab machine record. `--wait` waits for that one attempt and exits non-zero unless the lease ended `released`. Without `--wait` the command prints the queued operation.
+   The lease goes back to `releasing` and one new `lab.cleanup` attempt is queued at once. A guest that is already gone counts as destroyed, so a guest you removed by hand resolves the lease to `released`, and the cleanup removes the guest's Lab machine record. Fleet still has to ask the account's PVE API to learn that the guest is gone, so removing it by hand is not enough on its own: restore the account's trust (a confirmed fingerprint) and its connectivity first, or the new attempt fails like the last ones. If you cannot, leave the lease `cleanup_failed`. `--wait` waits for that one attempt and exits non-zero unless the lease ended `released`. Without `--wait` the command prints the queued operation.
 
    **Exception: leases provisioned before FM-713.** Their provision record has no Proxmox account (and, for some, no node), and cleanup refuses such a lease before it looks for the guest. A re-arm therefore returns it to `cleanup_failed`, even after you removed the guest by hand. Destroy that guest by hand on the host and do not re-arm the lease: it stays `cleanup_failed` as the record, because `lab release` (with any strategy) refuses that state.
 
