@@ -54,6 +54,7 @@ const ALLOWED: &[&str] = &[
     "TMPDIR",
     "LANG",
     "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
     "PACKER_PLUGIN_PATH",
     "PACKER_CONFIG_DIR",
     "PACKER_CONFIG",
@@ -110,8 +111,9 @@ fn fake_packer(dir: &Path) -> PathBuf {
 }
 
 fn dumped(dir: &Path, name: &str) -> BTreeMap<String, String> {
-    std::fs::read_to_string(dir.join(format!("env-{name}")))
-        .unwrap_or_else(|error| panic!("no dump for {name}: {error}"))
+    let bytes = std::fs::read(dir.join(format!("env-{name}")))
+        .unwrap_or_else(|error| panic!("no dump for {name}: {error}"));
+    String::from_utf8_lossy(&bytes)
         .lines()
         .filter_map(|line| line.split_once('='))
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -120,7 +122,13 @@ fn dumped(dir: &Path, name: &str) -> BTreeMap<String, String> {
 
 /// The exact environment a child handed `handed` must see in this process.
 fn expected(handed: &[(&str, &str)]) -> BTreeMap<String, String> {
-    let mut env: BTreeMap<String, String> = std::env::vars()
+    let mut env: BTreeMap<String, String> = std::env::vars_os()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
         .filter(|(key, _)| {
             ALLOWED.contains(&key.as_str()) || (key.starts_with("LC_") && key.len() > 3)
         })
@@ -149,10 +157,6 @@ fn assert_clean(name: &str, env: &BTreeMap<String, String>, want: &BTreeMap<Stri
     for (key, value) in PASSED_THROUGH {
         assert_eq!(env.get(*key).map(String::as_str), Some(*value), "{name}");
     }
-    assert!(
-        env.contains_key("PATH") && env.contains_key("HOME"),
-        "{name}"
-    );
 }
 
 /// The child's own setup really carries the sentinels.

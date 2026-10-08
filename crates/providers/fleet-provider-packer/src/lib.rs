@@ -72,7 +72,9 @@ pub struct PackerCommand {
 /// when it exists, else `$XDG_CONFIG_HOME/packer` or `$HOME/.config/packer`
 /// (`packer-plugin-sdk` `pathing`). `HOME` therefore stays, and the
 /// operator's own overrides of those locations are honored rather than
-/// replaced. `PACKER_CONFIG` names `.packerconfig`; `TMPDIR` is Go's
+/// replaced. Packer's cache directory is `PACKER_CACHE_DIR`, else
+/// `$XDG_CACHE_HOME/packer`, else `$HOME/.cache/packer`, created on every
+/// run. `PACKER_CONFIG` names `.packerconfig`; `TMPDIR` is Go's
 /// `os.TempDir`; `LANG` and [`AMBIENT_PREFIXES`] are locale only.
 ///
 /// Proxy variables are deliberately absent: the Proxmox plugin's API client
@@ -84,6 +86,7 @@ pub const AMBIENT_ALLOWLIST: &[&str] = &[
     "TMPDIR",
     "LANG",
     "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
     "PACKER_PLUGIN_PATH",
     "PACKER_CONFIG_DIR",
     "PACKER_CONFIG",
@@ -95,7 +98,7 @@ pub const AMBIENT_ALLOWLIST: &[&str] = &[
 pub const AMBIENT_PREFIXES: &[&str] = &["LC_"];
 
 /// Variables Fleet sets on every Packer child, whatever the controller's
-/// environment says.
+/// environment says or the command is handed: they are applied last.
 ///
 /// - `CHECKPOINT_DISABLE`: no update or telemetry call to the
 ///   vendor's checkpoint service.
@@ -124,8 +127,8 @@ pub fn ambient_allowed(name: &str) -> bool {
 ///
 /// Every child starts from an empty environment (#335): only the
 /// [`AMBIENT_ALLOWLIST`] (and [`AMBIENT_PREFIXES`]) variables are copied
-/// from the controller, then [`FIXED_ENV`], then the variables handed
-/// here. So no ambient credential reaches Packer or its plugins (cloud
+/// from the controller, then the variables handed here, then
+/// [`FIXED_ENV`], which nothing overrides. So no ambient credential reaches Packer or its plugins (cloud
 /// credentials, `PKR_VAR_*`, proxies, the controller's own `PROXMOX_*`),
 /// and a command handed nothing ([`SecretEnv::default`],
 /// [`SecretEnv::isolated`]) sees only the allowlist.
@@ -156,12 +159,13 @@ impl SecretEnv {
         self.vars.iter().map(|(name, _)| name.as_str()).collect()
     }
 
-    /// The exposed value of one variable (the trusted child boundary).
+    /// The exposed value of one variable (the trusted child boundary): the
+    /// last one handed, as the child sees it.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
         self.vars
             .iter()
-            .find(|(key, _)| key == name)
+            .rfind(|(key, _)| key == name)
             .map(|(_, value)| value.expose())
     }
 
@@ -172,8 +176,9 @@ impl SecretEnv {
     }
 
     /// The child's whole environment over the given ambient one: the
-    /// allowlisted ambient variables, then [`FIXED_ENV`], then the handed
-    /// variables, a later entry replacing an earlier one of the same name.
+    /// allowlisted ambient variables, then the handed variables, then
+    /// [`FIXED_ENV`], a later entry replacing an earlier one of the same
+    /// name. So a handed `SSH_AUTH_SOCK` can never reopen #333.
     fn child_env(
         &self,
         ambient: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
@@ -181,11 +186,11 @@ impl SecretEnv {
         let mut env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> = ambient
             .filter(|(key, _)| key.to_str().is_some_and(ambient_allowed))
             .collect();
-        for (key, value) in FIXED_ENV {
-            env.insert((*key).into(), (*value).into());
-        }
         for (key, value) in self.vars.iter() {
             env.insert(key.into(), value.expose().into());
+        }
+        for (key, value) in FIXED_ENV {
+            env.insert((*key).into(), (*value).into());
         }
         env.into_iter().collect()
     }
@@ -652,6 +657,21 @@ mod tests {
             ("SSL_CERT_FILE", "/work/tls/pinned.pem"),
         ]);
         assert_eq!(child_env(&env, AMBIENT), pairs(&expected));
+    }
+
+    #[test]
+    fn handed_variables_never_override_the_fixed_ones() {
+        let env = SecretEnv::new(vec![
+            (
+                "SSH_AUTH_SOCK".to_owned(),
+                fleet_core::SensitiveString::new("/run/agent.sock"),
+            ),
+            (
+                "CHECKPOINT_DISABLE".to_owned(),
+                fleet_core::SensitiveString::new(""),
+            ),
+        ]);
+        assert_eq!(child_env(&env, AMBIENT), pairs(PASSED));
     }
 
     #[test]
