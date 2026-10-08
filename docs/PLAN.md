@@ -314,14 +314,14 @@ Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymou
 - Preserve `fleetctl --output json` and official Fleet skills as the agent interface; do not add an MCP server without a new demonstrated need and plan revision.
 - Read/write command separation, high-impact confirmation policy, rate/concurrency limits, and prompt-injection threat tests.
 - CI integration and autonomous Lab workflows with owner/purpose linkage and artifact handoff.
-- Design that slice against [Release QA](https://github.com/Frogbyte-io/release-qa) as the reference consumer. Its planned Fleet adapter (Release QA Stage 8) lives in that repository. It acquires a Lab lease through `fleetctl lab --output json`, runs the unchanged `release-qa run` in the guest, collects evidence, and releases the lease. Release QA keeps test outcomes, reports, and its GitHub gate. Fleet only provisions, executes, collects, and cleans up. The adapter needs:
+- Design that slice against [Release QA](https://github.com/Frogbyte-io/release-qa) as the reference consumer. Its planned Fleet adapter (Release QA Stage 8) lives in that repository and binds only to Fleet APIs that are implemented when it starts. It is expected to acquire a Lab lease through `fleetctl lab --output json`, run the unchanged `release-qa run` in the guest, collect evidence, and release the lease. Release QA keeps test outcomes, reports, and its GitHub gate. Fleet only provisions, executes, collects, and cleans up. The adapter needs:
   - a scoped CI identity that can create, exec in, and destroy leases from an allowed template only;
-  - a lease purpose that records the Release QA candidate and run IDs;
+  - a lease purpose that carries the Release QA candidate and run IDs (a convention within the existing free-text purpose);
   - a way to run suites longer than the 900-second exec bound;
-  - evidence handoff out of the guest;
+  - download of collected Lab artifacts by that scoped CI identity, so evidence reaches the CI runner;
   - a way to deliver GitHub upload credentials that never passes them through job payloads, logs, or audit metadata.
 
-  Fleet adds no Release QA-specific code. Windows guests and exclusive USB hardware stay out of this slice until the Lab sub-epics for them land.
+  Fleet adds no Release QA-specific code. This slice covers Linux guests only. Windows guests and exclusive USB hardware stay out of it until the Lab sub-epics for them land.
 - Richer audit query/export and policy simulation.
 
 Exit gate: authenticated deployment no longer relies on LAN trust; a restricted agent identity can create and destroy an allowed Lab lease but cannot execute on production, administer Fleet, read secrets, or retain a VM.
