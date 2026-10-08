@@ -138,7 +138,7 @@ fleetctl --output json images build <version-id> --account "$BUILD_ACCOUNT" --wa
 
 - Pass `--account` when more than one account matches the recipe's `proxmox_url`. Otherwise the build fails with `target_account_missing`.
 - The build's own deadline is four hours. `--timeout` only bounds how long `fleetctl` waits; the default of 300 s is short for a build.
-- **Credentials.** Each build gets its account's token ID and secret as `PROXMOX_USERNAME` and `PROXMOX_TOKEN` in Packer's child environment, and nowhere else. Do not set `PROXMOX_*` in the controller's environment: Fleet removes every ambient `PROXMOX_*` variable from Packer's environment, including the version probes', so a build never uses a credential you did not give its account. An account whose fingerprint you have not confirmed is refused before Packer runs (`target_account_untrusted`), and so is an account without a stored token (`account_credential_missing`).
+- **Credentials.** Each build gets its account's token ID and secret as `PROXMOX_USERNAME` and `PROXMOX_TOKEN` in Packer's child environment, and nowhere else. Do not set `PROXMOX_*` in the controller's environment: Fleet removes every ambient `PROXMOX_*` variable from Packer's environment, including the version probes', so a build never uses a credential you did not give its account. An account whose fingerprint you have not confirmed is refused after the version checks and before `packer validate` or the build run (`target_account_untrusted`), and so is an account without a stored token (`account_credential_missing`). Other secret recipe variables travel separately: the build request's `secretVars` (API only) name secret-store references, which Fleet writes to a private `-var-file` in the build's work directory and deletes with it.
 
 Read the immutable build record:
 
@@ -193,7 +193,7 @@ One command creates the lease and provisions it:
 
 ```sh
 fleetctl --output json lab create <template-version-id> --purpose "first run" \
-  --account "$LAB_ACCOUNT" --wait --timeout 900 | jq -r .id   # the lease id
+  --account "$LAB_ACCOUNT" --wait --timeout 900   # prints the lease; its id is the lease id
 fleetctl --output json lab status <lease-id>
 ```
 
