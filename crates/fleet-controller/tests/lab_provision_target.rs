@@ -13,6 +13,9 @@ use fleet_application::lab::{
     CloneTargetReservation, ImageArtifactPort, LabTemplate, LabTemplatePort, LabTemplateVersion,
     LeasePort, NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
 };
+use fleet_application::lab_placement::{
+    CapacityReservationPort, ImageStoragePort, PlacementPolicy, ReservationState,
+};
 use fleet_application::operation::{NewOperation, Operations};
 use fleet_application::proxmox::{
     CredentialStoreError, NewProxmoxAccount, ProxmoxAccountPort, ProxmoxCredentialStore,
@@ -22,12 +25,15 @@ use fleet_provider_proxmox::{
     ProxmoxClient, PveHttpMethod, PveHttpRequest, PveHttpResponse, PveTransport, PveTransportError,
 };
 use fleet_storage_sqlite::{
-    AuditSink, LabRepository, LeaseRepository, OperationRepository, ProxmoxAccountRepository, Store,
+    AuditSink, CapacityRepository, LabRepository, LeaseRepository, OperationRepository,
+    ProxmoxAccountRepository, Store,
 };
 
 const FP: &str = "DC2C116EC9C7EA618AA4E41EFB9BDEE4AA3D81EB16388F2B360AABE283A76498";
 /// The account's API host: deliberately not a node name.
 const API_HOST: &str = "pve-api.example.test";
+/// FM-715: a second trusted account's API host that never answers.
+const UNREACHABLE_HOST: &str = "pve-unreachable.example.test";
 /// The node that holds the image template.
 const TEMPLATE_NODE: &str = "pve-b";
 /// The image template's VMID (the recorded build artifact).
@@ -68,6 +74,14 @@ struct Pve {
     /// flag (cleared by a PUT), how many more reads still report the
     /// clone lock, and the name the clone request gave it.
     clone_config: Mutex<CloneConfig>,
+    /// FM-715: the free memory (GiB of 32) node status reports, when the
+    /// capacity endpoints answer at all.
+    capacity: Mutex<Option<u64>>,
+    /// FM-715: the lease whose reservation state is recorded when the
+    /// `nextid` and clone requests arrive.
+    watch_reservation: Mutex<Option<(sqlx::SqlitePool, String)>>,
+    /// The (path, reservation held?) pairs those requests saw.
+    held_at: Mutex<Vec<(String, bool)>>,
 }
 
 #[derive(Debug, Default)]
@@ -105,6 +119,9 @@ impl Pve {
             observe: Mutex::new(None),
             ready_ip: false,
             clone_config: Mutex::new(CloneConfig::default()),
+            capacity: Mutex::new(None),
+            watch_reservation: Mutex::new(None),
+            held_at: Mutex::new(Vec::new()),
         })
     }
 
@@ -336,11 +353,47 @@ impl PveTransport for Transport {
 }
 
 impl Transport {
+    /// FM-715: the node status and storage endpoints, when scripted.
+    fn capacity_answer(&self, path: &str) -> Option<String> {
+        let free_gib = (*self.0.capacity.lock().unwrap())?;
+        let node = path.strip_prefix("/api2/json/nodes/")?;
+        let gib: u64 = 1 << 30;
+        if node
+            .strip_suffix("/status")
+            .is_some_and(|node| !node.contains('/'))
+        {
+            return Some(
+                serde_json::json!({"data": {
+                    "cpu": 0.1, "cpuinfo": {"cpus": 8},
+                    "memory": {"total": 32 * gib, "used": (32 - free_gib) * gib}
+                }})
+                .to_string(),
+            );
+        }
+        if node
+            .strip_suffix("/storage")
+            .is_some_and(|node| !node.contains('/'))
+        {
+            return Some(
+                serde_json::json!({"data": [
+                    {"storage": "local-lvm", "used": 0, "total": 500 * gib}
+                ]})
+                .to_string(),
+            );
+        }
+        None
+    }
+
     async fn respond(
         &self,
         request: PveHttpRequest,
         body: Option<serde_json::Value>,
     ) -> Result<PveHttpResponse, PveTransportError> {
+        if request.host == UNREACHABLE_HOST {
+            return Err(PveTransportError::Connect {
+                detail: "unreachable".to_owned(),
+            });
+        }
         assert_eq!(request.host, API_HOST, "every call goes to the API host");
         let path = request.path.clone();
         let stored_target = if path.ends_with("/clone") || path.ends_with("/status/start") {
@@ -363,6 +416,17 @@ impl Transport {
                 body["name"].as_str().unwrap().to_owned(),
             ));
         }
+        if path == "/api2/json/cluster/nextid" || path.ends_with("/clone") {
+            let watch = self.0.watch_reservation.lock().unwrap().clone();
+            if let Some((pool, lease_id)) = watch {
+                let held = CapacityRepository::new(pool)
+                    .for_lease(&lease_id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|reservation| reservation.state == ReservationState::Held);
+                self.0.held_at.lock().unwrap().push((path.clone(), held));
+            }
+        }
         self.0.seen.lock().unwrap().push(Seen {
             path: path.clone(),
             method: request.method,
@@ -384,6 +448,8 @@ impl Transport {
             r#"{"data":{"version":"9.0.3"}}"#.to_owned()
         } else if path == "/api2/json/cluster/resources" {
             self.0.resources()
+        } else if let Some(answer) = self.capacity_answer(&path) {
+            answer
         } else if path == "/api2/json/cluster/nextid" {
             // PVE's JSON formatter answers the integer as a string.
             format!(r#"{{"data":"{}"}}"#, self.0.next_vmid)
@@ -439,6 +505,28 @@ impl ImageArtifactPort for Artifacts {
     }
     async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String> {
         Ok(vec![TEMPLATE_VMID, OTHER_ARTIFACT_VMID, GONE_ARTIFACT_VMID])
+    }
+}
+
+/// FM-715: every pinned image's template disk lives on `local-lvm`.
+#[derive(Debug)]
+struct LocalLvm;
+
+/// An image whose storage pool Fleet does not know.
+#[derive(Debug)]
+struct NoStorage;
+
+#[async_trait]
+impl ImageStoragePort for NoStorage {
+    async fn template_storage(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl ImageStoragePort for LocalLvm {
+    async fn template_storage(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(Some("local-lvm".to_owned()))
     }
 }
 
@@ -614,7 +702,53 @@ impl Harness {
         lease_id: &str,
         record_id: &str,
     ) -> (String, Option<(String, String)>, ProvisionRecord) {
+        let account = self.account_id.clone();
+        self.run_with_account(pve, executor, lease_id, record_id, Some(&account))
+            .await
+    }
+
+    /// How many audit intents carry `event` in their metadata. The
+    /// operation's completion appends an outcome row to its latest intent,
+    /// so outcome rows are not counted.
+    async fn audit_events(&self, event: &str) -> usize {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE outcome IS NULL AND metadata_json LIKE ?1",
+        )
+        .bind(format!("%\"{event}\"%"))
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        usize::try_from(count).unwrap()
+    }
+
+    /// FM-715: the executor with placement enabled over the real capacity
+    /// repository.
+    fn placed_executor(
+        &self,
+        pve: &Arc<Pve>,
+        policy: PlacementPolicy,
+    ) -> fleet_controller::proxmox_exec::ProvisionExecutor {
+        self.executor(pve, Some(TEMPLATE_VMID)).with_placement(
+            Arc::new(CapacityRepository::new(self.pool.clone())),
+            Arc::new(LocalLvm),
+            Arc::new(AuditSink::new(self.pool.clone())),
+            policy,
+        )
+    }
+
+    async fn run_with_account(
+        &self,
+        pve: &Arc<Pve>,
+        executor: fleet_controller::proxmox_exec::ProvisionExecutor,
+        lease_id: &str,
+        record_id: &str,
+        account: Option<&str>,
+    ) -> (String, Option<(String, String)>, ProvisionRecord) {
         *pve.observe.lock().unwrap() = Some((self.labs.clone(), record_id.to_owned()));
+        let mut payload = serde_json::json!({ "recordId": record_id, "leaseId": lease_id });
+        if let Some(account) = account {
+            payload["accountId"] = serde_json::Value::String(account.to_owned());
+        }
         let operation = self
             .operations
             .create_lab_provision(
@@ -626,14 +760,7 @@ impl Harness {
                     idempotency_key: None,
                     deadline_at: None,
                     correlation_id: None,
-                    payload_json: Some(
-                        serde_json::json!({
-                            "recordId": record_id,
-                            "accountId": self.account_id,
-                            "leaseId": lease_id
-                        })
-                        .to_string(),
-                    ),
+                    payload_json: Some(payload.to_string()),
                     review_token: None,
                 },
             )
@@ -2015,4 +2142,525 @@ async fn a_permanent_client_error_on_the_update_is_not_retried() {
         step_of(&harness, &record.id).await.as_deref(),
         Some("unprotect")
     );
+}
+
+// FM-715: placement and capacity reservation ---------------------------------
+
+#[tokio::test]
+async fn placement_selects_the_account_and_reserves_before_any_vmid_or_clone() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    *pve.watch_reservation.lock().unwrap() = Some((harness.pool.clone(), lease_id.clone()));
+
+    let (_, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+
+    // The reservation was already held when the VMID was requested and
+    // when the clone was.
+    let held_at = pve.held_at.lock().unwrap().clone();
+    assert_eq!(held_at.len(), 2, "{held_at:?}");
+    assert!(held_at.iter().all(|(_, held)| *held), "{held_at:?}");
+
+    // The saga ran to the agent probe as before (never_ready), through the
+    // one account that reaches the template.
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(
+        stored.account_id.as_deref(),
+        Some(harness.account_id.as_str())
+    );
+    assert_eq!(pve.clones().len(), 1);
+    let paths = pve.paths();
+    let observed = paths
+        .iter()
+        .position(|path| path == &format!("/api2/json/nodes/{TEMPLATE_NODE}/status"))
+        .expect("the template node's capacity is refreshed");
+    let nextid = paths
+        .iter()
+        .position(|path| path == "/api2/json/cluster/nextid")
+        .unwrap();
+    assert!(observed < nextid, "{paths:?}");
+    let reservation = CapacityRepository::new(harness.pool.clone())
+        .for_lease(&lease_id)
+        .await
+        .unwrap()
+        .expect("the lease holds a reservation");
+    assert_eq!(reservation.node, TEMPLATE_NODE);
+    assert_eq!(reservation.account_id, harness.account_id);
+    assert_eq!(
+        (
+            reservation.demand.cores,
+            reservation.demand.memory_mib,
+            reservation.demand.disk_gib,
+            reservation.demand.storage.as_str()
+        ),
+        (2, 2048, 20, "local-lvm")
+    );
+    // The guest was allocated: never_ready keeps the reservation for
+    // cleanup to release after the destroy.
+    assert_eq!(reservation.state, ReservationState::Held);
+}
+
+#[tokio::test]
+async fn insufficient_capacity_refuses_with_an_explanation_and_allocates_nothing() {
+    let harness = Harness::new().await;
+    let (first_lease, first) = harness.record().await;
+    let (second_lease, second) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    // 3 GiB free; the template wants 2 GiB.
+    *pve.capacity.lock().unwrap() = Some(3);
+
+    let (_, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &first_lease,
+            &first.id,
+            None,
+        )
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let clones_before = pve.clones().len();
+
+    // The first lease's reservation holds 2 GiB: 1 GiB is left.
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &second_lease,
+            &second.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "insufficient_memory");
+    assert_eq!(
+        detail,
+        format!("insufficient memory on {TEMPLATE_NODE}: need 2048 MiB, 1024 free")
+    );
+    assert_eq!(pve.clones().len(), clones_before, "no clone was requested");
+    assert_eq!(stored.vmid, None, "no VMID was reserved");
+    // The refused lease never allocated a guest and holds nothing.
+    assert!(
+        CapacityRepository::new(harness.pool.clone())
+            .for_lease(&second_lease)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_unrefreshable_stale_observation_refuses_placement() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // The node status and storage endpoints fail, so the refresh is
+    // partial and replaces nothing; the stored observation is an hour old.
+    let pve = Pve::new(Vec::new());
+    CapacityRepository::new(harness.pool.clone())
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: TEMPLATE_NODE.to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "local-lvm".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: fleet_core::SystemClock::now_unix_millis() - 3_600_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "capacity_stale", "{detail}");
+    assert!(
+        detail.contains("refusing to place on stale capacity"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+
+    // A longer configured age accepts the same observation.
+    let (lease_id, record) = harness.record().await;
+    let (_, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(
+                &pve,
+                PlacementPolicy {
+                    max_observation_age_ms: 7_200_000,
+                    ..PlacementPolicy::default()
+                },
+            ),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id),
+        )
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+}
+
+#[tokio::test]
+async fn several_accounts_reaching_the_template_are_ambiguous() {
+    let harness = Harness::new().await;
+    let second = harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-second".to_owned(),
+            host: API_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab2".to_owned(),
+        })
+        .await
+        .unwrap();
+    harness
+        .accounts
+        .set_fingerprint(&second.id, Some(FP.to_owned()))
+        .await
+        .unwrap();
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "placement_ambiguous");
+    assert!(
+        detail.contains("pve-main on pve-b, pve-second on pve-b"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.account_id, None);
+}
+
+#[tokio::test]
+async fn a_failure_after_the_reservation_but_before_allocation_releases_it() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // Capacity fits, so the reservation is taken; then nextid hands out a
+    // promoted artifact's VMID and the provision fails before any guest
+    // is allocated.
+    let pve = Pve::scripted(Vec::new(), CLONE_UPID, GONE_ARTIFACT_VMID);
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    assert_eq!(error.unwrap().0, "conflict");
+    assert_eq!(stored.vmid, None);
+    assert_eq!(
+        harness.leases.get(&lease_id).await.unwrap().state,
+        fleet_core::LeaseState::Failed
+    );
+    let reservation = CapacityRepository::new(harness.pool.clone())
+        .for_lease(&lease_id)
+        .await
+        .unwrap()
+        .expect("the reservation was taken before the failure");
+    assert_eq!(reservation.state, ReservationState::Released);
+    assert!(reservation.released_at.is_some());
+}
+
+#[tokio::test]
+async fn a_resumed_pending_clone_without_a_reservation_reserves_before_cloning() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    // A run before FM-715 reserved the VMID and stopped before its clone.
+    harness
+        .labs
+        .reserve_clone_target(&record.id, TEMPLATE_NODE, 9005)
+        .await
+        .unwrap();
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    *pve.watch_reservation.lock().unwrap() = Some((harness.pool.clone(), lease_id.clone()));
+
+    let (_, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(stored.vmid, Some(9005));
+    let held_at = pve.held_at.lock().unwrap().clone();
+    assert_eq!(held_at.len(), 1, "only the clone, no nextid: {held_at:?}");
+    assert!(
+        held_at[0].0.ends_with("/clone") && held_at[0].1,
+        "{held_at:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_reservation_on_another_node_refuses_the_resumed_clone() {
+    use fleet_application::lab_placement::{CapacityDemand, ReservationRequest, ReserveOutcome};
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let capacity = CapacityRepository::new(harness.pool.clone());
+    let now = fleet_core::SystemClock::now_unix_millis();
+    // An earlier run reserved on pve-a; the template is now on pve-b.
+    capacity
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: "pve-a".to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "local-lvm".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = capacity
+        .reserve(
+            &ReservationRequest {
+                lease_id: lease_id.clone(),
+                account_id: harness.account_id.clone(),
+                node: "pve-a".to_owned(),
+                demand: CapacityDemand {
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    storage: "local-lvm".to_owned(),
+                },
+            },
+            &PlacementPolicy::default(),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReserveOutcome::Reserved(_)));
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "reservation_mismatch", "{detail}");
+    assert!(
+        detail.contains("node pve-a of account")
+            && detail.contains(&format!("node pve-b of account {}", harness.account_id)),
+        "the detail names the held and the requested node and account: {detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn a_reservation_on_another_storage_pool_refuses_the_resumed_clone() {
+    use fleet_application::lab_placement::{CapacityDemand, ReservationRequest, ReserveOutcome};
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let capacity = CapacityRepository::new(harness.pool.clone());
+    let now = fleet_core::SystemClock::now_unix_millis();
+    // An earlier run reserved on the template's node, but on the pool of a
+    // build that a re-promotion has since replaced.
+    capacity
+        .record_observation(
+            &harness.account_id,
+            &fleet_application::proxmox::ProxmoxNodeCapacity {
+                node: "pve-b".to_owned(),
+                cpu_usage_ratio: None,
+                cpu_count: Some(8),
+                memory_used_bytes: Some(0),
+                memory_total_bytes: Some(32 << 30),
+                storages: vec![fleet_application::proxmox::ProxmoxStorageCapacity {
+                    storage: "old-pool".to_owned(),
+                    used_bytes: 0,
+                    total_bytes: 500 << 30,
+                }],
+                observed_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let outcome = capacity
+        .reserve(
+            &ReservationRequest {
+                lease_id: lease_id.clone(),
+                account_id: harness.account_id.clone(),
+                node: "pve-b".to_owned(),
+                demand: CapacityDemand {
+                    cores: 2,
+                    memory_mib: 2048,
+                    disk_gib: 20,
+                    storage: "old-pool".to_owned(),
+                },
+            },
+            &PlacementPolicy::default(),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReserveOutcome::Reserved(_)));
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "reservation_mismatch", "{detail}");
+    assert!(
+        detail.contains("on old-pool") && detail.contains("on local-lvm"),
+        "{detail}"
+    );
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn an_unknown_storage_pool_refuses_and_is_audited() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+    let executor = harness.executor(&pve, Some(TEMPLATE_VMID)).with_placement(
+        Arc::new(CapacityRepository::new(harness.pool.clone())),
+        Arc::new(NoStorage),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+        PlacementPolicy::default(),
+    );
+
+    let (state, error, stored) = harness
+        .run_with_account(
+            &pve,
+            executor,
+            &lease_id,
+            &record.id,
+            Some(&harness.account_id.clone()),
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "storage_unknown", "{detail}");
+    assert!(pve.clones().is_empty());
+    assert_eq!(stored.vmid, None);
+    assert!(
+        CapacityRepository::new(harness.pool.clone())
+            .for_lease(&lease_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(harness.audit_events("lab_placement_refused").await, 1);
+}
+
+#[tokio::test]
+async fn an_unreadable_trusted_cluster_refuses_automatic_selection() {
+    let harness = Harness::new().await;
+    let other = harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-dark".to_owned(),
+            host: UNREACHABLE_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab3".to_owned(),
+        })
+        .await
+        .unwrap();
+    harness
+        .accounts
+        .set_fingerprint(&other.id, Some(FP.to_owned()))
+        .await
+        .unwrap();
+    // An untrusted account (no fingerprint) is a confirmed non-candidate
+    // and does not block selection on its own.
+    harness
+        .accounts
+        .create(&NewProxmoxAccount {
+            name: "pve-untrusted".to_owned(),
+            host: UNREACHABLE_HOST.to_owned(),
+            port: None,
+            token_id: "fleet@pve!lab4".to_owned(),
+        })
+        .await
+        .unwrap();
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    *pve.capacity.lock().unwrap() = Some(16);
+
+    let (state, error, _) = harness
+        .run_with_account(
+            &pve,
+            harness.placed_executor(&pve, PlacementPolicy::default()),
+            &lease_id,
+            &record.id,
+            None,
+        )
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "placement_unresolved", "{detail}");
+    assert!(detail.contains("pve-dark"), "{detail}");
+    assert!(!detail.contains("pve-untrusted"), "{detail}");
+    assert!(pve.clones().is_empty());
 }

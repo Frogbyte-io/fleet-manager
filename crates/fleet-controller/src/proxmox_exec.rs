@@ -1169,6 +1169,41 @@ async fn record_task_link(
     }
 }
 
+/// Releases a lease's held capacity reservation and audits the release.
+///
+/// # Errors
+///
+/// Fails when the reservation store fails.
+pub async fn release_reservation(
+    reservations: &dyn fleet_application::lab_placement::CapacityReservationPort,
+    audit: &dyn fleet_application::operation::AuditPort,
+    lease_id: &str,
+    why: &str,
+) -> Result<(), String> {
+    let now = fleet_core::SystemClock::now_unix_millis();
+    if reservations.release_for_lease(lease_id, now).await? {
+        let mut facts = vec![("outcome", why.to_owned())];
+        // The lookup only enriches the audit event: the release is
+        // already committed, so its failure is not the caller's.
+        if let Ok(Some(reservation)) = reservations.for_lease(lease_id).await {
+            facts.extend(fleet_application::lab_placement::reservation_facts(
+                &reservation,
+            ));
+        }
+        // Best effort, as for cleanup: the reservation row is the truth.
+        let _ = audit
+            .record_intent(&fleet_application::lab_placement::reservation_audit(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                lease_id,
+                None,
+                "lab_capacity_released",
+                &facts,
+            ))
+            .await;
+    }
+    Ok(())
+}
+
 /// Completes an operation as a failure with a redacted detail.
 async fn complete_failure(
     operations: &Operations,
@@ -1839,6 +1874,40 @@ pub struct ProvisionExecutor {
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
     readiness: Option<Arc<dyn fleet_application::lab::LabReadinessPort>>,
     audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
+    placement: Option<Placement>,
+}
+
+/// The placement and capacity reservation parts (FM-715).
+#[derive(Debug)]
+struct Placement {
+    reservations: Arc<dyn fleet_application::lab_placement::CapacityReservationPort>,
+    storage: Arc<dyn fleet_application::lab_placement::ImageStoragePort>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
+    policy: fleet_application::lab_placement::PlacementPolicy,
+}
+
+/// Attempts the best-effort `lab_placement_refused` audit for a refusal
+/// decided before the reservation transaction runs (FM-715).
+async fn audit_placement_refusal(
+    placement: &Placement,
+    lease_id: &str,
+    operation_id: &str,
+    node: &str,
+    refusal: &Refusal,
+) {
+    let _ = placement
+        .audit
+        .record_intent(&fleet_application::lab_placement::reservation_audit(
+            fleet_auth::LAN_PRINCIPAL_ID,
+            lease_id,
+            Some(operation_id),
+            "lab_placement_refused",
+            &[
+                ("node", node.to_owned()),
+                ("reason", refusal.reason.to_owned()),
+            ],
+        ))
+        .await;
 }
 
 /// A classified provisioning failure: the operation completes as failed
@@ -1877,6 +1946,73 @@ impl ProvisionExecutor {
             links: None,
             readiness: None,
             audit: None,
+            placement: None,
+        }
+    }
+
+    /// Enables placement and capacity reservation (FM-715): a lease
+    /// provision without an account selects the one account that reaches
+    /// the pinned template, and every clone first reserves the template's
+    /// CPU, memory, and disk on its node in one transaction.
+    #[must_use]
+    pub fn with_placement(
+        mut self,
+        reservations: Arc<dyn fleet_application::lab_placement::CapacityReservationPort>,
+        storage: Arc<dyn fleet_application::lab_placement::ImageStoragePort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+        policy: fleet_application::lab_placement::PlacementPolicy,
+    ) -> Self {
+        self.placement = Some(Placement {
+            reservations,
+            storage,
+            audit,
+            policy,
+        });
+        self
+    }
+
+    /// After a provision operation ends: a lease that ended `failed`
+    /// without allocating a guest owes nothing to cleanup, so its capacity
+    /// reservation is released (FM-715). A lease whose record holds a VMID
+    /// keeps its reservation until cleanup destroys the guest. This write is
+    /// bookkeeping only: the reservation transaction already stops counting
+    /// a held row whose lease is `failed` without a VMID, so a skipped or
+    /// failed release here cannot strand capacity.
+    async fn release_unallocated(&self, operation: &Operation) {
+        let Some(placement) = &self.placement else {
+            return;
+        };
+        let Some(lease_id) = operation
+            .payload_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+        else {
+            return;
+        };
+        let Ok(lease) = self.leases.get(&lease_id).await else {
+            return;
+        };
+        if lease.state != fleet_core::LeaseState::Failed {
+            return;
+        }
+        let allocated = match &lease.provision_id {
+            Some(id) => match self.provisions.get(id).await {
+                Ok(record) => record.vmid.is_some(),
+                // An unreadable record is not a reason to write: the storage
+                // rule decides from the same rows once they are readable.
+                Err(_) => return,
+            },
+            None => false,
+        };
+        if !allocated {
+            let _ = release_reservation(
+                placement.reservations.as_ref(),
+                placement.audit.as_ref(),
+                &lease_id,
+                "failed_without_allocation",
+            )
+            .await;
         }
     }
 
@@ -2104,11 +2240,12 @@ impl ProvisionExecutor {
     async fn clone_into_reserved_target(
         &self,
         record: &fleet_application::lab::ProvisionRecord,
-        image_version_id: &str,
+        content: &fleet_core::LabTemplateContent,
         account_id: &str,
         operation_id: &str,
         request: &fleet_provider_proxmox::PveHttpRequest,
     ) -> Result<Result<(String, u32), Refusal>, String> {
+        let image_version_id = content.image_version_id.as_str();
         // The clone source: the template VMID the pinned image version's
         // build recorded. No artifact is an honest failure: the pin was
         // validated as promoted, and promotion requires one.
@@ -2161,6 +2298,16 @@ impl ProvisionExecutor {
 
         // The target: reserved and recorded before the clone call. A
         // record that already holds a reservation resumes with it.
+        // FM-715: every pending clone (this function only runs before the
+        // clone starts) holds the template's capacity on its node before a
+        // VMID is taken or anything is cloned, including a record that
+        // reserved its VMID in an earlier run or before FM-715.
+        if let Err(refusal) = self
+            .reserve_capacity(record, content, &node, account_id, operation_id, request)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
         let mut reserved = if record.vmid.is_some() {
             record.clone()
         } else {
@@ -2436,6 +2583,244 @@ impl ProvisionExecutor {
         }
     }
 
+    /// Selects the account for a lease provision that named none (FM-715):
+    /// the candidates are the trusted accounts (confirmed fingerprint and a
+    /// stored token) whose cluster reports the pinned image's template VMID
+    /// as a template, since the clone runs on the template's node. Exactly
+    /// one candidate is placed; none or several are refused with an
+    /// explanation.
+    async fn place_account(
+        &self,
+        image_version_id: &str,
+    ) -> Result<Result<String, Refusal>, String> {
+        use fleet_application::lab_placement::{PlacementCandidate, select_candidate};
+        if self.placement.is_none() {
+            return Ok(Err(Refusal::new(
+                "placement_unavailable",
+                "this controller has no Lab placement configured; pass an account".to_owned(),
+            )));
+        }
+        let Some(source_vmid) = self
+            .artifacts
+            .template_vmid(image_version_id)
+            .await
+            .map_err(|detail| format!("the image artifact is unreadable: {detail}"))?
+        else {
+            return Ok(Err(Refusal::new(
+                "artifact_missing",
+                format!(
+                    "the pinned image version {image_version_id} has no recorded build artifact; build and promote it before provisioning"
+                ),
+            )));
+        };
+        let accounts = self
+            .accounts
+            .list()
+            .await
+            .map_err(|detail| format!("the Proxmox accounts are unreadable: {detail}"))?;
+        let mut candidates = Vec::new();
+        // Confirmed non-candidates (untrusted, or no such template) are
+        // `skipped`; accounts whose answer is unknown are `unresolved`, and
+        // any of those refuses automatic selection: a same-VMID template
+        // there could be the one the sole visible match is not.
+        let mut skipped = Vec::new();
+        let mut unresolved = Vec::new();
+        for account in accounts {
+            if account.fingerprint.is_none() {
+                skipped.push(format!("{}: no confirmed fingerprint", account.name));
+                continue;
+            }
+            match self.credentials.load(&account.id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    skipped.push(format!("{}: no stored API token", account.name));
+                    continue;
+                }
+                Err(_) => {
+                    unresolved.push(format!("{}: the credential store failed", account.name));
+                    continue;
+                }
+            }
+            let (bound, secret) = match self.bound(&account.id).await {
+                Ok(bound) => bound,
+                Err(_) => {
+                    unresolved.push(format!("{}: the account is unreadable", account.name));
+                    continue;
+                }
+            };
+            let Ok(resources) = self
+                .client
+                .list_guest_resources(pve_request(&bound, secret))
+                .await
+            else {
+                unresolved.push(format!(
+                    "{}: the cluster's resources are unreadable",
+                    account.name
+                ));
+                continue;
+            };
+            match resources.iter().find(|resource| {
+                resource.vmid == Some(source_vmid) && resource.kind == "qemu-template"
+            }) {
+                Some(template) if template.node.is_some() => {
+                    candidates.push(PlacementCandidate {
+                        account_id: account.id.clone(),
+                        account_name: account.name.clone(),
+                        node: template.node.clone().unwrap_or_default(),
+                    });
+                }
+                _ => skipped.push(format!(
+                    "{}: no template qemu/{source_vmid} in its cluster",
+                    account.name
+                )),
+            }
+        }
+        Ok(select_candidate(candidates, &skipped, &unresolved)
+            .map(|candidate| candidate.account_id)
+            .map_err(|refusal| Refusal::new(refusal.reason(), refusal.to_string())))
+    }
+
+    /// Reserves the template's capacity on `node` for the record's lease in
+    /// one transaction (FM-715). The node's capacity observation is
+    /// refreshed first; when the refresh fails the stored observation
+    /// decides, and a stale one refuses. A lease that already holds its
+    /// reservation (a resumed provision) keeps it.
+    async fn reserve_capacity(
+        &self,
+        record: &fleet_application::lab::ProvisionRecord,
+        content: &fleet_core::LabTemplateContent,
+        node: &str,
+        account_id: &str,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<Result<(), Refusal>, String> {
+        use fleet_application::lab_placement::{
+            CapacityDemand, ReservationRequest, ReservationState, ReserveOutcome,
+            reservation_audit, reservation_facts,
+        };
+        use fleet_provider_proxmox::ProxmoxSource as _;
+        let (Some(placement), Some(lease_id)) = (&self.placement, record.lease_id.as_deref())
+        else {
+            return Ok(Ok(()));
+        };
+        let Some(storage) = placement
+            .storage
+            .template_storage(&content.image_version_id)
+            .await
+            .map_err(|detail| format!("the image's storage pool is unreadable: {detail}"))?
+        else {
+            let refusal = Refusal::new(
+                "storage_unknown",
+                format!(
+                    "the storage pool of the pinned image version {} is unknown; refusing to place without it",
+                    content.image_version_id
+                ),
+            );
+            audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+            return Ok(Err(refusal));
+        };
+        let wanted = ReservationRequest {
+            lease_id: lease_id.to_owned(),
+            account_id: account_id.to_owned(),
+            node: node.to_owned(),
+            demand: CapacityDemand::for_template(content, &storage),
+        };
+        if let Some(existing) = placement
+            .reservations
+            .for_lease(lease_id)
+            .await
+            .map_err(|detail| format!("the capacity reservation is unreadable: {detail}"))?
+            && existing.state == ReservationState::Held
+        {
+            // A resumed provision keeps its reservation only where, and for
+            // what, the clone will run: the template can move between nodes,
+            // and a re-promotion can change the pinned build's storage pool.
+            if let Err(mismatch) = wanted.covered_by(&existing) {
+                let refusal = Refusal::new(mismatch.reason(), mismatch.to_string());
+                audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;
+                return Ok(Err(refusal));
+            }
+            return Ok(Ok(()));
+        }
+        // A failed or partial refresh is not fatal and replaces nothing: the
+        // stored observation decides, and the transaction refuses it once it
+        // is stale.
+        if let Ok(discovery) = self.client.discover(request.clone()).await {
+            let observed_at = fleet_core::SystemClock::now_unix_millis();
+            for capacity in discovery.node_capacities.into_iter().filter(|capacity| {
+                capacity.node == node
+                    && capacity.cpu_count.is_some()
+                    && capacity.memory_total_bytes.is_some()
+                    && capacity.memory_used_bytes.is_some()
+                    && !capacity.storages.is_empty()
+            }) {
+                let observation = fleet_application::proxmox::ProxmoxNodeCapacity {
+                    node: capacity.node,
+                    cpu_usage_ratio: capacity.cpu_usage_ratio,
+                    cpu_count: capacity.cpu_count,
+                    memory_used_bytes: capacity.memory_used_bytes,
+                    memory_total_bytes: capacity.memory_total_bytes,
+                    storages: capacity
+                        .storages
+                        .into_iter()
+                        .map(
+                            |storage| fleet_application::proxmox::ProxmoxStorageCapacity {
+                                storage: storage.storage,
+                                used_bytes: storage.used_bytes,
+                                total_bytes: storage.total_bytes,
+                            },
+                        )
+                        .collect(),
+                    observed_at,
+                };
+                placement
+                    .reservations
+                    .record_observation(account_id, &observation)
+                    .await
+                    .map_err(|detail| {
+                        format!("the capacity observation is unwritable: {detail}")
+                    })?;
+            }
+        }
+        let outcome = placement
+            .reservations
+            .reserve(
+                &wanted,
+                &placement.policy,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .map_err(|detail| format!("the capacity reservation failed: {detail}"))?;
+        let (event, facts, result) = match outcome {
+            ReserveOutcome::Reserved(reservation) => (
+                "lab_capacity_reserved",
+                reservation_facts(&reservation),
+                Ok(()),
+            ),
+            ReserveOutcome::Refused(refusal) => (
+                "lab_placement_refused",
+                vec![
+                    ("node", node.to_owned()),
+                    ("reason", refusal.reason().to_owned()),
+                ],
+                Err(Refusal::new(refusal.reason(), refusal.to_string())),
+            ),
+        };
+        let _ = placement
+            .audit
+            .record_intent(&reservation_audit(
+                fleet_auth::LAN_PRINCIPAL_ID,
+                lease_id,
+                Some(operation_id),
+                event,
+                &facts,
+            ))
+            .await;
+        Ok(result)
+    }
+}
+
+impl ProvisionExecutor {
     #[allow(clippy::too_many_lines)]
     async fn execute_linked(
         &self,
@@ -2456,10 +2841,7 @@ impl ProvisionExecutor {
             .as_str()
             .ok_or("the payload carries no recordId")?
             .to_owned();
-        let account_id = payload["accountId"]
-            .as_str()
-            .ok_or("the payload carries no accountId")?
-            .to_owned();
+        let requested_account = payload["accountId"].as_str().map(str::to_owned);
         let lease_id = payload["leaseId"]
             .as_str()
             .ok_or("the payload carries no leaseId")?
@@ -2518,8 +2900,39 @@ impl ProvisionExecutor {
 
         // The account is the API endpoint only: the PVE node that holds the
         // template comes from the cluster's resources, never from the
-        // account's host. FM-711's placement epic owns multi-account
-        // selection.
+        // account's host. The caller's account wins; a resumed record keeps
+        // the account it recorded; otherwise placement selects the one
+        // account that reaches the pinned template (FM-715).
+        let account_id = match requested_account.or_else(|| record.account_id.clone()) {
+            Some(account_id) => account_id,
+            None => match self
+                .place_account(&version.content.image_version_id)
+                .await?
+            {
+                Ok(account_id) => account_id,
+                Err(refusal) => {
+                    if let Some(placement) = &self.placement {
+                        let _ = placement
+                            .audit
+                            .record_intent(&fleet_application::lab_placement::reservation_audit(
+                                fleet_auth::LAN_PRINCIPAL_ID,
+                                &lease_id,
+                                Some(&operation.id),
+                                "lab_placement_refused",
+                                &[("reason", refusal.reason.to_owned())],
+                            ))
+                            .await;
+                    }
+                    return complete_failure(
+                        operations,
+                        &operation.id,
+                        refusal.reason,
+                        &refusal.detail,
+                    )
+                    .await;
+                }
+            },
+        };
         let (account, secret) = self.bound(&account_id).await?;
         let request = pve_request(&account, secret);
         // FM-713: the account is recorded before the clone, so cleanup
@@ -2591,7 +3004,7 @@ impl ProvisionExecutor {
             match self
                 .clone_into_reserved_target(
                     &record,
-                    &version.content.image_version_id,
+                    &version.content,
                     &account_id,
                     &operation.id,
                     &request,
@@ -3131,6 +3544,7 @@ impl OperationExecutor for LabDispatch {
             ("lab.provision", _) => {
                 let result = self.provision.execute(operations, operation).await;
                 self.compensate(operations, operation).await;
+                self.provision.release_unallocated(operation).await;
                 result
             }
             ("lab.cleanup", Some(cleanup)) => cleanup.execute(operations, operation).await,

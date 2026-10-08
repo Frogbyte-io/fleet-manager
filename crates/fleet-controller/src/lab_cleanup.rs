@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{Decision, Permission};
 use fleet_application::lab::{LeasePort, ProvisionPort, record_cleanup_failure};
+use fleet_application::lab_placement::CapacityReservationPort;
 use fleet_application::machine::MachinePort;
 use fleet_application::operation::{AuditPort, NewOperation, Operation, Operations};
 use fleet_application::worker::OperationExecutor;
@@ -70,6 +71,8 @@ pub struct LabCleanupExecutor {
     audit: Arc<dyn AuditPort>,
     /// Executes the `proxmox.guest.destroy` child (the destructive executor).
     destroyer: Arc<dyn OperationExecutor>,
+    /// The capacity reservations released once the guest is gone (FM-715).
+    reservations: Option<Arc<dyn CapacityReservationPort>>,
 }
 
 impl LabCleanupExecutor {
@@ -88,7 +91,16 @@ impl LabCleanupExecutor {
             machines,
             audit,
             destroyer,
+            reservations: None,
         }
+    }
+
+    /// Releases each lease's capacity reservation when its cleanup
+    /// completes (FM-715).
+    #[must_use]
+    pub fn with_reservations(mut self, reservations: Arc<dyn CapacityReservationPort>) -> Self {
+        self.reservations = Some(reservations);
+        self
     }
 
     async fn audit(&self, lease_id: &str, event: &str, facts: &[(&str, String)]) {
@@ -124,6 +136,20 @@ impl LabCleanupExecutor {
         lease.state = LeaseState::Released;
         lease.cleanup_next_at = None;
         self.leases.update(&lease).await?;
+        // FM-715: the guest is gone (or was never allocated, or was kept out
+        // of Lab ownership). The released lease already stops its held
+        // reservation from counting (the reservation transaction reads the
+        // lease's state), so marking the row released is bookkeeping and
+        // never costs a cleanup attempt.
+        if let Some(reservations) = &self.reservations {
+            let _ = crate::proxmox_exec::release_reservation(
+                reservations.as_ref(),
+                self.audit.as_ref(),
+                &lease.id,
+                how.id(),
+            )
+            .await;
+        }
         self.audit(
             &lease.id,
             "lab_lease_released",

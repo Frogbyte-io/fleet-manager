@@ -88,6 +88,111 @@ fn every_setting_can_be_overridden_from_the_environment() {
     );
 }
 
+#[test]
+fn lab_placement_defaults_layer_from_file_then_environment() {
+    let defaults = fleet_config::load(None, &none_env).unwrap();
+    assert_eq!(
+        defaults.lab_placement,
+        fleet_config::LabPlacementConfig {
+            memory_overcommit: 1.0,
+            cpu_overcommit: 1.0,
+            capacity_max_age_seconds: 300,
+        }
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!(
+            "{VALID_FILE}lab_memory_overcommit = 1.25\nlab_cpu_overcommit = 4.0\nlab_capacity_max_age_seconds = 60\n"
+        ),
+    );
+    let config = fleet_config::load(
+        Some(&file),
+        &env_of(&[(fleet_config::LAB_CPU_OVERCOMMIT_VAR, "2")]),
+    )
+    .unwrap();
+    assert!((config.lab_placement.memory_overcommit - 1.25).abs() < f64::EPSILON);
+    assert!((config.lab_placement.cpu_overcommit - 2.0).abs() < f64::EPSILON);
+    assert_eq!(config.lab_placement.capacity_max_age_seconds, 60);
+    assert!(config.summary().contains("lab_cpu_overcommit = 2"));
+}
+
+#[test]
+fn out_of_range_lab_placement_settings_are_refused() {
+    for (var, value) in [
+        (fleet_config::LAB_MEMORY_OVERCOMMIT_VAR, "0"),
+        (fleet_config::LAB_MEMORY_OVERCOMMIT_VAR, "NaN"),
+        (fleet_config::LAB_CPU_OVERCOMMIT_VAR, "17"),
+        (fleet_config::LAB_CPU_OVERCOMMIT_VAR, "lots"),
+        (fleet_config::LAB_CAPACITY_MAX_AGE_VAR, "0"),
+        (fleet_config::LAB_CAPACITY_MAX_AGE_VAR, "-5"),
+    ] {
+        let error = fleet_config::load(None, &env_of(&[(var, value)])).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::LabPlacementInvalid { setting, .. } if setting == var),
+            "{var}={value}: {error:?}"
+        );
+        // The guidance is the setting's own constraint, never the other's.
+        let message = error.to_string();
+        if var == fleet_config::LAB_CAPACITY_MAX_AGE_VAR {
+            assert!(
+                message.contains("seconds") && !message.contains("ratio"),
+                "{message}"
+            );
+        } else {
+            assert!(
+                message.contains("ratio") && !message.contains("seconds"),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn validate_refuses_an_out_of_range_placement_policy_set_in_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = fleet_config::load(None, &none_env).expect("defaults must load");
+    config.data_dir = dir.path().to_path_buf();
+    config.validate().expect("the default policy must validate");
+    config.lab_placement.memory_overcommit = 32.0;
+    assert!(matches!(
+        config.validate().unwrap_err(),
+        ConfigError::LabPlacementInvalid {
+            setting: "lab_memory_overcommit",
+            ..
+        }
+    ));
+    config.lab_placement.memory_overcommit = 1.0;
+    config.lab_placement.capacity_max_age_seconds = 0;
+    assert!(matches!(
+        config.validate().unwrap_err(),
+        ConfigError::LabPlacementInvalid {
+            setting: "lab_capacity_max_age_seconds",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_file_sourced_lab_setting_is_named_by_its_file_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}lab_cpu_overcommit = 20.0\n"),
+    );
+    let error = fleet_config::load(Some(&file), &none_env).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ConfigError::LabPlacementInvalid {
+                setting: "lab_cpu_overcommit",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
 // File format ----------------------------------------------------------------
 
 #[test]
@@ -227,6 +332,7 @@ fn validation_creates_the_state_directory() {
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
+        lab_placement: fleet_config::LabPlacementConfig::default(),
     };
     config
         .validate()
@@ -246,6 +352,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         master_key_file: None,
         lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
+        lab_placement: fleet_config::LabPlacementConfig::default(),
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::DataDirUnavailable { .. }));
@@ -261,6 +368,7 @@ fn a_missing_master_key_file_fails_validation() {
         master_key_file: Some(dir.path().join("absent_key")),
         lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
+        lab_placement: fleet_config::LabPlacementConfig::default(),
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyMissing { .. }));
@@ -276,6 +384,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         master_key_file: Some(dir.path().to_path_buf()),
         lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
+        lab_placement: fleet_config::LabPlacementConfig::default(),
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyNotAFile { .. }));
@@ -297,6 +406,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             master_key_file: Some(key.clone()),
             lab_sweep_interval_seconds: 60,
             tailscale_serve_listen: None,
+            lab_placement: fleet_config::LabPlacementConfig::default(),
         };
         let error = config.validate().unwrap_err();
         match error {
@@ -316,6 +426,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         master_key_file: Some(key),
         lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
+        lab_placement: fleet_config::LabPlacementConfig::default(),
     };
     config
         .validate()
@@ -344,6 +455,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         master_key_file: Some(key.clone()),
         lab_sweep_interval_seconds: 60,
         tailscale_serve_listen: None,
+        lab_placement: fleet_config::LabPlacementConfig::default(),
     };
     config
         .validate()

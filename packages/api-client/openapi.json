@@ -15674,14 +15674,14 @@
       },
       "StartLeaseProvisionRequest": {
         "type": "object",
-        "description": "The configured Proxmox account used to provision a lease.",
-        "required": [
-          "accountId"
-        ],
+        "description": "How to provision a lease: through an explicit Proxmox account, or through\nthe one placement selects.",
         "properties": {
           "accountId": {
-            "type": "string",
-            "description": "The identity of the explicitly configured Proxmox account."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The identity of the explicitly configured Proxmox account. When\nomitted, placement selects the one trusted account whose cluster\nholds the pinned image's template; none or several fail the\nprovision operation with an explanation."
           }
         }
       },

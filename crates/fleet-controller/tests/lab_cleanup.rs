@@ -11,12 +11,18 @@ use fleet_application::lab::{
     LabTemplate, LabTemplatePort, LabTemplateVersion, LeasePort, MAX_CLEANUP_ATTEMPTS,
     NewLabTemplate, NewLease, NewProvision, ProvisionPort, cleanup_operation,
 };
+use fleet_application::lab_placement::{
+    CapacityDemand, CapacityReservationPort as _, PlacementPolicy, ReservationRequest,
+    ReservationState, ReserveOutcome,
+};
 use fleet_application::operation::{NewOperation, Operation, Operations};
+use fleet_application::proxmox::{ProxmoxNodeCapacity, ProxmoxStorageCapacity};
 use fleet_application::worker::OperationExecutor;
 use fleet_controller::lab_cleanup::LabCleanupExecutor;
 use fleet_core::{CleanupStrategy, LabTemplateContent, LeaseState, ReadinessProbe};
 use fleet_storage_sqlite::{
-    AuditSink, LabRepository, LeaseRepository, MachineRepository, OperationRepository, Store,
+    AuditSink, CapacityRepository, LabRepository, LeaseRepository, MachineRepository,
+    OperationRepository, Store,
 };
 
 /// The scripted stand-in for the reviewed destroy executor: it records the
@@ -180,6 +186,59 @@ impl Harness {
             Arc::new(AuditSink::new(self.pool.clone())),
             destroyer,
         )
+        .with_reservations(Arc::new(CapacityRepository::new(self.pool.clone())))
+    }
+
+    /// Gives the lease a held capacity reservation (FM-715).
+    async fn reserve(&self, lease_id: &str) {
+        let now = fleet_core::SystemClock::now_unix_millis();
+        let capacity = CapacityRepository::new(self.pool.clone());
+        capacity
+            .record_observation(
+                "account-1",
+                &ProxmoxNodeCapacity {
+                    node: "pve-b".to_owned(),
+                    cpu_usage_ratio: None,
+                    cpu_count: Some(8),
+                    memory_used_bytes: Some(0),
+                    memory_total_bytes: Some(32 << 30),
+                    storages: vec![ProxmoxStorageCapacity {
+                        storage: "local-lvm".to_owned(),
+                        used_bytes: 0,
+                        total_bytes: 500 << 30,
+                    }],
+                    observed_at: now,
+                },
+            )
+            .await
+            .unwrap();
+        let outcome = capacity
+            .reserve(
+                &ReservationRequest {
+                    lease_id: lease_id.to_owned(),
+                    account_id: "account-1".to_owned(),
+                    node: "pve-b".to_owned(),
+                    demand: CapacityDemand {
+                        cores: 2,
+                        memory_mib: 2048,
+                        disk_gib: 20,
+                        storage: "local-lvm".to_owned(),
+                    },
+                },
+                &PlacementPolicy::default(),
+                now,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ReserveOutcome::Reserved(_)));
+    }
+
+    async fn reservation(&self, lease_id: &str) -> Option<ReservationState> {
+        CapacityRepository::new(self.pool.clone())
+            .for_lease(lease_id)
+            .await
+            .unwrap()
+            .map(|reservation| reservation.state)
     }
 
     /// Queues and runs one cleanup attempt; answers the operation's final
@@ -395,6 +454,68 @@ async fn a_rearmed_cleanup_failed_lease_resolves_to_released_once_the_guest_is_g
     .await
     .unwrap();
     assert_eq!(cleanups, i64::from(MAX_CLEANUP_ATTEMPTS) + 1);
+}
+
+#[tokio::test]
+async fn the_capacity_reservation_is_released_only_after_the_guest_is_gone() {
+    // FM-715: failed destroys keep the reservation held, through
+    // cleanup_failed; a successful destroy releases it with the lease.
+    let harness = Harness::new().await;
+    let failing = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9010, Some("account-1"))),
+        )
+        .await;
+    harness.reserve(&failing).await;
+    let broken = Arc::new(Destroyer {
+        fail: true,
+        ..Destroyer::default()
+    });
+    for _ in 0..MAX_CLEANUP_ATTEMPTS {
+        let _ = harness.run(&failing, &broken).await;
+        assert_eq!(
+            harness.reservation(&failing).await,
+            Some(ReservationState::Held)
+        );
+    }
+    assert_eq!(
+        harness.leases.get(&failing).await.unwrap().state,
+        LeaseState::CleanupFailed
+    );
+
+    let destroyed = harness
+        .releasing(
+            CleanupStrategy::Destroy,
+            Some(("pve-b", 9011, Some("account-1"))),
+        )
+        .await;
+    harness.reserve(&destroyed).await;
+    let (state, _, after) = harness
+        .run(&destroyed, &Arc::new(Destroyer::default()))
+        .await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(after.state, LeaseState::Released);
+    assert_eq!(
+        harness.reservation(&destroyed).await,
+        Some(ReservationState::Released)
+    );
+    assert_eq!(harness.audit_events("lab_capacity_released").await, 1);
+
+    // A kept guest leaves Lab ownership: its reservation goes with the lease.
+    let kept = harness
+        .releasing(
+            CleanupStrategy::Keep,
+            Some(("pve-b", 9012, Some("account-1"))),
+        )
+        .await;
+    harness.reserve(&kept).await;
+    let (state, _, _) = harness.run(&kept, &Arc::new(Destroyer::default())).await;
+    assert_eq!(state, "succeeded");
+    assert_eq!(
+        harness.reservation(&kept).await,
+        Some(ReservationState::Released)
+    );
 }
 
 #[tokio::test]
