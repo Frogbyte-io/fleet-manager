@@ -8,13 +8,8 @@ use fleet_provider_ssh::ExecutionLimiter;
 use fleet_storage_sqlite::{AuditSink, MachineRepository, OperationRepository, Store};
 use sqlx::SqlitePool;
 mod common;
-use common::{TestSshd, start_sshd, whoami};
+use common::{TestSshd, start_sshd_with_home, whoami};
 use std::time::Duration;
-use tokio::sync::Mutex;
-
-/// The stub CLI and its install location are shared machine state; the
-/// tests serialize their installation and removal.
-static CLI_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// The composed fixture: store, operations, mise executor, and a verified
 /// endpoint.
@@ -133,7 +128,7 @@ fn install_stub_cli(home: &str) -> String {
     std::fs::create_dir_all(&bin_dir).unwrap();
     let path = format!("{bin_dir}/mise");
     let stub = r#"#!/usr/bin/env bash
-echo "$@" >> /tmp/fleet-mise-stub.log
+echo "$@" >> "$HOME/mise-stub.log"
 case "$1" in
   --version) echo "mise 2026.1.2" ;;
   ls) echo '{"node":[{"version":"20.11.0","requested":"20","installed":true}]}' ;;
@@ -165,8 +160,10 @@ fn remove_stub_cli(home: &str) {
 
 #[tokio::test]
 async fn the_inventory_reports_presence_and_versions() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
 
     let payload = serde_json::json!({
@@ -188,10 +185,12 @@ async fn the_inventory_reports_presence_and_versions() {
 
 #[tokio::test]
 async fn the_status_surface_answers_the_documented_json() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home);
 
     let payload = serde_json::json!({
@@ -209,12 +208,13 @@ async fn the_status_surface_answers_the_documented_json() {
 
 #[tokio::test]
 async fn install_is_idempotent_and_pins_the_version() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home);
-    std::fs::remove_file("/tmp/fleet-mise-stub.log").ok();
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -228,7 +228,7 @@ async fn install_is_idempotent_and_pins_the_version() {
         let (state, _result, error) = fixture.run_kind("mise.install", payload.clone()).await;
         assert_eq!(state, "succeeded", "{error:?}");
     }
-    let log = std::fs::read_to_string("/tmp/fleet-mise-stub.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/mise-stub.log")).unwrap();
     assert!(
         log.contains("install node@20.11.0"),
         "the pin travels as data: {log}"
@@ -238,16 +238,16 @@ async fn install_is_idempotent_and_pins_the_version() {
 
 #[tokio::test]
 async fn exec_passes_the_command_array_verbatim() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home);
-    std::fs::remove_file("/tmp/fleet-mise-stub.log").ok();
 
-    let root = std::env::temp_dir().join(format!("fleet-mise-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = root_dir.path().to_path_buf();
 
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -262,18 +262,20 @@ async fn exec_passes_the_command_array_verbatim() {
     let result: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
     assert_eq!(result["kind"], "mise exec");
 
-    let log = std::fs::read_to_string("/tmp/fleet-mise-stub.log").unwrap();
+    let log = std::fs::read_to_string(format!("{home}/mise-stub.log")).unwrap();
     assert!(
         log.contains("exec -- npm test"),
         "the command array survives verbatim: {log}"
     );
-    let _ = std::fs::remove_dir_all(&root);
     remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn a_leading_dash_tool_is_refused_before_any_ssh_work() {
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
     let payload = serde_json::json!({
         "machineId": fixture.machine_id,
@@ -291,18 +293,19 @@ async fn a_leading_dash_tool_is_refused_before_any_ssh_work() {
 
 #[tokio::test]
 async fn project_files_are_never_touched() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     let _path = install_stub_cli(&home);
 
     // A checkout with a native mise.toml: the stub never reads or writes
     // it, and the executor's scripts never name it. The file's content is
     // the authority and must survive byte-identical.
-    let root = std::env::temp_dir().join(format!("fleet-mise-auth-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = root_dir.path().to_path_buf();
     let mise_toml = root.join("mise.toml");
     std::fs::write(&mise_toml, "[tools]\nnode = \"20\"\n").unwrap();
     let before = std::fs::read(&mise_toml).unwrap();
@@ -322,16 +325,17 @@ async fn project_files_are_never_touched() {
         before,
         "the native project file is the authority and is never rewritten"
     );
-    let _ = std::fs::remove_dir_all(&root);
     remove_stub_cli(&home);
 }
 
 #[tokio::test]
 async fn an_absent_cli_fails_honestly() {
-    let _guard = CLI_LOCK.lock().await;
-    let sshd = start_sshd();
+    // A private home per test: the stub CLI, its log and installs never
+    // touch the real $HOME or shared /tmp paths.
+    let home_dir = tempfile::tempdir().unwrap();
+    let sshd = start_sshd_with_home(home_dir.path());
     let fixture = compose(&sshd).await;
-    let home = std::env::var("HOME").unwrap();
+    let home = home_dir.path().display().to_string();
     remove_stub_cli(&home);
 
     let payload = serde_json::json!({
