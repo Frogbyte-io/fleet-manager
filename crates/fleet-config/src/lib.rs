@@ -21,7 +21,7 @@
 //!
 //! `FLEET_IMAGE_BUILD_PROXY` (TOML `image_build_proxy`, off by default) is
 //! the explicit proxy Packer image builds may use (#339). It must be a bare
-//! `http(s)://host[:port]`: a value with credentials, a path, a query, or a
+//! `http://host[:port]`: a value with credentials, a path, a query, or a
 //! fragment fails loading, and the error never repeats the value.
 //!
 //! `FLEET_LAB_SWEEP_INTERVAL_SECONDS` (TOML `lab_sweep_interval_seconds`,
@@ -149,7 +149,7 @@ pub struct ControllerConfig {
 /// so everything here may appear in logs, audit metadata, and summaries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageBuildProxy {
-    /// `http://host[:port]` or `https://host[:port]`, normalized.
+    /// `http://host[:port]`, normalized.
     url: String,
     /// The `NO_PROXY` list, when one was configured.
     no_proxy: Option<String>,
@@ -160,7 +160,7 @@ impl ImageBuildProxy {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not a bare `http(s)://host[:port]` (userinfo,
+    /// Fails when the URL is not a bare `http://host[:port]` (userinfo,
     /// a path, a query, or a fragment are refused) or the list holds
     /// anything but host-list characters. The error names the setting and
     /// the rule, never the value.
@@ -171,13 +171,19 @@ impl ImageBuildProxy {
         let url = url.trim();
         let (scheme, rest) = url
             .split_once("://")
-            .ok_or_else(|| invalid(IMAGE_BUILD_PROXY_VAR, "must start with http:// or https://"))?;
+            .ok_or_else(|| invalid(IMAGE_BUILD_PROXY_VAR, "must start with http://"))?;
         let scheme = scheme.to_ascii_lowercase();
-        if scheme != "http" && scheme != "https" {
+        if scheme == "https" {
+            // Under the certificate pin, `SSL_CERT_FILE` makes the PVE leaf
+            // the only trusted root, so the handshake with an HTTPS proxy
+            // (a different certificate) could never verify.
             return Err(invalid(
                 IMAGE_BUILD_PROXY_VAR,
-                "must start with http:// or https://",
+                "must use http://: an https:// proxy cannot work, because the build trusts only the PVE certificate",
             ));
+        }
+        if scheme != "http" {
+            return Err(invalid(IMAGE_BUILD_PROXY_VAR, "must start with http://"));
         }
         let authority = rest.strip_suffix('/').unwrap_or(rest);
         if authority.contains('@') {
@@ -186,10 +192,15 @@ impl ImageBuildProxy {
                 "must not carry credentials (user:password@); a proxy that needs them is not supported",
             ));
         }
-        if authority.contains(['/', '?', '#', '\\']) || authority.chars().any(char::is_whitespace) {
+        if !authority.is_ascii()
+            || authority.contains(['/', '?', '#', '\\', '%'])
+            || authority
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
             return Err(invalid(
                 IMAGE_BUILD_PROXY_VAR,
-                "must be a bare scheme://host[:port], with no path, query, or fragment",
+                "must be a bare scheme://host[:port] of ASCII, with no path, query, fragment, or percent-encoding",
             ));
         }
         let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
@@ -202,25 +213,32 @@ impl ImageBuildProxy {
                     "has an invalid IPv6 address",
                 ));
             }
-            (format!("[{host}]"), tail.strip_prefix(':'))
+            let port = match tail {
+                "" => None,
+                tail => Some(tail.strip_prefix(':').ok_or_else(|| {
+                    invalid(IMAGE_BUILD_PROXY_VAR, "has text after the IPv6 address")
+                })?),
+            };
+            (format!("[{host}]"), port)
         } else {
-            match authority.split_once(':') {
-                Some((host, port)) => (host.to_owned(), Some(port)),
-                None => (authority.to_owned(), None),
+            let (host, port) = match authority.split_once(':') {
+                Some((host, port)) => (host, Some(port)),
+                None => (authority, None),
+            };
+            let host_ok = !host.is_empty()
+                && host.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+            if !host_ok {
+                return Err(invalid(IMAGE_BUILD_PROXY_VAR, "has an invalid host"));
             }
+            (host.to_owned(), port)
         };
-        let host_ok = !host.is_empty()
-            && host.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '[')
-            && host.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':')
-            });
-        if !host_ok || (!authority.starts_with('[') && host.contains(':')) {
-            return Err(invalid(IMAGE_BUILD_PROXY_VAR, "has an invalid host"));
-        }
         let port = match port {
             Some(port) => Some(
                 Some(port)
-                    .filter(|port| port.bytes().all(|b| b.is_ascii_digit()))
+                    .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
                     .and_then(|port| port.parse::<u16>().ok())
                     .filter(|port| *port != 0)
                     .ok_or_else(|| invalid(IMAGE_BUILD_PROXY_VAR, "has an invalid port"))?,
@@ -231,23 +249,7 @@ impl ImageBuildProxy {
             Some(port) => format!("{scheme}://{host}:{port}"),
             None => format!("{scheme}://{host}"),
         };
-        let no_proxy = match no_proxy.map(str::trim).filter(|list| !list.is_empty()) {
-            None => None,
-            Some(list) => {
-                let list_ok = list.len() <= MAX_IMAGE_BUILD_NO_PROXY_BYTES
-                    && list.chars().all(|c| {
-                        c.is_ascii_alphanumeric()
-                            || matches!(c, '.' | '-' | '_' | ',' | ':' | '*' | '/' | '[' | ']')
-                    });
-                if !list_ok {
-                    return Err(invalid(
-                        IMAGE_BUILD_NO_PROXY_VAR,
-                        "must be a comma-separated host list of letters, digits, and . - _ : * / [ ] (at most 1024 bytes)",
-                    ));
-                }
-                Some(list.to_owned())
-            }
-        };
+        let no_proxy = parse_no_proxy(no_proxy)?;
         Ok(Self { url, no_proxy })
     }
 
@@ -539,7 +541,7 @@ pub fn load(
             error,
         })?;
         let file: ConfigFile = toml::from_str(&raw).map_err(|error| ConfigError::Parse {
-            detail: error.to_string(),
+            detail: parse_detail(&raw, &error),
         })?;
         if file.version != Some(CONFIG_VERSION) {
             return Err(ConfigError::Version {
@@ -631,6 +633,42 @@ pub fn load(
     })
 }
 
+/// Validates the direct-connection list; empty means none.
+fn parse_no_proxy(list: Option<&str>) -> Result<Option<String>, ConfigError> {
+    let Some(list) = list.map(str::trim).filter(|list| !list.is_empty()) else {
+        return Ok(None);
+    };
+    let ok = list.len() <= MAX_IMAGE_BUILD_NO_PROXY_BYTES
+        && list.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '.' | '-' | '_' | ',' | ':' | '*' | '/' | '[' | ']')
+        });
+    if ok {
+        Ok(Some(list.to_owned()))
+    } else {
+        Err(ConfigError::ImageBuildProxyInvalid {
+            setting: IMAGE_BUILD_NO_PROXY_VAR,
+            rule: "must be a comma-separated host list of ASCII letters, digits, and . - _ : * / [ ] (at most 1024 bytes)",
+        })
+    }
+}
+
+/// The parser's complaint, unless the file holds an image-build proxy
+/// setting: the parser quotes the offending line, and a proxy URL there
+/// could carry credentials (an unquoted value, a misspelled key, and a
+/// wrong type all quote it). Then only the line is named.
+fn parse_detail(raw: &str, error: &toml::de::Error) -> String {
+    if !raw.contains("image_build") {
+        return error.to_string();
+    }
+    let line = error.span().map_or(0, |span| {
+        raw[..span.start.min(raw.len())].matches('\n').count() + 1
+    });
+    format!(
+        "TOML syntax or shape error at line {line} (details withheld: the file sets image_build_* settings, which may hold a proxy URL)"
+    )
+}
+
 /// Layers the image-build proxy environment over the file's keys. An empty
 /// value (a Compose `${VAR:-}` default) means off.
 fn layer_image_build_proxy(
@@ -638,11 +676,15 @@ fn layer_image_build_proxy(
     file_no_proxy: Option<String>,
     env: EnvLookup<'_>,
 ) -> Result<Option<ImageBuildProxy>, ConfigError> {
-    let proxy = env(IMAGE_BUILD_PROXY_VAR).or(file_proxy);
-    let no_proxy = env(IMAGE_BUILD_NO_PROXY_VAR).or(file_no_proxy);
-    match proxy.as_deref().map(str::trim) {
-        Some(url) if !url.is_empty() => Ok(Some(ImageBuildProxy::parse(url, no_proxy.as_deref())?)),
-        _ => Ok(None),
+    // An empty environment value is unset: it must not override the file.
+    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let proxy = set(env(IMAGE_BUILD_PROXY_VAR)).or_else(|| set(file_proxy));
+    let no_proxy = set(env(IMAGE_BUILD_NO_PROXY_VAR)).or_else(|| set(file_no_proxy));
+    // Checked even when no proxy is set, so a typo fails at startup.
+    parse_no_proxy(no_proxy.as_deref())?;
+    match proxy {
+        Some(url) => Ok(Some(ImageBuildProxy::parse(&url, no_proxy.as_deref())?)),
+        None => Ok(None),
     }
 }
 
