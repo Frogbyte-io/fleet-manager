@@ -149,6 +149,31 @@ fn out_of_range_lab_placement_settings_are_refused() {
 }
 
 #[test]
+fn validate_refuses_an_out_of_range_placement_policy_set_in_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = fleet_config::load(None, &none_env).expect("defaults must load");
+    config.data_dir = dir.path().to_path_buf();
+    config.validate().expect("the default policy must validate");
+    config.lab_placement.memory_overcommit = 32.0;
+    assert!(matches!(
+        config.validate().unwrap_err(),
+        ConfigError::LabPlacementInvalid {
+            setting: "lab_memory_overcommit",
+            ..
+        }
+    ));
+    config.lab_placement.memory_overcommit = 1.0;
+    config.lab_placement.capacity_max_age_seconds = 0;
+    assert!(matches!(
+        config.validate().unwrap_err(),
+        ConfigError::LabPlacementInvalid {
+            setting: "lab_capacity_max_age_seconds",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_file_sourced_lab_setting_is_named_by_its_file_key() {
     let dir = tempfile::tempdir().unwrap();
     let file = write_config(

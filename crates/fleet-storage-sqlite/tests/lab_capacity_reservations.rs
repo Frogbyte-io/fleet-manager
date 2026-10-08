@@ -267,6 +267,30 @@ async fn stale_or_missing_observations_refuse_without_writing() {
 }
 
 #[tokio::test]
+async fn an_out_of_range_observation_is_rejected_not_clamped() {
+    let (_dir, store) = setup().await;
+    let leases = LeaseRepository::new(store.pool().clone());
+    let capacity = CapacityRepository::new(store.pool().clone());
+    let id = lease(&leases).await;
+    let mut oversized = observation(16, NOW);
+    oversized.memory_total_bytes = Some(u64::MAX);
+    let error = capacity
+        .record_observation("account-1", &oversized)
+        .await
+        .expect_err("a figure SQLite cannot hold must be rejected");
+    assert!(error.contains("total memory"), "{error}");
+    // Nothing was stored, so placement still has no observation to trust.
+    let ReserveOutcome::Refused(refusal) = capacity
+        .reserve(&request(&id, 1024), &PlacementPolicy::default(), NOW)
+        .await
+        .unwrap()
+    else {
+        panic!("a rejected observation must not admit a reservation");
+    };
+    assert_eq!(refusal.reason(), "capacity_unknown");
+}
+
+#[tokio::test]
 async fn the_schema_rejects_invalid_reservations() {
     let (_dir, store) = setup().await;
     let leases = LeaseRepository::new(store.pool().clone());

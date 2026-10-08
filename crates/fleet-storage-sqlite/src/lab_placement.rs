@@ -67,8 +67,15 @@ struct StoredStorage {
     total_bytes: u64,
 }
 
-fn to_i64(value: Option<u64>) -> Option<i64> {
-    value.map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+/// Converts an observed figure for storage. A figure SQLite cannot hold is
+/// an error, never a clamped value: clamping would fabricate free capacity.
+fn to_i64(value: Option<u64>, figure: &str) -> Result<Option<i64>, String> {
+    value
+        .map(|value| {
+            i64::try_from(value)
+                .map_err(|_| format!("the observation's {figure} ({value}) is out of range"))
+        })
+        .transpose()
 }
 
 fn to_u64(value: Option<i64>) -> Option<u64> {
@@ -127,9 +134,9 @@ impl CapacityReservationPort for CapacityRepository {
         )
         .bind(account_id)
         .bind(&observation.node)
-        .bind(to_i64(observation.cpu_count))
-        .bind(to_i64(observation.memory_total_bytes))
-        .bind(to_i64(observation.memory_used_bytes))
+        .bind(to_i64(observation.cpu_count, "CPU count")?)
+        .bind(to_i64(observation.memory_total_bytes, "total memory")?)
+        .bind(to_i64(observation.memory_used_bytes, "used memory")?)
         .bind(storages)
         .bind(observation.observed_at)
         .execute(&self.pool)
@@ -197,10 +204,16 @@ impl CapacityReservationPort for CapacityRepository {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| format!("read held reservations failed: {error}"))?;
+        // A negative sum cannot come from the CHECKed rows; if it does, the
+        // reservation errors rather than counting it as nothing reserved.
+        let sum = |column: &str| {
+            to_u64(Some(totals.get(column)))
+                .ok_or_else(|| format!("the held reservations' {column} total is out of range"))
+        };
         let reserved = ReservedTotals {
-            cores: to_u64(Some(totals.get("cores"))).unwrap_or(0),
-            memory_mib: to_u64(Some(totals.get("memory_mib"))).unwrap_or(0),
-            disk_gib: to_u64(Some(totals.get("disk_gib"))).unwrap_or(0),
+            cores: sum("cores")?,
+            memory_mib: sum("memory_mib")?,
+            disk_gib: sum("disk_gib")?,
         };
         if let Err(refusal) = check_capacity(
             &request.node,

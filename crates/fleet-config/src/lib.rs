@@ -418,8 +418,6 @@ fn layer_lab_placement(
             value,
             expected,
         };
-    let ratio_ok = |ratio: f64| ratio.is_finite() && ratio > 0.0 && ratio <= MAX_LAB_OVERCOMMIT;
-    let age_ok = |age: u64| (1..=MAX_LAB_CAPACITY_AGE_SECONDS).contains(&age);
     let mut sources = [
         "lab_memory_overcommit",
         "lab_cpu_overcommit",
@@ -449,23 +447,40 @@ fn layer_lab_placement(
                 .map_err(|_| invalid(var, raw.clone(), age_expected()))?;
         }
     }
-    for (setting, ratio) in [
-        (sources[0], lab_placement.memory_overcommit),
-        (sources[1], lab_placement.cpu_overcommit),
-    ] {
-        if !ratio_ok(ratio) {
-            return Err(invalid(setting, ratio.to_string(), ratio_expected()));
-        }
-    }
-    if !age_ok(lab_placement.capacity_max_age_seconds) {
-        return Err(invalid(
-            sources[2],
-            lab_placement.capacity_max_age_seconds.to_string(),
-            age_expected(),
-        ));
-    }
-
+    lab_placement.check(sources)?;
     Ok(lab_placement)
+}
+
+impl LabPlacementConfig {
+    /// Range-checks the policy, naming each setting as `sources` spells it
+    /// (memory ratio, CPU ratio, capacity age).
+    fn check(&self, sources: [&'static str; 3]) -> Result<(), ConfigError> {
+        let ratio_ok = |ratio: f64| ratio.is_finite() && ratio > 0.0 && ratio <= MAX_LAB_OVERCOMMIT;
+        for (setting, ratio) in [
+            (sources[0], self.memory_overcommit),
+            (sources[1], self.cpu_overcommit),
+        ] {
+            if !ratio_ok(ratio) {
+                return Err(ConfigError::LabPlacementInvalid {
+                    setting,
+                    value: ratio.to_string(),
+                    expected: format!(
+                        "an overcommit ratio greater than 0 and at most {MAX_LAB_OVERCOMMIT}"
+                    ),
+                });
+            }
+        }
+        if !(1..=MAX_LAB_CAPACITY_AGE_SECONDS).contains(&self.capacity_max_age_seconds) {
+            return Err(ConfigError::LabPlacementInvalid {
+                setting: sources[2],
+                value: self.capacity_max_age_seconds.to_string(),
+                expected: format!(
+                    "a whole number of seconds in 1..={MAX_LAB_CAPACITY_AGE_SECONDS}"
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl ControllerConfig {
@@ -515,6 +530,13 @@ impl ControllerConfig {
         if let Some(key_file) = &self.master_key_file {
             validate_master_key_file(key_file)?;
         }
+        // Layering already range-checks the policy; a config built or
+        // changed in code is checked again before startup uses it.
+        self.lab_placement.check([
+            "lab_memory_overcommit",
+            "lab_cpu_overcommit",
+            "lab_capacity_max_age_seconds",
+        ])?;
         Ok(())
     }
 
