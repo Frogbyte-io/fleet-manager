@@ -329,7 +329,7 @@ Refusals fail the provision operation with a reason:
 | `capacity_stale` | The observation is older than `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`, or dated in the future | Fix the node read or the controller clock |
 | `storage_unknown` | The image's storage pool is unknown, or the observation does not report it | Check the build's storage pool and the token's storage visibility |
 | `insufficient_memory`, `insufficient_cpu` | The node lacks memory or cores after overcommit, usage, and held reservations | Release leases, free the node, or raise `FLEET_LAB_MEMORY_OVERCOMMIT` or `FLEET_LAB_CPU_OVERCOMMIT` |
-| `insufficient_disk` | The image's storage pool on the node lacks free space after held reservations (no overcommit applies) | Free space on that pool, or release leases that hold disk on it |
+| `insufficient_disk` | The image's storage pool on the node lacks free space after held reservations (no overcommit applies). A running Lab guest's disk is in the observed used space and in its reservation, so it counts twice | Free space on that pool, or release leases that hold disk on it |
 | `reservation_mismatch` | The lease's held reservation is for another node, account, demand, or storage pool. This can happen when the template moved or a re-promotion changed the pinned build's pool | Release the lease and request a new one |
 
 `FLEET_LAB_MEMORY_OVERCOMMIT` and `FLEET_LAB_CPU_OVERCOMMIT` (default `1.0`, at most 16) scale the node's total memory and CPU count; disk is never overcommitted. A lease's reservation stops counting once the lease is released, or failed without a guest. A lease in `cleanup_failed` keeps its reservation until `lab cleanup-retry` destroys the guest. [`docs/architecture/lab.md`](../architecture/lab.md) has the exact rule.
