@@ -814,6 +814,58 @@ impl Controller {
             .unwrap();
     }
 
+    /// Releases a lease with `keep` (`POST .../release?keep=true`): its
+    /// cleanup leaves the guest in place.
+    pub async fn release_keeping(&self, lease_id: &str) {
+        let principal = ActingPrincipal {
+            id: PRINCIPAL.to_owned(),
+        };
+        let lease = self
+            .lab
+            .release_lease(
+                &AllowAll,
+                &principal,
+                lease_id,
+                true,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        self.parts
+            .operations
+            .create_lab_cleanup(
+                &AllowAll,
+                PRINCIPAL,
+                lease_id,
+                &fleet_application::lab::cleanup_operation(&lease, None),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The provision read model's view of a lease's record, as
+    /// `GET /lab/provisions` reports it: its saga state, what became of the
+    /// guest, and the linked lease's state.
+    pub async fn provision_view(&self, lease_id: &str) -> (String, String, Option<String>) {
+        let principal = ActingPrincipal {
+            id: PRINCIPAL.to_owned(),
+        };
+        let record = self.record(lease_id).await;
+        let view = self
+            .lab
+            .list_provision_views(&AllowAll, &principal)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|view| view.record.id == record.id)
+            .expect("the record is listed");
+        (
+            view.record.state.id().to_owned(),
+            view.guest.id().to_owned(),
+            view.lease_state.map(|state| state.id().to_owned()),
+        )
+    }
+
     /// Runs the queued operations to completion, or until a crash point.
     pub async fn drain(&self, world: &World) -> Run<usize> {
         let parts = self.parts.clone();
