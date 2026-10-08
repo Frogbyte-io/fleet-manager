@@ -34,7 +34,7 @@ pub const TAILSCALE_IDENTITY_HEADER_NAMES: [&str; 3] = [
 ];
 pub use image::{
     ImageBuildRecord, ImageBuildTemplate, MAX_RECIPE_CONTENT_BYTES, RecipeContent, RecipeSource,
-    RecipeVersion, StructuredRecipe,
+    RecipeVersion, StructuredRecipe, requests_insecure_tls,
 };
 pub use lab::{
     CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState,

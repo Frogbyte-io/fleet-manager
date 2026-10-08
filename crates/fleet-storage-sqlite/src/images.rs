@@ -67,6 +67,7 @@ impl RecipeRepository {
             promoted_at: row.get::<Option<i64>, _>("promoted_at"),
             promoted_by: row.get::<Option<String>, _>("promoted_by"),
             promoted_build_id: row.get::<Option<String>, _>("promoted_build_id"),
+            allow_insecure_tls: row.get::<i64, _>("allow_insecure_tls") != 0,
         })
     }
 }
@@ -331,8 +332,8 @@ impl RecipePort for RecipeRepository {
             .await
             .map_err(|error| format!("publish failed: {error}"))?;
         let result = sqlx::query(
-            "INSERT INTO image_recipe_versions (id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            "INSERT INTO image_recipe_versions (id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, allow_insecure_tls) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT (recipe_id, content_digest) DO NOTHING",
         )
         .bind(&version.id)
@@ -345,6 +346,7 @@ impl RecipePort for RecipeRepository {
         .bind(&version.node)
         .bind(&version.storage_pool)
         .bind(version.published_at)
+        .bind(i64::from(version.allow_insecure_tls))
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("publish failed: {error}"))?;
@@ -361,7 +363,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn get_version(&self, id: &str) -> Result<RecipeVersion, String> {
-        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE id = ?1")
+        sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id, allow_insecure_tls FROM image_recipe_versions WHERE id = ?1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -372,7 +374,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn list_versions(&self, recipe_id: &str) -> Result<Vec<RecipeVersion>, String> {
-        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
+        let rows = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id, allow_insecure_tls FROM image_recipe_versions WHERE recipe_id = ?1 ORDER BY published_at DESC, id DESC")
             .bind(recipe_id)
             .fetch_all(&self.pool)
             .await
@@ -427,7 +429,7 @@ impl RecipePort for RecipeRepository {
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("promote failed: {error}"))?;
-        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE id = ?1")
+        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id, allow_insecure_tls FROM image_recipe_versions WHERE id = ?1")
             .bind(version_id)
             .fetch_one(&mut *transaction)
             .await
@@ -441,7 +443,7 @@ impl RecipePort for RecipeRepository {
     }
 
     async fn promoted_version(&self, recipe_id: &str) -> Result<Option<RecipeVersion>, String> {
-        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id FROM image_recipe_versions WHERE recipe_id = ?1 AND promoted_at IS NOT NULL LIMIT 1")
+        let row = sqlx::query("SELECT id, recipe_id, name, description, content_digest, content, source, node, storage_pool, published_at, promoted_at, promoted_by, promoted_build_id, allow_insecure_tls FROM image_recipe_versions WHERE recipe_id = ?1 AND promoted_at IS NOT NULL LIMIT 1")
             .bind(recipe_id)
             .fetch_optional(&self.pool)
             .await
@@ -679,8 +681,39 @@ mod build_record_tests {
             promoted_at: None,
             promoted_by: None,
             promoted_build_id: None,
+            allow_insecure_tls: false,
         };
         recipes.publish(&draft.id, &version).await.unwrap();
+        assert!(
+            !recipes
+                .get_version(&version.id)
+                .await
+                .unwrap()
+                .allow_insecure_tls
+        );
+        // The insecure-TLS opt-in (#284) round-trips, and the column refuses
+        // anything but 0 or 1.
+        let opted = RecipeVersion {
+            id: "image@opted".to_owned(),
+            content_digest: draft.content.version_digest(true).unwrap(),
+            allow_insecure_tls: true,
+            ..version.clone()
+        };
+        recipes.publish(&draft.id, &opted).await.unwrap();
+        assert!(
+            recipes
+                .get_version(&opted.id)
+                .await
+                .unwrap()
+                .allow_insecure_tls
+        );
+        assert!(
+            sqlx::query("UPDATE image_recipe_versions SET allow_insecure_tls = 2 WHERE id = ?1")
+                .bind(&opted.id)
+                .execute(store.pool())
+                .await
+                .is_err()
+        );
         let operation = OperationRepository::new(store.pool().clone())
             .create("image.build", None, None, None, None)
             .await
@@ -1047,7 +1080,7 @@ mod target_account_tests {
         let version = RecipeVersion {
             id: "version".to_owned(), recipe_id: "recipe".to_owned(), name: "image".to_owned(), description: String::new(),
             content_digest: "digest".to_owned(), content: r#"{"builders":[{"type":"proxmox-clone","proxmox_url":"https://pve.example.test:8006/api2/json/"}]}"#.to_owned(),
-            source: RecipeSource::Clone, node: "pve".to_owned(), storage_pool: "local-lvm".to_owned(), published_at: 1, promoted_at: None, promoted_by: None, promoted_build_id: None,
+            source: RecipeSource::Clone, node: "pve".to_owned(), storage_pool: "local-lvm".to_owned(), published_at: 1, promoted_at: None, promoted_by: None, promoted_build_id: None, allow_insecure_tls: false,
         };
         assert_eq!(
             recipes

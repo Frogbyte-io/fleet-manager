@@ -75,6 +75,23 @@ impl RecipeContent {
     ///
     /// Fails when the content exceeds the bound.
     pub fn content_digest(&self) -> Result<String, String> {
+        self.digest(false)
+    }
+
+    /// The digest of a version published from this content. A version that
+    /// opts into `insecure_skip_tls_verify` (#284) is a different build
+    /// input, so the opt-in joins the digest; without it the digest is
+    /// exactly [`Self::content_digest`], so every version published before
+    /// the opt-in existed keeps its identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the content exceeds the bound.
+    pub fn version_digest(&self, allow_insecure_tls: bool) -> Result<String, String> {
+        self.digest(allow_insecure_tls)
+    }
+
+    fn digest(&self, allow_insecure_tls: bool) -> Result<String, String> {
         if self.content.len() > MAX_RECIPE_CONTENT_BYTES {
             return Err(format!(
                 "the recipe content is {} bytes, over the {MAX_RECIPE_CONTENT_BYTES}-byte bound",
@@ -92,6 +109,9 @@ impl RecipeContent {
         hasher.update(self.storage_pool.as_deref().unwrap_or_default().as_bytes());
         hasher.update(b"\n");
         hasher.update(self.source.id().as_bytes());
+        if allow_insecure_tls {
+            hasher.update(b"\nallow-insecure-tls");
+        }
         let digest: [u8; 32] = hasher.finalize().into();
         Ok(digest.iter().fold(String::with_capacity(64), |mut out, b| {
             use std::fmt::Write as _;
@@ -134,6 +154,38 @@ impl RecipeContent {
     }
 }
 
+/// Whether a recipe's builders ask Packer's Proxmox plugin to skip TLS
+/// verification (#284). Any `insecure_skip_tls_verify` value other than a
+/// literal `false` counts, including a template variable: Fleet cannot know
+/// what it resolves to. Keys match case-insensitively, as Packer's
+/// `mapstructure` decoding does. Content that is not a JSON template is
+/// judged by whether the key appears in it at all.
+#[must_use]
+pub fn requests_insecure_tls(content: &str) -> bool {
+    const KEY: &str = "insecure_skip_tls_verify";
+    let Ok(template) = serde_json::from_str::<serde_json::Value>(content) else {
+        return content.to_ascii_lowercase().contains(KEY);
+    };
+    template
+        .as_object()
+        .and_then(|object| {
+            object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("builders"))
+        })
+        .and_then(|(_, builders)| builders.as_array())
+        .is_some_and(|builders| {
+            builders
+                .iter()
+                .filter_map(serde_json::Value::as_object)
+                .any(|builder| {
+                    builder.iter().any(|(key, value)| {
+                        key.eq_ignore_ascii_case(KEY) && *value != serde_json::Value::Bool(false)
+                    })
+                })
+        })
+}
+
 /// A published recipe version: immutable, identified by its digest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +223,13 @@ pub struct RecipeVersion {
     /// `None` when the version was never promoted, or was promoted before
     /// the pin existed and not since.
     pub promoted_build_id: Option<String>,
+    /// Whether the version may build with `insecure_skip_tls_verify` (#284).
+    /// Set only by an explicit, audited opt-in at publication and part of
+    /// the version digest. Without it, a build of a recipe that skips TLS
+    /// verification is refused (`insecure_tls_not_allowed`); every other
+    /// build pins the account's confirmed certificate for Packer.
+    #[serde(default)]
+    pub allow_insecure_tls: bool,
 }
 
 #[cfg(test)]
@@ -195,6 +254,38 @@ mod tests {
         let c = recipe("{\"builders\":[{}]}");
         assert_eq!(a.content_digest().unwrap(), b.content_digest().unwrap());
         assert_ne!(a.content_digest().unwrap(), c.content_digest().unwrap());
+    }
+
+    #[test]
+    fn the_insecure_tls_opt_in_is_part_of_the_version_digest_only_when_set() {
+        let a = recipe("{\"builders\":[]}");
+        assert_eq!(
+            a.version_digest(false).unwrap(),
+            a.content_digest().unwrap()
+        );
+        assert_ne!(a.version_digest(true).unwrap(), a.content_digest().unwrap());
+    }
+
+    #[test]
+    fn insecure_tls_requests_are_recognized_in_every_spelling() {
+        for content in [
+            r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":true}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":"true"}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":"{{user `skip`}}"}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone"},{"INSECURE_SKIP_TLS_VERIFY":1}]}"#,
+            r#"{"Builders":[{"Insecure_Skip_Tls_Verify":true}]}"#,
+            "source \"proxmox-clone\" \"x\" { insecure_skip_tls_verify = true }",
+        ] {
+            assert!(requests_insecure_tls(content), "{content}");
+        }
+        for content in [
+            r#"{"builders":[{"type":"proxmox-clone"}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":false}]}"#,
+            r#"{"variables":{"insecure_skip_tls_verify":"true"},"builders":[{}]}"#,
+            "not json",
+        ] {
+            assert!(!requests_insecure_tls(content), "{content}");
+        }
     }
 
     #[test]
@@ -579,7 +670,7 @@ mod frozen_target_tests {
                 description: String::new(), content_digest: "digest".to_owned(),
                 content: serde_json::json!({"builders":[{"type":"proxmox-clone", "node":node, "disks":[{"type":"scsi", "storage_pool":storage_pool, "disk_size":"8G"}]}]}).to_string(),
                 source: RecipeSource::Clone, node: node.to_owned(), storage_pool: storage_pool.to_owned(),
-                published_at: 1, promoted_at: None, promoted_by: None, promoted_build_id: None,
+                published_at: 1, promoted_at: None, promoted_by: None, promoted_build_id: None, allow_insecure_tls: false,
             };
             assert_eq!(version.has_frozen_build_target(), expected);
         }
@@ -600,6 +691,7 @@ mod frozen_target_tests {
             promoted_at: None,
             promoted_by: None,
             promoted_build_id: None,
+            allow_insecure_tls: false,
         }
     }
 
