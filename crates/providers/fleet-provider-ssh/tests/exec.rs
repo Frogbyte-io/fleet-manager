@@ -17,13 +17,18 @@ use std::time::Duration;
 /// The lock file is scoped to the uid: an unrelated user's leftover lock
 /// on a shared machine must not break this suite, and the file's mode is
 /// 0600 so no other user can hold or tamper with it.
-fn startup_lock_path() -> std::path::PathBuf {
+fn named_lock_path(name: &str) -> std::path::PathBuf {
     let user = std::env::var("USER")
         .unwrap_or_else(|_| std::env::var("LOGNAME").unwrap_or_else(|_| "unknown".to_owned()));
-    std::env::temp_dir().join(format!("fleet-test-sshd-startup-{user}.lock"))
+    std::env::temp_dir().join(format!("fleet-test-{name}-{user}.lock"))
 }
 
 fn acquire_startup_lock() -> std::fs::File {
+    acquire_startup_lock_named("sshd-startup")
+}
+
+fn acquire_startup_lock_named(name: &str) -> std::fs::File {
+    let lock_path = named_lock_path(name);
     // The mode is set atomically at creation (OpenOptionsExt::mode applies
     // to newly created files), so no window exists where another user
     // could open the lock. A stale pre-existing file from an older run is
@@ -38,12 +43,12 @@ fn acquire_startup_lock() -> std::fs::File {
             .create(true)
             .truncate(false)
             .mode(0o600)
-            .open(startup_lock_path());
+            .open(&lock_path);
         let file = match file {
             Ok(file) => file,
             Err(error) => panic!("the startup lock file must open: {error}"),
         };
-        std::fs::set_permissions(startup_lock_path(), std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
             .expect("the startup lock file must be ours to chmod");
         file.lock().expect("the startup lock must acquire");
         file
@@ -55,7 +60,7 @@ fn acquire_startup_lock() -> std::fs::File {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(startup_lock_path())
+            .open(&lock_path)
             .expect("the startup lock file must open");
         file.lock().expect("the startup lock must acquire");
         file
@@ -126,6 +131,7 @@ fn start_sshd() -> TestSshd {
              KbdInteractiveAuthentication no\n\
              UsePAM no\n\
              StrictModes no\n\
+             MaxAuthTries 64\n\
              PidFile {dir_display}/sshd.pid\n\
              Subsystem sftp internal-sftp\n"
         ),
@@ -480,47 +486,88 @@ fn a_sink_failure_ends_the_copy_at_once() {
     assert_eq!(limiter.held(), 0, "the copy releases its permit");
 }
 
+/// Marks the throwaway key so a leftover from an interrupted run is replaced.
+const DEFAULT_KEY_MARKER: &str = "fleet-test-default-key";
+
+/// The passwd home directory: OpenSSH resolves `~` from the passwd entry,
+/// not from `$HOME`.
+fn passwd_home() -> Option<std::path::PathBuf> {
+    let uid = Command::new("id").arg("-u").output().ok()?;
+    let uid = String::from_utf8(uid.stdout).ok()?;
+    let entry = Command::new("getent")
+        .args(["passwd", uid.trim()])
+        .output()
+        .ok()?;
+    let entry = String::from_utf8(entry.stdout).ok()?;
+    let home = entry.trim().split(':').nth(5)?;
+    Some(std::path::PathBuf::from(home))
+}
+
 /// Installs a throwaway `~/.ssh/id_ecdsa` for the length of one test and
-/// removes it on drop. OpenSSH resolves `~` from the passwd entry, so the
-/// default identity files cannot be redirected to a temporary directory.
-/// `id_ecdsa` is a default identity file that is rarely present, and the
-/// guard refuses to touch one that exists.
+/// removes it on drop. The default identity files cannot be redirected to a
+/// temporary directory. `id_ecdsa` is a default identity file that is rarely
+/// present; the guard refuses to touch one it did not create (recognised by
+/// the marker comment) and replaces its own leftover from a killed run. While
+/// it exists, any other ssh client of this user also offers it.
 struct DefaultKey {
     private: std::path::PathBuf,
     public_text: String,
+    created_dir: Option<std::path::PathBuf>,
     _lock: std::fs::File,
 }
 
 impl DefaultKey {
     fn install() -> Option<Self> {
-        let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-        let ssh_dir = home.join(".ssh");
-        let lock_path = std::env::temp_dir().join("fleet-test-default-key.lock");
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)
-            .ok()?;
-        lock.lock().ok()?;
+        let ssh_dir = passwd_home()?.join(".ssh");
+        let lock = acquire_startup_lock_named("default-key");
         let private = ssh_dir.join("id_ecdsa");
-        if private.exists() {
+        let public = std::path::PathBuf::from(format!("{}.pub", private.display()));
+        let leftover = std::fs::read_to_string(&public)
+            .is_ok_and(|text| text.trim_end().ends_with(DEFAULT_KEY_MARKER));
+        let present = |path: &std::path::Path| std::fs::symlink_metadata(path).is_ok();
+        if leftover {
+            let _ = std::fs::remove_file(&private);
+            let _ = std::fs::remove_file(&public);
+        } else if present(&private) || present(&public) {
             return None;
         }
-        std::fs::create_dir_all(&ssh_dir).ok()?;
+        let created_dir = if ssh_dir.exists() {
+            None
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&ssh_dir)
+                    .ok()?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir_all(&ssh_dir).ok()?;
+            Some(ssh_dir)
+        };
         let generated = Command::new("ssh-keygen")
-            .args(["-t", "ecdsa", "-N", "", "-q", "-f"])
+            .args([
+                "-t",
+                "ecdsa",
+                "-N",
+                "",
+                "-q",
+                "-C",
+                DEFAULT_KEY_MARKER,
+                "-f",
+            ])
             .arg(&private)
             .output()
             .ok()?;
         if !generated.status.success() {
             return None;
         }
-        let public_text = std::fs::read_to_string(format!("{}.pub", private.display())).ok()?;
+        let public_text = std::fs::read_to_string(&public).ok()?;
         Some(Self {
             private,
             public_text,
+            created_dir,
             _lock: lock,
         })
     }
@@ -530,6 +577,9 @@ impl Drop for DefaultKey {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.private);
         let _ = std::fs::remove_file(format!("{}.pub", self.private.display()));
+        if let Some(dir) = &self.created_dir {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
 }
 
@@ -539,7 +589,11 @@ impl Drop for DefaultKey {
 #[test]
 fn agent_auth_falls_back_to_the_default_identity_file() {
     let Some(key) = DefaultKey::install() else {
-        eprintln!("skipped: ~/.ssh/id_ecdsa is in use or HOME is unusable");
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must be able to install the default key"
+        );
+        eprintln!("skipped: ~/.ssh/id_ecdsa is in use or the home directory is unusable");
         return;
     };
     let sshd = start_sshd();

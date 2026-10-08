@@ -416,7 +416,8 @@ pub(crate) fn add_ssh_keyscan_host(command: &mut Command, host: &str) {
 /// How Fleet authenticates to an SSH endpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SshAuth {
-    /// The caller's running agent (`SSH_AUTH_SOCK`) supplies the key.
+    /// The caller's agent (`SSH_AUTH_SOCK`) supplies keys, then the user's
+    /// default `~/.ssh/id_*` files (OpenSSH's default).
     Agent,
     /// A specific identity file, referenced by path. The path is not secret;
     /// a passphrase would be, and Fleet does not do passphrase prompts.
