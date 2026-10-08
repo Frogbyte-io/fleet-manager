@@ -1724,7 +1724,7 @@ impl fleet_application::lab::LabReadinessPort for ProvisionReadiness {
                 deadline_at: record.readiness_deadline_at, correlation_id: Some(record.id.clone()), review_token: None,
                 payload_json: Some(serde_json::json!({
                     "machineId": record.machine_id, "endpointId": record.endpoint_id,
-                    "auth": {"type": "agent"}, "remote": project.remote,
+                    "auth": {"type": "agent"}, "remote": project.remote, "fetch": project.fetch,
                     "root": format!("/tmp/fleet-projects/{}", project.id),
                     // Lab bootstrap is minimal (no tools, no skills) and does
                     // not use Frogenv: the workflow never logs a disposable
@@ -1881,6 +1881,7 @@ mod readiness_startup_tests {
         ));
         let project = projects
             .create(&fleet_application::project::NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "example.test/demo".to_owned(),
                 idempotency_key: None,
                 name: "demo".to_owned(),

@@ -209,6 +209,7 @@ async fn the_project_repository_round_trips_identity_and_checkouts() {
 
     let created = projects
         .create(&fleet_application::project::NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
             name: "fleet-manager".to_owned(),
             description: String::new(),
@@ -221,6 +222,7 @@ async fn the_project_repository_round_trips_identity_and_checkouts() {
     // A conflicting remote is refused by the unique index.
     let conflict = projects
         .create(&fleet_application::project::NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
             name: "other".to_owned(),
             description: String::new(),
@@ -287,6 +289,7 @@ async fn the_project_list_filters_match_literals_and_ignore_stale_observations()
     // literally, not as wildcards.
     let created = projects
         .create(&fleet_application::project::NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "host/team_a%b/proj_x".to_owned(),
             name: "metachars".to_owned(),
             description: String::new(),
@@ -349,6 +352,7 @@ async fn the_project_checkouts_cascade_when_the_machine_is_deleted() {
     let projects = fleet_storage_sqlite::ProjectRepository::new(store.pool().clone());
     let created = projects
         .create(&fleet_application::project::NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/Frogbyte-io/fleet-manager".to_owned(),
             name: "fleet-manager".to_owned(),
             description: String::new(),

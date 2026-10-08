@@ -61,6 +61,10 @@ struct ReadyPayload {
     auth: Auth,
     /// The project's normalized remote.
     remote: String,
+    /// How the remote is fetched. Absent (an operation queued before the
+    /// form was stored) means https.
+    #[serde(default)]
+    fetch: fleet_core::RemoteFetch,
     /// The checkout root the workflow targets.
     root: String,
     /// The tools the project declares, as pinned requests.
@@ -358,7 +362,7 @@ impl ReadyExecutor {
         // sides are normalized, so a checkout under a different remote
         // spelling still matches.
         if let Ok(checkouts) = self.discover_checkouts(payload).await {
-            let project_remote = fleet_core::NormalizedRemote::parse(&payload.remote)
+            let project_remote = parse_payload_remote(&payload.remote)
                 .map(|normalized| normalized.as_str().to_owned())
                 .unwrap_or_else(|_| payload.remote.clone());
             observed.matching_checkout = checkouts
@@ -539,7 +543,7 @@ impl ReadyExecutor {
                 // The payload carries the normalized identity; git needs a
                 // fetchable URL (#329). An unparseable remote is a named
                 // refusal, not a git error.
-                let remote = match clone_remote(&payload.remote) {
+                let remote = match clone_remote(&payload.remote, &payload.fetch) {
                     Ok(remote) => remote,
                     Err(detail) => return StepOutcome::Failed(detail),
                 };
@@ -695,11 +699,32 @@ enum FrogenvProbe {
     Unavailable,
 }
 
+/// Parses the payload's remote, normally the stored identity
+/// (`host[:port]/path`). Parsed bare, its port colon would read as an scp
+/// separator and the port would become a path segment, so a bare identity is
+/// read as an https remote. A full URL or scp spelling is parsed as written.
+fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, String> {
+    // An `@` before the first `/` is a login (an scp or ssh spelling); one
+    // later is part of an identity's path.
+    let login = remote
+        .split('/')
+        .next()
+        .is_some_and(|authority| authority.contains('@'));
+    if remote.contains("://") || login {
+        fleet_core::NormalizedRemote::parse(remote)
+    } else {
+        fleet_core::NormalizedRemote::parse(&format!("https://{remote}"))
+    }
+}
+
 /// The URL the clone step hands to git, derived from the payload's remote
 /// (normally the stored normalized identity; see
 /// [`fleet_core::NormalizedRemote::clone_url`]).
-fn clone_remote(remote: &str) -> Result<String, String> {
-    let normalized = fleet_core::NormalizedRemote::parse(remote)
+fn clone_remote(remote: &str, fetch: &fleet_core::RemoteFetch) -> Result<String, String> {
+    fetch
+        .validate()
+        .map_err(|detail| format!("invalid_project_remote: {detail}"))?;
+    let normalized = parse_payload_remote(remote)
         .map_err(|detail| format!("invalid_project_remote: {detail}"))?;
     // A query or fragment is never part of a repository path; refuse it
     // rather than let a `?token=` ride into the clone URL.
@@ -708,7 +733,7 @@ fn clone_remote(remote: &str) -> Result<String, String> {
             "invalid_project_remote: the remote path carries a query or fragment".to_owned(),
         );
     }
-    Ok(normalized.clone_url())
+    Ok(normalized.clone_url(fetch))
 }
 
 /// The workflow's generic failure reason, for a step that ran and failed.
@@ -849,18 +874,81 @@ mod lab_discovery_tests {
 
     #[test]
     fn clone_step_remote_is_fetchable_and_malformed_is_refused() {
+        use fleet_core::{FetchScheme, RemoteFetch};
+        let https = RemoteFetch::default();
         assert_eq!(
-            clone_remote("github.com/Frogbyte-io/fleet-manager").unwrap(),
+            clone_remote("github.com/Frogbyte-io/fleet-manager", &https).unwrap(),
             "https://github.com/Frogbyte-io/fleet-manager"
         );
+        // An https project, and one whose row predates the stored form,
+        // clone exactly as before.
         assert_eq!(
-            clone_remote("git@github.com:Frogbyte-io/fleet-manager.git").unwrap(),
-            "https://github.com/Frogbyte-io/fleet-manager"
+            clone_remote("git.example.test:8443/a/b", &https).unwrap(),
+            "https://git.example.test:8443/a/b"
+        );
+        // An scp-style project clones over ssh with its stored login user.
+        let scp = RemoteFetch {
+            scheme: FetchScheme::Scp,
+            user: Some("git".to_owned()),
+        };
+        assert_eq!(
+            clone_remote("git.example.test/a/b", &scp).unwrap(),
+            "git@git.example.test:a/b"
+        );
+        let ssh = RemoteFetch {
+            scheme: FetchScheme::Ssh,
+            user: Some("git".to_owned()),
+        };
+        assert_eq!(
+            clone_remote("git.example.test:2222/a/b", &ssh).unwrap(),
+            "ssh://git@git.example.test:2222/a/b"
+        );
+        let http = RemoteFetch {
+            scheme: FetchScheme::Http,
+            user: None,
+        };
+        assert_eq!(
+            clone_remote("git.example.test:3000/a/b", &http).unwrap(),
+            "http://git.example.test:3000/a/b"
         );
         assert!(
-            clone_remote("")
+            clone_remote("", &https)
                 .unwrap_err()
                 .starts_with("invalid_project_remote")
+        );
+    }
+
+    #[test]
+    fn a_payload_fetch_form_is_validated_and_a_path_at_sign_keeps_its_port() {
+        let forged = fleet_core::RemoteFetch {
+            scheme: fleet_core::FetchScheme::Ssh,
+            user: Some("x@evil:22/y".to_owned()),
+        };
+        assert!(
+            clone_remote("git.example.test/a/b", &forged)
+                .unwrap_err()
+                .starts_with("invalid_project_remote")
+        );
+        assert_eq!(
+            clone_remote(
+                "host.example.test:8443/a/b@c",
+                &fleet_core::RemoteFetch::default()
+            )
+            .unwrap(),
+            "https://host.example.test:8443/a/b@c"
+        );
+    }
+
+    #[test]
+    fn a_payload_without_a_fetch_form_clones_over_https() {
+        let payload: ReadyPayload = serde_json::from_value(serde_json::json!({
+            "machineId": "m", "endpointId": "e", "auth": {"type": "agent"},
+            "remote": "git.example.test/a/b", "root": "/r", "timeoutSeconds": 60,
+        }))
+        .unwrap();
+        assert_eq!(
+            clone_remote(&payload.remote, &payload.fetch).unwrap(),
+            "https://git.example.test/a/b"
         );
     }
 

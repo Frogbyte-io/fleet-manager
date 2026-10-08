@@ -2590,6 +2590,7 @@ async fn project_linked_lab_router() -> (
 
     let project = projects
         .create(&fleet_application::project::NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "https://github.com/example/linked.git".to_owned(),
             idempotency_key: None,
             name: "linked".to_owned(),

@@ -45,7 +45,7 @@ pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
 };
-pub use project::{CheckoutFact, NormalizedRemote, Project, ProjectView};
+pub use project::{CheckoutFact, FetchScheme, NormalizedRemote, Project, ProjectView, RemoteFetch};
 pub use redact::{
     flatten_control_characters, redact_credentials, redact_schemeless_credentials,
     redact_url_credentials,

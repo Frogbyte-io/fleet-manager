@@ -107,6 +107,7 @@ async fn tools_skills_and_checkouts_are_read_from_their_stores() {
     // checkouts count, and other machines' are ignored.
     let app = projects
         .create(&NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/acme/app".to_owned(),
             idempotency_key: None,
             name: "app".to_owned(),
@@ -116,6 +117,7 @@ async fn tools_skills_and_checkouts_are_read_from_their_stores() {
         .unwrap();
     let other = projects
         .create(&NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "github.com/acme/other".to_owned(),
             idempotency_key: None,
             name: "other".to_owned(),

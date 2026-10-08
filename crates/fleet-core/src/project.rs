@@ -36,6 +36,33 @@ impl NormalizedRemote {
     /// Returns a caller-safe detail when the remote is empty, oversized,
     /// credential-bearing, or carries no parseable host/path.
     pub fn parse(raw: &str) -> Result<Self, String> {
+        Self::parse_inner(raw, false).map(|(identity, _)| identity)
+    }
+
+    /// Parses a Git remote into its identity and its fetch form.
+    ///
+    /// The identity is what [`NormalizedRemote::parse`] returns. The
+    /// [`RemoteFetch`] records how the remote was spelled so a clone can
+    /// reach it again: `https`, `http`, `ssh://` (with its login user), or
+    /// scp-style `user@host:path`. A `git://` remote folds to `https`: the
+    /// unauthenticated Git protocol is never used to fetch. A scheme-less
+    /// remote with no user (`host/path`) is `https`. Credential-shaped
+    /// userinfo is refused, so the form can never carry a secret.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`NormalizedRemote::parse`], plus a login user
+    /// that is not a plain login name.
+    pub fn parse_with_fetch(raw: &str) -> Result<(Self, RemoteFetch), String> {
+        Self::parse_inner(raw, true)
+    }
+
+    /// The shared parser. `strict` adds the checks a remote must pass to be
+    /// fetched (a plain login name, a host that cannot read as an option,
+    /// a numeric port); identity-only callers (`parse`) accept what they
+    /// always accepted, so matching an observed checkout never starts
+    /// failing.
+    fn parse_inner(raw: &str, strict: bool) -> Result<(Self, RemoteFetch), String> {
         let error = |detail: &str| Err(format!("the remote is malformed: {detail}"));
         let raw = raw.trim();
         if raw.is_empty() {
@@ -108,6 +135,10 @@ impl NormalizedRemote {
         if credential_bearing {
             return error("it carries embedded credentials; use a remote without userinfo");
         }
+        let fetch = match fetch_form(scheme, authority, strict) {
+            Ok(fetch) => fetch,
+            Err(detail) => return error(detail),
+        };
 
         // Step 3: extract the host and path per spelling.
         let (host, path) = match scheme {
@@ -139,6 +170,9 @@ impl NormalizedRemote {
             return error("the host is empty");
         }
         let host = host.to_ascii_lowercase();
+        if strict && !fetchable_host(&host) {
+            return error("the host cannot be fetched from (an option-like or non-numeric port)");
+        }
         let mut path = path.trim_end_matches('/');
         // The `.git` suffix is a spelling convention, stripped
         // case-insensitively; the path's own case is preserved.
@@ -152,19 +186,15 @@ impl NormalizedRemote {
         if path.is_empty() {
             return error("the path is empty after normalization");
         }
-        if path.len() > 400 || host.len() > 253 {
-            return error("the host or path exceeds the bounds");
+        if let Err(detail) = check_bounds(&host, path) {
+            return error(detail);
         }
-        for part in path.split('/') {
-            for ch in part.chars() {
-                if ch.is_whitespace() || ch == '\0' {
-                    return error("the path carries whitespace or NUL");
-                }
-            }
-        }
-        Ok(Self {
-            value: format!("{host}/{path}"),
-        })
+        Ok((
+            Self {
+                value: format!("{host}/{path}"),
+            },
+            fetch,
+        ))
     }
 
     /// The normalized remote value, e.g. `github.com/Frogbyte-io/fleet-manager`.
@@ -173,17 +203,177 @@ impl NormalizedRemote {
         &self.value
     }
 
-    /// The URL a `git clone` can fetch: `https://` plus the normalized
-    /// `host[:port]/path`.
+    /// The URL a `git clone` can fetch: the identity (`host[:port]/path`)
+    /// in the spelling `fetch` records.
     ///
-    /// The normalized form drops the scheme (and an scp-style user), so it
-    /// is an identity, not a fetchable address; git would read it as a local
-    /// path. The rule is explicit: always `https`. No credential can appear,
-    /// because credential-shaped userinfo is refused at parse time.
+    /// The identity drops the scheme and an scp-style user, so it is not a
+    /// fetchable address; git would read it as a local path. No credential
+    /// can appear, because credential-shaped userinfo is refused at parse
+    /// time and the user is a validated login name.
     #[must_use]
-    pub fn clone_url(&self) -> String {
-        format!("https://{}", self.value)
+    pub fn clone_url(&self, fetch: &RemoteFetch) -> String {
+        let user = fetch
+            .user
+            .as_deref()
+            .map(|user| format!("{user}@"))
+            .unwrap_or_default();
+        match fetch.scheme {
+            FetchScheme::Https => format!("https://{}", self.value),
+            FetchScheme::Http => format!("http://{}", self.value),
+            FetchScheme::Ssh => format!("ssh://{user}{}", self.value),
+            FetchScheme::Scp => match self.value.split_once('/') {
+                Some((host, path)) => format!("{user}{host}:{path}"),
+                None => format!("https://{}", self.value),
+            },
+        }
     }
+}
+
+/// How a project's remote is fetched.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FetchScheme {
+    /// `https://host[:port]/path`.
+    #[default]
+    Https,
+    /// `http://host[:port]/path`.
+    Http,
+    /// `ssh://[user@]host[:port]/path`.
+    Ssh,
+    /// scp-style `user@host:path`.
+    Scp,
+}
+
+impl FetchScheme {
+    /// The stored spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            Self::Http => "http",
+            Self::Ssh => "ssh",
+            Self::Scp => "scp",
+        }
+    }
+
+    /// Reads the stored spelling.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "https" => Some(Self::Https),
+            "http" => Some(Self::Http),
+            "ssh" => Some(Self::Ssh),
+            "scp" => Some(Self::Scp),
+            _ => None,
+        }
+    }
+}
+
+/// The fetch form of a project's remote: the scheme and, for ssh, the login
+/// user. Never a credential. The default is `https` with no user, which is
+/// what every project registered before the form was stored uses.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFetch {
+    /// How the remote is reached.
+    #[serde(default)]
+    pub scheme: FetchScheme,
+    /// The ssh login user (`git` in `git@host:path`); `None` for http(s).
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// The size and character bounds of a normalized host and path.
+fn check_bounds(host: &str, path: &str) -> Result<(), &'static str> {
+    if path.len() > 400 || host.len() > 253 {
+        return Err("the host or path exceeds the bounds");
+    }
+    if path.chars().any(|ch| ch.is_whitespace() || ch == '\0') {
+        return Err("the path carries whitespace or NUL");
+    }
+    Ok(())
+}
+
+/// The fetch form a remote's scheme and authority spell. The credential
+/// check has already run, so any `user` here has no password part.
+fn fetch_form(
+    scheme: Option<&str>,
+    authority: &str,
+    strict: bool,
+) -> Result<RemoteFetch, &'static str> {
+    let user = authority.rsplit_once('@').map(|(user, _)| user.to_owned());
+    let scheme = match scheme {
+        Some(s) if s.eq_ignore_ascii_case("http") => FetchScheme::Http,
+        Some(s) if s.eq_ignore_ascii_case("ssh") => FetchScheme::Ssh,
+        None if user.is_some() => FetchScheme::Scp,
+        // https, a bare `host/path`, and `git://` (unauthenticated and
+        // unencrypted, so never used to fetch).
+        Some(_) | None => FetchScheme::Https,
+    };
+    let user = match scheme {
+        FetchScheme::Ssh | FetchScheme::Scp => user,
+        FetchScheme::Https | FetchScheme::Http => None,
+    };
+    if user.as_deref().is_some_and(|user| !valid_login(user)) {
+        if strict {
+            return Err("the login user is not a plain login name");
+        }
+        return Ok(RemoteFetch::default());
+    }
+    Ok(RemoteFetch { scheme, user })
+}
+
+/// Whether a normalized `host[:port]` is safe to hand to git: no leading
+/// dash (an option), no whitespace or control characters, and a port, when
+/// present, of one to five digits.
+fn fetchable_host(host: &str) -> bool {
+    if host.starts_with('-') || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    match host.rsplit_once(':') {
+        Some((_, port)) => {
+            (1..=5).contains(&port.len()) && port.chars().all(|c| c.is_ascii_digit())
+        }
+        None => true,
+    }
+}
+
+impl RemoteFetch {
+    /// Checks a form that did not come from [`NormalizedRemote::parse_with_fetch`]
+    /// (an operation payload, a stored row): a user belongs only to ssh and
+    /// scp and must be a plain login name, and scp needs one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a caller-safe detail when the form is not one the parser
+    /// could have produced.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match (self.scheme, self.user.as_deref()) {
+            (FetchScheme::Https | FetchScheme::Http, Some(_)) => {
+                Err("an http(s) fetch form carries no user")
+            }
+            (FetchScheme::Scp, None) => Err("an scp fetch form needs a login user"),
+            (FetchScheme::Ssh | FetchScheme::Scp, Some(user)) if !valid_login(user) => {
+                Err("the login user is not a plain login name")
+            }
+            (FetchScheme::Https | FetchScheme::Http, None)
+            | (FetchScheme::Ssh | FetchScheme::Scp, _) => Ok(()),
+        }
+    }
+}
+
+/// A plain login name: at most 32 of `[A-Za-z0-9._-]`, starting
+/// alphanumeric, so it can neither carry a credential nor be read as an
+/// option.
+fn valid_login(user: &str) -> bool {
+    user.len() <= 32
+        && user
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 impl fmt::Display for NormalizedRemote {
@@ -203,6 +393,9 @@ pub struct Project {
     pub id: String,
     /// The normalized remote.
     pub remote: String,
+    /// How the remote is fetched (scheme and ssh user, never a credential).
+    #[serde(default)]
+    pub fetch: RemoteFetch,
     /// The mutable, unique display name.
     pub name: String,
     /// Operator notes.
@@ -274,6 +467,9 @@ pub struct ProjectView {
     pub id: String,
     /// The normalized remote.
     pub remote: String,
+    /// How the remote is fetched.
+    #[serde(default)]
+    pub fetch: RemoteFetch,
     /// The display name.
     pub name: String,
     /// Operator notes.
@@ -355,23 +551,84 @@ mod tests {
         );
     }
 
+    fn clone_url_of(raw: &str) -> String {
+        let (identity, fetch) = NormalizedRemote::parse_with_fetch(raw)
+            .unwrap_or_else(|error| panic!("{raw:?} must parse: {error}"));
+        identity.clone_url(&fetch)
+    }
+
     #[test]
-    fn clone_url_is_a_fetchable_https_url_for_every_spelling() {
-        for raw in [
-            "https://github.com/Frogbyte-io/fleet-manager.git",
-            "git@github.com:Frogbyte-io/fleet-manager.git",
-            "ssh://git@GitHub.com/Frogbyte-io/fleet-manager",
-            "github.com/Frogbyte-io/fleet-manager",
-        ] {
-            let remote = NormalizedRemote::parse(raw).unwrap();
-            assert_eq!(
-                remote.clone_url(),
+    fn clone_url_keeps_the_spelling_the_remote_was_registered_with() {
+        for (raw, expected) in [
+            (
+                "https://github.com/Frogbyte-io/fleet-manager.git",
                 "https://github.com/Frogbyte-io/fleet-manager",
-                "{raw}"
-            );
+            ),
+            (
+                "git@github.com:Frogbyte-io/fleet-manager.git",
+                "git@github.com:Frogbyte-io/fleet-manager",
+            ),
+            (
+                "ssh://git@GitHub.com/Frogbyte-io/fleet-manager",
+                "ssh://git@github.com/Frogbyte-io/fleet-manager",
+            ),
+            (
+                "ssh://git@git.example.test:2222/a/b.git",
+                "ssh://git@git.example.test:2222/a/b",
+            ),
+            ("ssh://git.example.test/a/b", "ssh://git.example.test/a/b"),
+            (
+                "http://git.example.test:3000/a/b.git",
+                "http://git.example.test:3000/a/b",
+            ),
+            (
+                "https://git.example.test:8443/a/b.git",
+                "https://git.example.test:8443/a/b",
+            ),
+            // Bare and `git://` spellings stay https.
+            (
+                "github.com/Frogbyte-io/fleet-manager",
+                "https://github.com/Frogbyte-io/fleet-manager",
+            ),
+            ("git://git.example.test/a/b", "https://git.example.test/a/b"),
+        ] {
+            assert_eq!(clone_url_of(raw), expected, "{raw}");
         }
-        let ported = NormalizedRemote::parse("https://git.example.test:8443/a/b.git").unwrap();
-        assert_eq!(ported.clone_url(), "https://git.example.test:8443/a/b");
+    }
+
+    #[test]
+    fn the_default_fetch_form_is_https_for_rows_that_predate_it() {
+        let identity = NormalizedRemote::parse("git@github.com:a/b.git").unwrap();
+        assert_eq!(
+            identity.clone_url(&RemoteFetch::default()),
+            "https://github.com/a/b"
+        );
+        let decoded: RemoteFetch = serde_json::from_str("{}").unwrap();
+        assert_eq!(decoded, RemoteFetch::default());
+    }
+
+    #[test]
+    fn the_fetch_form_never_carries_a_credential_or_an_option_lookalike() {
+        for raw in [
+            "https://user:token@github.com/a/b.git",
+            "https://token@github.com/a/b.git",
+            "ssh://git:secret@github.com/a/b.git",
+            "git:secret@github.com:a/b.git",
+            "-oProxyCommand=x@github.com:a/b.git",
+            "ssh://-oProxyCommand=x@github.com/a/b.git",
+            "a b@github.com:a/b.git",
+            "ssh://git@-oProxyCommand=x/a/b",
+            "ssh://git@host:-oProxyCommand=x/a/b",
+            "ssh://git@host:99999999/a/b",
+            "ssh://git@ho st/a/b",
+        ] {
+            assert!(NormalizedRemote::parse_with_fetch(raw).is_err(), "{raw}");
+        }
+        let (_, fetch) = NormalizedRemote::parse_with_fetch("git@github.com:a/b.git").unwrap();
+        assert_eq!(fetch.scheme, FetchScheme::Scp);
+        assert_eq!(fetch.user.as_deref(), Some("git"));
+        let (_, https) = NormalizedRemote::parse_with_fetch("https://github.com/a/b.git").unwrap();
+        assert_eq!(https, RemoteFetch::default());
     }
 
     #[test]
@@ -437,6 +694,39 @@ mod tests {
                 NormalizedRemote::parse(raw).is_err(),
                 "{raw:?} must be refused"
             );
+        }
+    }
+
+    #[test]
+    fn identity_parsing_keeps_accepting_what_it_always_accepted() {
+        // Only a fetchable remote is registered, but an observed checkout's
+        // remote is matched by identity and must never start failing.
+        for raw in [
+            "ssh://first.last+ci@host.example.test/a/b",
+            "ssh://@host.example.test/a/b",
+            "ssh://git@host.example.test:abc/a/b",
+        ] {
+            assert!(NormalizedRemote::parse(raw).is_ok(), "{raw}");
+            assert!(NormalizedRemote::parse_with_fetch(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_fetch_form_from_outside_the_parser_is_validated() {
+        let form = |scheme, user: Option<&str>| RemoteFetch {
+            scheme,
+            user: user.map(str::to_owned),
+        };
+        assert!(RemoteFetch::default().validate().is_ok());
+        assert!(form(FetchScheme::Scp, Some("git")).validate().is_ok());
+        assert!(form(FetchScheme::Ssh, None).validate().is_ok());
+        for bad in [
+            form(FetchScheme::Scp, None),
+            form(FetchScheme::Https, Some("git")),
+            form(FetchScheme::Ssh, Some("x@evil:22/y")),
+            form(FetchScheme::Ssh, Some("-oProxyCommand=x")),
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
         }
     }
 }

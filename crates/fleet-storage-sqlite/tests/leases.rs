@@ -272,6 +272,7 @@ async fn leases_narrow_by_project_and_deleting_it_nulls_the_link() {
     // lease keeps the FK-constrained column.
     let project = projects
         .create(&NewProject {
+            fetch: fleet_core::RemoteFetch::default(),
             remote: "https://github.com/example/linked.git".to_owned(),
             idempotency_key: None,
             name: "linked".to_owned(),

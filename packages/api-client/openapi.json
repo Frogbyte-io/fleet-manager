@@ -12675,6 +12675,7 @@
               "required": [
                 "id",
                 "remote",
+                "fetch",
                 "name",
                 "description",
                 "checkouts",
@@ -12697,6 +12698,10 @@
                 "description": {
                   "type": "string",
                   "description": "Operator notes."
+                },
+                "fetch": {
+                  "$ref": "#/components/schemas/RemoteFetchDto",
+                  "description": "How the remote is fetched: the scheme and, for ssh, the login user.\nNever a credential."
                 },
                 "id": {
                   "type": "string",
@@ -13263,6 +13268,7 @@
         "required": [
           "id",
           "remote",
+          "fetch",
           "name",
           "description",
           "checkouts",
@@ -13285,6 +13291,10 @@
           "description": {
             "type": "string",
             "description": "Operator notes."
+          },
+          "fetch": {
+            "$ref": "#/components/schemas/RemoteFetchDto",
+            "description": "How the remote is fetched: the scheme and, for ssh, the login user.\nNever a credential."
           },
           "id": {
             "type": "string",
@@ -14444,6 +14454,26 @@
           "keep": {
             "type": "boolean",
             "description": "Whether to keep the VM out of automatic cleanup (elevated)."
+          }
+        }
+      },
+      "RemoteFetchDto": {
+        "type": "object",
+        "description": "How a project's remote is fetched.",
+        "required": [
+          "scheme"
+        ],
+        "properties": {
+          "scheme": {
+            "type": "string",
+            "description": "`https`, `http`, `ssh`, or `scp`."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ssh login user (`git` in `git@host:path`); null for http(s)."
           }
         }
       },
@@ -16096,6 +16126,7 @@
             "required": [
               "id",
               "remote",
+              "fetch",
               "name",
               "description",
               "checkouts",
@@ -16118,6 +16149,10 @@
               "description": {
                 "type": "string",
                 "description": "Operator notes."
+              },
+              "fetch": {
+                "$ref": "#/components/schemas/RemoteFetchDto",
+                "description": "How the remote is fetched: the scheme and, for ssh, the login user.\nNever a credential."
               },
               "id": {
                 "type": "string",

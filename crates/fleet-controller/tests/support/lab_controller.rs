@@ -114,6 +114,7 @@ impl World {
             .unwrap();
         let project = ProjectRepository::new(pool.clone())
             .create(&NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "example.org/demo".to_owned(),
                 idempotency_key: None,
                 name: "demo".to_owned(),
