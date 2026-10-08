@@ -317,11 +317,10 @@ async fn provider_errors_at_the_clone_release_the_reserved_target() {
 }
 
 #[tokio::test]
-#[ignore = "#310: the executor waits out the one-hour clone settle bound after a failed qmclone"]
 async fn a_failed_clone_task_releases_the_reserved_target() {
-    // The clone task ends in ERROR and leaves no guest. Until #310 is fixed,
-    // the executor polls the absent config instead of the task and never
-    // finishes within the suite's 60 s bound for one run of work.
+    // The clone task ends in ERROR and leaves no guest: the executor reads
+    // the task instead of polling the absent config for the settle bound
+    // (#310).
     let world = World::new(SHORT_READINESS_SECONDS).await;
     let (controller, lease) = provision_with(&world, Step::Clone, Fault::TaskError, 1).await;
     assert_eq!(controller.record(&lease).await.vmid, Some(FIRST_LAB_VMID));

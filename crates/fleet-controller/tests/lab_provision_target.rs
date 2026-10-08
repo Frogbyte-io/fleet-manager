@@ -82,6 +82,9 @@ struct Pve {
     watch_reservation: Mutex<Option<(sqlx::SqlitePool, String)>>,
     /// The (path, reservation held?) pairs those requests saw.
     held_at: Mutex<Vec<(String, bool)>>,
+    /// #310: the clone task's scripted status answers, one per poll; the
+    /// last one repeats. Empty: the node answers nothing for the task.
+    clone_task: Mutex<Vec<&'static str>>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +93,8 @@ struct CloneConfig {
     refuse_unprotect: bool,
     locked_reads: usize,
     missing_reads: usize,
+    /// Reads that fail with a transient 503.
+    flaky_reads: usize,
     forbid_read: bool,
     no_digest: bool,
     stale_puts: usize,
@@ -122,6 +127,7 @@ impl Pve {
             capacity: Mutex::new(None),
             watch_reservation: Mutex::new(None),
             held_at: Mutex::new(Vec::new()),
+            clone_task: Mutex::new(Vec::new()),
         })
     }
 
@@ -142,6 +148,50 @@ impl Pve {
     fn missing_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
         self.clone_config.lock().unwrap().missing_reads = reads;
         self
+    }
+
+    /// The config read fails with a transient 503 this many times.
+    fn flaky_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
+        self.clone_config.lock().unwrap().flaky_reads = reads;
+        self
+    }
+
+    /// The clone task's status answers (`running`, `ok`, `error`,
+    /// `unknown`), one per poll; the last repeats.
+    fn clone_task(self: Arc<Self>, answers: &[&'static str]) -> Arc<Self> {
+        *self.clone_task.lock().unwrap() = answers.to_vec();
+        self
+    }
+
+    fn task_polls(&self) -> usize {
+        self.seen()
+            .iter()
+            .filter(|seen| seen.path.contains("/tasks/") && seen.path.ends_with("/status"))
+            .count()
+    }
+
+    fn config_reads(&self) -> usize {
+        self.seen()
+            .iter()
+            .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
+            .count()
+    }
+
+    fn task_answer(&self) -> Option<String> {
+        let mut script = self.clone_task.lock().unwrap();
+        let next = if script.len() > 1 {
+            script.remove(0)
+        } else {
+            *script.first()?
+        };
+        Some(match next {
+            "running" => r#"{"data":{"status":"running"}}"#.to_owned(),
+            "ok" => r#"{"data":{"status":"stopped","exitstatus":"OK"}}"#.to_owned(),
+            "error" => {
+                r#"{"data":{"status":"stopped","exitstatus":"ERROR: storage full"}}"#.to_owned()
+            }
+            _ => r#"{"data":null}"#.to_owned(),
+        })
     }
 
     /// PVE answers every update with this HTTP status.
@@ -246,6 +296,10 @@ impl Pve {
                     r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Audit)\n"}}"#
                 ),
             );
+        }
+        if config.flaky_reads > 0 {
+            config.flaky_reads -= 1;
+            return (503, r#"{"data":null,"message":"unavailable"}"#.to_owned());
         }
         if config.missing_reads > 0 {
             config.missing_reads -= 1;
@@ -444,7 +498,10 @@ impl Transport {
                 body: answer.into_bytes(),
             });
         }
-        let answer = if path == "/api2/json/version" {
+        let task_status = path.contains("/tasks/") && path.ends_with("/status");
+        let answer = if task_status && let Some(answer) = self.0.task_answer() {
+            answer
+        } else if path == "/api2/json/version" {
             r#"{"data":{"version":"9.0.3"}}"#.to_owned()
         } else if path == "/api2/json/cluster/resources" {
             self.0.resources()
@@ -2677,4 +2734,157 @@ async fn an_unreadable_trusted_cluster_refuses_automatic_selection() {
     assert!(detail.contains("pve-dark"), "{detail}");
     assert!(!detail.contains("pve-untrusted"), "{detail}");
     assert!(pve.clones().is_empty());
+}
+
+/// #310: a clone task that failed, or finished with no config, fails the
+/// provision at `clone` without waiting; transient trouble and a config that
+/// lands late do not.
+#[tokio::test]
+async fn a_failed_clone_task_fails_at_clone_without_waiting() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .missing_for(1_000)
+        .clone_task(&["error"]);
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "clone_task_failed");
+    assert!(detail.contains("storage full"), "{detail}");
+    assert_eq!(pve.config_reads(), 1, "{:?}", pve.paths());
+    assert_eq!(pve.task_polls(), 1);
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.state, GuestState::NeverReady);
+    assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+    // The reserved target and the clone task stay recorded for cleanup.
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+}
+
+#[tokio::test]
+async fn a_clean_clone_task_with_no_config_fails_after_a_second_read() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).missing_for(1_000).clone_task(&["ok"]);
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "clone_task_failed");
+    // The first read may predate the task's end; the second does not.
+    assert_eq!(pve.config_reads(), 2, "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_config_that_lands_after_the_first_read_is_used() {
+    // The task finished between the read and the status poll.
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).missing_for(1).clone_task(&["ok"]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(first(&pve, "/status/start").is_some());
+    assert_eq!(pve.config_reads(), 2);
+}
+
+#[tokio::test]
+async fn a_transient_read_error_after_a_clean_task_is_not_a_missing_guest() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).flaky_for(2).clone_task(&["ok"]);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(first(&pve, "/status/start").is_some());
+
+    // Only a second consecutive miss refuses, and the guest is kept for
+    // cleanup.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).flaky_for(1_000).clone_task(&["ok"]);
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "clone_task_failed");
+    assert!(
+        detail.contains("removes the guest if one exists"),
+        "{detail}"
+    );
+    assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_running_or_unknown_clone_task_keeps_waiting() {
+    // One 2 s poll each, inside the harness's 5 s bound.
+    for status in ["running", "unknown"] {
+        let harness = Harness::new().await;
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new()).missing_for(1).clone_task(&[status]);
+        let (_, error, _) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(error.unwrap().0, "never_ready", "{status}");
+        assert_eq!(pve.config_reads(), 2, "{status}: {:?}", pve.paths());
+        assert!(first(&pve, "/status/start").is_some(), "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_resumed_record_reads_its_recorded_clone_task() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    interrupt(&harness, &lease_id, &record.id).await;
+
+    // The guest exists but its config never settles and the recorded task
+    // failed: the resume fails at clone and clones nothing again.
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)])
+        .missing_for(1_000)
+        .clone_task(&["error"]);
+    let (_, error, stored) = harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "clone_task_failed");
+    assert!(second.clones().is_empty());
+    assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+}
+
+#[tokio::test]
+async fn a_malformed_recorded_clone_task_id_is_not_polled() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    interrupt(&harness, &lease_id, &record.id).await;
+    let mut stored = ProvisionPort::get(harness.labs.as_ref(), &record.id)
+        .await
+        .unwrap();
+    stored.clone_upid = Some("not-a-upid".to_owned());
+    ProvisionPort::update(harness.labs.as_ref(), &stored)
+        .await
+        .unwrap();
+
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)])
+        .missing_for(1)
+        .clone_task(&["error"]);
+    let (_, error, _) = harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    // The unparsable id is reported on stderr and the config alone settles.
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(second.task_polls(), 0, "{:?}", second.paths());
 }
