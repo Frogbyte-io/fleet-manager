@@ -360,6 +360,7 @@ impl SshProvider {
     ///   `~/.ssh` is never offered unless the operator loaded it into the
     ///   agent.
     fn write_config(&self, auth: &SshAuth) -> Result<PathBuf, SshProviderError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let (name, identity) = match auth {
             SshAuth::Agent => ("config-agent", AGENT_IDENTITY_POLICY),
             SshAuth::IdentityFile { .. } => ("config-identity-file", IDENTITY_FILE_POLICY),
@@ -381,7 +382,6 @@ impl SshProvider {
         // concurrent `ssh -F` sees the old or the new complete file, never
         // an empty or truncated one (which would silently drop the host-key
         // pinning and the identity policy).
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let temporary = self.work_dir.join(format!(
             "{name}.{}.{}.tmp",
             std::process::id(),
