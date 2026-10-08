@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use fleet_core::SensitiveString;
 use serde_json::Value;
 
 use super::config::FLEETCTL_VAR;
@@ -29,6 +30,9 @@ pub struct Controller {
     dir: tempfile::TempDir,
     fleetctl: PathBuf,
     redactor: Redactor,
+    /// Extra environment for the controller process (and every restart).
+    /// Values are sensitive: `Debug` never prints them.
+    env: std::sync::Arc<[(String, SensitiveString)]>,
 }
 
 impl Drop for Controller {
@@ -98,11 +102,33 @@ impl Controller {
     ///
     /// When the binary cannot start or never becomes ready.
     pub async fn start(redactor: Redactor) -> Result<Self, String> {
+        Self::start_with_env(redactor, Vec::new()).await
+    }
+
+    /// Starts the controller with extra process environment, which every
+    /// restart keeps (the image suite's version gate uses it to hide
+    /// Packer). Every value is treated as sensitive and masked in the
+    /// output this harness prints, controller log tails included, within
+    /// the redactor's limits: it matches the trimmed value and ignores
+    /// values shorter than three characters, so never pass a secret that
+    /// short or padded.
+    ///
+    /// # Errors
+    ///
+    /// When the binary cannot start or never becomes ready.
+    pub async fn start_with_env(
+        mut redactor: Redactor,
+        env: Vec<(String, SensitiveString)>,
+    ) -> Result<Self, String> {
+        for (key, value) in &env {
+            redactor.mask(value.expose(), &format!("<env:{key}>"));
+        }
         let fleetctl = locate_fleetctl()?;
+        let env: std::sync::Arc<[(String, SensitiveString)]> = env.into();
         let mut last = String::new();
         // The free-port window is racy; a lost race shows as an early exit.
         for _ in 0..3 {
-            match Self::try_start(&fleetctl, redactor.clone()).await {
+            match Self::try_start(&fleetctl, redactor.clone(), env.clone()).await {
                 Ok(controller) => return Ok(controller),
                 Err(detail) => last = detail,
             }
@@ -110,7 +136,11 @@ impl Controller {
         Err(last)
     }
 
-    async fn try_start(fleetctl: &Path, redactor: Redactor) -> Result<Self, String> {
+    async fn try_start(
+        fleetctl: &Path,
+        redactor: Redactor,
+        env: std::sync::Arc<[(String, SensitiveString)]>,
+    ) -> Result<Self, String> {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let web = dir.path().join("web");
         let data = dir.path().join("data");
@@ -125,7 +155,7 @@ impl Controller {
         write_private(&key_path, &format!("1 {hex}\n"))?;
         let port = free_port()?;
         let address: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-        let child = spawn_child(dir.path(), address)?;
+        let child = spawn_child(dir.path(), address, &env)?;
         // Owned by the controller from here on, so Drop kills it on every
         // path, including a failed readiness wait.
         let controller = Self {
@@ -133,6 +163,7 @@ impl Controller {
             dir,
             fleetctl: fleetctl.to_path_buf(),
             redactor,
+            env,
         };
         controller.wait_ready().await?;
         Ok(controller)
@@ -271,7 +302,7 @@ impl Controller {
             } else {
                 ([127, 0, 0, 1], free_port()?).into()
             };
-            let child = spawn_child(self.dir.path(), address)?;
+            let child = spawn_child(self.dir.path(), address, &self.env)?;
             {
                 let mut process = self
                     .process
@@ -402,8 +433,13 @@ impl Controller {
 }
 
 /// Spawns `fleet-controller serve` over `dir`'s `web`, `data`, and
-/// `master.key`, logging (appending) to `dir/controller.log`.
-fn spawn_child(dir: &Path, address: std::net::SocketAddr) -> Result<Child, String> {
+/// `master.key`, logging (appending) to `dir/controller.log`, with `env`
+/// added to the process environment.
+fn spawn_child(
+    dir: &Path,
+    address: std::net::SocketAddr,
+    env: &[(String, SensitiveString)],
+) -> Result<Child, String> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -411,11 +447,17 @@ fn spawn_child(dir: &Path, address: std::net::SocketAddr) -> Result<Child, Strin
         .map_err(|error| error.to_string())?;
     let log_err = log.try_clone().map_err(|error| error.to_string())?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_fleet-controller"));
-    // The child sees none of the suite's own FLEET_* variables.
+    // The child sees none of the suite's own FLEET_* variables, and no
+    // ambient PROXMOX_* credentials the Proxmox plugin would read: a build
+    // must get its token from its account. A scenario passes any it needs.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("FLEET_") {
+        let name = key.to_string_lossy();
+        if name.starts_with("FLEET_") || name.starts_with("PROXMOX_") {
             command.env_remove(key);
         }
+    }
+    for (key, value) in env {
+        command.env(key, value.expose());
     }
     command
         .arg("serve")

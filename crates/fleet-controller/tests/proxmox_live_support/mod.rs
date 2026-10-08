@@ -62,6 +62,18 @@ pub fn result_line(
     result: &Result<Outcome, String>,
     duration: Duration,
 ) -> String {
+    marked_result_line(RESULT_MARKER, scenario, target, result, duration)
+}
+
+/// [`result_line`] under another suite's marker.
+#[must_use]
+pub fn marked_result_line(
+    marker: &str,
+    scenario: &str,
+    target: Option<&str>,
+    result: &Result<Outcome, String>,
+    duration: Duration,
+) -> String {
     let (status, reason) = match result {
         Ok(Outcome::Pass) => ("pass", String::new()),
         Ok(Outcome::Skipped(reason)) => ("skipped", reason.clone()),
@@ -72,7 +84,7 @@ pub fn result_line(
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     format!(
-        "{RESULT_MARKER} scenario={scenario} target={} status={status} duration_ms={} reason={}",
+        "{marker} scenario={scenario} target={} status={status} duration_ms={} reason={}",
         target.unwrap_or("-"),
         duration.as_millis(),
         reason.trim()
@@ -101,6 +113,7 @@ pub fn redactor_for(target: &Target) -> Redactor {
 
 /// One scenario test across the selected targets.
 pub struct Suite {
+    marker: &'static str,
     scenario: &'static str,
     targets: Vec<Arc<Target>>,
     failures: Vec<String>,
@@ -117,11 +130,24 @@ impl Suite {
     /// When the gate is on and the configuration is incomplete.
     #[must_use]
     pub fn begin(scenario: &'static str) -> Option<Self> {
+        Self::begin_marked(RESULT_MARKER, scenario)
+    }
+
+    /// [`Suite::begin`] for a suite that reports under its own marker. All
+    /// suites share the target contract and the cross-process lock, so two
+    /// suites never run on a target at once.
+    ///
+    /// # Panics
+    ///
+    /// When the gate is on and the configuration is incomplete.
+    #[must_use]
+    pub fn begin_marked(marker: &'static str, scenario: &'static str) -> Option<Self> {
         let targets = match config::load_process() {
             Ok(Gate::Off(reason)) => {
                 println!(
                     "{}",
-                    result_line(
+                    marked_result_line(
+                        marker,
                         scenario,
                         None,
                         &Ok(Outcome::Skipped(reason)),
@@ -137,6 +163,7 @@ impl Suite {
             panic!("{}=1 but {detail}", config::LIVE_GATE);
         }
         Some(Self {
+            marker,
             scenario,
             targets: targets.into_iter().map(Arc::new).collect(),
             failures: Vec::new(),
@@ -153,7 +180,13 @@ impl Suite {
     /// Prints one target's result line.
     pub fn record(&mut self, target: &Target, result: &Result<Outcome, String>, started: Instant) {
         let redactor = redactor_for(target);
-        let line = result_line(self.scenario, Some(&target.name), result, started.elapsed());
+        let line = marked_result_line(
+            self.marker,
+            self.scenario,
+            Some(&target.name),
+            result,
+            started.elapsed(),
+        );
         println!("{}", redactor.line(&line));
         if let Err(reason) = result {
             self.failures
@@ -219,7 +252,25 @@ impl TargetRun {
     ///
     /// When the start sweep or the controller fails.
     pub async fn start(target: Arc<Target>, scenario: &str) -> Result<Self, String> {
-        let redactor = redactor_for(&target);
+        Self::start_with_env(target, scenario, Vec::new()).await
+    }
+
+    /// [`TargetRun::start`] with extra controller environment (see
+    /// [`Controller::start_with_env`]).
+    ///
+    /// # Errors
+    ///
+    /// When the start sweep or the controller fails.
+    pub async fn start_with_env(
+        target: Arc<Target>,
+        scenario: &str,
+        env: Vec<(String, fleet_core::SensitiveString)>,
+    ) -> Result<Self, String> {
+        let mut redactor = redactor_for(&target);
+        // The scenario's own output masks the extra environment too.
+        for (key, value) in &env {
+            redactor.mask(value.expose(), &format!("<env:{key}>"));
+        }
         let pve = Arc::new(PveAdmin::new(&target));
         let guard = ScratchGuard::new(
             pve.clone(),
@@ -243,7 +294,7 @@ impl TargetRun {
                 &format!("{scenario}/{}: warning: {foreign}", target.name),
             );
         }
-        let controller = Controller::start(redactor.clone()).await?;
+        let controller = Controller::start_with_env(redactor.clone(), env).await?;
         Ok(Self {
             target,
             pve,

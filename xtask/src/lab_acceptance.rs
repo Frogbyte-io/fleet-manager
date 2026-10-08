@@ -20,7 +20,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
-use crate::pve_acceptance::{
+use crate::acceptance::{
     ResultRow, Status, configured_targets, descendants_in, effective_filter, json_string,
     parent_of_stat, resolve_target_dir, valid_target_name,
 };
@@ -40,12 +40,7 @@ const FLEETCTL_VAR: &str = "FLEET_PVE_ACCEPTANCE_FLEETCTL";
 /// Parses one result line, wherever the marker sits in the line.
 #[must_use]
 pub fn parse_result_line(line: &str) -> Option<ResultRow> {
-    let start = line.find(RESULT_MARKER)?;
-    let rest = &line[start + RESULT_MARKER.len()..];
-    crate::pve_acceptance::parse_result_line(&format!(
-        "{}{rest}",
-        crate::pve_acceptance::RESULT_MARKER
-    ))
+    crate::acceptance::parse_result_line(RESULT_MARKER, line)
 }
 
 /// Parses the subcommand's arguments: `[--target NAME]`.
