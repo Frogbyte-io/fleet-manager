@@ -231,6 +231,18 @@ impl ImagesExecutor {
                     )
                 })
                 .collect();
+            // No controller SSH agent for Packer (#333). The SDK forwards
+            // `SSH_AUTH_SOCK` to the build guest unless a recipe sets
+            // `ssh_disable_agent_forwarding`, which would hand the
+            // recipe's own provisioner shell the controller's Lab and fleet
+            // keys. An empty value makes the SDK's `GetSSHAgentConnection`
+            // fail, so neither forwarding nor agent authentication can use
+            // it, for stored versions too. The recipe gate refuses the
+            // agent options outright.
+            vars.push((
+                "SSH_AUTH_SOCK".to_owned(),
+                fleet_core::SensitiveString::new(String::new()),
+            ));
             vars.push((
                 "PROXMOX_USERNAME".to_owned(),
                 fleet_core::SensitiveString::new(username),
@@ -1040,6 +1052,9 @@ mod tests {
         /// Per command: its args joined and the trust it was handed, as
         /// the child would read it at that moment.
         saw_tls: Mutex<Vec<(String, Option<SeenTls>)>>,
+        /// Per command: its args joined and the child's `SSH_AUTH_SOCK`,
+        /// when Fleet sets one.
+        saw_agent: Mutex<Vec<(String, Option<String>)>>,
     }
 
     /// The pinned roots one command saw on disk.
@@ -1062,6 +1077,10 @@ mod tests {
                 command.args.join(" "),
                 command.env.get("PROXMOX_TOKEN").map(str::to_owned),
                 command.env.is_isolated(),
+            ));
+            self.saw_agent.lock().unwrap().push((
+                command.args.join(" "),
+                command.env.get("SSH_AUTH_SOCK").map(str::to_owned),
             ));
             let tls = match (
                 command.env.get("SSL_CERT_FILE"),
@@ -1293,6 +1312,7 @@ mod tests {
             clean_cancel: std::sync::atomic::AtomicBool::new(true),
             saw_env: Mutex::new(Vec::new()),
             saw_tls: Mutex::new(Vec::new()),
+            saw_agent: Mutex::new(Vec::new()),
         });
         (dir, store, repository, operations, operation, script)
     }
@@ -1430,6 +1450,7 @@ mod tests {
         record: fleet_core::ImageBuildRecord,
         seen: Vec<(String, Option<String>, bool)>,
         tls: Vec<(String, Option<SeenTls>)>,
+        agent: Vec<(String, Option<String>)>,
         stored: String,
         work: PathBuf,
     }
@@ -1503,10 +1524,12 @@ mod tests {
         .unwrap();
         let seen = transport.saw_env.lock().unwrap().clone();
         let tls = transport.saw_tls.lock().unwrap().clone();
+        let agent = transport.saw_agent.lock().unwrap().clone();
         Ran {
             record,
             seen,
             tls,
+            agent,
             stored: stored.join("\n"),
             work: dir.path().join("work").join(&operation.id),
         }
@@ -1554,6 +1577,22 @@ mod tests {
                 .is_none_or(|value| { !std::path::Path::new(&value).starts_with(&ran.work) })
         );
         assert!(!ran.work.exists());
+    }
+
+    #[tokio::test]
+    async fn validate_and_build_get_no_controller_ssh_agent() {
+        // #333: the SDK forwards `SSH_AUTH_SOCK` to the guest by default.
+        let ran = run_case(Case::pinned_and_presented(&leaf(&["pve.example.test"]))).await;
+        assert_eq!(ran.record.outcome, "succeeded", "{:?}", ran.record.reason);
+        let children: Vec<_> = ran
+            .agent
+            .iter()
+            .filter(|(args, _)| args.starts_with("validate") || args.contains(" build "))
+            .collect();
+        assert_eq!(children.len(), 2, "{:?}", ran.agent);
+        for (args, agent) in children {
+            assert_eq!(agent.as_deref(), Some(""), "{args}");
+        }
     }
 
     #[tokio::test]
@@ -1938,10 +1977,20 @@ mod tests {
         let mut cased_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
         cased_doc["Provisioners"] = serde_json::json!([{"type":"shell-local","inline":["true"]}]);
         let cased = cased_doc.to_string();
+        // #333: a communicator that reads a controller key file, and a
+        // templated key Packer would render into one.
+        let mut key_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
+        key_doc["builders"][0]["SSH_Private_Key_File"] = "~/.ssh/id_ed25519".into();
+        let key_file = key_doc.to_string();
+        let mut templated_doc: serde_json::Value = serde_json::from_str(CONTENT).unwrap();
+        templated_doc["builders"][0]["{{ `ssh_host` }}"] = "192.0.2.1".into();
+        let templated = templated_doc.to_string();
         for (malicious, reason) in [
             (env_var.as_str(), "recipe_forbidden_template_function"),
             (post.as_str(), "recipe_forbidden_top_level_key"),
             (cased.as_str(), "recipe_duplicate_key"),
+            (key_file.as_str(), "recipe_communicator_forbidden_option"),
+            (templated.as_str(), "recipe_templated_key"),
         ] {
             // Publish a benign version (the gate forbids publishing the
             // malicious one), then rewrite its stored content to simulate a
