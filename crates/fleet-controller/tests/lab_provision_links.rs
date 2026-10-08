@@ -69,7 +69,12 @@ impl PveTransport for Transport {
         } else if path == "/api2/json/nodes/pve/qemu/104/config" {
             // The finished clone, without an inherited protection flag.
             let name = self.clone_name.lock().unwrap().clone().unwrap();
-            serde_json::json!({ "data": { "name": name, "digest": "0123abcd" } }).to_string()
+            // With the template's hardware, so none is applied (#372).
+            serde_json::json!({ "data": {
+                "name": name, "digest": "0123abcd", "cores": 2, "memory": "2048",
+                "boot": "order=scsi0", "scsi0": "local-lvm:vm-104-disk-0,size=20G",
+            } })
+            .to_string()
         } else {
             // The agent probe and anything else: refused, so the guest
             // never reports ready.

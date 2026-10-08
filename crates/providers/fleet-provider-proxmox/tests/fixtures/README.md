@@ -244,6 +244,13 @@ read from qemu-server `src/PVE/API2/Qemu.pm` on
   `protection`, a general option. `$update_vm_api` refuses a stale `digest`
   ("checksum mismatch (file change by other user?)") and a locked guest
   ("VM is locked (clone)") before it writes.
+- Hardware (issue #372): `$check_vm_modify_config_perm` checks `VM.Config.CPU` for
+  `cores` and `VM.Config.Memory` for `memory`; `PUT …/resize` needs
+  `VM.Config.Disk` on `/vms/{vmid}`, takes an absolute `size` such as `20G`
+  (PVE refuses to shrink), and accepts `digest`. `memory` may be a plain MiB
+  number or, on newer PVE, a property string (`current=2048,max=65536`). These
+  response shapes are modeled on pve-manager's `Qemu.pm`, not captured from a
+  live host.
 - Flags in the config read are integers; the JSON formatter may answer them
   as strings, so both are accepted.
 

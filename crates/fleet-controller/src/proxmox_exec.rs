@@ -34,6 +34,9 @@ pub const MAX_LIFECYCLE_TIMEOUT: u64 = 600;
 const CLONE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3_600);
 /// How often the Lab executor records progress while it waits for a clone.
 const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
+/// How long the executor waits for a clone's config to report the template's
+/// hardware after updating it (#372).
+const HARDWARE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The payload every lifecycle kind carries: the machine-scoped shape plus
 /// the account, the guest, and its node.
@@ -2251,6 +2254,38 @@ impl ProvisionExecutor {
         Ok(())
     }
 
+    /// Fails the provision at `step` with a classified refusal: the record
+    /// ends `never_ready` with its external IDs kept for cleanup, and the
+    /// operation completes with the same `{reason, step, detail}` shape as
+    /// [`Self::fail`].
+    async fn fail_at(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        record_id: &str,
+        step: &str,
+        refusal: &Refusal,
+    ) -> Result<(), String> {
+        self.persist_failure(record_id, step).await?;
+        operations
+            .complete(
+                operation_id,
+                "failed",
+                None,
+                Some(
+                    &serde_json::json!({
+                        "reason": refusal.reason,
+                        "step": step,
+                        "detail": refusal.detail,
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     async fn fail(
         &self,
         operations: &Operations,
@@ -2694,6 +2729,174 @@ impl ProvisionExecutor {
                         ),
                     )));
                 }
+            }
+        }
+    }
+
+    /// Step 1c (issue #372): gives the clone the template's cores and memory
+    /// and grows its boot disk to at least the template's `diskGib`, on the
+    /// provision's own new guest only (never a template or another guest;
+    /// the caller skips pool members). Each write is conditional on the
+    /// config digest it was read at and is repeated only when the config
+    /// differs, so a resume repeats nothing; a server error (a config
+    /// rewritten after the read) re-reads and retries once. A disk is never
+    /// shrunk: a clone already at or over the size is left alone, and a
+    /// guest whose boot disk or memory format cannot be understood is
+    /// refused rather than guessed at. The result is confirmed by reading
+    /// the config again, within a bound. The guest's filesystem is the
+    /// image's business: Fleet grows the disk, not the partition.
+    async fn apply_clone_hardware(
+        &self,
+        operations: &Operations,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+        content: &fleet_core::LabTemplateContent,
+        node: &str,
+        vmid: u32,
+    ) -> Result<Result<(), Refusal>, String> {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Write {
+            Config,
+            Resize,
+        }
+        let wanted_mib = u64::from(content.disk_gib) * 1024;
+        let where_ = format!("{node}/qemu/{vmid}");
+        let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
+        let failed =
+            |action: &str, privileges: &str, error: &fleet_provider_proxmox::PveApiError| {
+                let cause = match error {
+                    fleet_provider_proxmox::PveApiError::Auth
+                    | fleet_provider_proxmox::PveApiError::Forbidden { .. } => {
+                        format!("the token needs {privileges} on /vms/{vmid} ({error})")
+                    }
+                    _ => format!(
+                        "PVE refused it; the config may still be locked or changing ({error})"
+                    ),
+                };
+                Refusal::new(
+                    "hardware_failed",
+                    format!("the clone {where_} could not {action}: {cause}"),
+                )
+            };
+        let started = std::time::Instant::now();
+        let mut retried = [false; 2];
+        let mut last_write: Option<Write> = None;
+        loop {
+            if operations
+                .cancel_requested(operation_id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return refuse(
+                    "cancelled",
+                    format!(
+                        "cancelled while applying the hardware of {where_}; the guest is retained for cleanup"
+                    ),
+                );
+            }
+            let hardware = self
+                .client
+                .qemu_hardware(request.clone(), node, vmid)
+                .await
+                .map_err(|error| format!("the clone's hardware is unreadable: {error}"))?;
+            let cores = (hardware.cores != content.cores).then_some(content.cores);
+            let memory = (hardware.memory_mib != content.memory_mib).then_some(content.memory_mib);
+            if memory.is_some() && hardware.memory_has_options {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} has a memory setting with options (such as a maximum), which Fleet does not rewrite; give the image template a plain memory size or a template with the same size ({} MiB)",
+                        content.memory_mib
+                    ),
+                );
+            }
+            let Some(disk) = hardware.boot_disk.clone() else {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} has no single boot disk Fleet can identify (no `boot` order or `bootdisk` names one of several disks), so its size is not checked"
+                    ),
+                );
+            };
+            let Some(size_mib) = disk.size_mib else {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the size of the boot disk {} of {where_} is not stated in its config, so it is not checked",
+                        disk.key
+                    ),
+                );
+            };
+            let grow = size_mib < wanted_mib;
+            if cores.is_none() && memory.is_none() && !grow {
+                return Ok(Ok(()));
+            }
+            // What is still wrong right after the write that should have
+            // fixed it is waited out, never written again, within a bound.
+            let next = if cores.is_some() || memory.is_some() {
+                Write::Config
+            } else {
+                Write::Resize
+            };
+            if last_write == Some(next) {
+                if started.elapsed() >= HARDWARE_CONFIRM_TIMEOUT {
+                    return refuse(
+                        "hardware_failed",
+                        format!(
+                            "the clone {where_} does not report the template's hardware ({} cores, {} MiB, {} GiB disk) after the update; the guest is retained for cleanup",
+                            content.cores, content.memory_mib, content.disk_gib
+                        ),
+                    );
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+            let Some(digest) = hardware.digest.as_deref() else {
+                return refuse(
+                    "hardware_failed",
+                    format!(
+                        "the config of {where_} carries no digest, so its hardware is not changed unconditionally"
+                    ),
+                );
+            };
+            let (result, action, privileges) = match next {
+                Write::Config => (
+                    self.client
+                        .qemu_set_hardware(request.clone(), node, vmid, cores, memory, digest)
+                        .await,
+                    "set its cores and memory".to_owned(),
+                    match (cores.is_some(), memory.is_some()) {
+                        (true, true) => "VM.Config.CPU and VM.Config.Memory",
+                        (true, false) => "VM.Config.CPU",
+                        _ => "VM.Config.Memory",
+                    },
+                ),
+                Write::Resize => (
+                    self.client
+                        .qemu_resize_disk(
+                            request.clone(),
+                            node,
+                            vmid,
+                            &disk.key,
+                            content.disk_gib,
+                            digest,
+                        )
+                        .await,
+                    format!("resize its disk {} to {} GiB", disk.key, content.disk_gib),
+                    "VM.Config.Disk",
+                ),
+            };
+            match result {
+                Ok(()) => last_write = Some(next),
+                // A config rewritten after the read (a stale digest, a brief
+                // lock) is read again and tried once more per kind.
+                Err(fleet_provider_proxmox::PveApiError::Http { status, .. })
+                    if (500..600).contains(&status)
+                        && !std::mem::replace(
+                            &mut retried[usize::from(next == Write::Resize)],
+                            true,
+                        ) => {}
+                Err(error) => return Ok(Err(failed(&action, privileges, &error))),
             }
         }
     }
@@ -3494,25 +3697,29 @@ impl ProvisionExecutor {
             } else {
                 "clone"
             };
-            self.persist_failure(&record.id, step).await?;
-            // The same {reason, step, detail} shape as `fail`.
-            return operations
-                .complete(
+            return self
+                .fail_at(operations, &operation.id, &record.id, step, &refusal)
+                .await;
+        }
+        // Step 1c (issue #372): the clone gets the template's cores, memory,
+        // and disk (the image template's hardware is only a starting
+        // point), so the guest matches what the capacity reservation held.
+        // A pool member's hardware is the operator's.
+        if pooled.is_none()
+            && let Err(refusal) = self
+                .apply_clone_hardware(
+                    operations,
                     &operation.id,
-                    "failed",
-                    None,
-                    Some(
-                        &serde_json::json!({
-                            "reason": refusal.reason,
-                            "step": step,
-                            "detail": refusal.detail,
-                        })
-                        .to_string(),
-                    ),
+                    &request,
+                    &version.content,
+                    &node,
+                    vmid,
                 )
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string());
+                .await?
+        {
+            return self
+                .fail_at(operations, &operation.id, &record.id, "hardware", &refusal)
+                .await;
         }
 
         let mut record = record;

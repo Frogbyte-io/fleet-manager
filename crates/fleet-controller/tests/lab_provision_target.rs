@@ -104,6 +104,51 @@ struct CloneConfig {
     foreign_name: Option<String>,
     /// The settled config carries `template: 1`.
     as_template: bool,
+    /// #372: the clone's hardware as the image template left it. `None`
+    /// means the template's own (2 cores, 2048 MiB, 20 GiB).
+    hardware: Option<Hardware>,
+    /// The clone's memory is a property string with a maximum.
+    memory_options: bool,
+    /// The config names no boot disk.
+    no_boot_disk: bool,
+    /// The config states no size for its boot disk.
+    no_disk_size: bool,
+    /// PVE answers every cores/memory update with this status.
+    set_status: Option<u16>,
+    /// PVE answers every resize with this status.
+    resize_status: Option<u16>,
+    /// A resize is accepted but changes nothing.
+    resize_ignored: bool,
+    /// The digest every write must carry; each write moves it on.
+    digest_moves: u32,
+    /// Writes PVE accepted: `(kind, body)`.
+    writes: Vec<(String, serde_json::Value)>,
+}
+
+/// The hardware the suite's template asks for (`Harness` publishes 2 cores,
+/// 2048 MiB, and a 20 GiB disk): a clone that has it needs no update.
+const TEMPLATE_HARDWARE: Hardware = Hardware {
+    cores: 2,
+    memory_mib: 2048,
+    disk_gib: 20,
+};
+
+impl CloneConfig {
+    /// The digest the config answers and every write must carry.
+    fn digest(&self) -> String {
+        if self.digest_moves == 0 {
+            "0123abcd".to_owned()
+        } else {
+            format!("0123abcd{}", self.digest_moves)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Hardware {
+    cores: u32,
+    memory_mib: u32,
+    disk_gib: u32,
 }
 
 impl Pve {
@@ -230,6 +275,26 @@ impl Pve {
         self
     }
 
+    /// #372: the clone keeps this hardware from the image template.
+    fn imaged(self: Arc<Self>, cores: u32, memory_mib: u32, disk_gib: u32) -> Arc<Self> {
+        self.clone_config.lock().unwrap().hardware = Some(Hardware {
+            cores,
+            memory_mib,
+            disk_gib,
+        });
+        self
+    }
+
+    fn configure(self: Arc<Self>, change: impl FnOnce(&mut CloneConfig)) -> Arc<Self> {
+        change(&mut self.clone_config.lock().unwrap());
+        self
+    }
+
+    /// The hardware writes PVE accepted.
+    fn hardware_writes(&self) -> Vec<(String, serde_json::Value)> {
+        self.clone_config.lock().unwrap().writes.clone()
+    }
+
     /// The clone's config stays locked for this many reads.
     fn locked_for(self: Arc<Self>, reads: usize) -> Arc<Self> {
         self.clone_config.lock().unwrap().locked_reads = reads;
@@ -244,6 +309,81 @@ impl Pve {
             .collect()
     }
 
+    /// `PUT …/config` with cores and/or memory (#372).
+    fn hardware_update(
+        config: &mut CloneConfig,
+        vmid: u32,
+        body: &serde_json::Value,
+    ) -> (u16, String) {
+        for key in body.as_object().unwrap().keys() {
+            assert!(
+                ["cores", "memory", "digest"].contains(&key.as_str()),
+                "only cores and memory are set: {body}"
+            );
+        }
+        if body["digest"] != config.digest().as_str() {
+            return (
+                500,
+                r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                    .to_owned(),
+            );
+        }
+        if let Some(status) = config.set_status {
+            return (
+                status,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.CPU)\n"}}"#
+                ),
+            );
+        }
+        let mut hardware = config.hardware.unwrap_or(TEMPLATE_HARDWARE);
+        if let Some(cores) = body.get("cores") {
+            hardware.cores = u32::try_from(cores.as_u64().unwrap()).unwrap();
+        }
+        if let Some(memory) = body.get("memory") {
+            hardware.memory_mib = u32::try_from(memory.as_u64().unwrap()).unwrap();
+        }
+        config.hardware = Some(hardware);
+        config.digest_moves += 1;
+        config.writes.push(("config".to_owned(), body.clone()));
+        (200, r#"{"data":null}"#.to_owned())
+    }
+
+    /// `PUT …/resize` (#372).
+    fn resize(&self, vmid: u32, body: &serde_json::Value) -> (u16, String) {
+        let mut config = self.clone_config.lock().unwrap();
+        assert_eq!(body["disk"], "scsi0", "{body}");
+        if body["digest"] != config.digest().as_str() {
+            return (
+                500,
+                r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                    .to_owned(),
+            );
+        }
+        if let Some(status) = config.resize_status {
+            return (
+                status,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.Disk)\n"}}"#
+                ),
+            );
+        }
+        let gib: u32 = body["size"]
+            .as_str()
+            .and_then(|size| size.strip_suffix('G'))
+            .and_then(|size| size.parse().ok())
+            .expect("an absolute size in GiB");
+        let mut hardware = config.hardware.unwrap_or(TEMPLATE_HARDWARE);
+        assert!(gib >= hardware.disk_gib, "PVE refuses to shrink a disk");
+        if !config.resize_ignored {
+            hardware.disk_gib = gib;
+            config.hardware = Some(hardware);
+        }
+        config.digest_moves += 1;
+        config.writes.push(("resize".to_owned(), body.clone()));
+        (200, r#"{"data":null}"#.to_owned())
+    }
+
     /// `GET`/`PUT …/qemu/{vmid}/config`: the scripted clone config.
     fn config(
         &self,
@@ -256,6 +396,10 @@ impl Pve {
             "the template's config is never read or changed"
         );
         let mut config = self.clone_config.lock().unwrap();
+        if method == PveHttpMethod::Put && body.is_some_and(|body| body.get("protection").is_none())
+        {
+            return Self::hardware_update(&mut config, vmid, body.unwrap());
+        }
         if method == PveHttpMethod::Put {
             let body = body.expect("a config update carries a body");
             assert_eq!(
@@ -287,6 +431,7 @@ impl Pve {
                 );
             }
             config.protected = false;
+            config.digest_moves += 1;
             return (200, r#"{"data":null}"#.to_owned());
         }
         if config.forbid_read {
@@ -338,10 +483,24 @@ impl Pve {
             );
         }
         let name = config.foreign_name.clone().unwrap_or(name);
+        let hardware = config.hardware.unwrap_or(TEMPLATE_HARDWARE);
         let mut answer = serde_json::json!({
-            "name": name, "cores": 2, "memory": "2048", "digest": "0123abcd",
-            "scsi0": format!("local-lvm:vm-{vmid}-disk-0,size=20G"),
+            "name": name, "cores": hardware.cores, "digest": config.digest(),
+            "memory": if config.memory_options {
+                format!("current={},max=65536", hardware.memory_mib)
+            } else {
+                hardware.memory_mib.to_string()
+            },
         });
+        if !config.no_boot_disk {
+            let size = if config.no_disk_size {
+                String::new()
+            } else {
+                format!(",size={}G", hardware.disk_gib)
+            };
+            answer["scsi0"] = serde_json::json!(format!("local-lvm:vm-{vmid}-disk-0{size}"));
+            answer["boot"] = serde_json::json!("order=scsi0;net0");
+        }
         if config.protected {
             answer["protection"] = serde_json::json!(1);
         }
@@ -487,6 +646,17 @@ impl Transport {
             body: body.clone(),
             stored_target,
         });
+        if let Some(vmid) = path
+            .strip_suffix("/resize")
+            .and_then(|rest| rest.rsplit_once("/qemu/"))
+            .and_then(|(_, vmid)| vmid.parse::<u32>().ok())
+        {
+            let (status, answer) = self.0.resize(vmid, body.as_ref().expect("a resize body"));
+            return Ok(PveHttpResponse {
+                status,
+                body: answer.into_bytes(),
+            });
+        }
         if let Some(vmid) = path
             .strip_suffix("/config")
             .and_then(|rest| rest.rsplit_once("/qemu/"))
@@ -1957,7 +2127,7 @@ async fn the_clone_lock_is_waited_out_before_the_flag_is_cleared() {
         .iter()
         .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
         .count();
-    assert_eq!(reads, 2, "the locked read is retried: {:?}", pve.paths());
+    assert_eq!(reads, 3, "the locked read is retried: {:?}", pve.paths()); // two settle reads, then the hardware check (#372)
     assert_eq!(pve.config_updates().len(), 1);
     let put = pve
         .seen()
@@ -2108,7 +2278,7 @@ async fn a_config_not_written_yet_is_retried_but_a_refused_read_fails_at_once() 
         .iter()
         .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
         .count();
-    assert_eq!(reads, 2, "{:?}", pve.paths());
+    assert_eq!(reads, 3, "{:?}", pve.paths());
     assert_eq!(pve.config_updates().len(), 1);
 
     // Without VM.Audit on the clone target, no polling and no start.
@@ -2165,7 +2335,7 @@ async fn a_stale_digest_is_reread_and_retried_once() {
         .iter()
         .filter(|seen| seen.path == CLONE_CONFIG && seen.method == PveHttpMethod::Get)
         .count();
-    assert_eq!(reads, 2, "{:?}", pve.paths());
+    assert_eq!(reads, 3, "{:?}", pve.paths());
     assert!(first(&pve, "/status/start").is_some());
 
     // Refused twice: the provision fails before the start.
@@ -2790,7 +2960,7 @@ async fn a_config_that_lands_after_the_first_read_is_used() {
         .await;
     assert_eq!(error.unwrap().0, "never_ready");
     assert!(first(&pve, "/status/start").is_some());
-    assert_eq!(pve.config_reads(), 2);
+    assert_eq!(pve.config_reads(), 3);
 }
 
 #[tokio::test]
@@ -2832,7 +3002,7 @@ async fn a_running_or_unknown_clone_task_keeps_waiting() {
             .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
             .await;
         assert_eq!(error.unwrap().0, "never_ready", "{status}");
-        assert_eq!(pve.config_reads(), 2, "{status}: {:?}", pve.paths());
+        assert_eq!(pve.config_reads(), 3, "{status}: {:?}", pve.paths());
         assert!(first(&pve, "/status/start").is_some(), "{status}");
     }
 }
@@ -2888,4 +3058,190 @@ async fn a_malformed_recorded_clone_task_id_is_not_polled() {
     // The unparsable id is reported on stderr and the config alone settles.
     assert_eq!(error.unwrap().0, "never_ready");
     assert_eq!(second.task_polls(), 0, "{:?}", second.paths());
+}
+
+/// #372: the clone gets the template's cores, memory, and disk.
+#[tokio::test]
+async fn a_clone_that_already_has_the_templates_hardware_is_not_changed() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/resize").is_none());
+    assert!(first(&pve, "/status/start").is_some());
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    // One read settles the config, one checks the hardware: nothing more.
+    assert_eq!(pve.config_reads(), 2, "{:?}", pve.paths());
+}
+
+#[tokio::test]
+async fn the_templates_cores_memory_and_disk_are_applied_before_the_start() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    // One conditional config update for cores and memory, then one resize
+    // to an absolute size, each at the digest the previous write left.
+    assert_eq!(writes[0].0, "config");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({"cores": 2, "memory": 2048, "digest": "0123abcd"})
+    );
+    assert_eq!(writes[1].0, "resize");
+    assert_eq!(
+        writes[1].1,
+        serde_json::json!({"disk": "scsi0", "size": "20G", "digest": "0123abcd1"})
+    );
+    // Both landed before the guest started.
+    let paths = pve.paths();
+    let start = paths
+        .iter()
+        .position(|path| path.ends_with("/status/start"));
+    let resize = paths.iter().position(|path| path.ends_with("/resize"));
+    assert!(resize.unwrap() < start.unwrap(), "{paths:?}");
+}
+
+#[tokio::test]
+async fn only_what_differs_is_written_and_a_bigger_disk_is_never_shrunk() {
+    let harness = Harness::new().await;
+    // More cores than the template: set down; memory and disk match.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(4, 2048, 20);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({"cores": 2, "digest": "0123abcd"})
+    );
+
+    // A disk already over the template's size stays as it is.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 40);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/resize").is_none());
+}
+
+#[tokio::test]
+async fn a_refused_hardware_update_fails_the_provision_at_hardware_before_the_start() {
+    let harness = Harness::new().await;
+    for (privilege, pve) in [
+        (
+            "VM.Config.CPU",
+            Pve::new(Vec::new())
+                .imaged(1, 2048, 20)
+                .configure(|config| config.set_status = Some(403)),
+        ),
+        (
+            "VM.Config.Disk",
+            Pve::new(Vec::new())
+                .imaged(2, 2048, 8)
+                .configure(|config| config.resize_status = Some(403)),
+        ),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "failed", "{privilege}");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_failed", "{privilege}");
+        assert!(detail.contains(privilege), "{detail}");
+        assert!(first(&pve, "/status/start").is_none(), "{privilege}");
+        // The guest stays recorded for cleanup, at the named step.
+        assert_eq!(stored.state, GuestState::NeverReady);
+        assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+        assert_eq!(stored.vmid, Some(NEXT_VMID));
+    }
+}
+
+#[tokio::test]
+async fn a_server_error_is_retried_once_and_then_refused() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(1, 2048, 20)
+        .configure(|config| config.set_status = Some(500));
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "hardware_failed");
+    // The settle read, then one hardware read per try.
+    assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn a_guest_fleet_cannot_read_is_refused_rather_than_guessed_at() {
+    let harness = Harness::new().await;
+    for (what, pve) in [
+        (
+            "memory options",
+            Pve::new(Vec::new())
+                .imaged(2, 1024, 20)
+                .configure(|config| config.memory_options = true),
+        ),
+        (
+            "no boot disk",
+            Pve::new(Vec::new()).configure(|config| config.no_boot_disk = true),
+        ),
+        (
+            "no disk size",
+            Pve::new(Vec::new()).configure(|config| config.no_disk_size = true),
+        ),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(state, "failed", "{what}");
+        assert_eq!(error.unwrap().0, "hardware_unsupported", "{what}");
+        assert!(pve.hardware_writes().is_empty(), "{what}");
+        assert!(first(&pve, "/status/start").is_none(), "{what}");
+        assert_eq!(stored.failed_step.as_deref(), Some("hardware"), "{what}");
+    }
+
+    // A memory property string that already has the template's size is
+    // fine: nothing needs rewriting.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.memory_options = true);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+}
+
+#[tokio::test]
+async fn a_resumed_provision_repeats_no_hardware_write() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(pve.hardware_writes().len(), 2);
+    interrupt(&harness, &lease_id, &record.id).await;
+
+    // The guest now has what the first run gave it.
+    let name = format!("fm-lab-{}", record.id);
+    let second = Pve::new(vec![guest(NEXT_VMID, &name)]);
+    harness
+        .run(&second, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(second.clones().is_empty());
+    assert!(second.hardware_writes().is_empty(), "{:?}", second.paths());
 }

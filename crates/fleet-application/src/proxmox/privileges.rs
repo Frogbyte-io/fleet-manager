@@ -684,6 +684,30 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "A clone copies the template's protection flag, and PVE refuses to delete a protected guest; the executor clears it (protection=0, a general option) on its own new guest so cleanup can destroy it (issue #290).",
     },
     PrivilegeRequirement {
+        id: "lab.provision.hardware-config",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.CPU", "VM.Config.Memory"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "A clone keeps the image template's cores and memory; when they differ from the Lab template's, the executor sets cores (VM.Config.CPU) and memory (VM.Config.Memory) on its own new guest, conditional on the config digest, so the guest matches what the capacity reservation held (issue #372). Nothing is written, and neither privilege is used, when they already match.",
+    },
+    PrivilegeRequirement {
+        id: "lab.provision.hardware-resize",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/resize",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.Disk"],
+        matching: PrivilegeMatch::All,
+        required: true,
+        note: "When the clone's boot disk is smaller than the Lab template's disk size, the executor grows it to that size on its own new guest, conditional on the config digest (issue #372). A disk is never shrunk; nothing is resized, and the privilege is not used, when the disk is large enough.",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.start",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,
@@ -1324,6 +1348,7 @@ mod tests {
             for (id, privilege) in [
                 ("lab.provision.clone-config", "VM.Audit"),
                 ("lab.provision.unprotect", "VM.Config.Options"),
+                ("lab.provision.hardware-resize", "VM.Config.Disk"),
             ] {
                 let row = requirements_for_major(major)
                     .find(|row| row.id == id)
@@ -1340,6 +1365,39 @@ mod tests {
                     .all(|row| !row.privileges.contains(&"VM.Config.Options")),
                 "{major}.x: Lab never needs VM.Config.Options outside its new guests"
             );
+        }
+    }
+
+    #[test]
+    fn lab_sets_a_clones_hardware_only_on_its_new_guest_on_both_majors() {
+        // Issue #372: cores and memory are set through the config update,
+        // the disk through the resize; each needs its own privilege, and only
+        // on the new guest, never on the template.
+        for major in [8, 9] {
+            let config = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.hardware-config")
+                .unwrap();
+            assert_eq!(config.privileges, &["VM.Config.CPU", "VM.Config.Memory"]);
+            assert_eq!(config.matching, PrivilegeMatch::All);
+            for id in [
+                "lab.provision.hardware-config",
+                "lab.provision.hardware-resize",
+            ] {
+                let row = requirements_for_major(major)
+                    .find(|row| row.id == id)
+                    .unwrap();
+                assert_eq!(row.tier, PrivilegeTier::Lab);
+                assert_eq!(row.scope, PrivilegeScope::NewGuest);
+                assert!(row.required);
+            }
+            for privilege in ["VM.Config.CPU", "VM.Config.Memory", "VM.Config.Disk"] {
+                assert!(
+                    requirements_for_major(major)
+                        .filter(|row| row.scope != PrivilegeScope::NewGuest)
+                        .all(|row| !row.privileges.contains(&privilege)),
+                    "{major}.x: nothing outside the new guest needs {privilege}"
+                );
+            }
         }
     }
 

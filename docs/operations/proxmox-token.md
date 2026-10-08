@@ -26,7 +26,7 @@ Fleet's permission vocabulary (`crates/fleet-application/src/authz.rs`) and oper
 | **discover** | `proxmox.read` → discovery, nodes, guests, guest observe (config MACs, agent info, network, OS), snapshot list, task status | `FleetDiscover` (8.x: plus the opt-in `FleetAgent8`) | `/nodes`, `/pool/<pool>` (storage in the pool, or `/storage/<id>`) — or `/` for whole-cluster inventory |
 | **operate** | `proxmox.operate` → `proxmox.guest.start`, `.stop`, `.shutdown`, `.reboot` | `FleetOperate` | `/pool/<pool>` |
 | **destructive** | `proxmox.destructive` → `proxmox.guest.snapshot`, `.snapshot-revert`, `.snapshot-delete`, `.clone`, `.template`, `.destroy`, `proxmox.task-cancel` | `FleetDestructive` | `/pool/<pool>` for existing guests and storage; clone targets also need `/vms/<newid>` (see [clone targets](#why-clone-and-lab-need-more-than-the-pool)); `/sdn/zones/<zone>/<bridge>` |
-| **lab** | `lab.provision` → clone the pinned image, clear the clone's inherited protection flag, start it, probe readiness | `FleetLab`, plus `FleetLabTarget` (8.x: and `FleetAgent8`) on the new guests' `/vms/<newid>` | the template's `/vms/<id>` (protected), `/storage/<id>`, the new guests' `/vms/<newid>`, `/sdn/zones/<zone>/<bridge>`; never `/pool/<pool>` |
+| **lab** | `lab.provision` → clone the pinned image, clear the clone's inherited protection flag, give it the template's cores, memory, and disk, start it, probe readiness | `FleetLab`, plus `FleetLabTarget` (8.x: and `FleetAgent8`) on the new guests' `/vms/<newid>` | the template's `/vms/<id>` (protected), `/storage/<id>`, the new guests' `/vms/<newid>`, `/sdn/zones/<zone>/<bridge>`; never `/pool/<pool>` |
 
 ### Required privileges per tier
 
@@ -46,7 +46,7 @@ The two tables below are the PVE privileges per tier, keyed by major. Each entry
 | discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{vmid}` | `Pool.Audit` on `/pool/{pool}` | `Pool.Audit`: the opt-in row. Fleet's discovery does not use pool rows today; drop it from the role if you prefer |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.PowerMgmt` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: the revert row accepts either it or `VM.Snapshot`; it is kept so a rollback-only role can be split off |
-| lab | `FleetLab`, `FleetLabTarget` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | — | — |
+| lab | `FleetLab`, `FleetLabTarget` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.GuestAgent.Audit` or `VM.GuestAgent.Unrestricted` on `/vms/{newid}` | — | — |
 <!-- privilege-table:end -->
 
 Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted also permits agent `exec`.
@@ -59,7 +59,7 @@ Grant `VM.GuestAgent.Audit`, never `VM.GuestAgent.Unrestricted`: Unrestricted al
 | discover | `FleetDiscover` | `Sys.Audit` on `/nodes/{node}`, `VM.Audit` on `/vms/{vmid}`, `Datastore.Audit` on `/storage/{storage}` | `Pool.Audit` on `/pool/{pool}`, `VM.Monitor` on `/vms/{vmid}` | `Pool.Audit`: the opt-in row, as on 9.x. The agent privilege is a separate opt-in role, not part of this one |
 | operate | `FleetOperate` | `VM.PowerMgmt` on `/vms/{vmid}` | — | — |
 | destructive | `FleetDestructive` | `VM.Audit` on `/vms/{vmid}`, `VM.PowerMgmt` on `/vms/{vmid}`, `VM.Snapshot` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Allocate` on `/vms/{vmid}` | `Sys.Modify` on `/nodes/{node}` | `VM.Snapshot.Rollback`: as on 9.x |
-| lab | `FleetLab`, `FleetLabTarget`, `FleetAgent8` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.Monitor` on `/vms/{newid}` | — | — |
+| lab | `FleetLab`, `FleetLabTarget`, `FleetAgent8` | `VM.Audit` on `/vms/{vmid}`, `VM.Clone` on `/vms/{vmid}`, `VM.Allocate` on `/vms/{newid}`, `Datastore.AllocateSpace` on `/storage/{storage}`, `SDN.Use` on `/sdn/zones/{zone}/{bridge}`, `VM.Audit` on `/vms/{newid}`, `VM.Config.Options` on `/vms/{newid}`, `VM.Config.CPU` on `/vms/{newid}`, `VM.Config.Memory` on `/vms/{newid}`, `VM.Config.Disk` on `/vms/{newid}`, `VM.PowerMgmt` on `/vms/{newid}`, `VM.Monitor` on `/vms/{newid}` | — | — |
 <!-- privilege-table:end -->
 
 On 8.x, `VM.Monitor` is opt-in for discover (agent facts), because it also permits agent `exec`. For lab it is **required**: the provision executor polls `agent/info` for readiness on every template today, whatever its readiness probe setting, so a token without it reaches `never_ready`. Grant `FleetAgent8` on the reserved clone-target VMIDs only ([clone targets](#why-clone-and-lab-need-more-than-the-pool)), not on the template or the pool. See [8.x vs 9.x differences](#8x-vs-9x-differences).
@@ -151,8 +151,10 @@ pveum role add FleetOperate     --privs "VM.PowerMgmt"
 pveum role add FleetDestructive --privs "VM.Audit,VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit"
 # Only on the clone-target VMIDs, never on the template or the pool: it lets
-# Lab clear the protection flag a clone copies from its template.
-pveum role add FleetLabTarget   --privs "VM.Config.Options"
+# Lab clear the protection flag a clone copies from its template, and give the
+# clone the template's cores (VM.Config.CPU), memory (VM.Config.Memory), and
+# disk size (VM.Config.Disk).
+pveum role add FleetLabTarget   --privs "VM.Config.Options,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk"
 # Opt-in only, not granted below. Sys.Modify on a node also allows changing its
 # network, DNS, time, and services. It lets proxmox.task-cancel stop tasks
 # Fleet did not start.
@@ -169,7 +171,7 @@ pveum role add FleetOperate     --privs "VM.PowerMgmt"
 pveum role add FleetDestructive --privs "VM.Audit,VM.PowerMgmt,VM.Snapshot,VM.Snapshot.Rollback,VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use"
 pveum role add FleetLab         --privs "VM.Clone,VM.Allocate,Datastore.AllocateSpace,SDN.Use,VM.PowerMgmt,VM.Audit"
 # Only on the clone-target VMIDs (see the 9.x block).
-pveum role add FleetLabTarget   --privs "VM.Config.Options"
+pveum role add FleetLabTarget   --privs "VM.Config.Options,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk"
 # VM.Monitor also permits guest-agent exec/file-write/set-user-password (root
 # inside the guest). Lab readiness requires it on the clone targets; on the
 # pool it is an opt-in for agent observations.
@@ -246,6 +248,8 @@ Clones inherit the flag: PVE copies `protection` into the new guest's config, an
 
 Without `FleetLabTarget` on the clone targets, a clone of a protected template fails its provision at the `unprotect` step before it starts, and the cleanup that follows cannot delete the guest. The lease ends `cleanup_failed`. Fleet clears the flag only while provisioning, never at cleanup, so granting the role later does not help that guest: run `qm set <vmid> --protection 0` on the host, then destroy it. Clones of an unprotected template need no change.
 
+The clone also starts with the image template's hardware, which the Lab template may override (issue #372). After the unprotect step and before the start, the executor reads the new guest's config and, only where it differs, sets the Lab template's `cores` and `memory` (`PUT /nodes/{node}/qemu/{newid}/config`, which needs `VM.Config.CPU` for cores and `VM.Config.Memory` for memory) and grows the boot disk to at least the template's `diskGib` (`PUT /nodes/{node}/qemu/{newid}/resize`, which needs `VM.Config.Disk`). Each write is conditional on the config digest. A disk is never shrunk, and a guest with no identifiable boot disk, or a memory setting with options such as a maximum, is refused rather than guessed at. `FleetLabTarget` grants all three, on the clone-target VMIDs only. **Upgrading:** a token whose `FleetLabTarget` still holds only `VM.Config.Options` keeps working for templates whose hardware already matches the image, and fails a provision at the `hardware` step (reason `hardware_failed`, naming the privilege) otherwise; add the privileges with `pveum role modify FleetLabTarget --privs "VM.Config.Options,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk"`. Fleet grows the disk, not the partition or filesystem inside it: that is the image's job (for example cloud-init `growpart`).
+
 On 8.x, if you opt into agent reads for the pool:
 
 ```sh
@@ -286,7 +290,7 @@ fleetctl proxmox confirm <account-id> --fingerprint <SHA256:...>   # after check
    done
    ```
 
-   `FleetLabTarget` (`VM.Config.Options`) lets Lab clear the protection flag a clone copies from a protected template ([step 5](#5-acls)). On these VMIDs it also permits changing the new guest's other general options, such as its name, description, and boot behavior. Grant it here only.
+   `FleetLabTarget` (`VM.Config.Options`) lets Lab clear the protection flag a clone copies from a protected template ([step 5](#5-acls)). `VM.Config.CPU`, `VM.Config.Memory`, and `VM.Config.Disk` in the same role let Lab give the clone the Lab template's cores, memory, and disk size ([step 5](#5-acls)). On these VMIDs the role also permits changing the new guest's other general options, such as its name, description, and boot behavior, and its CPU, memory, and disks. Grant it here only.
 
    On 8.x, Lab's readiness probe also needs `VM.Monitor` on each new guest, so grant `FleetAgent8` on the same VMIDs (and only there):
 
@@ -310,7 +314,7 @@ fleetctl proxmox confirm <account-id> --fingerprint <SHA256:...>   # after check
 3. `Datastore.AllocateSpace` on `/storage/{storeid}` for **every non-CD-ROM disk** of the source, full or linked clone. When `storage` is passed, the check uses that target storage instead of the source disk's storage. The same privilege is also required on the `vmstatestorage`, if the source defines one. Adding the storage to the pool covers this through the pool ACL. A physical `cdrom` passthrough drive would also need `Sys.Console` on `/`, so keep templates free of host CD-ROM passthrough.
 4. `SDN.Use` on `/sdn/zones/<zone>/<bridge>` for every `netN` of the source. A plain Linux bridge is in the zone `localnetwork`. VLAN-tagged NICs are checked on `/sdn/zones/<zone>/<bridge>/<tag>`, which the bridge ACL covers through propagation.
 
-After the clone, the Lab tier reads the new guest's config (`VM.Audit`) until the clone's lock is gone, and clears an inherited `protection` flag (`VM.Config.Options`). It then starts the new guest (`VM.PowerMgmt`) and polls `agent/info` for `guest_agent` readiness (`VM.GuestAgent.Audit` on 9.x, `VM.Monitor` on 8.x) on the new VMID. It polls for every template, whatever its readiness probe setting. That is why `FleetLab`, `FleetLabTarget`, and on 8.x `FleetAgent8` are granted on the clone-target paths.
+After the clone, the Lab tier reads the new guest's config (`VM.Audit`) until the clone's lock is gone, and clears an inherited `protection` flag (`VM.Config.Options`). It then sets the template's cores and memory where they differ (`VM.Config.CPU`, `VM.Config.Memory`) and grows the boot disk where it is smaller (`VM.Config.Disk`). It then starts the new guest (`VM.PowerMgmt`) and polls `agent/info` for `guest_agent` readiness (`VM.GuestAgent.Audit` on 9.x, `VM.Monitor` on 8.x) on the new VMID. It polls for every template, whatever its readiness probe setting. That is why `FleetLab`, `FleetLabTarget`, and on 8.x `FleetAgent8` are granted on the clone-target paths.
 
 ## Verify
 
@@ -499,6 +503,8 @@ These are all the PVE endpoints `crates/providers/fleet-provider-proxmox/src/lib
 | 22 | `GET /access/permissions` | privilege diagnostics (`fleetctl proxmox privileges`) | `user => 'all'`: every user or token may read its own permissions; reading another's needs `Sys.Audit` on `/access` | pve-access-control `PVE/API2/AccessControl.pm` (`permissions`) |
 | — | `DELETE /nodes/{node}/qemu/{vmid}` | destructive (QEMU destroy) | `perm /vms/{vmid} [VM.Allocate]` | `destroy_vm` |
 | — | `PUT /nodes/{node}/qemu/{vmid}/config` with `protection=0` | lab (the new guest, issue #290) | `perm /vms/{vmid} [VM.Config.Disk, VM.Config.CDROM, VM.Config.CPU, VM.Config.Memory, VM.Config.Network, VM.Config.HWType, VM.Config.Options, VM.Config.Cloudinit] any`; in code, `$check_vm_modify_config_perm` checks `VM.Config.Options` for `protection`, a general option. It refuses a locked guest (`check_lock`) and, with `digest`, a changed config | `update_vm`, `$update_vm_api` |
+| — | `PUT /nodes/{node}/qemu/{vmid}/config` with `cores` and/or `memory` | lab (the new guest, issue #372) | the same `$check_vm_modify_config_perm`: `cores` needs `VM.Config.CPU` and `memory` needs `VM.Config.Memory`, both on `/vms/{vmid}`; it refuses a locked guest and, with `digest`, a changed config | `update_vm`, `$update_vm_api` |
+| — | `PUT /nodes/{node}/qemu/{vmid}/resize` with `disk`, `size`, and `digest` | lab (the new guest, issue #372) | `perm /vms/{vmid} [VM.Config.Disk]`; a disk cannot be shrunk, and with `digest` a changed config is refused | `resize_vm` |
 
 ### Sources and versions read
 
