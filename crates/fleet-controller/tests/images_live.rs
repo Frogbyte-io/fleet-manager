@@ -175,8 +175,9 @@ fn unusable_packer(gate: &str) -> String {
 /// Starts one scenario's run with one trusted Proxmox account for the
 /// target, so every build resolves its account from the recipe's
 /// `proxmox_url` (FM-702) without `--account`. The version gate's
-/// controller sees no Packer at all; every other controller gets the
-/// plugin's credentials.
+/// controller sees no Packer at all. No controller gets Proxmox
+/// credentials in its environment: each build gets its account's token
+/// (#272).
 async fn start(scenario: &str, target: Arc<Target>) -> Result<TargetRun, String> {
     let run = start_controller(scenario, target).await?;
     run.trusted_account("acceptance-images", &run.target.token)
@@ -506,6 +507,12 @@ async fn build_record(run: &TargetRun) -> Result<Outcome, String> {
     let (status, accounts) = run.controller.get("/api/v1/proxmox/accounts").await?;
     check!(status == 200, "listing accounts answered {status}");
     let account = accounts["items"][0]["id"].clone();
+    // The expected values must exist, or `null == null` would pass.
+    check!(
+        dto["contentDigest"].is_string() && account.is_string(),
+        "the version digest ({}) or the account id ({account}) is missing",
+        dto["contentDigest"]
+    );
     let (packer, plugin) = installed_versions()?;
     let expected = [
         ("outcome", json!("succeeded")),
@@ -532,8 +539,11 @@ async fn build_record(run: &TargetRun) -> Result<Outcome, String> {
         run.target.node
     );
     check!(
-        record["endedAt"].as_i64() >= record["startedAt"].as_i64(),
-        "the record ends before it starts: {record}"
+        matches!(
+            (record["startedAt"].as_i64(), record["endedAt"].as_i64()),
+            (Some(started), Some(ended)) if ended >= started
+        ),
+        "the record's timing is missing or ends before it starts: {record}"
     );
     let text = record.to_string();
     check!(
@@ -607,6 +617,10 @@ async fn rebuild_keeps_promotion(run: &TargetRun) -> Result<Outcome, String> {
         .await?;
     check!(answer.success, "images promote failed: {}", answer.stderr);
     let promoted = version_dto(run, &version).await?["promotedAt"].clone();
+    check!(
+        promoted.is_number(),
+        "the version shows no promotedAt after images promote: {promoted}"
+    );
 
     // The same version again. The recipe pins `vm_id`, so Packer must
     // refuse it (the VMID is taken): the rebuild fails and the newest
@@ -804,8 +818,8 @@ mod tests {
         assert_eq!(builder["scsi_controller"], "virtio-scsi-pci");
         let name = builder["template_name"].as_str().unwrap();
         assert!(name.starts_with(IMAGE_PREFIX) && name.starts_with(NAME_PREFIX));
-        // Credentials ride the controller environment, never the recipe
-        // the controller stores.
+        // The recipe the controller stores carries no credential: each
+        // build gets its account's token in Packer's environment (#272).
         for key in ["username", "token", "password"] {
             assert!(builder.get(key).is_none(), "{key} is in the recipe");
         }

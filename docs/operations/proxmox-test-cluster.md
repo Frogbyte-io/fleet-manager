@@ -256,7 +256,7 @@ cargo xtask image-acceptance --target PVE8 > ~/image-acceptance.json
 
 It also needs an operator-installed `packer` inside the FM-S09 pins (`>= 1.15 < 2`) with the Proxmox plugin (`>= 1.2.4 < 2`, `packer plugins install github.com/hashicorp/proxmox`) on the machine that runs it. The suite asks the product's own version gate. Without a usable Packer, only `version-gate` can pass (it needs no Packer); every other scenario fails with the gate's reason, so a live run never passes without building.
 
-A whole run is bounded: four hours for this suite, two for Step 7's (compilation included). Past the bound the runner kills the suite's process tree, and every scenario that has not reported fails with that reason in the summary.
+A whole run is bounded: four hours for this suite, two for Step 7's, counted from the start (the builds spend it too; a `cargo build` that itself hangs is not interrupted). Past the bound the runner kills the suite's process tree, and every scenario that has not reported fails with that reason in the summary.
 
 Builds are linked clones of `…_TEMPLATE_VMID` into `…_VMID_RANGE`. Each built template is named `fleet-acceptance-image-*` and tagged `fleet-acceptance`. The suite destroys exactly those templates at the start and end of every scenario. The shared Step 7 sweep never destroys a template.
 

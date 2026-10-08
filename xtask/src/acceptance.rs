@@ -30,9 +30,10 @@ pub struct SuiteSpec {
     pub scenarios: &'static [&'static str],
     /// The `fleet-controller` integration test target (`--test <name>`).
     pub test_target: &'static str,
-    /// The most wall time the whole run may take, compile included. Past
-    /// it the suite's process tree is killed and every unreported pair
-    /// fails.
+    /// The most wall time a run may take, counted from its start, so the
+    /// fleetctl and test-target builds spend it too. Past it the suite's
+    /// process tree is killed and every unreported pair fails. (A
+    /// `cargo build -p fleetctl` that itself hangs is not interrupted.)
     pub deadline: std::time::Duration,
 }
 
@@ -666,6 +667,8 @@ fn build_fleetctl(repo_root: &Path) -> Result<PathBuf, String> {
 ///
 /// When cargo cannot run or the target filter names no configured target.
 pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<Summary, String> {
+    // The bound counts from here, so building fleetctl spends it too.
+    let deadline = std::time::Instant::now() + spec.deadline;
     let env: BTreeMap<String, String> = std::env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
         .collect();
@@ -725,7 +728,7 @@ pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<S
     // From here every early return drops `suite`, which kills and reaps it.
     let suite = SuiteProcess { child: Some(child) };
     let (reported, timed_out) = match stdout {
-        Some(stdout) => read_rows(spec, stdout)?,
+        Some(stdout) => read_rows(spec, stdout, deadline)?,
         None => (Vec::new(), false),
     };
     if timed_out {
@@ -765,6 +768,7 @@ pub fn run(spec: &SuiteSpec, repo_root: &Path, target: Option<&str>) -> Result<S
 fn read_rows(
     spec: &SuiteSpec,
     stdout: impl std::io::Read + Send + 'static,
+    deadline: std::time::Instant,
 ) -> Result<(Vec<ResultRow>, bool), String> {
     let mut reported = Vec::new();
     // The output is read on its own thread so the deadline can end the
@@ -789,7 +793,6 @@ fn read_rows(
             }
         }
     });
-    let deadline = std::time::Instant::now() + spec.deadline;
     let mut stderr = std::io::stderr();
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1155,7 +1158,8 @@ mod tests {
             ..SPEC
         };
         let started = std::time::Instant::now();
-        let (rows, timed_out) = read_rows(&spec, reader).unwrap();
+        let (rows, timed_out) =
+            read_rows(&spec, reader, std::time::Instant::now() + spec.deadline).unwrap();
         assert!(timed_out);
         assert_eq!(rows.len(), 1, "rows before the deadline are kept");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
