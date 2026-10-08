@@ -80,7 +80,7 @@ function lease(overrides: Partial<LeaseDto> = {}): LeaseDto {
 }
 
 function detail(overrides: Partial<LeaseDetailDto> = {}): LeaseDetailDto {
-  return { ...lease(), node: 'pve-a', vmid: 9001, machineId: 'machine-lab-0001', provisionState: 'ready', address: null, failedStep: null, collectionFailure: null, ...overrides }
+  return { ...lease(), node: 'pve-a', vmid: 9001, machineId: 'machine-lab-0001', provisionState: 'ready', address: null, failedStep: null, collectionFailure: null, reservation: null, ...overrides }
 }
 
 function template(): LabTemplateDto {
@@ -207,6 +207,48 @@ describe('lease detail', () => {
     expect(q('[data-testid="lease-project"]').textContent).toContain('demo-app')
     expect(q('[data-testid="lease-timeline"]').textContent).toContain('Ready')
     expect(document.body.textContent).toContain('fleetctl --output json lab status lease-ready-0001')
+  })
+
+  it('shows a held reservation: node, account, pool, cores, memory, and disk', async () => {
+    getLabLease.mockResolvedValue(ok({ data: detail({ reservation: { node: 'pve-a', accountId: 'acct-1', storagePool: 'local-lvm', cores: 4, memoryBytes: 2048 * 1024 * 1024, diskBytes: 20 * 1024 ** 3, state: 'held' } }) }))
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
+    await settle()
+    const text = q('[data-testid="lease-reservation"]').textContent ?? ''
+    expect(text).toContain('held')
+    expect(q('[data-testid="reservation-node"]').textContent).toContain('pve-a')
+    expect(q('[data-testid="reservation-account"]').textContent).toContain('acct-1')
+    expect(q('[data-testid="reservation-pool"]').textContent).toContain('local-lvm')
+    expect(q('[data-testid="reservation-cores"]').textContent?.trim()).toBe('4')
+    expect(q('[data-testid="reservation-memory"]').textContent).toContain('2.0 GiB')
+    expect(q('[data-testid="reservation-disk"]').textContent).toContain('20.0 GiB')
+  })
+
+  it('marks a released reservation as released', async () => {
+    getLabLease.mockResolvedValue(ok({ data: detail({ state: 'released', reservation: { node: 'pve-a', accountId: 'acct-1', storagePool: 'local-lvm', cores: 2, memoryBytes: 1024 ** 3, diskBytes: 10 * 1024 ** 3, state: 'released' } }) }))
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
+    await settle()
+    expect(q('[data-testid="lease-reservation"]').textContent).toContain('released')
+    expect(q('[data-testid="reservation-memory"]').textContent).toContain('1.0 GiB')
+  })
+
+  it('says so when the reservation field is absent (an older controller)', async () => {
+    const withoutField: Partial<LeaseDetailDto> = detail()
+    delete withoutField.reservation
+    getLabLease.mockResolvedValue(ok({ data: withoutField }))
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
+    await settle()
+    expect(q('[data-testid="reservation-none"]')).toBeTruthy()
+  })
+
+  it('says so when a lease has no reservation', async () => {
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
+    await settle()
+    expect(q('[data-testid="reservation-none"]').textContent).toContain('No capacity is reserved')
+    expect(document.querySelector('[data-testid="reservation-node"]')).toBeNull()
   })
 
   it('shows the bootstrapping step as current with no machine yet', async () => {

@@ -11,6 +11,7 @@ import { errorMessage } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import {
   artifactsCommand,
+  formatBytes,
   formatSpan,
   formatTimestamp,
   leaseTone,
@@ -286,6 +287,86 @@ function onTabKey(event: KeyboardEvent, index: number) {
                   >Not registered yet</span>
                 </dd>
               </dl>
+            </section>
+
+            <section
+              class="grid gap-1.5"
+              data-testid="lease-reservation"
+            >
+              <h3 class="fc-kicker flex items-center gap-2 border-b border-fc-line pb-1">
+                Reservation
+                <StatusChip
+                  v-if="lease.reservation"
+                  :label="lease.reservation.state"
+                  :tone="lease.reservation.state === 'held' ? 'info' : 'muted'"
+                />
+              </h3>
+              <dl
+                v-if="lease.reservation"
+                class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs"
+              >
+                <dt class="fc-kicker">
+                  Node
+                </dt>
+                <dd
+                  class="font-mono"
+                  data-testid="reservation-node"
+                >
+                  {{ lease.reservation.node }}
+                </dd>
+                <dt class="fc-kicker">
+                  Account
+                </dt>
+                <dd
+                  class="font-mono"
+                  data-testid="reservation-account"
+                >
+                  {{ lease.reservation.accountId }}
+                </dd>
+                <dt class="fc-kicker">
+                  Storage pool
+                </dt>
+                <dd
+                  class="font-mono"
+                  data-testid="reservation-pool"
+                >
+                  {{ lease.reservation.storagePool }}
+                </dd>
+                <dt class="fc-kicker">
+                  Cores
+                </dt>
+                <dd
+                  class="font-mono"
+                  data-testid="reservation-cores"
+                >
+                  {{ lease.reservation.cores }}
+                </dd>
+                <dt class="fc-kicker">
+                  Memory
+                </dt>
+                <dd
+                  class="font-mono"
+                  data-testid="reservation-memory"
+                >
+                  {{ formatBytes(lease.reservation.memoryBytes) }}
+                </dd>
+                <dt class="fc-kicker">
+                  Disk
+                </dt>
+                <dd
+                  class="font-mono"
+                  data-testid="reservation-disk"
+                >
+                  {{ formatBytes(lease.reservation.diskBytes) }}
+                </dd>
+              </dl>
+              <p
+                v-else
+                class="text-xs text-fc-muted"
+                data-testid="reservation-none"
+              >
+                No capacity is reserved for this lease.
+              </p>
             </section>
 
             <section
