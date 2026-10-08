@@ -3854,6 +3854,18 @@ impl LabDispatch {
             }
             None => {}
         }
+        // The failed provision ends its record too, so a VMID it reserved is
+        // free for later leases (#303). A failure here is not lost: the
+        // sweeper ends any in-flight record of a lease that left the saga.
+        if let Some(record) = &record
+            && fleet_application::lab::provision_to_abandon(&lease, record)
+            && let Err(error) = provisions.abandon(&record.id).await
+        {
+            eprintln!(
+                "ending abandoned provision {} failed (the sweeper retries): {error}",
+                record.id
+            );
+        }
     }
 }
 

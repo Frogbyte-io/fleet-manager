@@ -271,6 +271,9 @@ impl ProvisionPort for Interruptible {
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String> {
         ProvisionPort::update(self.inner.as_ref(), record).await
     }
+    async fn abandon(&self, id: &str) -> Result<Option<ProvisionRecord>, String> {
+        self.inner.abandon(id).await
+    }
     async fn complete_ready(
         &self,
         record: &ProvisionRecord,

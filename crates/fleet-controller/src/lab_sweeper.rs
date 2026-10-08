@@ -32,7 +32,7 @@ use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{Decision, Permission};
 use fleet_application::lab::{
     Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned,
-    record_cleanup_failure, stuck_compensation,
+    provision_to_abandon, record_cleanup_failure, stuck_compensation,
 };
 use fleet_application::operation::{AuditPort, Operations};
 
@@ -288,6 +288,29 @@ impl LabSweeper {
                 Err(error) => report
                     .failures
                     .push(format!("compensating lease {}: {error}", lease.id)),
+            }
+        }
+
+        // 2b. Records left in flight by a lease that left the saga (the
+        // compensation above, the executor's own, or a crash between a
+        // lease change and its record) end `never_ready`, so a VMID they
+        // reserved is free for later leases (#303). Re-listed after step 2
+        // and idempotent, so a failure here is retried on the next tick.
+        let records = self.provisions.list().await?;
+        for lease in self.leases.list(None).await? {
+            let Some(record) = records
+                .iter()
+                .find(|record| provision_to_abandon(&lease, record))
+            else {
+                continue;
+            };
+            match self.provisions.abandon(&record.id).await {
+                Ok(Some(_)) => self.changed(),
+                Ok(None) => {}
+                Err(error) => report.failures.push(format!(
+                    "ending the provision of lease {}: {error}",
+                    lease.id
+                )),
             }
         }
 

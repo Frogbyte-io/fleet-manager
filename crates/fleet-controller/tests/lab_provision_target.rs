@@ -934,6 +934,7 @@ async fn a_rerun_after_the_clone_started_does_not_clone_again() {
     let mut resumable_lease = harness.leases.get(&lease_id).await.unwrap();
     resumable_lease.state = fleet_core::LeaseState::Provisioning;
     harness.leases.update(&resumable_lease).await.unwrap();
+    reopen(&harness, &record.id).await;
     resumable.failed_step = None;
     resumable.state = GuestState::Provisioning;
     ProvisionPort::update(harness.labs.as_ref(), &resumable)
@@ -1968,6 +1969,18 @@ async fn a_settled_config_that_is_not_our_clone_is_never_updated_or_started() {
     }
 }
 
+/// Reopens an ended record, which the port refuses to do (#303): the
+/// simulated interruption precedes the failure the run recorded.
+async fn reopen(harness: &Harness, record_id: &str) {
+    sqlx::query(
+        "UPDATE lab_provisions SET state = 'provisioning', failed_step = NULL WHERE id = ?1",
+    )
+    .bind(record_id)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+}
+
 /// Puts a run's record and lease back to `provisioning`, as if the
 /// controller had stopped after the clone was recorded.
 async fn interrupt(harness: &Harness, lease_id: &str, record_id: &str) {
@@ -1977,6 +1990,7 @@ async fn interrupt(harness: &Harness, lease_id: &str, record_id: &str) {
     let mut record = ProvisionPort::get(harness.labs.as_ref(), record_id)
         .await
         .unwrap();
+    reopen(harness, record_id).await;
     record.failed_step = None;
     record.state = GuestState::Provisioning;
     ProvisionPort::update(harness.labs.as_ref(), &record)
