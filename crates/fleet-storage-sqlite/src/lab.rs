@@ -585,7 +585,7 @@ impl ProvisionPort for LabRepository {
     }
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
+pub(crate) fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(
         error
             .as_database_error()

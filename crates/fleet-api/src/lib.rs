@@ -22,6 +22,7 @@ pub mod frogenv;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
+pub mod lab_pools;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -185,6 +186,12 @@ pub const API_BASE_PATH: &str = "/api/v1";
         lab::ReleaseLeaseRequest,
         lab::StartLeaseProvisionRequest,
         lab::ExtendLeaseRequest,
+        lab_pools::LabPoolDto,
+        lab_pools::LabPoolMemberDto,
+        lab_pools::CreateLabPoolRequest,
+        lab_pools::FillLabPoolRequest,
+        lab_pools::DrainLabPoolRequest,
+        lab_pools::LabPoolDrainDto,
         images::RecipeDto,
         images::RecipeVersionDto,
         images::SaveRecipeRequest,
@@ -393,6 +400,13 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab_artifacts::list_lab_artifacts))
                 .routes(routes!(lab_artifacts::get_lab_artifact))
                 .routes(routes!(lab_artifacts::download_lab_artifact))
+                .routes(routes!(
+                    lab_pools::list_lab_pools,
+                    lab_pools::create_lab_pool
+                ))
+                .routes(routes!(lab_pools::get_lab_pool, lab_pools::delete_lab_pool))
+                .routes(routes!(lab_pools::fill_lab_pool))
+                .routes(routes!(lab_pools::drain_lab_pool))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )

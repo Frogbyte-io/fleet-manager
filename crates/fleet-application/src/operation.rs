@@ -55,7 +55,7 @@ enum CreateRoute {
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 62] = [
+pub const CREATABLE_KINDS: [&str; 63] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -118,6 +118,7 @@ pub const CREATABLE_KINDS: [&str; 62] = [
     "lab.cleanup",
     "lab.exec",
     "lab.collect",
+    "lab.pool.fill",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -861,6 +862,42 @@ impl Operations {
         .await
     }
 
+    /// Queues the `lab.pool.fill` operation `LabPools::request_fill`
+    /// validated (FM-717), by a caller allowed to configure Lab.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_pool_fill(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        pool_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        let linked = new
+            .payload_json
+            .as_deref()
+            .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .and_then(|payload| payload["poolId"].as_str().map(str::to_owned));
+        if new.kind != crate::lab_pool::FILL_KIND || linked.as_deref() != Some(pool_id) {
+            return Err(OperationUseCaseError::Invalid {
+                detail: "the lab.pool.fill payload must match its pool".to_owned(),
+            });
+        }
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id,
+                action: Permission::LabConfig,
+                resource: Some(pool_id),
+            },
+        )
+        .map_err(OperationUseCaseError::Denied)?;
+        self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
+            .await
+    }
+
     /// The shared path of the lease-scoped Lab kinds: never the generic
     /// surface; the payload must name exactly this lease; the caller must
     /// hold `permission` on it.
@@ -1100,6 +1137,14 @@ impl Operations {
             if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.collect runs through the lease artifacts route".to_owned(),
+                });
+            }
+        } else if new.kind == crate::lab_pool::FILL_KIND {
+            // Authorized by `create_lab_pool_fill` against its pool.
+            if route == CreateRoute::Generic {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.pool.fill is queued by filling a Lab pool, not created directly"
+                        .to_owned(),
                 });
             }
         } else if new.kind == "lab.cleanup" {

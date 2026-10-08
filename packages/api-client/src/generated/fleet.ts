@@ -785,6 +785,26 @@ export interface CreateEnrollmentTokenRequest {
 }
 
 /**
+ * A pool creation request.
+ */
+export interface CreateLabPoolRequest {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /**
+     * The snapshot every member carries and is reverted to (a PVE
+     * snapshot name, at most 40 characters).
+     */
+  baselineSnapshot: string;
+  /**
+     * The declared number of members, 1 to 16.
+     * @minimum 0
+     */
+  size: number;
+  /** A published template version whose cleanup strategy is `revert`. */
+  templateVersionId: string;
+}
+
+/**
  * The lease creation request.
  */
 export interface CreateLeaseRequest {
@@ -1030,6 +1050,18 @@ export interface DraftEndpointDto {
 }
 
 /**
+ * A drain request.
+ */
+export interface DrainLabPoolRequest {
+  /**
+     * The VMIDs to drain; every member when absent.
+     * @nullable
+     * @items.minimum 0
+     */
+  vmids?: number[] | null;
+}
+
+/**
  * How many differences of each drift state a machine has.
  */
 export interface DriftCountsDto {
@@ -1136,6 +1168,18 @@ export interface ExtendLeaseRequest {
 export interface FetchDesiredRequest {
   /** The full 40-character lowercase hexadecimal commit SHA. */
   commitSha: string;
+}
+
+/**
+ * A fill request.
+ */
+export interface FillLabPoolRequest {
+  /**
+     * The VMIDs of existing QEMU guests that carry the baseline snapshot.
+     * Empty re-queues the verification of members still filling.
+     * @items.minimum 0
+     */
+  vmids: number[];
 }
 
 /**
@@ -1282,6 +1326,87 @@ export interface LabArtifactDto {
      * @minimum 0
      */
   sizeBytes: number;
+}
+
+/**
+ * What a drain did.
+ */
+export interface LabPoolDrainDto {
+  /**
+     * The VMIDs that leave once their lease's cleanup or their fill ends.
+     * @items.minimum 0
+     */
+  deferred: number[];
+  /**
+     * The VMIDs that left the pool. The guests themselves stay.
+     * @items.minimum 0
+     */
+  removed: number[];
+}
+
+/**
+ * One pool member.
+ */
+export interface LabPoolMemberDto {
+  /**
+     * Why it is quarantined, when it is.
+     * @nullable
+     */
+  detail?: string | null;
+  /** Whether it leaves the pool once its lease's cleanup or its fill ends. */
+  draining: boolean;
+  /** The member's identity; a refill after a drain gets a new one. */
+  id: string;
+  /**
+     * The lease it is bound to, when any. A quarantined member can still
+     * be bound: its lease's cleanup still owes the revert.
+     * @nullable
+     */
+  leaseId?: string | null;
+  /**
+     * The guest's name when its fill verified it.
+     * @nullable
+     */
+  name?: string | null;
+  /**
+     * The node the guest was last seen on, once verified.
+     * @nullable
+     */
+  node?: string | null;
+  /** `filling`, `available`, `leased`, or `quarantined`. */
+  state: string;
+  /** When it last changed (epoch millis). */
+  updatedAt: number;
+  /**
+     * The guest's VMID.
+     * @minimum 0
+     */
+  vmid: number;
+}
+
+/**
+ * One pool and its members.
+ */
+export interface LabPoolDto {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /** The snapshot every member is reverted to. */
+  baselineSnapshot: string;
+  /** When the pool was created (epoch millis). */
+  createdAt: number;
+  /** Who created the pool. */
+  createdBy: string;
+  /** The pool's identity. */
+  id: string;
+  /** The members, by VMID. */
+  members: LabPoolMemberDto[];
+  /**
+     * The declared number of members.
+     * @minimum 0
+     */
+  size: number;
+  /** The published template version leases take members for. */
+  templateVersionId: string;
 }
 
 /**
@@ -2354,6 +2479,44 @@ export type PageLabArtifactDtoItemsItem = {
 export interface PageLabArtifactDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageLabArtifactDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * One pool and its members.
+ */
+export type PageLabPoolDtoItemsItem = {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /** The snapshot every member is reverted to. */
+  baselineSnapshot: string;
+  /** When the pool was created (epoch millis). */
+  createdAt: number;
+  /** Who created the pool. */
+  createdBy: string;
+  /** The pool's identity. */
+  id: string;
+  /** The members, by VMID. */
+  members: LabPoolMemberDto[];
+  /**
+     * The declared number of members.
+     * @minimum 0
+     */
+  size: number;
+  /** The published template version leases take members for. */
+  templateVersionId: string;
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageLabPoolDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageLabPoolDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -4062,6 +4225,69 @@ export type ResourceLabArtifactDtoData = {
 export interface ResourceLabArtifactDto {
   /** One stored Lab artifact's metadata. */
   data: ResourceLabArtifactDtoData;
+}
+
+/**
+ * What a drain did.
+ */
+export type ResourceLabPoolDrainDtoData = {
+  /**
+     * The VMIDs that leave once their lease's cleanup or their fill ends.
+     * @items.minimum 0
+     */
+  deferred: number[];
+  /**
+     * The VMIDs that left the pool. The guests themselves stay.
+     * @items.minimum 0
+     */
+  removed: number[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabPoolDrainDto {
+  /** What a drain did. */
+  data: ResourceLabPoolDrainDtoData;
+}
+
+/**
+ * One pool and its members.
+ */
+export type ResourceLabPoolDtoData = {
+  /** The Proxmox account the members are reached through. */
+  accountId: string;
+  /** The snapshot every member is reverted to. */
+  baselineSnapshot: string;
+  /** When the pool was created (epoch millis). */
+  createdAt: number;
+  /** Who created the pool. */
+  createdBy: string;
+  /** The pool's identity. */
+  id: string;
+  /** The members, by VMID. */
+  members: LabPoolMemberDto[];
+  /**
+     * The declared number of members.
+     * @minimum 0
+     */
+  size: number;
+  /** The published template version leases take members for. */
+  templateVersionId: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceLabPoolDto {
+  /** One pool and its members. */
+  data: ResourceLabPoolDtoData;
 }
 
 /**
@@ -8434,6 +8660,412 @@ const res = await fetch(getReleaseLabLeaseUrl(leaseId),
 
   const data: releaseLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as releaseLabLeaseResponse
+}
+
+
+
+export type listLabPoolsResponse200 = {
+  data: PageLabPoolDto
+  status: 200
+}
+
+export type listLabPoolsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listLabPoolsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listLabPoolsResponseSuccess = (listLabPoolsResponse200) & {
+  headers: Headers;
+};
+export type listLabPoolsResponseError = (listLabPoolsResponse403 | listLabPoolsResponse500) & {
+  headers: Headers;
+};
+
+export type listLabPoolsResponse = (listLabPoolsResponseSuccess | listLabPoolsResponseError)
+
+export const getListLabPoolsUrl = () => {
+
+
+
+
+  return `/api/v1/lab/pools`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the pools and their members.
+ */
+export const listLabPools = async ( options?: RequestInit): Promise<listLabPoolsResponse> => {
+
+  const res = await fetch(getListLabPoolsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listLabPoolsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listLabPoolsResponse
+}
+
+
+
+export type createLabPoolResponse201 = {
+  data: ResourceLabPoolDto
+  status: 201
+}
+
+export type createLabPoolResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type createLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type createLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type createLabPoolResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type createLabPoolResponseSuccess = (createLabPoolResponse201) & {
+  headers: Headers;
+};
+export type createLabPoolResponseError = (createLabPoolResponse400 | createLabPoolResponse403 | createLabPoolResponse404 | createLabPoolResponse409) & {
+  headers: Headers;
+};
+
+export type createLabPoolResponse = (createLabPoolResponseSuccess | createLabPoolResponseError)
+
+export const getCreateLabPoolUrl = () => {
+
+
+
+
+  return `/api/v1/lab/pools`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, malformed input, an
+ * unknown version or account, or a version that already has a pool.
+ * @summary Creates a pool for a published template version whose cleanup strategy
+is `revert`. Leases from that version then take a pool member instead of
+a clone.
+ */
+export const createLabPool = async (createLabPoolRequest: CreateLabPoolRequest, options?: RequestInit): Promise<createLabPoolResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getCreateLabPoolUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(createLabPoolRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: createLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as createLabPoolResponse
+}
+
+
+
+export type getLabPoolResponse200 = {
+  data: ResourceLabPoolDto
+  status: 200
+}
+
+export type getLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getLabPoolResponseSuccess = (getLabPoolResponse200) & {
+  headers: Headers;
+};
+export type getLabPoolResponseError = (getLabPoolResponse403 | getLabPoolResponse404) & {
+  headers: Headers;
+};
+
+export type getLabPoolResponse = (getLabPoolResponseSuccess | getLabPoolResponseError)
+
+export const getGetLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown pool.
+ * @summary Reads one pool and its members.
+ */
+export const getLabPool = async (poolId: string, options?: RequestInit): Promise<getLabPoolResponse> => {
+
+  const res = await fetch(getGetLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getLabPoolResponse
+}
+
+
+
+export type deleteLabPoolResponse204 = {
+  data: void
+  status: 204
+}
+
+export type deleteLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type deleteLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type deleteLabPoolResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type deleteLabPoolResponseSuccess = (deleteLabPoolResponse204) & {
+  headers: Headers;
+};
+export type deleteLabPoolResponseError = (deleteLabPoolResponse403 | deleteLabPoolResponse404 | deleteLabPoolResponse409) & {
+  headers: Headers;
+};
+
+export type deleteLabPoolResponse = (deleteLabPoolResponseSuccess | deleteLabPoolResponseError)
+
+export const getDeleteLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown pool, or a pool
+ * that still holds members.
+ * @summary Deletes an empty pool (drain it first). Leases from its template version
+then clone again.
+ */
+export const deleteLabPool = async (poolId: string, options?: RequestInit): Promise<deleteLabPoolResponse> => {
+
+  const res = await fetch(getDeleteLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: deleteLabPoolResponse['data'] = body ? JSON.parse(body) : undefined
+  return { data, status: res.status, headers: res.headers } as deleteLabPoolResponse
+}
+
+
+
+export type drainLabPoolResponse200 = {
+  data: ResourceLabPoolDrainDto
+  status: 200
+}
+
+export type drainLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type drainLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type drainLabPoolResponseSuccess = (drainLabPoolResponse200) & {
+  headers: Headers;
+};
+export type drainLabPoolResponseError = (drainLabPoolResponse403 | drainLabPoolResponse404) & {
+  headers: Headers;
+};
+
+export type drainLabPoolResponse = (drainLabPoolResponseSuccess | drainLabPoolResponseError)
+
+export const getDrainLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}/drain`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown pool or VMID.
+ * @summary Drains members from a pool (every member when no VMIDs are named).
+Unbound members leave at once; a member bound to a lease, or still
+filling, leaves once that finishes instead of returning to the pool.
+Fleet never destroys a pool guest: drained guests stay where they are.
+ */
+export const drainLabPool = async (poolId: string,
+    drainLabPoolRequest: DrainLabPoolRequest, options?: RequestInit): Promise<drainLabPoolResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getDrainLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(drainLabPoolRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: drainLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as drainLabPoolResponse
+}
+
+
+
+export type fillLabPoolResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type fillLabPoolResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type fillLabPoolResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type fillLabPoolResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type fillLabPoolResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type fillLabPoolResponseSuccess = (fillLabPoolResponse202) & {
+  headers: Headers;
+};
+export type fillLabPoolResponseError = (fillLabPoolResponse400 | fillLabPoolResponse403 | fillLabPoolResponse404 | fillLabPoolResponse409) & {
+  headers: Headers;
+};
+
+export type fillLabPoolResponse = (fillLabPoolResponseSuccess | fillLabPoolResponseError)
+
+export const getFillLabPoolUrl = (poolId: string,) => {
+
+
+
+
+  return `/api/v1/lab/pools/${poolId}/fill`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, invalid VMIDs, an unknown
+ * pool, a full pool, or a guest that already is a pool member.
+ * @summary Registers existing QEMU guests as pool members and queues the
+`lab.pool.fill` operation that checks each one, reverts it to the
+baseline snapshot through the reviewed revert, and verifies it. A
+member becomes `available` only once verified; otherwise it is
+`quarantined` with the reason.
+ */
+export const fillLabPool = async (poolId: string,
+    fillLabPoolRequest: FillLabPoolRequest, options?: RequestInit): Promise<fillLabPoolResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getFillLabPoolUrl(poolId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(fillLabPoolRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: fillLabPoolResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as fillLabPoolResponse
 }
 
 

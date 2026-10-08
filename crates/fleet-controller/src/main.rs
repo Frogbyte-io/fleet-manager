@@ -514,7 +514,38 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 };
                 // FM-713: Lab cleanup destroys through its own reviewed
                 // destroy executor, guarded against templates and promoted
-                // image artifacts like the dedicated destroy route.
+                // image artifacts like the dedicated destroy route. FM-717's
+                // pool reverts run through the same reviewed executor.
+                let lab_destructive: std::sync::Arc<
+                    dyn fleet_application::worker::OperationExecutor,
+                > = std::sync::Arc::new(
+                    fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
+                        lab_accounts.clone(),
+                        lab_credentials.clone(),
+                        fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    )
+                    .with_image_artifacts(std::sync::Arc::new(
+                        fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                    ))
+                    .with_task_links(std::sync::Arc::new(
+                        fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(store.pool().clone()),
+                    )),
+                );
+                // FM-717: pooled guests.
+                let lab_pools: std::sync::Arc<dyn fleet_application::lab_pool::LabPoolPort> =
+                    std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(
+                        store.pool().clone(),
+                    ));
+                let lab_pool_guests: std::sync::Arc<
+                    dyn fleet_application::lab_pool::PoolGuestPort,
+                > = std::sync::Arc::new(fleet_controller::lab_pool::ProxmoxPoolGuests::new(
+                    lab_accounts.clone(),
+                    lab_credentials.clone(),
+                    fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
+                    std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                        store.pool().clone(),
+                    )),
+                ));
                 let lab_cleanup = std::sync::Arc::new(
                     fleet_controller::lab_cleanup::LabCleanupExecutor::new(
                         lab_leases.clone(),
@@ -525,25 +556,25 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                         std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
                             store.pool().clone(),
                         )),
-                        std::sync::Arc::new(
-                            fleet_controller::proxmox_exec::ProxmoxDestructiveExecutor::new(
-                                lab_accounts.clone(),
-                                lab_credentials.clone(),
-                                fleet_provider_proxmox::ProxmoxClient::new(pve_transport.clone()),
-                            )
-                            .with_image_artifacts(std::sync::Arc::new(
-                                fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
-                            ))
-                            .with_task_links(std::sync::Arc::new(
-                                fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(
-                                    store.pool().clone(),
-                                ),
-                            )),
-                        ),
+                        lab_destructive.clone(),
                     )
-                    .with_reservations(lab_capacity.clone()),
+                    .with_reservations(lab_capacity.clone())
+                    .with_pools(
+                        lab_pools.clone(),
+                        lab_pool_guests.clone(),
+                        lab_destructive.clone(),
+                    ),
                 );
-                std::sync::Arc::new(
+                let lab_pool_fill =
+                    std::sync::Arc::new(fleet_controller::lab_pool::LabPoolFillExecutor::new(
+                        lab_pools.clone(),
+                        lab_pool_guests,
+                        lab_destructive,
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                    ));
+                let lab_dispatch = std::sync::Arc::new(
                     fleet_controller::proxmox_exec::LabDispatch::new(
                         with_images.clone(),
                         std::sync::Arc::new(
@@ -595,11 +626,16 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                                     store.pool().clone(),
                                 )),
                                 lab_placement_policy,
-                            ),
+                            )
+                            .with_pools(lab_pools),
                         ),
                     )
                     .with_cleanup(lab_cleanup, lab_leases, lab_provisions),
-                )
+                );
+                std::sync::Arc::new(fleet_controller::lab_pool::LabPoolDispatch::new(
+                    lab_dispatch,
+                    lab_pool_fill,
+                ))
             };
             // FM-721: every lab.exec keeps its log, and lab.collect copies
             // guest files, through the artifact store.
@@ -744,6 +780,22 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             )),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
         );
+        // FM-717: the pool use cases, authorized and audited in the
+        // application.
+        let lab = lab.with_pools(std::sync::Arc::new(
+            fleet_application::lab_pool::LabPools::new(
+                std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ),
+        ));
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,

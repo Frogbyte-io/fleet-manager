@@ -830,6 +830,7 @@ pub struct Lab {
     projects: Arc<dyn ProjectPort>,
     audit: Arc<dyn AuditPort>,
     artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
+    pools: Option<Arc<crate::lab_pool::LabPools>>,
 }
 
 impl Lab {
@@ -851,7 +852,21 @@ impl Lab {
             projects,
             audit,
             artifacts: None,
+            pools: None,
         }
+    }
+
+    /// Serves the Lab pool use cases (FM-717) beside the Lab surface.
+    #[must_use]
+    pub fn with_pools(mut self, pools: Arc<crate::lab_pool::LabPools>) -> Self {
+        self.pools = Some(pools);
+        self
+    }
+
+    /// The Lab pool use cases, when the controller composed them.
+    #[must_use]
+    pub fn pools(&self) -> Option<&Arc<crate::lab_pool::LabPools>> {
+        self.pools.as_ref()
     }
 
     /// Serves the Lab artifact use cases (FM-721) beside the Lab surface.

@@ -328,7 +328,62 @@ The re-arm needs `lab.lease` on the lease and `operation.create`, as a release d
 
 Until you re-arm it, `cleanup_failed` stays put: `lab release` refuses it, and Fleet does not retry it. The lease remains the record that it owned a guest that needed a human.
 
-`revert` cleanup needs pooled guests (FM-717, [#260](https://github.com/Frogbyte-io/fleet-manager/issues/260)). Until then, cleanup refuses `revert` with `unsupported_until_pooled`. It destroys nothing and spends no attempt; the lease stays `releasing`. Release it with `--keep`, then remove the guest yourself.
+`revert` cleanup applies only to a lease that holds a pool member (see [Pooled guests](#pooled-guests)). A `revert` lease whose guest is a clone is refused with `not_pooled`. Nothing is destroyed and no attempt is spent; the lease stays `releasing`. Release it with `--keep`, then remove the guest yourself.
+
+### Pooled guests
+
+A pool is a small set of preallocated QEMU guests (FM-717, [#260](https://github.com/Frogbyte-io/fleet-manager/issues/260)). It is bound to one published template version, and leases from that version take a member instead of a clone. Cleanup rolls the member back to a baseline snapshot instead of destroying it. Fleet never creates or destroys a pool guest:
+- you build and snapshot the guests yourself;
+- fill registers them;
+- drain only releases them from Lab.
+
+Before you create a pool, prepare it:
+
+1. Publish a template version whose cleanup is `revert` (`lab template-create ... --cleanup revert`, then `lab publish`). A pool refuses any other version.
+2. For each member, make a QEMU guest (not a template, not a container) on a node of the account you will name.
+   - The guest's name must not start with `fm-lab-`, which Lab uses for its own clones.
+   - Its VMID must not be a promoted image's template.
+   - Take the baseline snapshot on it (`qm snapshot <vmid> baseline`). Every member must carry a snapshot with the same name.
+   - Install the controller's SSH key and the QEMU guest agent before the snapshot, as for an image.
+3. Grant the account's token `VM.Audit` and `VM.Snapshot.Rollback` (or `VM.Snapshot`) on each member's `/vms/<vmid>`, plus `VM.PowerMgmt` to start it.
+
+Then create, fill, and check the pool:
+
+```sh
+fleetctl --output json lab pool create --template-version <version-id> --account <account-id> --baseline baseline --size 3
+fleetctl --output json lab pool fill <pool-id> --vmid 700 --vmid 701 --vmid 702 --wait
+fleetctl --output json lab pool show <pool-id>
+```
+
+Fill registers the VMIDs as `filling` and queues a `lab.pool.fill` operation. For each member, the operation:
+- checks that the guest exists, is a QEMU guest, is not an `fm-lab-*` clone or an image artifact, and carries the baseline;
+- rolls it back to the baseline through the reviewed `proxmox.guest.snapshot-revert` path. The rollback stops a running guest first;
+- reads the config back. The config's `parent` must name the baseline, with no lock left.
+
+Only then is the member `available`. Otherwise it is `quarantined` and its `detail` says why. `--wait` exits non-zero when any member was quarantined. The member records the guest's name, and later reverts refuse a guest at that VMID with another name: a replaced guest is never rolled back. Fill refuses more VMIDs than the pool's `size` (at most 16), and a guest that is already a member of any pool. `lab pool fill <pool-id>` with no `--vmid` re-queues members that are still `filling`, for example after a controller restart.
+
+Leasing works as before. `lab create <version-id> --purpose ...` takes the free member with the lowest VMID, in the same SQLite transaction that records it on the lease's provision. Two leases never share a member. A pooled provision uses the pool's account; `--account` must name it or be omitted. It reserves no capacity, because the member already exists. It boots the member and runs the template's readiness as usual. With no free member, the provision fails with `pool_exhausted` and the lease ends `failed`, owning nothing.
+
+Release (`lab release`, `lab destroy`, expiry) queues the usual `lab.cleanup`:
+- **Revert.** A lease that holds a member always reverts it, even if its strategy says `destroy`; Lab never destroys a member. Cleanup re-checks the guest, rolls it back, verifies it, and removes the lease's Lab machine record. It then returns the member to `available` in the same transaction that marks the lease `released`.
+- **Failed revert.** A failed check, rollback, or verification quarantines the member at once, still bound to the lease, and is a failed attempt with the usual backoff. After five attempts the lease is `cleanup_failed`. Fix the guest (for example `qm unlock <vmid>`, or restore the baseline), then run `lab cleanup-retry`; a verified revert returns the member.
+- **`keep`.** The lease is released, and the guest and its machine record stay. The member is quarantined out of rotation. Drain it, then fill it again once it is back at its baseline.
+
+Drain releases members from Lab:
+
+```sh
+fleetctl --output json lab pool drain <pool-id> --vmid 701
+fleetctl --output json lab pool drain <pool-id>
+fleetctl --output json lab pool delete <pool-id>
+```
+
+A member that no lease holds leaves at once (`removed`). A member that is bound to a lease, or still filling, is flagged and leaves when that cleanup or fill finishes, instead of returning (`deferred`). Without `--vmid`, drain covers every member. A pool is deleted only once it is empty. After that, leases from its template version clone again.
+
+Every pool mutation needs `lab.config`, and fill also needs `operation.create`. The controller checks both before anything is registered. The intent is audited before the change: `lab_pool_creating`, `lab_pool_fill_requested`, `lab_pool_draining`, `lab_pool_deleting`. The executors record each member change best effort (resource: the pool):
+- `lab_pool_member_available` and `lab_pool_member_quarantined` (with `reason`);
+- `lab_pool_member_claimed`, `lab_pool_member_returned`, and `lab_pool_member_removed`.
+
+Find them with `fleetctl --output json audit list --action lab.config`.
 
 ### Orphans
 

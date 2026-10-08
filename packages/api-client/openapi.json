@@ -2585,6 +2585,371 @@
         }
       }
     },
+    "/api/v1/lab/pools": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Lists the pools and their members.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listLabPools",
+        "responses": {
+          "200": {
+            "description": "The pools, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_LabPoolDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Creates a pool for a published template version whose cleanup strategy\nis `revert`. Leases from that version then take a pool member instead of\na clone.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, malformed input, an\nunknown version or account, or a version that already has a pool.",
+        "operationId": "createLabPool",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLabPoolRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The pool was created, empty.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabPoolDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed, or the version does not revert.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The template version or account does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The template version already has a pool.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/pools/{poolId}": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Reads one pool and its members.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown pool.",
+        "operationId": "getLabPool",
+        "parameters": [
+          {
+            "name": "poolId",
+            "in": "path",
+            "description": "The pool's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pool.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabPoolDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pool does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Deletes an empty pool (drain it first). Leases from its template version\nthen clone again.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown pool, or a pool\nthat still holds members.",
+        "operationId": "deleteLabPool",
+        "parameters": [
+          {
+            "name": "poolId",
+            "in": "path",
+            "description": "The pool's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The pool was deleted."
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pool does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The pool still holds members.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/pools/{poolId}/drain": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Drains members from a pool (every member when no VMIDs are named).\nUnbound members leave at once; a member bound to a lease, or still\nfilling, leaves once that finishes instead of returning to the pool.\nFleet never destroys a pool guest: drained guests stay where they are.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown pool or VMID.",
+        "operationId": "drainLabPool",
+        "parameters": [
+          {
+            "name": "poolId",
+            "in": "path",
+            "description": "The pool's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DrainLabPoolRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the drain did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LabPoolDrainDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pool, or a named VMID in it, does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/pools/{poolId}/fill": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Registers existing QEMU guests as pool members and queues the\n`lab.pool.fill` operation that checks each one, reverts it to the\nbaseline snapshot through the reviewed revert, and verifies it. A\nmember becomes `available` only once verified; otherwise it is\n`quarantined` with the reason.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, invalid VMIDs, an unknown\npool, a full pool, or a guest that already is a pool member.",
+        "operationId": "fillLabPool",
+        "parameters": [
+          {
+            "name": "poolId",
+            "in": "path",
+            "description": "The pool's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FillLabPoolRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The members were registered and their verification queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The VMIDs are invalid or exceed the pool's size.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not configure the Lab surface or create operations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The pool does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A guest already is a pool member, or the pool is full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/provisions": {
       "get": {
         "tags": [
@@ -8189,6 +8554,37 @@
           }
         }
       },
+      "CreateLabPoolRequest": {
+        "type": "object",
+        "description": "A pool creation request.",
+        "required": [
+          "templateVersionId",
+          "accountId",
+          "baselineSnapshot",
+          "size"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account the members are reached through."
+          },
+          "baselineSnapshot": {
+            "type": "string",
+            "description": "The snapshot every member carries and is reverted to (a PVE\nsnapshot name, at most 40 characters)."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The declared number of members, 1 to 16.",
+            "minimum": 0
+          },
+          "templateVersionId": {
+            "type": "string",
+            "description": "A published template version whose cleanup strategy is `revert`."
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateLeaseRequest": {
         "type": "object",
         "description": "The lease creation request.",
@@ -8572,6 +8968,25 @@
           }
         }
       },
+      "DrainLabPoolRequest": {
+        "type": "object",
+        "description": "A drain request.",
+        "properties": {
+          "vmids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The VMIDs to drain; every member when absent."
+          }
+        },
+        "additionalProperties": false
+      },
       "DriftCountsDto": {
         "type": "object",
         "description": "How many differences of each drift state a machine has.",
@@ -8868,6 +9283,25 @@
             "description": "Caller-safe explanation."
           }
         }
+      },
+      "FillLabPoolRequest": {
+        "type": "object",
+        "description": "A fill request.",
+        "required": [
+          "vmids"
+        ],
+        "properties": {
+          "vmids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The VMIDs of existing QEMU guests that carry the baseline snapshot.\nEmpty re-queues the verification of members still filling."
+          }
+        },
+        "additionalProperties": false
       },
       "FrogenvActionDto": {
         "type": "string",
@@ -9198,6 +9632,152 @@
             "type": "integer",
             "format": "int64",
             "description": "The size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "LabPoolDrainDto": {
+        "type": "object",
+        "description": "What a drain did.",
+        "required": [
+          "removed",
+          "deferred"
+        ],
+        "properties": {
+          "deferred": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The VMIDs that leave once their lease's cleanup or their fill ends."
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The VMIDs that left the pool. The guests themselves stay."
+          }
+        }
+      },
+      "LabPoolDto": {
+        "type": "object",
+        "description": "One pool and its members.",
+        "required": [
+          "id",
+          "templateVersionId",
+          "accountId",
+          "baselineSnapshot",
+          "size",
+          "createdBy",
+          "createdAt",
+          "members"
+        ],
+        "properties": {
+          "accountId": {
+            "type": "string",
+            "description": "The Proxmox account the members are reached through."
+          },
+          "baselineSnapshot": {
+            "type": "string",
+            "description": "The snapshot every member is reverted to."
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the pool was created (epoch millis)."
+          },
+          "createdBy": {
+            "type": "string",
+            "description": "Who created the pool."
+          },
+          "id": {
+            "type": "string",
+            "description": "The pool's identity."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabPoolMemberDto"
+            },
+            "description": "The members, by VMID."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The declared number of members.",
+            "minimum": 0
+          },
+          "templateVersionId": {
+            "type": "string",
+            "description": "The published template version leases take members for."
+          }
+        }
+      },
+      "LabPoolMemberDto": {
+        "type": "object",
+        "description": "One pool member.",
+        "required": [
+          "id",
+          "vmid",
+          "state",
+          "draining",
+          "updatedAt"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is quarantined, when it is."
+          },
+          "draining": {
+            "type": "boolean",
+            "description": "Whether it leaves the pool once its lease's cleanup or its fill ends."
+          },
+          "id": {
+            "type": "string",
+            "description": "The member's identity; a refill after a drain gets a new one."
+          },
+          "leaseId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The lease it is bound to, when any. A quarantined member can still\nbe bound: its lease's cleanup still owes the revert."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The guest's name when its fill verified it."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node the guest was last seen on, once verified."
+          },
+          "state": {
+            "type": "string",
+            "description": "`filling`, `available`, `leased`, or `quarantined`."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it last changed (epoch millis)."
+          },
+          "vmid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The guest's VMID.",
             "minimum": 0
           }
         }
@@ -11250,6 +11830,78 @@
                   "format": "int64",
                   "description": "The size in bytes.",
                   "minimum": 0
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_LabPoolDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One pool and its members.",
+              "required": [
+                "id",
+                "templateVersionId",
+                "accountId",
+                "baselineSnapshot",
+                "size",
+                "createdBy",
+                "createdAt",
+                "members"
+              ],
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "description": "The Proxmox account the members are reached through."
+                },
+                "baselineSnapshot": {
+                  "type": "string",
+                  "description": "The snapshot every member is reverted to."
+                },
+                "createdAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When the pool was created (epoch millis)."
+                },
+                "createdBy": {
+                  "type": "string",
+                  "description": "Who created the pool."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The pool's identity."
+                },
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LabPoolMemberDto"
+                  },
+                  "description": "The members, by VMID."
+                },
+                "size": {
+                  "type": "integer",
+                  "format": "int32",
+                  "description": "The declared number of members.",
+                  "minimum": 0
+                },
+                "templateVersionId": {
+                  "type": "string",
+                  "description": "The published template version leases take members for."
                 }
               }
             },
@@ -14186,6 +14838,106 @@
                 "format": "int64",
                 "description": "The size in bytes.",
                 "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Resource_LabPoolDrainDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "What a drain did.",
+            "required": [
+              "removed",
+              "deferred"
+            ],
+            "properties": {
+              "deferred": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                "description": "The VMIDs that leave once their lease's cleanup or their fill ends."
+              },
+              "removed": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                "description": "The VMIDs that left the pool. The guests themselves stay."
+              }
+            }
+          }
+        }
+      },
+      "Resource_LabPoolDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One pool and its members.",
+            "required": [
+              "id",
+              "templateVersionId",
+              "accountId",
+              "baselineSnapshot",
+              "size",
+              "createdBy",
+              "createdAt",
+              "members"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "description": "The Proxmox account the members are reached through."
+              },
+              "baselineSnapshot": {
+                "type": "string",
+                "description": "The snapshot every member is reverted to."
+              },
+              "createdAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the pool was created (epoch millis)."
+              },
+              "createdBy": {
+                "type": "string",
+                "description": "Who created the pool."
+              },
+              "id": {
+                "type": "string",
+                "description": "The pool's identity."
+              },
+              "members": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LabPoolMemberDto"
+                },
+                "description": "The members, by VMID."
+              },
+              "size": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The declared number of members.",
+                "minimum": 0
+              },
+              "templateVersionId": {
+                "type": "string",
+                "description": "The published template version leases take members for."
               }
             }
           }

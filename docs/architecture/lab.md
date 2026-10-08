@@ -126,8 +126,37 @@ The rules live in `fleet_application::lab` (`stuck_compensation`, `cleanup_due`,
 Cleanup strategies:
 
 - `destroy` is the default and deletes the allocated clone.
-- `revert` is meant for explicitly managed preallocated/pool instances whose reservation prevents concurrent use. Pooled guests do not exist yet (FM-717), so cleanup currently refuses `revert` (`unsupported_until_pooled`) without destroying anything or spending an attempt; the lease stays `releasing`, so an operator can release it with `keep` instead.
+- `revert` applies to a lease that holds a member of a [pool](#pooled-guests-fm-717). It rolls the member back to the pool's baseline snapshot and returns it. A `revert` lease whose guest is a clone is refused (`not_pooled`) without destroying anything or spending an attempt; the lease stays `releasing`, so an operator can release it with `keep` instead.
 - `keep` requires elevated permission; it releases the lease and leaves the guest and its Lab-owned machine record in place, out of automatic Lab cleanup. It is not “skip cleanup and forget.”
+
+### Pooled guests (FM-717)
+
+A pool binds a small set of preallocated QEMU guests to one published template version, whose cleanup strategy must be `revert`. The rules live in `fleet_application::lab_pool`. The SQLite store, the provision and cleanup executors, the `/api/v1/lab/pools` routes, and `fleetctl lab pool` are adapters.
+
+- **Resource.** A pool (`lab_pools`, migration 0043) has a template version (at most one pool each), the Proxmox account its members are reached through, a baseline snapshot name (a PVE `pve-snapshot-name`, never `current`), and a declared size of 1–16. A member (`lab_pool_members`) is unique by account and VMID across all pools. It records the guest's node and its name as verified. Its state is `filling`, `available`, `leased`, or `quarantined`, with an optional lease, a `draining` flag, and a quarantine reason. Fleet never creates or destroys a member's guest.
+- **Fill.** Fill (`lab.config` and `operation.create`) registers operator-supplied VMIDs as `filling`, within the size. It queues `lab.pool.fill`, which checks each member's identity (`member_identity`):
+  - a QEMU guest, never a template or container;
+  - not a protected image artifact;
+  - not one of Lab's `fm-lab-*` clones;
+  - carrying the baseline snapshot.
+
+  It then reverts the member through the reviewed revert and verifies it. The member becomes `available`, or `quarantined` with the reason.
+- **Revert and verification.** Every revert is FM-603's reviewed `proxmox.guest.snapshot-revert` child, with a review token the controller computes over the exact payload. It runs after the identity check, which also requires the name the fill recorded, so a different guest at a reused VMID is never rolled back. PVE's rollback (`POST /nodes/{node}/qemu/{vmid}/snapshot/{snapname}/rollback`, a `qmrollback` task) stops a running guest, holds the `rollback` config lock, and sets the config's `parent` to the restored snapshot ([qemu-server `Qemu.pm`](https://git.proxmox.com/?p=qemu-server.git;a=blob;f=src/PVE/API2/Qemu.pm), [`AbstractConfig.pm`](https://git.proxmox.com/?p=pve-guest-common.git;a=blob;f=src/PVE/AbstractConfig.pm)). A revert is verified only when the config read back (`GET .../config`) is not a template, holds no lock, and names the baseline as its `parent` (`verify_reverted`).
+- **Claim.** In the provision executor, a lease whose template version has a pool skips placement, capacity reservation, the clone, and the clone's unprotect step. One `BEGIN IMMEDIATE` transaction does the claim:
+  1. it answers the member already bound to the lease (a resumed provision);
+  2. otherwise it binds the lowest-VMID `available`, non-draining member, conditional on `state = 'available' AND lease_id IS NULL`;
+  3. it writes the member's account, node, and VMID onto the provision record, conditional on the record holding no guest.
+
+  A partial unique index on the member's `lease_id` makes a shared member impossible in the schema. Before the boot, the executor checks the live guest: the cleanup guard, the QEMU kind, and the recorded name. No free member fails the provision with `pool_exhausted`, with nothing allocated, so the lease ends `failed`.
+- **Cleanup.** A lease bound to a member is never destroyed, whatever its strategy (`cleanup_plan`).
+  - **Revert.** It reverts the member, verifies it, and removes the Lab machine record. Then one transaction returns the member (or removes it when draining) and marks the lease `released`. No crash can return a member to a lease that is still releasing, or release a lease whose member is still bound.
+  - **Failed revert.** A failed identity check, rollback, or verification quarantines the member at once, still bound, and is a failed attempt with the usual backoff and `cleanup_failed` after the round. A later verified revert (an automatic retry or `cleanup-retry`) returns it.
+  - **`keep`.** It releases the lease and quarantines the member out of rotation.
+  - **Destroy guard.** The destroy branch refuses any VMID that is a pool member, bound or not.
+  - **Unreadable binding.** If the pool binding cannot be read, the attempt fails rather than reading as "not pooled".
+- **Drain.** Drain (`lab.config`) removes unbound, settled members at once. It flags bound or filling members to leave when their cleanup or fill finishes. A pool is deleted only when empty.
+- **Audit.** Each mutation's intent is recorded before the change (`lab_pool_creating`, `lab_pool_fill_requested`, `lab_pool_draining`, `lab_pool_deleting`). The executors record member changes best effort, naming the operation in the metadata rather than as the intent's operation, so the operation's own outcome stays attached to its own intent.
+- **Out of scope.** Automatic pool sizing and LXC pools are out of scope. The sweeper's orphan report covers only `fm-lab-*` guests, which can never be members.
 
 ## Placement and later scheduling
 

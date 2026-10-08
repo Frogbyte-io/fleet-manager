@@ -14,6 +14,7 @@ pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
 pub mod lab_placement;
+pub mod lab_pool;
 pub mod machine;
 pub mod node;
 pub mod observed;
