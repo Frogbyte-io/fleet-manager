@@ -260,7 +260,7 @@ A whole run is bounded: four hours for this suite, two for Step 7's (compilation
 
 Builds are linked clones of `…_TEMPLATE_VMID` into `…_VMID_RANGE`. Each built template is named `fleet-acceptance-image-*` and tagged `fleet-acceptance`. The suite destroys exactly those templates at the start and end of every scenario. The shared Step 7 sweep never destroys a template.
 
-Each build gets the trusted account's token through the product's own path (#272): the account is resolved from the recipe's `proxmox_url`, and its token reaches only the Packer child process. The harness strips any `PROXMOX_*` variables from the controller's environment, so a passing build proves the token came from the account. The recipes still set `insecure_skip_tls_verify` until [#284](https://github.com/Frogbyte-io/fleet-manager/issues/284) gives Packer the pinned certificate.
+Each build gets the trusted account's token through the product's own path (#272): the account is resolved from the recipe's `proxmox_url`, and its token reaches only the Packer child process, in its environment. Recipe secrets take the other channel: their resolved values go to Packer in a `-var-file` inside the operation's private work directory. The suite's recipes declare no secrets, so only the account token is exercised here. The harness strips any `PROXMOX_*` variables from the controller's environment, so a passing build proves the token came from the account. The recipes still set `insecure_skip_tls_verify` until [#284](https://github.com/Frogbyte-io/fleet-manager/issues/284) gives Packer the pinned certificate.
 
 ## Evidence for #211
 
