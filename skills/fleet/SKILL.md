@@ -26,7 +26,7 @@ text.
    thing and read the plan.
 5. **Never put secrets in arguments.** Commands that need a secret read it from
    stdin; everything you pass on the command line may end up in shell history.
-6. **Lab environments are disposable and time-limited.** Release them when you
+6. **Lab environments are disposable and time-limited.** Destroy them when you
    are done; extend them only as long as you need.
 
 ## Controller and health
@@ -72,35 +72,79 @@ tell the user instead of retrying.
 
 ```bash
 fleetctl --output json lab templates
+fleetctl --output json lab create <template-version-id> --project <project-id> --purpose "reproduce flaky test" --wait
+fleetctl --output json lab exec <lease-id> --wait -- cargo test
+fleetctl --output json lab status <lease-id>
+fleetctl --output json lab collect <lease-id> /home/lab/out/report.xml --wait
+fleetctl --output json lab artifacts --lease <lease-id>
+fleetctl --output json lab extend <lease-id> --seconds 3600
+fleetctl --output json lab destroy <lease-id> --wait
+```
+
+1. Pick a published template version from `lab templates` (`publishedFrom`).
+2. `lab create` leases and provisions the environment (`--wait` waits for it). `--project`
+   attaches the lease to a project. Without `--account` it uses the only
+   trusted Proxmox account; with none or several, pass `--account <account-id>`.
+   Without `--wait` it returns the lease as it is right after provisioning was
+   queued, and you follow it with `lab status` until its `state` is `ready`. With
+   `--wait` the exit code is non-zero unless the lease is `ready`. Keep the
+   lease `id` it returns, even on failure, so you can destroy it.
+3. `lab exec` runs a command in the guest. Put `--wait` and `--timeout` before
+   the `--`; everything after it is the guest command. With `--wait` the exit
+   code is the guest command's (1 if it did not run, or if the wait timed out
+   before the operation finished: the error names the operation). The default
+   `--timeout` is 60 seconds. Its output is stored as an exec-log artifact.
+4. Optionally `lab collect` copies absolute guest paths into artifacts, which
+   outlive the lease (with `--wait` it exits non-zero unless it succeeded), and
+   `lab artifacts` lists them (filter with `--lease` or `--project`).
+5. `lab extend` adds time up to the lease's maximum lifetime; the controller
+   refuses more.
+6. `lab destroy` removes the environment.
+
+Rules:
+
+- Always run `lab destroy` as the last step, even when the task failed or you
+  are giving up (a finally-style step). Never leave a lease behind.
+- Never use `--keep`: it hands the guest out of Lab ownership, and nothing will
+  clean it up.
+- A lease in `cleanup_failed` still owns resources. Report it to the user; do
+  not retry `lab destroy` in a loop. `lab cleanup-retry` is for an operator
+  after the cause is fixed.
+- Do not put secrets in `--purpose` or in `lab exec` arguments.
+
+If `lab create` fails, the operation carries an explanation (for example
+`template_missing`, no capacity on the node, or `pool_exhausted`). Report it to
+the user, then `lab destroy` any lease it left. With no trusted account, or
+several and no `--account`, `lab create` stops before it creates a lease.
+
+Lab pools (`lab pool ...`) are set up by an operator. A template version with a
+pool is used by `lab create` with no extra step, provided `--account` is
+omitted or names the pool's account.
+
+### Advanced: the low-level flow
+
+`lab create` is `lab lease` followed by `lab provision-lease`; use the pieces
+only when you need to control them separately.
+
+```bash
 fleetctl --output json lab lease <template-version-id> --purpose "reproduce flaky test"
 fleetctl --output json lab provision-lease <lease-id>
 fleetctl --output json lab leases
 fleetctl --output json lab provisions
-fleetctl --output json lab extend <lease-id> --seconds 3600
 fleetctl --output json lab release <lease-id>
 ```
 
-1. Pick a published template version from `lab templates` (`publishedFrom`).
-2. `lab lease` creates the lease; `lab provision-lease` builds it on the one
-   Proxmox account whose cluster holds the template's image, after reserving
-   its CPU, memory, and disk against the node's latest observed capacity (not
-   a live host guarantee: workloads outside Fleet can still use that room).
-   The provision operation fails with an explanation when no trusted account
-   holds the template (`placement_no_candidate`), when several do
-   (`placement_ambiguous`), when a trusted account cannot be read
-   (`placement_unresolved`), when the node lacks capacity, or when its
-   capacity cannot be observed or is stale. Report the explanation to the
-   user. Passing `--account <account-id>` skips the automatic scan, so it
-   resolves `placement_ambiguous` and `placement_unresolved`. It does not
-   resolve `placement_no_candidate`: that account then fails with
-   `template_missing`.
-3. Poll `lab leases` until the lease `state` is `ready`. `lab provisions` shows
-   where it landed (node, VMID, address).
-4. `lab extend` adds time up to the lease's maximum lifetime; the controller
-   refuses more.
-5. `lab release` destroys the environment. Always release what you leased.
-
-A lease in `cleanup_failed` still owns resources: report it to the user.
+- Poll `lab leases` until the lease `state` is `ready`; `lab provisions` shows
+  where it landed (node, VMID, address).
+- Provisioning places the lease on the one Proxmox account whose cluster holds
+  the template's image, after reserving CPU, memory, and disk against the
+  node's latest observed capacity (not a live host guarantee). It fails with
+  `placement_no_candidate`, `placement_ambiguous`, `placement_unresolved`, a
+  capacity error, or a stale-capacity error; report the explanation.
+  `lab provision-lease <lease-id> --account <account-id>` skips the scan, which
+  resolves `placement_ambiguous` and `placement_unresolved` but not
+  `placement_no_candidate` (that fails with `template_missing`).
+- `lab release` is the low-level `lab destroy`; the same rules apply.
 
 ## Operations
 
