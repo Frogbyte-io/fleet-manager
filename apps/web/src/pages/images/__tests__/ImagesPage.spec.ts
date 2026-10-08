@@ -250,5 +250,6 @@ describe('e2e: edit → publish → build → promote', () => {
     listImageRecipes.mockResolvedValue(ok(page([recipe({ content: 'source "proxmox-iso" "x" {}' })])))
     const { wrapper } = await mountAt('/images?select=recipe:r1')
     expect(wrapper.get('[data-testid="raw-only"]').text()).toContain('not JSON')
+    expect(wrapper.get('[data-testid="raw-only"]').text()).not.toMatch(/hcl/i)
   })
 })
