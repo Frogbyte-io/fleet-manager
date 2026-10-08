@@ -31,7 +31,7 @@ use std::time::Duration;
 use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{Decision, Permission};
 use fleet_application::lab::{
-    Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned,
+    Lab, LeasePort, ProvisionPort, abandon_provision, cleanup_due, cleanup_operation, guest_owned,
     record_cleanup_failure, stuck_compensation,
 };
 use fleet_application::operation::{AuditPort, Operations};
@@ -266,6 +266,26 @@ impl LabSweeper {
                 Ok(true) => {
                     self.changed();
                     report.compensated += 1;
+                    // The record ends with its lease, or it would hold its
+                    // VMID for every later lease (#303).
+                    if let Some(id) = lease.provision_id.as_deref() {
+                        match self.provisions.get(id).await {
+                            Ok(mut record) => {
+                                if abandon_provision(&mut record)
+                                    && let Err(error) = self.provisions.update(&record).await
+                                {
+                                    report.failures.push(format!(
+                                        "ending the provision of lease {}: {error}",
+                                        lease.id
+                                    ));
+                                }
+                            }
+                            Err(error) => report.failures.push(format!(
+                                "reading the provision of lease {}: {error}",
+                                lease.id
+                            )),
+                        }
+                    }
                     // The transition is committed; a refused audit is
                     // reported rather than hidden.
                     if let Err(error) = self

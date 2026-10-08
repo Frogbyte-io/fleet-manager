@@ -2233,6 +2233,27 @@ pub fn rearm_cleanup(lease: &mut Lease) {
     lease.cleanup_next_at = None;
 }
 
+/// Ends a provision record whose lease was compensated while the saga was
+/// still in flight (#303): `never_ready`, keeping its node, VMID and clone
+/// task for cleanup. A record left `provisioning` would hold its VMID for
+/// every later lease. Returns whether the record changed.
+pub fn abandon_provision(record: &mut ProvisionRecord) -> bool {
+    if !matches!(
+        record.state,
+        GuestState::Provisioning
+            | GuestState::Provisioned
+            | GuestState::Booting
+            | GuestState::Bootstrapping
+    ) {
+        return false;
+    }
+    record.state = GuestState::NeverReady;
+    record
+        .failed_step
+        .get_or_insert_with(|| "interrupted".to_owned());
+    true
+}
+
 /// Where a lease goes after its provision failed or was cancelled: to
 /// `releasing` (cleanup owed) when the record allocated a guest, including
 /// from `failed`, whose terminal state would otherwise strand the guest; to
@@ -2399,6 +2420,22 @@ pub fn cleanup_operation(
 #[cfg(test)]
 mod tests {
     use super::guard_destroy_target;
+
+    #[test]
+    fn an_abandoned_provision_ends_never_ready_and_keeps_its_ids() {
+        use fleet_core::GuestState::{NeverReady, Provisioning, Ready};
+        let mut record = record(None, None);
+        record.state = Provisioning;
+        record.vmid = Some(9000);
+        assert!(super::abandon_provision(&mut record));
+        assert_eq!(record.state, NeverReady);
+        assert_eq!(record.vmid, Some(9000));
+        assert_eq!(record.failed_step.as_deref(), Some("interrupted"));
+        // A terminal or ready record is left alone.
+        assert!(!super::abandon_provision(&mut record));
+        record.state = Ready;
+        assert!(!super::abandon_provision(&mut record));
+    }
 
     #[test]
     fn a_failed_provision_owes_cleanup_only_for_an_allocated_guest() {

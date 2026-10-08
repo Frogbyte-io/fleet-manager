@@ -524,7 +524,6 @@ async fn interrupted_before_boot_the_lease_converges_within_an_hour() {
 }
 
 #[tokio::test]
-#[ignore = "#303: the interrupted record keeps its VMID reserved forever"]
 async fn an_interrupted_reservation_is_freed_once_its_lease_is_released() {
     let world = World::new(READINESS_SECONDS).await;
     let (controller, lease) = crash_provision(&world, Step::Reserved, Fault::CrashAfter).await;
