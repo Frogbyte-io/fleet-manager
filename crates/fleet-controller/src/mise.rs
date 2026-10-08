@@ -527,6 +527,9 @@ async fn finish_json(
                 )
                 .await;
             };
+            // The parsed document is stored as the operation result: scrub
+            // every string (a tool's source URL can carry userinfo).
+            let parsed = redact_json_strings(parsed);
             let result_json = serde_json::json!({ field: parsed }).to_string();
             operations
                 .complete(operation_id, "succeeded", Some(&result_json), None)
@@ -601,6 +604,27 @@ async fn finish_cli(
 
 /// Redacts credential-shaped userinfo from CLI output before it becomes a
 /// public result.
+/// Applies the provider's credential redaction to every string key and
+/// value of a parsed JSON document.
+fn redact_json_strings(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(fleet_provider_mise::redact(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_json_strings).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    (
+                        fleet_provider_mise::redact(&key),
+                        redact_json_strings(value),
+                    )
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn redact_output(text: &str) -> String {
     crate::exec::scrub_and_bound_with(text.trim(), false, fleet_provider_mise::redact).0
 }
@@ -653,5 +677,23 @@ mod redact_bound_tests {
                 assert!(out.len() <= 3_000 + "…".len(), "pad {pad}: {}", out.len());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod redact_json_tests {
+    #[test]
+    fn every_string_in_a_parsed_document_is_redacted() {
+        let parsed = serde_json::json!({
+            "node": [{
+                "version": "20.1.0",
+                "source": {"url": "https://user:hunter2pw@host.invalid/tool.git"},
+                "notes": ["fetched via deploy:hunter2pw@host.invalid:repo"],
+            }],
+            "https://user:hunter2pw@host.invalid/k": 1,
+        });
+        let out = super::redact_json_strings(parsed).to_string();
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(out.contains("20.1.0"), "{out}");
     }
 }
