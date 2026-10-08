@@ -692,8 +692,15 @@ mod live {
                 Err(Unfit::Fail(reason)) => Err(reason),
                 Ok(lab) => match TargetRun::start(target.clone(), id).await {
                     Ok(run) => {
-                        let result = body(&run, &lab).await;
-                        let leaked = lab.sweep_leftovers(&run).await;
+                        let before = lab_guests(&run).await;
+                        let result = match &before {
+                            Ok(_) => body(&run, &lab).await,
+                            Err(reason) => Err(reason.clone()),
+                        };
+                        let leaked = match before {
+                            Ok(before) => lab.sweep_leftovers(&run, &before).await,
+                            Err(_) => Ok(()),
+                        };
                         let result = match (result, leaked) {
                             (result, Ok(())) => result,
                             (Ok(_), Err(leak)) => Err(leak),
@@ -764,19 +771,22 @@ mod live {
             Ok(Self { ssh_user })
         }
 
-        /// The safety net after every scenario: a Lab guest left in the
-        /// range is a leak. It is destroyed and the scenario fails.
-        async fn sweep_leftovers(&self, run: &TargetRun) -> Result<(), String> {
-            let resources = run.pve.resources().await?;
-            let leaked: Vec<_> = resources
+        /// The safety net after every scenario: a Lab guest in the range
+        /// that this scenario created and Fleet did not remove is a leak. It
+        /// is destroyed and the scenario fails. `fm-lab-*` guests that
+        /// existed before the scenario (`before`) belong to someone else and
+        /// are never touched.
+        async fn sweep_leftovers(
+            &self,
+            run: &TargetRun,
+            before: &std::collections::BTreeSet<u32>,
+        ) -> Result<(), String> {
+            let leaked: Vec<_> = run
+                .pve
+                .resources()
+                .await?
                 .into_iter()
-                .filter(|guest| {
-                    run.target.range.contains(guest.vmid)
-                        && guest
-                            .name
-                            .as_deref()
-                            .is_some_and(|name| name.starts_with("fm-lab-"))
-                })
+                .filter(|guest| is_lab_guest(run, guest) && !before.contains(&guest.vmid))
                 .collect();
             if leaked.is_empty() {
                 return Ok(());
@@ -841,6 +851,33 @@ mod live {
             );
             Ok((account, version))
         }
+    }
+
+    /// Whether `guest` is a Fleet Lab guest inside the target's range.
+    fn is_lab_guest(run: &TargetRun, guest: &super::proxmox_live_support::pve::VmResource) -> bool {
+        run.target.range.contains(guest.vmid)
+            && guest
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("fm-lab-"))
+    }
+
+    /// The Lab guests already in the range when a scenario starts.
+    async fn lab_guests(run: &TargetRun) -> Result<std::collections::BTreeSet<u32>, String> {
+        let existing: std::collections::BTreeSet<u32> = run
+            .pve
+            .resources()
+            .await?
+            .into_iter()
+            .filter(|guest| is_lab_guest(run, guest))
+            .map(|guest| guest.vmid)
+            .collect();
+        if !existing.is_empty() {
+            run.log(&format!(
+                "warning: Lab guests {existing:?} were in the range before the scenario; left alone"
+            ));
+        }
+        Ok(existing)
     }
 
     /// Creates and publishes an image recipe through `fleetctl`, records a
