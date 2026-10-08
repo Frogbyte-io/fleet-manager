@@ -3,17 +3,30 @@ import { describe, expect, it } from 'vitest'
 import type { LabTemplateDto } from '@frogbyte-io/fleet-api-client'
 
 import {
+  artifactGetCommand,
+  artifactsCommand,
+  cleanupRetryCommand,
+  collectCommand,
+  createCommand,
+  execCommand,
+  execOutput,
   extendCommand,
+  formatBytes,
   formatDuration,
   formatSpan,
+  formatTimestamp,
   isLive,
   leasableTemplates,
   leaseCommand,
+  leasesCommand,
   leaseSteps,
   leaseTone,
   leaseTtl,
+  operationFailure,
+  parsePaths,
   provisionLeaseCommand,
   releaseCommand,
+  statusCommand,
   sweepCommand,
   templatesByVersion,
   templateSpec,
@@ -163,7 +176,53 @@ describe('fleetctl equivalents', () => {
     expect(sweepCommand()).toBe('fleetctl --output json lab sweep')
   })
 
-  it('has no equivalent for a project-scoped lease (the CLI has no project flag)', () => {
-    expect(leaseCommand('v1', 'x', 'p1')).toBeNull()
+  it('carries the project and the optional account', () => {
+    expect(leaseCommand('v1', 'x', 'p1')).toBe('fleetctl --output json lab lease v1 --purpose x --project p1')
+    expect(createCommand('v1', 'x', 'p1', 'acc')).toBe('fleetctl --output json lab create v1 --purpose x --project p1 --account acc')
+    expect(createCommand('v1', 'x', null, 'acc')).toBe('fleetctl --output json lab create v1 --purpose x --account acc')
+    expect(provisionLeaseCommand('l1', null)).toBe('fleetctl --output json lab provision-lease l1')
+    expect(leasesCommand('p1')).toBe('fleetctl --output json lab leases --project p1')
+    expect(leasesCommand(null)).toBe('fleetctl --output json lab leases')
+  })
+
+  it('spells out cleanup retry, status, exec, collect, and artifact commands', () => {
+    expect(cleanupRetryCommand('l1')).toBe('fleetctl --output json lab cleanup-retry l1')
+    expect(statusCommand('l1')).toBe('fleetctl --output json lab status l1')
+    expect(execCommand('l1', 'uname -a', 60)).toBe(`fleetctl --output json lab exec l1 --timeout 60 -- sh -c 'uname -a'`)
+    expect(collectCommand('l1', ['/var/log/a.log', '/tmp/b c'])).toBe(`fleetctl --output json lab collect l1 /var/log/a.log '/tmp/b c'`)
+    expect(artifactsCommand({ leaseId: 'l1' })).toBe('fleetctl --output json lab artifacts --lease l1')
+    expect(artifactsCommand({ projectId: 'p1' })).toBe('fleetctl --output json lab artifacts --project p1')
+    expect(artifactGetCommand('a1', 'out.log')).toBe('fleetctl --output json lab artifact-get a1 --out out.log')
+  })
+})
+
+describe('operation results', () => {
+  it('reads a placement refusal verbatim', () => {
+    const failure = operationFailure('{"reason":"insufficient_memory","detail":"insufficient memory on pve-02: need 4096 MiB, 2048 free"}')
+    expect(failure).toEqual({ reason: 'insufficient_memory', detail: 'insufficient memory on pve-02: need 4096 MiB, 2048 free', step: null })
+    expect(operationFailure('{"reason":"provision_failed","step":"clone","detail":"x"}')?.step).toBe('clone')
+    expect(operationFailure('not json')).toBeNull()
+    expect(operationFailure('{"other":1}')).toBeNull()
+    expect(operationFailure(null)).toBeNull()
+  })
+
+  it('reads exec output from a success, a nonzero exit, a deadline kill, and a connection failure', () => {
+    expect(execOutput({ resultJson: '{"exitCode":0,"stdout":"ok\\n","stderr":"","truncatedStdout":false,"truncatedStderr":false}' }))
+      .toEqual({ exitCode: 0, stdout: 'ok\n', stderr: '', truncatedStdout: false, truncatedStderr: false, reason: null, detail: null })
+    expect(execOutput({ errorJson: '{"exitCode":2,"stdout":"","stderr":"boom","truncatedStdout":true,"truncatedStderr":false}' }))
+      .toMatchObject({ exitCode: 2, stderr: 'boom', truncatedStdout: true })
+    expect(execOutput({ errorJson: '{"reason":"deadline_killed","detail":"killed","partialOutput":{"stdout":"half","stderr":"","truncatedStdout":false,"truncatedStderr":true}}' }))
+      .toMatchObject({ exitCode: null, stdout: 'half', truncatedStderr: true, reason: 'deadline_killed', detail: 'killed' })
+    expect(execOutput({ errorJson: '{"reason":"connection_failed","detail":"refused"}' }))
+      .toMatchObject({ exitCode: null, stdout: '', stderr: '', reason: 'connection_failed' })
+    expect(execOutput({})).toBeNull()
+  })
+
+  it('splits collect paths and formats sizes and timestamps', () => {
+    expect(parsePaths(' /a \n\n/b\n/a\n')).toEqual(['/a', '/b'])
+    expect(formatBytes(512)).toBe('512 B')
+    expect(formatBytes(1536)).toBe('1.5 KiB')
+    expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MiB')
+    expect(formatTimestamp(Date.UTC(2026, 9, 8, 14, 3, 12))).toBe('2026-10-08 14:03:12 UTC')
   })
 })

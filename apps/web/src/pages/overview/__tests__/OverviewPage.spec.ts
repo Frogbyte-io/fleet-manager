@@ -17,6 +17,7 @@ const listLabTemplates = vi.fn()
 const listLabLeases = vi.fn()
 const getSystemInfo = vi.fn()
 const listDesiredDrift = vi.fn()
+const getLabLease = vi.fn()
 
 vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listMachines: (...a: unknown[]) => listMachines(...a),
@@ -32,6 +33,7 @@ vi.mock('@frogbyte-io/fleet-api-client', () => ({
   listLabLeases: (...a: unknown[]) => listLabLeases(...a),
   getSystemInfo: (...a: unknown[]) => getSystemInfo(...a),
   listDesiredDrift: (...a: unknown[]) => listDesiredDrift(...a),
+  getLabLease: (...a: unknown[]) => getLabLease(...a),
 }))
 
 import OverviewPage from '../OverviewPage.vue'
@@ -84,7 +86,7 @@ function row(wrapper: Awaited<ReturnType<typeof mountPage>>, source: string) {
 enableAutoUnmount(afterEach)
 
 beforeEach(() => {
-  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift])
+  for (const mock of [listMachines, listOnboardingDrafts, listAuditEvents, listOperations, listProxmoxAccounts, discoverProxmoxCluster, listProxmoxGuests, listImageRecipes, listImageRecipeVersions, listLabTemplates, listLabLeases, getSystemInfo, listDesiredDrift, getLabLease])
     mock.mockReset()
   everythingFine()
 })
@@ -105,7 +107,44 @@ describe('Overview attention queue', () => {
   it('lists a cleanup_failed lease and links to Lab', async () => {
     listLabLeases.mockResolvedValue(ok(page([lease('lease-cf-000001', 'cleanup_failed', null)])))
     const wrapper = await mountPage()
-    expect(row(wrapper, 'lease-cleanup').attributes('href')).toBe('/lab')
+    expect(row(wrapper, 'lease-cleanup').attributes('href')).toBe('/lab?lease=lease-cf-000001')
+  })
+
+  it('names the node and VMID a cleanup_failed lease still holds', async () => {
+    listLabLeases.mockResolvedValue(ok(page([lease('lease-cf-000001', 'cleanup_failed', null)])))
+    getLabLease.mockResolvedValue(ok({ data: { ...lease('lease-cf-000001', 'cleanup_failed', null), node: 'pve-a', vmid: 9001 } }))
+    const wrapper = await mountPage()
+    expect(getLabLease).toHaveBeenCalledWith('lease-cf-000001')
+    expect(row(wrapper, 'lease-cleanup').text()).toContain('on pve-a · VMID 9001')
+  })
+
+  it('lists an orphan Lab guest the sweeper reported, from the lab.lease audit events', async () => {
+    listAuditEvents.mockImplementation(async (params: { action?: string }) => ok(page(params.action === 'lab.lease'
+      ? [{ id: 'e1', seq: 1, actor: 'controller', action: 'lab.lease', resource: 'fm-lab-0009', allowed: true, reason: 'allowed', occurredAt: NOW - 1000, metadata: { event: 'lab_orphan_guest', vmid: '9009' } }]
+      : [])))
+    const wrapper = await mountPage()
+    expect(listAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ action: 'lab.lease' }))
+    // No Proxmox account lists guests, so nothing proves it gone: it stays, without a node.
+    expect(row(wrapper, 'lab-orphan').text()).toContain('unknown node')
+  })
+
+  it('keeps an orphan whose guest is still listed, with its node', async () => {
+    listAuditEvents.mockImplementation(async (params: { action?: string }) => ok(page(params.action === 'lab.lease'
+      ? [{ id: 'e1', seq: 1, actor: 'controller', action: 'lab.lease', resource: 'fm-lab-0009', allowed: true, reason: 'allowed', occurredAt: NOW - 1000, metadata: { event: 'lab_orphan_guest', vmid: '9009' } }]
+      : [])))
+    listProxmoxAccounts.mockResolvedValue(ok(page([{ id: 'acc1', name: 'example', host: 'pve', port: 8006, tokenId: 't', fingerprint: 'AA', fingerprintState: 'confirmed', createdAt: 0 }])))
+    discoverProxmoxCluster.mockResolvedValue(ok({ data: { accountId: 'acc1', pveVersion: '8.4', reportedCount: 0, warnings: [], observedAt: NOW, resources: [], nodeCapacities: [] } }))
+    listProxmoxGuests.mockResolvedValue(ok(page([{ id: 'g1', kind: 'qemu', name: 'fm-lab-0009', vmid: 9009, node: 'pve-b', macs: [], candidates: [], observedAt: 0, pveVersion: '8.4', warnings: [] }])))
+    const wrapper = await mountPage()
+    // Guests are asked for only once discovery verified the pin.
+    await vi.waitFor(async () => {
+      await flushPromises()
+      expect(wrapper.find('[data-testid="attention-lab-orphan"]').exists()).toBe(true)
+    })
+    const orphan = row(wrapper, 'lab-orphan')
+    expect(orphan.text()).toContain('Orphan Lab guest fm-lab-0009')
+    expect(orphan.text()).toContain('on pve-b · VMID 9009')
+    expect(orphan.attributes('href')).toBe('/proxmox')
   })
 
   it('lists an expiring lease and links to Lab', async () => {

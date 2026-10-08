@@ -1,12 +1,14 @@
-import { useQuery } from '@tanstack/vue-query'
+import { useQueries, useQuery } from '@tanstack/vue-query'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, ref } from 'vue'
 
 import {
+  getLabLease,
   listAuditEvents,
   listMachines,
   listOnboardingDrafts,
   type AuditEventDto,
+  type LeaseDetailDto,
   type MachineDto,
   type OnboardingDraftDto,
 } from '@frogbyte-io/fleet-api-client'
@@ -14,6 +16,7 @@ import {
 import { useFleetDrift } from '../drift/useDrift'
 import { fetchAllPages, type PagedResponse } from '../fleet/useFleetInventory'
 import { useImages } from '../images/useImages'
+import { leaseDetailKey } from '../lab/useLab'
 import { retryTransient, unwrap } from '../machine/api'
 import { useOperationsList } from '../operations/useOperations'
 import { isFingerprintMismatch } from '../proxmox/proxmox'
@@ -26,6 +29,7 @@ import {
   leaseRows,
   machineRows,
   onboardingRows,
+  orphanRows,
   operationRows,
   proxmoxRows,
   sortAttention,
@@ -38,7 +42,14 @@ import {
 // invalidates them, so the page stays live without polling.
 
 export const RECENT_AUDIT_KEY = ['audit', 'recent'] as const
+export const LAB_ORPHANS_KEY = ['audit', 'lab-orphans'] as const
 const AUDIT_LIMIT = 25
+/**
+ * Orphan reports are read from this window of `lab.lease` audit events. The
+ * sweeper reports an orphan once per controller run, so one older than the
+ * window shows again after the next restart.
+ */
+const ORPHAN_WINDOW_MS = 30 * 24 * 3600 * 1000
 
 function page<T>(response: { status: number, data: unknown }): T[] {
   if (response.status !== 200)
@@ -70,6 +81,23 @@ export function useOverview() {
     queryFn: async () => page<AuditEventDto>(await listAuditEvents({ limit: AUDIT_LIMIT })),
     retry: retryTransient,
   })
+  // The sweeper's orphan reports: `lab.lease` audit events, oldest first.
+  const orphanAudit = useQuery({
+    queryKey: LAB_ORPHANS_KEY,
+    queryFn: async () => {
+      const from = Date.now() - ORPHAN_WINDOW_MS
+      const { items, truncated } = await fetchAllPages<AuditEventDto>(async (cursor) => {
+        const response = await listAuditEvents({ action: 'lab.lease', from, limit: 200, cursor }) as { status: number, data: unknown }
+        if (response.status !== 200)
+          unwrap(response)
+        return response as PagedResponse<AuditEventDto>
+      })
+      return { items, truncated }
+    },
+    retry: retryTransient,
+    // No event announces an orphan report, so re-read on a slow clock.
+    refetchInterval: 60_000,
+  })
   const operations = useOperationsList()
   const proxmox = useProxmox()
   const images = useImages()
@@ -80,12 +108,34 @@ export function useOverview() {
   useIntervalFn(() => (now.value = Date.now()), 30_000)
 
   const leases = computed(() => images.leases.data.value ?? [])
+
+  // Where each cleanup_failed lease's guest remains (shares the Lab drawer's cache).
+  const failingIds = computed(() => leases.value.filter(l => l.state === 'cleanup_failed').map(l => l.id))
+  const failingDetails = useQueries({
+    queries: computed(() => failingIds.value.map(id => ({
+      queryKey: leaseDetailKey(id),
+      queryFn: async () => unwrap<LeaseDetailDto>(await getLabLease(id)),
+      retry: retryTransient,
+    }))),
+  })
+  const remains = computed(() => new Map(failingDetails.value
+    .map(q => q.data)
+    .filter((d): d is LeaseDetailDto => !!d)
+    .map(d => [d.id, { node: d.node, vmid: d.vmid }])))
+
+  const guestIndex = computed(() => ({
+    guests: proxmox.views.value.flatMap(v => v.guests),
+    // With no account listed there is nothing to prove an orphan gone.
+    complete: proxmox.views.value.length > 0
+      && proxmox.views.value.every(v => v.state === 'pinned' && !v.guestsLoading && !v.guestsError && !v.guestsTruncated),
+  }))
   const operationList = computed(() => operations.data.value?.items ?? [])
 
   const attention = computed(() => {
     return sortAttention([
       ...machineRows(machines.data.value ?? []),
-      ...leaseRows(leases.value, now.value),
+      ...leaseRows(leases.value, now.value, remains.value),
+      ...orphanRows(orphanAudit.data.value?.items ?? [], guestIndex.value),
       ...operationRows(operationList.value),
       ...proxmoxRows(proxmox.views.value),
       ...onboardingRows(drafts.data.value ?? []),
@@ -106,6 +156,9 @@ export function useOverview() {
     proxmox.accounts.error.value && 'Proxmox accounts',
     drift.query.error.value && 'skill drift',
     images.leases.error.value && 'Lab leases',
+    orphanAudit.error.value && 'Lab orphan reports',
+    // Audit pages run oldest first, so a cut read misses the newest reports.
+    orphanAudit.data.value?.truncated && 'Lab orphan reports (too many events to read; the newest may be missing)',
     images.templates.error.value && 'Lab templates',
     images.loadError.value.some(([what]) => what === 'versions' || what === 'recipes') && 'image versions',
     [...proxmox.discoveryErrors.value.values(), ...proxmox.guestErrors.value.values()].some(e => e && !isFingerprintMismatch(e)) && 'Proxmox discovery',
@@ -118,6 +171,7 @@ export function useOverview() {
     || drafts.isLoading.value
     || proxmox.loading.value
     || images.leases.isLoading.value
+    || orphanAudit.isLoading.value
     || images.templates.isLoading.value
     || images.loading.value)
 

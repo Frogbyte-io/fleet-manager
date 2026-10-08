@@ -3,7 +3,10 @@
 // No Vue imports, so every source is unit-tested directly.
 
 import type {
+  AssociatedGuestDto,
+  AuditEventDto,
   LabTemplateDto,
+  LeaseDetailDto,
   MachineDriftDto,
   LeaseDto,
   MachineDto,
@@ -22,6 +25,7 @@ export type Severity = 'err' | 'warn' | 'info'
 export type AttentionSource =
   | 'machine'
   | 'lease-cleanup'
+  | 'lab-orphan'
   | 'operation-blocked'
   | 'proxmox-trust'
   | 'onboarding'
@@ -98,17 +102,36 @@ export function driftRows(entries: Pick<MachineDriftDto, 'machineId' | 'machineN
   return rows
 }
 
-export function leaseRows(leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'expiresAt' | 'createdAt'>[], now: number): AttentionRow[] {
+/** Where a `cleanup_failed` lease's guest still is, from the lease detail. */
+export type LeaseRemains = Pick<LeaseDetailDto, 'node' | 'vmid'>
+
+/** `on pve-02 · VMID 9001`, or what is known of it. */
+function remainsText(remains: LeaseRemains | undefined): string {
+  if (!remains || (remains.node == null && remains.vmid == null))
+    return ''
+  const parts = [
+    remains.node != null ? `on ${remains.node}` : null,
+    remains.vmid != null ? `VMID ${remains.vmid}` : null,
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+export function leaseRows(
+  leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'expiresAt' | 'createdAt'>[],
+  now: number,
+  remains: Map<string, LeaseRemains> = new Map(),
+): AttentionRow[] {
   const rows: AttentionRow[] = []
   for (const lease of leases) {
     if (lease.state === 'cleanup_failed') {
+      const where = remainsText(remains.get(lease.id))
       rows.push({
         key: `lease-cleanup:${lease.id}`,
         source: 'lease-cleanup',
         severity: 'err',
         title: `Lab lease ${lease.id.slice(0, 12)} failed cleanup`,
-        detail: `It still owns resources (${lease.purpose}). Sweep retries the cleanup.`,
-        to: '/lab',
+        detail: `${where ? `Its guest remains ${where}` : 'It still owns resources'} (${lease.purpose}). Fix the cause, then retry its cleanup.`,
+        to: { path: '/lab', query: { lease: lease.id } },
         at: lease.createdAt,
       })
     }
@@ -124,6 +147,57 @@ export function leaseRows(leases: Pick<LeaseDto, 'id' | 'state' | 'purpose' | 'e
         at: lease.expiresAt,
       })
     }
+  }
+  return rows
+}
+
+/** The Proxmox guests the Overview could list, and whether that list is whole. */
+export interface GuestIndex {
+  guests: Pick<AssociatedGuestDto, 'name' | 'vmid' | 'node'>[]
+  /** Every account's guests listed without error or truncation. */
+  complete: boolean
+}
+
+/**
+ * Orphan Lab guests (FM-716): the sweeper's `lab_orphan_guest` audit events
+ * (action `lab.lease`, resource = the guest's name, `vmid` among the exposed
+ * facts). The audit DTO withholds the node, so it comes from the guest lists
+ * the Overview already reads; a guest no account lists any more is gone and
+ * drops out, but only when every list is whole.
+ */
+export function orphanRows(
+  events: Pick<AuditEventDto, 'id' | 'resource' | 'metadata' | 'occurredAt'>[],
+  guests: GuestIndex,
+): AttentionRow[] {
+  const newest = new Map<string, { name: string, vmid: string, at: number }>()
+  for (const event of events) {
+    const metadata = (event.metadata ?? {}) as Record<string, unknown>
+    if (metadata.event !== 'lab_orphan_guest' || !event.resource)
+      continue
+    const vmid = typeof metadata.vmid === 'string' ? metadata.vmid : ''
+    const key = `${event.resource}:${vmid}`
+    const seen = newest.get(key)
+    if (!seen || seen.at < event.occurredAt)
+      newest.set(key, { name: event.resource, vmid, at: event.occurredAt })
+  }
+  const rows: AttentionRow[] = []
+  for (const [key, orphan] of newest) {
+    const guest = guests.guests.find(g => g.name === orphan.name && (orphan.vmid === '' || String(g.vmid) === orphan.vmid))
+    if (!guest && guests.complete)
+      continue
+    const where = [
+      guest?.node ? `on ${guest.node}` : 'on an unknown node (not every Proxmox account\'s guests could be listed, so Fleet could not confirm it is gone)',
+      orphan.vmid ? `VMID ${orphan.vmid}` : null,
+    ].filter(Boolean).join(' · ')
+    rows.push({
+      key: `lab-orphan:${key}`,
+      source: 'lab-orphan',
+      severity: 'warn',
+      title: `Orphan Lab guest ${orphan.name}`,
+      detail: `Remains ${where}. No lease or provision owns it, and Fleet never deletes an orphan: check it, then remove it in Proxmox.`,
+      to: '/proxmox',
+      at: orphan.at,
+    })
   }
   return rows
 }

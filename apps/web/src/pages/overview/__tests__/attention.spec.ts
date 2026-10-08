@@ -11,6 +11,7 @@ import {
   machineRows,
   onboardingRows,
   operationRows,
+  orphanRows,
   proxmoxRows,
   sortAttention,
   templatePinRows,
@@ -38,10 +39,47 @@ describe('attention sources', () => {
       { id: 'lease-later-001', state: 'ready', purpose: 'long', expiresAt: NOW + EXPIRING_WINDOW_MS + 60_000, createdAt: 3 },
     ], NOW)
     expect(rows.map(r => [r.source, r.severity, r.to])).toEqual([
-      ['lease-cleanup', 'err', '/lab'],
+      ['lease-cleanup', 'err', { path: '/lab', query: { lease: 'lease-cleanup-1' } }],
       ['lease-expiring', 'warn', '/lab'],
     ])
+    expect(rows[0]!.detail).toContain('It still owns resources')
     expect(rows[1]!.title).toContain('in 10 min')
+  })
+
+  it('names where a cleanup_failed lease\'s guest remains, linking to that lease', () => {
+    const rows = leaseRows(
+      [{ id: 'lease-cleanup-1', state: 'cleanup_failed', purpose: 'old', expiresAt: null, createdAt: 1 }],
+      NOW,
+      new Map([['lease-cleanup-1', { node: 'pve-a', vmid: 9001 }]]),
+    )
+    expect(rows[0]!.detail).toBe('Its guest remains on pve-a · VMID 9001 (old). Fix the cause, then retry its cleanup.')
+    expect(rows[0]!.to).toEqual({ path: '/lab', query: { lease: 'lease-cleanup-1' } })
+  })
+
+  it('lists orphan Lab guests with the node from the guest lists, newest report once', () => {
+    const report = (id: string, resource: string, vmid: string, occurredAt: number) =>
+      ({ id, resource, occurredAt, metadata: { event: 'lab_orphan_guest', vmid } })
+    const events = [
+      report('e1', 'fm-lab-0001', '9001', 10),
+      report('e2', 'fm-lab-0001', '9001', 20),
+      report('e3', 'fm-lab-0002', '9002', 30),
+      { id: 'e4', resource: 'lease-1', occurredAt: 40, metadata: { event: 'lab_lease_created' } },
+    ]
+    const rows = orphanRows(events, { guests: [{ name: 'fm-lab-0001', vmid: 9001, node: 'pve-a' }], complete: true })
+    // fm-lab-0002 is no longer listed by any account, and every list is whole: it is gone.
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ source: 'lab-orphan', severity: 'warn', title: 'Orphan Lab guest fm-lab-0001', to: '/proxmox', at: 20 })
+    expect(rows[0]!.detail).toContain('Remains on pve-a · VMID 9001')
+  })
+
+  it('keeps an orphan it cannot place while a guest list is missing', () => {
+    const rows = orphanRows(
+      [{ id: 'e1', resource: 'fm-lab-0002', occurredAt: 1, metadata: { event: 'lab_orphan_guest', vmid: '9002' } }],
+      { guests: [], complete: false },
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.detail).toContain('unknown node')
+    expect(rows[0]!.detail).toContain('VMID 9002')
   })
 
   it('flags blocked operations with their recorded reason, linking to the operation', () => {
