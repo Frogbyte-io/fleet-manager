@@ -3,12 +3,15 @@ use std::process::ExitCode;
 
 use xtask::{ProcessRunner, package_fleetd, verify_with};
 
-const HELP: &str = "Usage: cargo xtask verify | cargo xtask package-fleetd | cargo xtask pve-acceptance [--target NAME]";
+const HELP: &str = "Usage: cargo xtask verify | cargo xtask package-fleetd | cargo xtask pve-acceptance [--target NAME] | cargo xtask lab-acceptance [--target NAME]";
 
 fn main() -> ExitCode {
     let all: Vec<String> = std::env::args().skip(1).collect();
     if all.first().map(String::as_str) == Some("pve-acceptance") {
         return pve_acceptance(&all[1..]);
+    }
+    if all.first().map(String::as_str) == Some("lab-acceptance") {
+        return lab_acceptance(&all[1..]);
     }
     let mut args = all.into_iter();
     match (args.next().as_deref(), args.next()) {
@@ -58,6 +61,33 @@ fn pve_acceptance(args: &[String]) -> ExitCode {
         }
     };
     match xtask::pve_acceptance::run(&find_repo_root(), target.as_deref()) {
+        Ok(summary) => {
+            println!("{}", summary.to_json());
+            if summary.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs the live Lab acceptance scenarios (FM-741) and prints their JSON
+/// summary on stdout; everything else goes to stderr. Exits non-zero when
+/// any scenario/target pair failed.
+fn lab_acceptance(args: &[String]) -> ExitCode {
+    let target = match xtask::lab_acceptance::parse_args(args) {
+        Ok(target) => target,
+        Err(message) => {
+            eprintln!("error: {message}\n{HELP}");
+            return ExitCode::from(2);
+        }
+    };
+    match xtask::lab_acceptance::run(&find_repo_root(), target.as_deref()) {
         Ok(summary) => {
             println!("{}", summary.to_json());
             if summary.ok() {
