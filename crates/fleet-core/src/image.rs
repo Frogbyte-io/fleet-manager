@@ -1418,6 +1418,7 @@ mod tests {
             serde_json::json!(0),
             serde_json::json!(2222),
             serde_json::json!(5985),
+            serde_json::json!(5986),
             serde_json::json!(6379),
             serde_json::json!(-22),
             serde_json::json!(22.0),
@@ -1439,13 +1440,22 @@ mod tests {
         }
         for value in bad
             .iter()
-            .filter(|value| value.as_u64() != Some(5985))
+            .filter(|value| !matches!(value.as_u64(), Some(5985 | 5986)))
             .chain([&serde_json::json!(22)])
         {
             for spelling in ["winrm_port", "WinRM_Port"] {
                 let extra = serde_json::json!({ spelling: value });
                 assert_eq!(winrm(&extra), refused, "{extra}");
+                let nested = serde_json::json!({ "additional_iso_files": [{ spelling: value }] });
+                assert_eq!(winrm(&nested), refused, "{nested}");
             }
+        }
+        // Raw JSON that is numerically 22 or overflows u64 parses as a
+        // float, so it is refused rather than read as 22 or truncated.
+        for raw in ["2.2e1", "22e0", "18446744073709551638", "220e-1"] {
+            let content =
+                format!(r#"{{"builders":[{{"type":"proxmox-clone","ssh_port":{raw}}}]}}"#);
+            assert_eq!(recipe_build_refusal(&content), refused, "{content}");
         }
         // `communicator: none` never dials, but a stray port is still
         // refused rather than special-cased.
