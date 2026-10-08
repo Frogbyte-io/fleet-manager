@@ -166,14 +166,10 @@ impl Summary {
         reported: &[ResultRow],
         test_exit_success: bool,
     ) -> Self {
-        let mut targets: Vec<String> = expected_targets.to_vec();
-        for row in reported {
-            if let Some(target) = &row.target
-                && !targets.contains(target)
-            {
-                targets.push(target.clone());
-            }
-        }
+        // The matrix is the configured targets only. A row naming any other
+        // target (an unconfigured or malformed name) has no cell and fails
+        // below as drift, never as a new column.
+        let targets: Vec<String> = expected_targets.to_vec();
         let columns: Vec<Option<String>> = if targets.is_empty() {
             vec![None]
         } else {
@@ -236,10 +232,17 @@ impl Summary {
             {
                 continue;
             }
-            let drift = if known {
+            let drift = if known && row.target.is_none() {
                 format!(
                     "scenario {:?} reported without a target while the matrix has targets ({}); update the suite to report its target",
                     row.scenario, spec.suite
+                )
+            } else if known {
+                format!(
+                    "scenario {:?} reported target {:?}, which is not a configured target ({}); check the suite's target names",
+                    row.scenario,
+                    row.target.as_deref().unwrap_or("-"),
+                    spec.suite
                 )
             } else {
                 format!(
@@ -1186,6 +1189,25 @@ mod tests {
             trust.reason
         );
         assert!(trust.reason.contains("first"));
+    }
+
+    #[test]
+    fn a_row_for_an_unconfigured_or_malformed_target_fails_instead_of_adding_a_column() {
+        for stray in ["PVE-9", "PVE.9", "PVE7"] {
+            let reported = vec![
+                row("trust", Some("PVE9"), Status::Pass, ""),
+                row("trust", Some(stray), Status::Pass, ""),
+            ];
+            let summary = Summary::build(SPEC, true, None, &["PVE9".to_owned()], &reported, true);
+            assert_eq!(summary.targets, vec!["PVE9".to_owned()], "{stray}");
+            let drift = summary
+                .results
+                .iter()
+                .find(|row| row.target.as_deref() == Some(stray))
+                .expect("kept, not dropped");
+            assert_eq!(drift.status, Status::Fail, "{stray}");
+            assert!(drift.reason.contains("not a configured target"), "{stray}");
+        }
     }
 
     #[test]
