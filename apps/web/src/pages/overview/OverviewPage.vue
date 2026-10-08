@@ -69,7 +69,7 @@ const severityLabel = { err: 'error', warn: 'warning', info: 'to do' } as const
       </RouterLink>
     </div>
 
-    <div class="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,420px)]">
+    <div class="mt-6 grid grid-cols-[minmax(0,1fr)] gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,420px)]">
       <section class="space-y-2">
         <h2 class="fc-kicker border-b-2 border-fc-ink pb-1">
           Needs attention <span class="text-fc-faint">{{ attention.length }}</span>
@@ -173,14 +173,17 @@ const severityLabel = { err: 'error', warn: 'warning', info: 'to do' } as const
                 v-if="item.to"
                 :to="item.to"
                 class="block truncate font-mono text-[11px] text-fc-ink hover:underline"
+                :title="item.title"
               >{{ item.title }}</RouterLink>
               <span
                 v-else
                 class="block truncate font-mono text-[11px] text-fc-ink"
+                :title="item.title"
               >{{ item.title }}</span>
               <span
                 v-if="item.detail"
                 class="block truncate text-[11px] text-fc-muted"
+                :title="item.detail"
               >{{ item.detail }}</span>
             </span>
             <span class="shrink-0 font-mono text-[10px] text-fc-faint">{{ relativeTime(item.at) }}</span>
