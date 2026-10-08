@@ -303,6 +303,30 @@ impl Drop for SuiteProcess {
     }
 }
 
+/// Echoes the suite's stdout to stderr and collects its result rows.
+fn collect_results(stdout: std::process::ChildStdout) -> Result<Vec<ResultRow>, String> {
+    let mut reported = Vec::new();
+    let mut stderr = std::io::stderr();
+    let mut reader = BufReader::new(stdout);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) => return Ok(reported),
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buffer);
+                let text = text.trim_end_matches(['\n', '\r']);
+                let _ = writeln!(stderr, "{text}");
+                if let Some(row) = parse_result_line(text) {
+                    reported.push(row);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(format!("reading the suite's output: {error}")),
+        }
+    }
+}
+
 /// Runs the live scenarios and answers their summary. Progress and the
 /// suite's own output go to stderr; the caller prints the JSON on stdout.
 ///
@@ -389,28 +413,10 @@ pub fn run(repo_root: &Path, target: Option<&str>) -> Result<Summary, String> {
     let stdout = child.stdout.take();
     // From here every early return drops `suite`, which kills and reaps it.
     let suite = SuiteProcess { child: Some(child) };
-    let mut reported = Vec::new();
-    if let Some(stdout) = stdout {
-        let mut stderr = std::io::stderr();
-        let mut reader = BufReader::new(stdout);
-        let mut buffer = Vec::new();
-        loop {
-            buffer.clear();
-            match reader.read_until(b'\n', &mut buffer) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let text = String::from_utf8_lossy(&buffer);
-                    let text = text.trim_end_matches(['\n', '\r']);
-                    let _ = writeln!(stderr, "{text}");
-                    if let Some(row) = parse_result_line(text) {
-                        reported.push(row);
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(format!("reading the suite's output: {error}")),
-            }
-        }
-    }
+    let reported = match stdout {
+        Some(stdout) => collect_results(stdout)?,
+        None => Vec::new(),
+    };
     let status = suite
         .wait()
         .map_err(|error| format!("cargo test did not finish: {error}"))?;
