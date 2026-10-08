@@ -120,7 +120,10 @@ impl RecipePort for RecipeRepository {
                 Err("target account does not match the frozen recipe endpoint".to_owned())
             };
         }
-        Ok((matching.len() == 1).then(|| matching[0].clone()))
+        if matching.len() > 1 {
+            return Err(fleet_application::images::TARGET_ACCOUNT_AMBIGUOUS.to_owned());
+        }
+        Ok(matching.into_iter().next())
     }
 
     async fn start_build(&self, record: &ImageBuildRecord) -> Result<(), String> {
@@ -1106,12 +1109,14 @@ mod target_account_tests {
         );
         sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES ('two', 'two', 'pve.example.test', 8006, 'fixture@pve!other', 1)")
             .execute(store.pool()).await.unwrap();
-        assert!(
-            recipes
-                .build_target_account(&version, None)
-                .await
-                .unwrap()
-                .is_none()
+        // Several matches without an explicit choice name the ambiguity.
+        assert_eq!(
+            recipes.build_target_account(&version, None).await,
+            Err(fleet_application::images::TARGET_ACCOUNT_AMBIGUOUS.to_owned())
+        );
+        assert_eq!(
+            recipes.build_target_account(&version, Some("two")).await,
+            Ok(Some("two".to_owned()))
         );
     }
 }

@@ -88,6 +88,10 @@ pub struct NewRecipe {
     pub content: RecipeContent,
 }
 
+/// The error `RecipePort::build_target_account` returns when several accounts
+/// match the recipe's endpoint and none was requested.
+pub const TARGET_ACCOUNT_AMBIGUOUS: &str = "target_account_ambiguous";
+
 /// The recipe storage port.
 #[async_trait]
 pub trait RecipePort: fmt::Debug + Send + Sync {

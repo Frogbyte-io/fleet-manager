@@ -72,7 +72,34 @@ Notes:
 - `proxmox.guest.template` requires `VM.Allocate` on `/vms/{vmid}`. **`VM.Allocate` also lets the token delete that VM.** It also counts as a substitute for `Permissions.Modify` on `/vms/...`, so the token can delegate subsets of its own privileges on that path. This is why the privilege is scoped to a pool and never granted on `/`.
 - `proxmox.task-cancel` needs no privilege for tasks the token started. The cancel review binds the task's UPID to the reviewed guest's node and VMID, but not to the user that started it, so a reviewed UPID can name another principal's task on that guest. PVE stops such a task only with `Sys.Modify` on `/nodes/{node}`; that is the opt-in `proxmox.task-cancel.other-principal` row. This guide does not grant it: `Sys.Modify` on a node also allows changing its network, DNS, time, and services. Without it, cancelling a task Fleet did not start is refused with 403. If you need it anyway, the role blocks define `FleetCancelAnyTask`; grant it on `/nodes/<node>`.
 - `proxmox.guest.destroy` stops a running QEMU guest before deleting it, so the destructive role also needs `VM.PowerMgmt` on `/vms/{vmid}`. `DELETE /nodes/{node}/qemu/{vmid}` needs `VM.Allocate` on `/vms/{vmid}` in both majors, which the destructive and lab roles already contain. Lab clones inherit the template's protection flag, which PVE checks before it deletes a guest. The Lab provision executor therefore clears the flag on each new guest right after its clone lands (`lab.provision.unprotect`, `VM.Config.Options` on `/vms/{newid}` through `FleetLabTarget`; see [step 5](#5-acls)), so cleanup can destroy it. Independently of the protection flag, Fleet's cleanup guard refuses to destroy any VMID that is a template or that matches the recorded build artifact of a promoted image version.
-- Image builds (`image.build`) run Packer, which uses its own credentials. This guide does not cover Packer's token.
+- Image builds (`image.build`) run Packer with the build account's token, not Fleet's tiered roles. [Image builds](#image-builds) lists what the plugin needs. `fleetctl proxmox privileges` does not evaluate it.
+
+## Image builds
+
+Packer's Proxmox plugin calls the PVE API itself, and Fleet's privilege table (FM-604) does not model those calls, so `fleetctl proxmox privileges` cannot check them. Use a separate account for builds. The list below follows the plugin's behavior (`proxmox-clone` and `proxmox-iso`, v1.2.x) and the privileges PVE's [API viewer](https://pve.proxmox.com/pve-docs/api-viewer/) documents for each call. Prove your role with a test build, because a missing privilege shows up only when the plugin reaches that call.
+
+| Plugin step | PVE call | Privileges (on the build VMID unless noted) |
+|---|---|---|
+| Pick a VMID (only when the recipe has no `vm_id`) | `GET /cluster/nextid` | none |
+| Clone the source (`proxmox-clone`) | `POST /nodes/{node}/qemu/{clone_vm_id}/clone` | `VM.Clone` on the source, `VM.Allocate` on the new VMID, `Datastore.AllocateSpace` on the target storage, `SDN.Use` on the bridge |
+| Create the VM (`proxmox-iso`) | `POST /nodes/{node}/qemu` | `VM.Allocate`, `Datastore.AllocateSpace`, `SDN.Use`, and the `VM.Config.*` privileges for the fields the recipe sets (`VM.Config.Disk`, `.CPU`, `.Memory`, `.Network`, `.CDROM`, `.HWType`, `.Options`) |
+| Set the configuration | `POST` or `PUT /nodes/{node}/qemu/{vmid}/config` | the `VM.Config.*` privileges above, plus `VM.Config.Cloudinit` when the recipe sets cloud-init fields |
+| Fetch or attach an ISO | `POST /nodes/{node}/storage/{storage}/download-url` or `/upload` | `Datastore.AllocateTemplate` on the ISO storage |
+| Start, stop, shut down | `POST …/status/start`, `…/stop`, `…/shutdown` | `VM.PowerMgmt` |
+| Type the boot command | `POST …/sendkey`, `…/vncproxy` | `VM.Console` |
+| Read the guest address | `GET …/agent/network-get-interfaces` | `VM.Monitor` on 8.x; `VM.GuestAgent.Audit` on 9.x |
+| Convert to a template | `POST …/template` | `VM.Allocate` |
+| Delete after a failure or cancel | `DELETE …/qemu/{vmid}` | `VM.Allocate` |
+
+Grant them on the build VMIDs and the source template only, for example through a pool that holds the build range. `VM.Allocate` also lets the token delete the VM, so never grant it on `/`. Fleet's Lab roles do not cover these calls, and the build account should not be the Lab account.
+
+### Set `vm_id` in every recipe
+
+A recipe without `vm_id` lets the plugin take the next free VMID from `GET /cluster/nextid`. That is the Lab range (see [VMID ranges](lab.md#vmid-ranges)): the build can take a VMID Fleet granted to Lab guests, and the build account then needs privileges on a range it should not have. Set `vm_id` to a VMID outside the Lab range in every recipe, and grant the build account only that range.
+
+### Several accounts for one endpoint
+
+Fleet picks the build account from the recipe's `proxmox_url`. When more than one account matches, pass `--account` (`fleetctl images build <version-id> --account <id>`). Without it the build is refused with `target_account_ambiguous` before Packer runs.
 
 ## 8.x vs 9.x differences
 

@@ -381,7 +381,13 @@ impl OperationExecutor for ImagesExecutor {
             .versions
             .build_target_account(&version, payload.account_id.as_deref())
             .await;
-        let target_resolution_failed = target_account.is_err();
+        let target_resolution_failed = match &target_account {
+            Ok(_) => None,
+            Err(detail) if detail == fleet_application::images::TARGET_ACCOUNT_AMBIGUOUS => {
+                Some("target_account_ambiguous")
+            }
+            Err(_) => Some("target_account_resolution_failed"),
+        };
         let mut record = ImageBuildRecord {
             id: operation.id.clone(),
             operation_id: operation.id.clone(),
@@ -403,8 +409,8 @@ impl OperationExecutor for ImagesExecutor {
         // No provider invocation is allowed until the immutable input snapshot
         // commits. A duplicate delivery cannot silently overwrite old evidence.
         self.versions.start_build(&record).await?;
-        let result = if target_resolution_failed {
-            Err("target_account_resolution_failed")
+        let result = if let Some(reason) = target_resolution_failed {
+            Err(reason)
         } else if operations
             .get_state(&operation.id)
             .await
