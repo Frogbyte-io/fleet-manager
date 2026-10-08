@@ -10145,7 +10145,7 @@
                   },
                   {
                     "$ref": "#/components/schemas/LeaseReservationDto",
-                    "description": "The capacity Fleet reserved for the lease (FM-715), when it has one.\nAbsent for a pooled lease, which reserves nothing."
+                    "description": "The capacity Fleet reserved for the lease (FM-715), when it has one.\nNull for a lease that reserved nothing, such as a pooled lease."
                   }
                 ]
               },
@@ -10299,7 +10299,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`held` while it counts against the node, `released` afterwards."
+            "description": "The reservation record's state: `held` until it is released."
           },
           "storagePool": {
             "type": "string",
@@ -15285,7 +15285,7 @@
                       },
                       {
                         "$ref": "#/components/schemas/LeaseReservationDto",
-                        "description": "The capacity Fleet reserved for the lease (FM-715), when it has one.\nAbsent for a pooled lease, which reserves nothing."
+                        "description": "The capacity Fleet reserved for the lease (FM-715), when it has one.\nNull for a lease that reserved nothing, such as a pooled lease."
                       }
                     ]
                   },

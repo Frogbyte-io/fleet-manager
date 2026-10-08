@@ -1651,7 +1651,7 @@ export interface LeaseReservationDto {
   memoryBytes: number;
   /** The PVE node the capacity is reserved on. */
   node: string;
-  /** `held` while it counts against the node, `released` afterwards. */
+  /** The reservation record's state: `held` until it is released. */
   state: string;
   /** The storage pool the disk is allocated on. */
   storagePool: string;

@@ -1252,7 +1252,7 @@ pub struct LeaseDetailDto {
     /// Collection never changes the lease or holds up its cleanup.
     pub collection_failure: Option<crate::lab_artifacts::CollectionFailureDto>,
     /// The capacity Fleet reserved for the lease (FM-715), when it has one.
-    /// Absent for a pooled lease, which reserves nothing.
+    /// Null for a lease that reserved nothing, such as a pooled lease.
     pub reservation: Option<LeaseReservationDto>,
 }
 
@@ -1272,7 +1272,7 @@ pub struct LeaseReservationDto {
     pub memory_bytes: u64,
     /// Reserved disk, in bytes.
     pub disk_bytes: u64,
-    /// `held` while it counts against the node, `released` afterwards.
+    /// The reservation record's state: `held` until it is released.
     pub state: String,
 }
 
