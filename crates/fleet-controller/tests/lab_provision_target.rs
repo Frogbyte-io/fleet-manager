@@ -81,6 +81,10 @@ struct CloneConfig {
     stale_puts: usize,
     update_status: Option<u16>,
     cloned: Option<(u32, String)>,
+    /// The settled config answers this name instead of the requested one.
+    foreign_name: Option<String>,
+    /// The settled config carries `template: 1`.
+    as_template: bool,
 }
 
 impl Pve {
@@ -144,6 +148,18 @@ impl Pve {
     /// The token lacks `VM.Audit` on the clone target.
     fn forbidding_config_reads(self: Arc<Self>) -> Arc<Self> {
         self.clone_config.lock().unwrap().forbid_read = true;
+        self
+    }
+
+    /// The settled config names another guest than the one requested.
+    fn named(self: Arc<Self>, name: &str) -> Arc<Self> {
+        self.clone_config.lock().unwrap().foreign_name = Some(name.to_owned());
+        self
+    }
+
+    /// The settled config is a template's.
+    fn as_template(self: Arc<Self>) -> Arc<Self> {
+        self.clone_config.lock().unwrap().as_template = true;
         self
     }
 
@@ -250,6 +266,7 @@ impl Pve {
                 format!(r#"{{"data":{{"lock":"clone","name":"{name}","digest":"0000"}}}}"#),
             );
         }
+        let name = config.foreign_name.clone().unwrap_or(name);
         let mut answer = serde_json::json!({
             "name": name, "cores": 2, "memory": "2048", "digest": "0123abcd",
             "scsi0": format!("local-lvm:vm-{vmid}-disk-0,size=20G"),
@@ -259,6 +276,9 @@ impl Pve {
         }
         if config.no_digest {
             answer.as_object_mut().unwrap().remove("digest");
+        }
+        if config.as_template {
+            answer["template"] = serde_json::json!(1);
         }
         (200, serde_json::json!({ "data": answer }).to_string())
     }
@@ -1788,6 +1808,37 @@ async fn a_refused_unprotect_fails_the_provision_before_the_start() {
     assert_eq!(stored.failed_step.as_deref(), Some("unprotect"));
     assert_eq!(stored.vmid, Some(NEXT_VMID));
     assert_eq!(stored.clone_upid.as_deref(), Some(CLONE_UPID));
+}
+
+#[tokio::test]
+async fn a_settled_config_that_is_not_our_clone_is_never_updated_or_started() {
+    // The mock otherwise echoes the requested clone name, so these cases
+    // prove the identity check runs before the protection update.
+    let harness = Harness::new().await;
+    for pve in [
+        Pve::new(Vec::new()).protected().named("someone-else"),
+        Pve::new(Vec::new()).protected().as_template(),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+
+        assert_eq!(state, "failed");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "conflict", "{detail}");
+        assert!(detail.contains("left unchanged"), "{detail}");
+        assert_eq!(pve.clones().len(), 1, "{:?}", pve.paths());
+        assert!(first(&pve, CLONE_CONFIG).is_some(), "{:?}", pve.paths());
+        assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+        assert!(first(&pve, "/status/start").is_none(), "{:?}", pve.paths());
+        assert_eq!(
+            step_of(&harness, &record.id).await.as_deref(),
+            Some("clone")
+        );
+        assert_eq!(stored.failed_step.as_deref(), Some("clone"));
+        assert_eq!(stored.vmid, Some(NEXT_VMID));
+    }
 }
 
 /// Puts a run's record and lease back to `provisioning`, as if the
