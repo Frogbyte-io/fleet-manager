@@ -72,7 +72,7 @@ Handlers, CLI commands, skill-driven CLI calls, and workers invoke this layer. N
 | Aggregate | Key invariants |
 |---|---|
 | Machine | Stable Fleet ID is distinct from hostname, IP, provider ID, or Tailscale identity; connections and observations may change independently. |
-| Checkout | A project can have at most one tracked checkout at a normalized path on a node; Git remote identity is normalized without embedding credentials. |
+| Checkout | A project can have at most one tracked checkout at a normalized path on a node; Git remote identity is normalized without embedding credentials. The stored identity is not a fetchable address: the `ready.workflow` clone step derives `https://<host[:port]>/<path>` from it (`NormalizedRemote::clone_url`); an scp-style project therefore clones over https, using the node's own git credentials, never a token in the URL. Http-only or ssh-only hosts, and a non-https port, are not supported until the original scheme is stored. |
 | Desired revision | Only a fully parsed and validated immutable revision can be active; invalid fetches do not replace the last valid revision. |
 | Operation | Accepted work has an ID, actor, permission decision, idempotency key, deadline, progress, result, and audit correlation. |
 | Lab lease | Exactly one owner and cleanup policy; a ready TTL, provisioning deadline, and maximum lifetime are independent. |
