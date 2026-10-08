@@ -1008,7 +1008,10 @@ mod live {
                     None,
                 )
                 .await?;
-            if destroyed.success && destroyed.json["state"] == "released" {
+            if destroyed.success
+                && destroyed.json["state"] == "released"
+                && guest_gone(run, &created.json).await.is_ok()
+            {
                 return Err(format!(
                     "the Lab guest {vmid} lay outside the VMID range; Fleet destroyed it"
                 ));
@@ -1017,7 +1020,7 @@ mod live {
             // failed Fleet cleanup is reported as a leak for the operator.
             return Err(format!(
                 "LEAK: the Lab guest {vmid} lies outside the VMID range and Fleet's destroy ended \
-                 {} ({}); remove VMID {vmid} on the host by hand",
+                 {} ({}) without removing it from PVE; remove VMID {vmid} on the host by hand",
                 destroyed.json["state"], destroyed.stderr
             ));
         }
