@@ -321,8 +321,8 @@ impl ProvisionPort for LabRepository {
     }
 
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String> {
-        sqlx::query(
-            "UPDATE lab_provisions SET state = ?2, node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8, machine_id = ?9, endpoint_id = ?10, ready_project_operation_id = ?11, readiness_deadline_at = ?12, failed_step = ?13, account_id = ?14 WHERE id = ?1",
+        let updated = sqlx::query(
+            "UPDATE lab_provisions SET state = ?2, node = ?3, vmid = ?4, clone_upid = ?5, guest_ipv4 = ?6, ready_at = ?7, updated_at = ?8, machine_id = ?9, endpoint_id = ?10, ready_project_operation_id = ?11, readiness_deadline_at = ?12, failed_step = ?13, account_id = ?14 WHERE id = ?1 AND (state != 'never_ready' OR ?2 = 'never_ready')",
         )
         .bind(&record.id)
         .bind(record.state.id())
@@ -341,7 +341,35 @@ impl ProvisionPort for LabRepository {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;
+        // A record that ended `never_ready` stays ended: a saga still
+        // running on a stale copy must stop, not resurrect it (#303).
+        if updated.rows_affected() == 0
+            && <Self as ProvisionPort>::get(self, &record.id)
+                .await
+                .is_ok_and(|stored| stored.state == GuestState::NeverReady)
+        {
+            return Err(format!(
+                "provision {} is never_ready and cannot change",
+                record.id
+            ));
+        }
         Ok(())
+    }
+
+    async fn abandon(&self, id: &str) -> Result<Option<ProvisionRecord>, String> {
+        let result = sqlx::query(
+            "UPDATE lab_provisions SET state = 'never_ready', failed_step = COALESCE(failed_step, 'interrupted'), updated_at = ?2 \
+             WHERE id = ?1 AND state IN ('provisioning', 'provisioned', 'booting', 'bootstrapping')",
+        )
+        .bind(id)
+        .bind(fleet_core::SystemClock::now_unix_millis())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("abandon failed: {error}"))?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        <Self as ProvisionPort>::get(self, id).await.map(Some)
     }
 
     async fn complete_ready(

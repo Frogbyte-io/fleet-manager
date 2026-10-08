@@ -3831,14 +3831,6 @@ impl LabDispatch {
         };
         // Only a record linking back to this lease is its guest.
         let allocated = fleet_application::lab::lease_allocated(&lease, record.as_ref());
-        // The failed provision ends its record too, so a VMID it reserved
-        // is free for later leases (#303).
-        if let Some(mut record) = record.clone()
-            && record.lease_id.as_deref() == Some(lease.id.as_str())
-            && fleet_application::lab::abandon_provision(&mut record)
-        {
-            let _ = provisions.update(&record).await;
-        }
         match fleet_application::lab::provision_compensation(lease.state, allocated) {
             Some(fleet_core::LeaseState::Releasing) => {
                 lease.state = fleet_core::LeaseState::Releasing;
@@ -3861,6 +3853,18 @@ impl LabDispatch {
                 let _ = leases.update(&lease).await;
             }
             None => {}
+        }
+        // The failed provision ends its record too, so a VMID it reserved is
+        // free for later leases (#303). A failure here is not lost: the
+        // sweeper ends any in-flight record of a lease that left the saga.
+        if let Some(record) = &record
+            && fleet_application::lab::provision_to_abandon(&lease, record)
+            && let Err(error) = provisions.abandon(&record.id).await
+        {
+            eprintln!(
+                "ending abandoned provision {} failed (the sweeper retries): {error}",
+                record.id
+            );
         }
     }
 }

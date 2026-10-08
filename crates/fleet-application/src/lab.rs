@@ -223,6 +223,16 @@ pub trait ProvisionPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when unknown or the backend errors.
     async fn update(&self, record: &ProvisionRecord) -> Result<(), String>;
+    /// Ends a still-in-flight record as `never_ready` without touching its
+    /// node, VMID, clone task or other IDs, which cleanup needs: one
+    /// conditional write on the stored state, so it cannot overwrite what
+    /// a running saga committed meanwhile. Returns the record when it
+    /// changed, `None` when it was not in flight (or does not exist).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn abandon(&self, id: &str) -> Result<Option<ProvisionRecord>, String>;
     /// Atomically records provision readiness and, when linked, the lease's
     /// ready state and expiry. This prevents either row from becoming the
     /// sole source of truth after a partial write.
@@ -2233,25 +2243,33 @@ pub fn rearm_cleanup(lease: &mut Lease) {
     lease.cleanup_next_at = None;
 }
 
-/// Ends a provision record whose lease was compensated while the saga was
-/// still in flight (#303): `never_ready`, keeping its node, VMID and clone
-/// task for cleanup. A record left `provisioning` would hold its VMID for
-/// every later lease. Returns whether the record changed.
-pub fn abandon_provision(record: &mut ProvisionRecord) -> bool {
-    if !matches!(
+/// Whether `record`, the record `lease` links to, is still in flight although
+/// the lease left the saga (compensated, failed, released, or in cleanup)
+/// and so must end `never_ready` (#303): a record left `provisioning` would
+/// hold its reserved VMID against every later lease. The two must link to
+/// each other, so a standalone or pooled record, or one another lease owns,
+/// is never touched. [`ProvisionPort::abandon`] performs the transition.
+#[must_use]
+pub fn provision_to_abandon(lease: &Lease, record: &ProvisionRecord) -> bool {
+    let lease_left_saga = !matches!(
+        lease.state,
+        LeaseState::Requested
+            | LeaseState::Provisioning
+            | LeaseState::Booting
+            | LeaseState::Bootstrapping
+            | LeaseState::Ready
+    );
+    let record_in_flight = matches!(
         record.state,
         GuestState::Provisioning
             | GuestState::Provisioned
             | GuestState::Booting
             | GuestState::Bootstrapping
-    ) {
-        return false;
-    }
-    record.state = GuestState::NeverReady;
-    record
-        .failed_step
-        .get_or_insert_with(|| "interrupted".to_owned());
-    true
+    );
+    lease_left_saga
+        && record_in_flight
+        && lease.provision_id.as_deref() == Some(record.id.as_str())
+        && record.lease_id.as_deref() == Some(lease.id.as_str())
 }
 
 /// Where a lease goes after its provision failed or was cancelled: to
@@ -2422,19 +2440,68 @@ mod tests {
     use super::guard_destroy_target;
 
     #[test]
-    fn an_abandoned_provision_ends_never_ready_and_keeps_its_ids() {
-        use fleet_core::GuestState::{NeverReady, Provisioning, Ready};
-        let mut record = record(None, None);
-        record.state = Provisioning;
-        record.vmid = Some(9000);
-        assert!(super::abandon_provision(&mut record));
-        assert_eq!(record.state, NeverReady);
-        assert_eq!(record.vmid, Some(9000));
-        assert_eq!(record.failed_step.as_deref(), Some("interrupted"));
-        // A terminal or ready record is left alone.
-        assert!(!super::abandon_provision(&mut record));
-        record.state = Ready;
-        assert!(!super::abandon_provision(&mut record));
+    fn a_record_in_flight_is_abandoned_only_for_a_lease_that_left_the_saga() {
+        use super::provision_to_abandon;
+        use fleet_core::GuestState::{
+            Booting, Bootstrapping, NeverReady, Provisioned, Provisioning, Ready,
+        };
+        use fleet_core::LeaseState;
+        let lease = |state, link: Option<&str>| fleet_core::Lease {
+            id: "l1".to_owned(),
+            state,
+            provision_id: link.map(str::to_owned),
+            ..fleet_core::Lease::default()
+        };
+        let mut owned = record(Some(9000), Some("l1"));
+        // Every in-flight record state, but no other, is ended.
+        for (state, ends) in [
+            (Provisioning, true),
+            (Provisioned, true),
+            (Booting, true),
+            (Bootstrapping, true),
+            (Ready, false),
+            (NeverReady, false),
+        ] {
+            owned.state = state;
+            let gone = lease(LeaseState::Releasing, Some("r1"));
+            assert_eq!(provision_to_abandon(&gone, &owned), ends, "{state:?}");
+        }
+        // A lease still in the saga, or ready, keeps its record.
+        owned.state = Provisioning;
+        for state in [
+            LeaseState::Requested,
+            LeaseState::Provisioning,
+            LeaseState::Booting,
+            LeaseState::Bootstrapping,
+            LeaseState::Ready,
+        ] {
+            assert!(!provision_to_abandon(&lease(state, Some("r1")), &owned));
+        }
+        // Every state past the saga ends it.
+        for state in [
+            LeaseState::Failed,
+            LeaseState::Releasing,
+            LeaseState::Released,
+            LeaseState::CleanupFailed,
+        ] {
+            assert!(provision_to_abandon(&lease(state, Some("r1")), &owned));
+        }
+        // A record that does not link both ways is not this lease's: a
+        // pooled or standalone record, or one another lease owns.
+        let gone = lease(LeaseState::Released, Some("r1"));
+        assert!(!provision_to_abandon(&gone, &record(Some(9000), None)));
+        assert!(!provision_to_abandon(
+            &gone,
+            &record(Some(9000), Some("l2"))
+        ));
+        assert!(!provision_to_abandon(
+            &lease(LeaseState::Released, Some("r2")),
+            &owned
+        ));
+        assert!(!provision_to_abandon(
+            &lease(LeaseState::Released, None),
+            &owned
+        ));
     }
 
     #[test]

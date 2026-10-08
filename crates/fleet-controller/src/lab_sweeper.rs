@@ -31,8 +31,8 @@ use std::time::Duration;
 use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{Decision, Permission};
 use fleet_application::lab::{
-    Lab, LeasePort, ProvisionPort, abandon_provision, cleanup_due, cleanup_operation, guest_owned,
-    record_cleanup_failure, stuck_compensation,
+    Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned,
+    provision_to_abandon, record_cleanup_failure, stuck_compensation,
 };
 use fleet_application::operation::{AuditPort, Operations};
 
@@ -266,26 +266,6 @@ impl LabSweeper {
                 Ok(true) => {
                     self.changed();
                     report.compensated += 1;
-                    // The record ends with its lease, or it would hold its
-                    // VMID for every later lease (#303).
-                    if let Some(id) = lease.provision_id.as_deref() {
-                        match self.provisions.get(id).await {
-                            Ok(mut record) => {
-                                if abandon_provision(&mut record)
-                                    && let Err(error) = self.provisions.update(&record).await
-                                {
-                                    report.failures.push(format!(
-                                        "ending the provision of lease {}: {error}",
-                                        lease.id
-                                    ));
-                                }
-                            }
-                            Err(error) => report.failures.push(format!(
-                                "reading the provision of lease {}: {error}",
-                                lease.id
-                            )),
-                        }
-                    }
                     // The transition is committed; a refused audit is
                     // reported rather than hidden.
                     if let Err(error) = self
@@ -308,6 +288,29 @@ impl LabSweeper {
                 Err(error) => report
                     .failures
                     .push(format!("compensating lease {}: {error}", lease.id)),
+            }
+        }
+
+        // 2b. Records left in flight by a lease that left the saga (the
+        // compensation above, the executor's own, or a crash between a
+        // lease change and its record) end `never_ready`, so a VMID they
+        // reserved is free for later leases (#303). Re-listed after step 2
+        // and idempotent, so a failure here is retried on the next tick.
+        let records = self.provisions.list().await?;
+        for lease in self.leases.list(None).await? {
+            let Some(record) = records
+                .iter()
+                .find(|record| provision_to_abandon(&lease, record))
+            else {
+                continue;
+            };
+            match self.provisions.abandon(&record.id).await {
+                Ok(Some(_)) => self.changed(),
+                Ok(None) => {}
+                Err(error) => report.failures.push(format!(
+                    "ending the provision of lease {}: {error}",
+                    lease.id
+                )),
             }
         }
 

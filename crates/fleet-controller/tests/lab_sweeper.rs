@@ -563,3 +563,186 @@ async fn an_orphan_whose_audit_was_refused_is_reported_on_the_next_tick() {
     // Then reported once, as before.
     assert!(sweeper.tick(NOW + 2).await.unwrap().orphans.is_empty());
 }
+
+/// A record's stored state, VMID and failure step.
+async fn stored(harness: &Harness, record_id: &str) -> fleet_application::lab::ProvisionRecord {
+    ProvisionPort::get(harness.labs.as_ref(), record_id)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_record_left_in_flight_by_a_finished_lease_ends_and_frees_its_vmid() {
+    use fleet_application::lab::CloneTargetReservation;
+    use fleet_core::GuestState;
+    // Every in-flight state, behind a lease the sweeper (or a crash after
+    // the lease change) left released: the record ends, keeping its IDs.
+    for state in [
+        GuestState::Provisioning,
+        GuestState::Provisioned,
+        GuestState::Booting,
+        GuestState::Bootstrapping,
+    ] {
+        let harness = Harness::new().await;
+        let (lease, record_id) = harness.lease(LeaseState::Released, Some(9000)).await;
+        let mut record = stored(&harness, &record_id).await;
+        record.state = state;
+        ProvisionPort::update(harness.labs.as_ref(), &record)
+            .await
+            .unwrap();
+
+        harness.sweeper().tick(NOW).await.unwrap();
+        let ended = stored(&harness, &record_id).await;
+        assert_eq!(ended.state, GuestState::NeverReady, "{state:?}");
+        assert_eq!(ended.vmid, Some(9000));
+        assert_eq!(ended.node.as_deref(), Some("pve-b"));
+        assert_eq!(harness.cleanups(&lease).await, 0);
+
+        // The VMID is free for another record.
+        let other = ProvisionPort::create(
+            harness.labs.as_ref(),
+            &NewProvision {
+                template_version_id: harness.version_id.clone(),
+                lease_id: None,
+                idempotency_key: None,
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+        let reservation =
+            ProvisionPort::reserve_clone_target(harness.labs.as_ref(), &other.id, "pve-b", 9000)
+                .await
+                .unwrap();
+        assert!(
+            matches!(reservation, CloneTargetReservation::Reserved(_)),
+            "{state:?}: {reservation:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_ready_record_and_a_record_another_owner_holds_are_left_alone() {
+    use fleet_core::GuestState;
+    let harness = Harness::new().await;
+    // A ready record behind a released (kept) lease.
+    let (_, ready_id) = harness.lease(LeaseState::Released, Some(9001)).await;
+    let mut ready = stored(&harness, &ready_id).await;
+    ready.state = GuestState::Ready;
+    ready.ready_at = Some(NOW);
+    ProvisionPort::update(harness.labs.as_ref(), &ready)
+        .await
+        .unwrap();
+    // A pooled (unleased) record, in flight with a VMID.
+    let mut pooled = ProvisionPort::create(
+        harness.labs.as_ref(),
+        &NewProvision {
+            template_version_id: harness.version_id.clone(),
+            lease_id: None,
+            idempotency_key: None,
+        },
+        NOW,
+    )
+    .await
+    .unwrap();
+    pooled.vmid = Some(9002);
+    pooled.node = Some("pve-b".to_owned());
+    ProvisionPort::update(harness.labs.as_ref(), &pooled)
+        .await
+        .unwrap();
+    // A lease linking to a record another lease owns.
+    let (mismatched, _) = harness.lease(LeaseState::Released, None).await;
+    let (_, foreign_id) = harness.lease(LeaseState::Provisioning, Some(9003)).await;
+    harness
+        .leases
+        .attach_provision(&mismatched, &foreign_id)
+        .await
+        .ok();
+
+    harness.sweeper().tick(NOW).await.unwrap();
+    assert_eq!(stored(&harness, &ready_id).await.state, GuestState::Ready);
+    assert_eq!(
+        stored(&harness, &pooled.id).await.state,
+        GuestState::Provisioning
+    );
+    assert_eq!(
+        stored(&harness, &foreign_id).await.state,
+        GuestState::Provisioning
+    );
+}
+
+#[tokio::test]
+async fn a_failed_record_write_is_reported_and_retried_on_the_next_tick() {
+    use fleet_core::GuestState;
+    let harness = Harness::new().await;
+    let (_, record_id) = harness.lease(LeaseState::Released, Some(9000)).await;
+    sqlx::query(
+        "CREATE TRIGGER refuse_provision_writes BEFORE UPDATE ON lab_provisions \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    )
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    let report = harness.sweeper().tick(NOW).await.unwrap();
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert_eq!(
+        stored(&harness, &record_id).await.state,
+        GuestState::Provisioning
+    );
+
+    sqlx::query("DROP TRIGGER refuse_provision_writes")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    let report = harness.sweeper().tick(NOW).await.unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(
+        stored(&harness, &record_id).await.state,
+        GuestState::NeverReady
+    );
+}
+
+#[tokio::test]
+async fn an_ended_record_refuses_a_stale_saga_write_and_keeps_what_it_holds() {
+    use fleet_core::GuestState;
+    let harness = Harness::new().await;
+    let (_, record_id) = harness.lease(LeaseState::Released, None).await;
+    // The sweeper's view had no reservation; the executor then reserved a
+    // target and cloned, while the sweeper's abandon landed in between.
+    let stale = stored(&harness, &record_id).await;
+    let mut reserving = stale.clone();
+    reserving.node = Some("pve-b".to_owned());
+    reserving.vmid = Some(9000);
+    ProvisionPort::update(harness.labs.as_ref(), &reserving)
+        .await
+        .unwrap();
+    let ended = ProvisionPort::abandon(harness.labs.as_ref(), &record_id)
+        .await
+        .unwrap()
+        .expect("an in-flight record ends");
+    // The conditional write kept what the saga committed.
+    assert_eq!(
+        (ended.state, ended.vmid),
+        (GuestState::NeverReady, Some(9000))
+    );
+    // Ending again is a no-op, and a saga holding an in-flight copy cannot
+    // write over it (it would resurrect or erase the record).
+    assert!(
+        ProvisionPort::abandon(harness.labs.as_ref(), &record_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut resurrect = reserving.clone();
+    resurrect.clone_upid = Some("UPID:x".to_owned());
+    assert!(
+        ProvisionPort::update(harness.labs.as_ref(), &resurrect)
+            .await
+            .is_err()
+    );
+    let after = stored(&harness, &record_id).await;
+    assert_eq!(
+        (after.state, after.vmid, after.clone_upid),
+        (GuestState::NeverReady, Some(9000), None)
+    );
+}

@@ -239,6 +239,27 @@ impl ProvisionPort for FakeProvisions {
         Ok(())
     }
 
+    async fn abandon(
+        &self,
+        id: &str,
+    ) -> Result<Option<fleet_application::lab::ProvisionRecord>, String> {
+        let mut records = self.records.lock().unwrap();
+        let Some(stored) = records.iter_mut().find(|stored| stored.id == id) else {
+            return Ok(None);
+        };
+        if !matches!(
+            stored.state,
+            fleet_core::GuestState::Provisioning
+                | fleet_core::GuestState::Provisioned
+                | fleet_core::GuestState::Booting
+                | fleet_core::GuestState::Bootstrapping
+        ) {
+            return Ok(None);
+        }
+        stored.state = fleet_core::GuestState::NeverReady;
+        Ok(Some(stored.clone()))
+    }
+
     async fn complete_ready(
         &self,
         record: &fleet_application::lab::ProvisionRecord,
