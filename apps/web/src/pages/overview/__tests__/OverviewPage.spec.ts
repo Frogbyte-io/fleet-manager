@@ -246,4 +246,19 @@ describe('Overview figures and activity', () => {
     const feed = wrapper.get('[data-testid="activity"]').text()
     expect(feed.indexOf('image.build')).toBeLessThan(feed.indexOf('machines.create'))
   })
+
+  it('keeps long unbroken activity tokens inside the page (truncated, full text in the title)', async () => {
+    const long = 'example.invalid/acme/a-very-long-repository-name-with-no-breaks-at-all-0123456789'
+    listMachines.mockResolvedValue(ok(page([])))
+    listOperations.mockResolvedValue(ok(page([])))
+    listAuditEvents.mockResolvedValue(ok(page([{ id: 'a1', seq: 1, occurredAt: NOW - 5000, action: 'projects.create', actor: 'me', resource: long, allowed: true, outcome: 'succeeded', reason: 'ok', metadata: {} }])))
+    const wrapper = await mountPage()
+    const row = wrapper.get('[data-testid="activity"] li')
+    const truncated = row.findAll('.truncate')
+    expect(truncated.length).toBeGreaterThan(0)
+    for (const el of truncated) expect(el.attributes('title')).toBe(el.text())
+    // Below xl the two-column grid must be a single minmax(0,1fr) track, or one long token widens the page.
+    const grid = wrapper.get('[data-testid="activity"]').element.closest('.grid')
+    expect(grid?.className).toContain('grid-cols-[minmax(0,1fr)]')
+  })
 })
