@@ -709,8 +709,8 @@ impl LabArtifacts {
             match inserted {
                 Ok(artifact) => artifact,
                 Err(detail) => {
-                    self.release_unreferenced(&location).await;
-                    return Err(backend(detail));
+                    let cleanup = self.release_unreferenced(&location).await;
+                    return Err(backend(format!("{detail}{cleanup}")));
                 }
             }
         };
@@ -775,10 +775,13 @@ impl LabArtifacts {
                     retain_until: self.policy.retain_until(now),
                 })
                 .await;
-            if inserted.is_err() {
-                self.release_unreferenced(&location).await;
+            match inserted {
+                Ok(artifact) => Ok(artifact),
+                Err(detail) => {
+                    let cleanup = self.release_unreferenced(&location).await;
+                    Err(backend(format!("{detail}{cleanup}")))
+                }
             }
-            inserted.map_err(backend)
         }
         .await;
         if recorded.is_err() {
@@ -822,10 +825,7 @@ impl LabArtifacts {
             detail: detail.chars().take(MAX_FAILURE_DETAIL_CHARS).collect(),
             failed_at: now,
         };
-        self.artifacts
-            .record_collection_failure(&failure)
-            .await
-            .map_err(backend)?;
+        // The audit intent precedes the mutation.
         self.audit_event(
             principal,
             lease_id,
@@ -836,6 +836,10 @@ impl LabArtifacts {
             ],
         )
         .await?;
+        self.artifacts
+            .record_collection_failure(&failure)
+            .await
+            .map_err(backend)?;
         Ok(failure)
     }
 
@@ -915,11 +919,21 @@ impl LabArtifacts {
     }
 
     /// Removes committed bytes that no artifact references, after their
-    /// metadata insert failed; the caller holds the blob lock. A failure is
-    /// logged-only: the bytes were never servable.
-    async fn release_unreferenced(&self, location: &str) {
-        if matches!(self.artifacts.location_references(location).await, Ok(0)) {
-            let _ = self.blobs.remove(location).await;
+    /// metadata insert failed; the caller holds the blob lock. Answers a
+    /// suffix for the caller's error naming any cleanup that failed, so the
+    /// leftover bytes (never servable) are visible to the operator.
+    async fn release_unreferenced(&self, location: &str) -> String {
+        match self.artifacts.location_references(location).await {
+            Ok(0) => match self.blobs.remove(location).await {
+                Ok(()) => String::new(),
+                Err(error) => {
+                    format!("; its unreferenced bytes at {location} were not removed: {error}")
+                }
+            },
+            Ok(_) => String::new(),
+            Err(error) => format!(
+                "; whether the bytes at {location} are still referenced is unknown: {error}"
+            ),
         }
     }
 

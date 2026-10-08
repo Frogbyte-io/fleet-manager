@@ -80,6 +80,13 @@ pub fn fetch_file(
     deadline: Duration,
     sink: &mut (dyn Write + Send),
 ) -> Result<FetchOutcome, SshProviderError> {
+    // The remote script compares and adds in Bash's signed 64-bit
+    // arithmetic; a larger cap would wrap.
+    if max_bytes >= i64::MAX as u64 {
+        return Err(SshProviderError::Setup {
+            detail: format!("the copy cap {max_bytes} exceeds the supported range"),
+        });
+    }
     if !limiter.acquire() {
         return Err(SshProviderError::Tool {
             tool: "ssh",
@@ -155,6 +162,10 @@ fn fetch_inner(
         let mut killed = false;
         let status = loop {
             if started.elapsed() >= deadline {
+                // A session that already finished is not a deadline kill.
+                if let Ok(Some(status)) = child.try_wait() {
+                    break Some(status);
+                }
                 killed = true;
                 let _ = child.kill();
                 break child.wait().ok();
@@ -189,7 +200,16 @@ fn fetch_inner(
         tool: "ssh",
         detail: format!("cannot store the copied bytes: {error}"),
     })?;
-    let code = status.and_then(|status| status.code());
+    outcome_for(status.and_then(|status| status.code()), bytes, &stderr)
+}
+
+/// Maps the remote script's exit code (see [`FETCH_SCRIPT`]) to an outcome;
+/// 255 is `ssh`'s own connection failure.
+fn outcome_for(
+    code: Option<i32>,
+    bytes: u64,
+    stderr: &[u8],
+) -> Result<FetchOutcome, SshProviderError> {
     Ok(match code {
         Some(0) => FetchOutcome::Fetched { bytes },
         Some(65) => FetchOutcome::NotAFile,
@@ -198,7 +218,7 @@ fn fetch_inner(
         Some(68) => FetchOutcome::TooLarge,
         Some(255) => {
             return Err(SshProviderError::Connect {
-                detail: crate::redact_failure(&String::from_utf8_lossy(&stderr)),
+                detail: crate::redact_failure(&String::from_utf8_lossy(stderr)),
             });
         }
         other => FetchOutcome::Failed { exit_code: other },

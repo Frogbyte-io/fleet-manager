@@ -599,6 +599,18 @@ fn the_lab_artifact_settings_default_layer_and_refuse_zero() {
     assert_eq!(overridden.lab_artifact_retention_seconds, 60);
     assert_eq!(overridden.lab_artifact_max_bytes, 2048);
 
+    // The file layer refuses zero too.
+    for key in ["lab_artifact_retention_seconds", "lab_artifact_max_bytes"] {
+        let zero = write_config(dir.path(), &format!("{VALID_FILE}{key} = 0\n"));
+        assert!(
+            matches!(
+                fleet_config::load(Some(&zero), &none_env),
+                Err(fleet_config::ConfigError::LabArtifactSettingInvalid { .. })
+            ),
+            "{key} = 0 was accepted"
+        );
+    }
+
     for (var, value) in [
         (fleet_config::LAB_ARTIFACT_RETENTION_VAR, "0"),
         (fleet_config::LAB_ARTIFACT_MAX_BYTES_VAR, "0"),

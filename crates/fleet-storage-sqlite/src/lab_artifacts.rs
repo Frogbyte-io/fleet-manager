@@ -148,7 +148,8 @@ impl LabArtifactPort for LabArtifactRepository {
             "INSERT INTO lab_artifact_collection_failures (lease_id, operation_id, reason, detail, failed_at) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT (lease_id) DO UPDATE SET operation_id = excluded.operation_id, \
-             reason = excluded.reason, detail = excluded.detail, failed_at = excluded.failed_at",
+             reason = excluded.reason, detail = excluded.detail, failed_at = excluded.failed_at \
+             WHERE excluded.failed_at >= lab_artifact_collection_failures.failed_at",
         )
         .bind(&failure.lease_id)
         .bind(&failure.operation_id)

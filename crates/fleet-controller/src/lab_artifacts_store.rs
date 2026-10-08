@@ -41,7 +41,7 @@ const STAGING_DIR: &str = "tmp";
 const BLOB_DIR: &str = "sha256";
 
 /// The content-addressed artifact byte store over one directory.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FsArtifactStore {
     root: PathBuf,
     max_bytes: u64,
@@ -214,13 +214,15 @@ impl FsArtifactStore {
             });
         }
         let source = self.staged_path(&staged.token)?;
-        let size = std::fs::metadata(&source)
-            .map_err(|_| BlobError::Missing)?
-            .len();
-        if size != staged.size_bytes {
+        // The staged bytes must still be what was hashed, or the metadata
+        // would reference unusable bytes.
+        if let Err(error) = verify_blob(&source, &staged.sha256, staged.size_bytes) {
             let _ = std::fs::remove_file(&source);
-            return Err(BlobError::Corrupt {
-                detail: "the staged size changed before its commit".to_owned(),
+            return Err(match error {
+                BlobError::Corrupt { detail } => BlobError::Corrupt {
+                    detail: format!("the staged bytes changed before their commit: {detail}"),
+                },
+                other => other,
             });
         }
         let location = Self::location_for(&staged.sha256);
@@ -299,12 +301,19 @@ fn verify_blob(path: &Path, sha256: &str, size_bytes: u64) -> Result<std::fs::Fi
 #[async_trait]
 impl ArtifactBlobPort for FsArtifactStore {
     async fn put(&self, bytes: &[u8]) -> Result<StoredBlob, BlobError> {
-        // Exec logs are a few kilobytes; larger puts stay bounded by the cap.
-        self.put_blocking(bytes)
+        let store = self.clone();
+        let bytes = bytes.to_vec();
+        tokio::task::spawn_blocking(move || store.put_blocking(&bytes))
+            .await
+            .map_err(|error| BlobError::Io(format!("the store thread failed: {error}")))?
     }
 
     async fn commit(&self, staged: &StagedBlob) -> Result<StoredBlob, BlobError> {
-        self.commit_blocking(staged)
+        let store = self.clone();
+        let staged = staged.clone();
+        tokio::task::spawn_blocking(move || store.commit_blocking(&staged))
+            .await
+            .map_err(|error| BlobError::Io(format!("the store thread failed: {error}")))?
     }
 
     async fn discard(&self, staged: &StagedBlob) {

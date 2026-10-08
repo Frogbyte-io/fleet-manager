@@ -6373,6 +6373,13 @@ fn write_verified(
             "the downloaded bytes ({size} bytes, sha256 {actual}) do not match the artifact ({expected_size} bytes, sha256 {expected}); nothing was written to {out}"
         )));
     }
+    // `rename` replaces an existing file on Unix; Windows needs it removed
+    // first for the same overwrite behaviour.
+    #[cfg(windows)]
+    if target.is_file() {
+        std::fs::remove_file(target)
+            .map_err(|error| fail(format!("cannot replace {out}: {error}")))?;
+    }
     std::fs::rename(&partial, target)
         .map_err(|error| fail(format!("cannot move the download to {out}: {error}")))?;
     Ok((size, actual))

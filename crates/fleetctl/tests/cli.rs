@@ -3727,8 +3727,10 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
             listener,
             router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         );
-        std::mem::forget((dist, store));
+        // The server task owns the web dist and the store for as long as it
+        // serves; the runtime ends with the test.
         tokio::spawn(async move {
+            let _keep = (dist, store);
             let _ = server.await;
         });
         (

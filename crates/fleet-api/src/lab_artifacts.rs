@@ -168,7 +168,10 @@ pub struct CollectArtifactsRequest {
     path = "/lab/leases/{leaseId}/artifacts/collect",
     tag = "lab",
     operation_id = "collectLabArtifacts",
-    params(("leaseId" = String, Path, description = "The lease's identity.")),
+    params(
+        ("leaseId" = String, Path, description = "The lease's identity."),
+        ("Idempotency-Key" = Option<String>, Header, description = "A caller-chosen key: a retry with the same key, while the lease can still be collected from, returns the operation already queued."),
+    ),
     request_body = CollectArtifactsRequest,
     responses(
         (status = 202, description = "The copy is queued as a `lab.collect` operation; its result lists the stored artifacts.", body = Resource<crate::operations::OperationDto>),
