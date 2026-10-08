@@ -62,7 +62,7 @@ pvesh set /cluster/options --next-id lower=9000,upper=9010   # 9000 to 9009
 
 - `upper` is exclusive. The range applies to every automatic VMID choice in the cluster, including the web UI.
 - The range size is the hard limit on concurrent Lab guests today. When it is full, provisioning fails with "unable to get any free VMID in range" and clones nothing.
-- Give image builds their own VMIDs, outside the Lab range. Set `vm_id` in every recipe, outside the Lab range. Without it, the plugin asks PVE for the next free VMID, which comes from the Lab range ([token guide](proxmox-token.md#set-vm_id-in-every-recipe)).
+- Give image builds their own VMIDs. Set `vm_id` in every recipe, outside the Lab range. Without it, the plugin asks PVE for the next free VMID, which comes from the Lab range ([token guide](proxmox-token.md#set-vm_id-in-every-recipe)).
 
 ### Storage and network
 

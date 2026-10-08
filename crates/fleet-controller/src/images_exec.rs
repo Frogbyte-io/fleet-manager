@@ -2209,6 +2209,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn several_matching_accounts_without_a_choice_name_the_ambiguity() {
+        let (dir, store, repository, operations, operation, transport) = setup(
+            CONTENT,
+            serde_json::json!({"accountId": null}),
+            Vec::new(),
+            false,
+        )
+        .await;
+        for id in ["one", "two"] {
+            sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES (?1, ?1, 'pve.example.test', 8006, 'fixture@pve!builder', 1)")
+                .bind(id)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        let executor =
+            ImagesExecutor::new(repository.clone(), transport, None, dir.path().join("work"));
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.reason.as_deref(), Some("target_account_ambiguous"));
+    }
+
+    #[tokio::test]
     async fn a_stored_recipe_that_escapes_the_allowlist_is_refused_before_any_secret() {
         // A version published before the #313 gate existed carries recipe
         // content that reads the controller environment or escapes the

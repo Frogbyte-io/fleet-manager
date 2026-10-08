@@ -76,14 +76,15 @@ Notes:
 
 ## Image builds
 
-Packer's Proxmox plugin calls the PVE API itself, and Fleet's privilege table (FM-604) does not model those calls, so `fleetctl proxmox privileges` cannot check them. Use a separate account for builds. The list below follows the plugin's behavior (`proxmox-clone` and `proxmox-iso`, v1.2.x) and the privileges PVE's [API viewer](https://pve.proxmox.com/pve-docs/api-viewer/) documents for each call. Prove your role with a test build, because a missing privilege shows up only when the plugin reaches that call.
+Packer's Proxmox plugin calls the PVE API itself, and Fleet's privilege table (FM-604) does not model those calls, so `fleetctl proxmox privileges` cannot check them. Use a separate account for builds. The list below follows the plugin's behavior (`proxmox-clone` and `proxmox-iso`, v1.2.x) and the privileges PVE's [API viewer](https://pve.proxmox.com/pve-docs/api-viewer/) documents for each call; it was not proven against a live host for every recipe option, and PVE 8.x and 9.x differ in the guest-agent privilege. Prove your role with a test build, because a missing privilege shows up only when the plugin reaches that call.
 
 | Plugin step | PVE call | Privileges (on the build VMID unless noted) |
 |---|---|---|
 | Pick a VMID (only when the recipe has no `vm_id`) | `GET /cluster/nextid` | none |
-| Clone the source (`proxmox-clone`) | `POST /nodes/{node}/qemu/{clone_vm_id}/clone` | `VM.Clone` on the source, `VM.Allocate` on the new VMID, `Datastore.AllocateSpace` on the target storage, `SDN.Use` on the bridge |
+| Look up VMs and read state | `GET /cluster/resources`, `GET …/status/current`, `GET …/config` | `VM.Audit` on the build VMID and the source template, `Datastore.Audit` on the storage the recipe names |
+| Clone the source (`proxmox-clone`) | `POST /nodes/{node}/qemu/{clone_vm_id}/clone` | `VM.Clone` on the source, `VM.Allocate` on the new VMID, `Datastore.AllocateSpace` on the target storage, and `Pool.Allocate` on the pool when the recipe sets `pool` |
 | Create the VM (`proxmox-iso`) | `POST /nodes/{node}/qemu` | `VM.Allocate`, `Datastore.AllocateSpace`, `SDN.Use`, and the `VM.Config.*` privileges for the fields the recipe sets (`VM.Config.Disk`, `.CPU`, `.Memory`, `.Network`, `.CDROM`, `.HWType`, `.Options`) |
-| Set the configuration | `POST` or `PUT /nodes/{node}/qemu/{vmid}/config` | the `VM.Config.*` privileges above, plus `VM.Config.Cloudinit` when the recipe sets cloud-init fields |
+| Set the configuration | `POST` or `PUT /nodes/{node}/qemu/{vmid}/config` | the `VM.Config.*` privileges above, `SDN.Use` on `/sdn/zones/{zone}/{bridge}` for the NIC's bridge, and `VM.Config.Cloudinit` when the recipe sets cloud-init fields |
 | Fetch or attach an ISO | `POST /nodes/{node}/storage/{storage}/download-url` or `/upload` | `Datastore.AllocateTemplate` on the ISO storage |
 | Start, stop, shut down | `POST …/status/start`, `…/stop`, `…/shutdown` | `VM.PowerMgmt` |
 | Type the boot command | `POST …/sendkey`, `…/vncproxy` | `VM.Console` |
