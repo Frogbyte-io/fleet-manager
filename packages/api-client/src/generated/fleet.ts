@@ -3010,6 +3010,12 @@ export interface StructuredRecipeDto {
  * One published recipe version.
  */
 export type PageRecipeVersionDtoItemsItem = {
+  /**
+     * Whether the version was published with the audited opt-in that lets
+     * it build with `insecure_skip_tls_verify` (#284). False for every
+     * version published before the opt-in existed.
+     */
+  allowInsecureTls: boolean;
   /** The frozen content. */
   content: string;
   /** The frozen content digest. */
@@ -3588,6 +3594,21 @@ export interface ProxmoxTaskPage {
 }
 
 /**
+ * The optional publish request (#284). An absent or empty body publishes
+ * with every option off, as before the body existed.
+ */
+export interface PublishRecipeRequest {
+  /**
+     * Lets the version build with `insecure_skip_tls_verify`. Without it,
+     * a build of a recipe that skips TLS verification is refused, and
+     * every other build pins the account's confirmed certificate for
+     * Packer. Refused for a recipe that does not skip verification. The
+     * opt-in is audited and part of the version digest.
+     */
+  allowInsecureTls?: boolean;
+}
+
+/**
  * How the workflow's endpoint authenticates.
  */
 export type ReadyAuthDto = {
@@ -3668,6 +3689,12 @@ export interface RecipeDto {
  * One published recipe version.
  */
 export interface RecipeVersionDto {
+  /**
+     * Whether the version was published with the audited opt-in that lets
+     * it build with `insecure_skip_tls_verify` (#284). False for every
+     * version published before the opt-in existed.
+     */
+  allowInsecureTls: boolean;
   /** The frozen content. */
   content: string;
   /** The frozen content digest. */
@@ -4997,6 +5024,12 @@ export interface ResourceRecipeDto {
  * One published recipe version.
  */
 export type ResourceRecipeVersionDtoData = {
+  /**
+     * Whether the version was published with the audited opt-in that lets
+     * it build with `insecure_skip_tls_verify` (#284). False for every
+     * version published before the opt-in existed.
+     */
+  allowInsecureTls: boolean;
   /** The frozen content. */
   content: string;
   /** The frozen content digest. */
@@ -7204,6 +7237,11 @@ export type publishImageRecipeResponse201 = {
   status: 201
 }
 
+export type publishImageRecipeResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type publishImageRecipeResponse404 = {
   data: ApiError
   status: 404
@@ -7212,7 +7250,7 @@ export type publishImageRecipeResponse404 = {
 export type publishImageRecipeResponseSuccess = (publishImageRecipeResponse201) & {
   headers: Headers;
 };
-export type publishImageRecipeResponseError = (publishImageRecipeResponse404) & {
+export type publishImageRecipeResponseError = (publishImageRecipeResponse400 | publishImageRecipeResponse404) & {
   headers: Headers;
 };
 
@@ -7229,18 +7267,26 @@ export const getPublishImageRecipeUrl = (recipeId: string,) => {
 /**
  * # Errors
  *
- * Returns the public error envelope on refusal or an unknown recipe.
+ * Returns the public error envelope on refusal, a malformed body, or an
+ * unknown recipe.
  * @summary Publishes a draft: freezes an immutable version identified by its
 content digest. Idempotent by construction.
  */
-export const publishImageRecipe = async (recipeId: string, options?: RequestInit): Promise<publishImageRecipeResponse> => {
+export const publishImageRecipe = async (recipeId: string,
+    nullPublishRecipeRequest?: null | PublishRecipeRequest, options?: RequestInit): Promise<publishImageRecipeResponse> => {
 
-  const res = await fetch(getPublishImageRecipeUrl(recipeId),
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPublishImageRecipeUrl(recipeId),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(nullPublishRecipeRequest)
   }
 )
 

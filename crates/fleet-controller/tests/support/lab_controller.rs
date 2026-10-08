@@ -203,6 +203,7 @@ impl ImagePinValidator for Promoted {
                 promoted_at: Some(0),
                 promoted_by: Some(PRINCIPAL.to_owned()),
                 promoted_build_id: Some("build-1".to_owned()),
+                allow_insecure_tls: false,
             }),
         )
     }

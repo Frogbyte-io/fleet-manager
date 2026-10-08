@@ -12,6 +12,24 @@
 //! probes both pinned versions, and completes the build on every terminal
 //! executor path. A kill or cancellation cannot prove remote cleanup; its
 //! reason code preserves that uncertainty without retaining provider output.
+//!
+//! #284 pins the account's confirmed certificate for Packer. The Proxmox
+//! plugin verifies TLS against Go's system root pool, which on Linux is
+//! exactly `SSL_CERT_FILE` plus the directories in `SSL_CERT_DIR`. Each
+//! build captures the host's leaf without credentials and refuses it unless
+//! its SHA-256 equals the confirmed pin. A build that verifies TLS (every
+//! version without the audited `allowInsecureTls` opt-in) also requires the
+//! leaf to name the account host, and hands the validate/build children
+//! that one leaf as their only root (an empty `SSL_CERT_DIR` keeps the
+//! system directories out). Go accepts a leaf that is itself in the pool as
+//! a chain of one, still checking the host name, validity, and key usage.
+//! Any other certificate fails the handshake before a request is sent, so
+//! the token is never sent to it. The pin constrains Go TLS clients that
+//! honor these variables (Packer and its Proxmox plugin); other TLS stacks
+//! in a subprocess are not covered, and HTTPS downloads by Packer itself
+//! (an `iso_url` fetched on the controller) are unsupported under the pin.
+//! An opted-in build gets only the check-time pin: Packer then skips
+//! verification itself.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,7 +84,15 @@ pub struct ImagesExecutor {
     work_root: PathBuf,
     accounts: Option<Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>>,
     credentials: Option<Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>>,
+    certificates: Option<Arc<dyn fleet_provider_proxmox::PveTransport>>,
 }
+
+/// The work-directory entries that carry the pinned trust to Packer.
+const TLS_DIR: &str = "tls";
+/// The pinned leaf, PEM-encoded: `SSL_CERT_FILE`.
+const PINNED_CERT_FILE: &str = "pinned.pem";
+/// An empty directory: `SSL_CERT_DIR`, so Go loads no system directory.
+const EMPTY_CERT_DIR: &str = "roots.d";
 
 impl ImagesExecutor {
     /// Composes the executor from its parts.
@@ -84,21 +110,26 @@ impl ImagesExecutor {
             work_root,
             accounts: None,
             credentials: None,
+            certificates: None,
         }
     }
 
     /// Hands each build its target account's token (#272): resolved just in
     /// time, behind the account's explicit-trust gate, into Packer's child
-    /// environment only. Without this the CLI inherits the controller's
-    /// environment, as before.
+    /// environment only, together with the account's pinned certificate as
+    /// the child's only TLS root (#284). `certificates` captures the host's
+    /// leaf without credentials for the pin check. Without this the CLI
+    /// inherits the controller's environment, as before.
     #[must_use]
     pub fn with_account_credentials(
         mut self,
         accounts: Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>,
         credentials: Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>,
+        certificates: Arc<dyn fleet_provider_proxmox::PveTransport>,
     ) -> Self {
         self.accounts = Some(accounts);
         self.credentials = Some(credentials);
+        self.certificates = Some(certificates);
         self
     }
 
@@ -112,10 +143,20 @@ impl ImagesExecutor {
         }
     }
 
-    /// The Proxmox plugin's credentials for the build's account. A token is
-    /// never handed out for an account whose host trust is unconfirmed.
-    async fn account_env(&self, account_id: Option<&str>) -> Result<SecretEnv, &'static str> {
-        let (Some(accounts), Some(credentials)) = (&self.accounts, &self.credentials) else {
+    /// The Proxmox plugin's environment for the build's account: its
+    /// token and, unless the version opted into skipping verification, its
+    /// pinned certificate as the only TLS root. A token is never handed out
+    /// for an account whose host trust is unconfirmed, or whose host now
+    /// presents a certificate other than the confirmed one.
+    async fn account_env(
+        &self,
+        account_id: Option<&str>,
+        work_dir: &std::path::Path,
+        insecure_tls: bool,
+    ) -> Result<SecretEnv, &'static str> {
+        let (Some(accounts), Some(credentials), Some(certificates)) =
+            (&self.accounts, &self.credentials, &self.certificates)
+        else {
             return Ok(SecretEnv::default());
         };
         let account_id = account_id.ok_or("target_account_missing")?;
@@ -123,15 +164,50 @@ impl ImagesExecutor {
             .get(account_id)
             .await
             .map_err(|_| "target_account_unreadable")?;
-        if account.fingerprint.is_none() {
+        let Some(pinned) = account.fingerprint.as_deref() else {
             return Err("target_account_untrusted");
+        };
+        // The leaf is captured without credentials and is worth exactly as
+        // much as its digest: only the confirmed certificate passes. This
+        // runs for opted-in insecure builds too, so even they never hand
+        // the token to a host whose certificate changed since confirmation.
+        let observed = certificates
+            .observe_certificate(&account.host, account.port)
+            .await
+            .map_err(|_| "target_certificate_unobservable")?;
+        let digest: [u8; 32] = sha2::Sha256::digest(&observed.der).into();
+        let digest = digest.iter().fold(String::with_capacity(64), |mut out, b| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02X}");
+            out
+        });
+        if fleet_provider_proxmox::normalize_fingerprint(pinned) != digest {
+            return Err("target_certificate_changed");
+        }
+        let mut vars = Vec::new();
+        if !insecure_tls {
+            // Go uses the platform verifier, not `SSL_CERT_FILE`, on these.
+            if cfg!(any(target_os = "macos", target_os = "ios", windows)) {
+                return Err("certificate_pin_unsupported");
+            }
+            if !fleet_provider_proxmox::certificate_names_host(&observed.der, &account.host) {
+                return Err("target_certificate_name_mismatch");
+            }
+            let (file, dir) = write_pinned_roots(work_dir, &observed.der)
+                .map_err(|_| "certificate_write_failed")?;
+            for (name, path) in [("SSL_CERT_FILE", file), ("SSL_CERT_DIR", dir)] {
+                vars.push((
+                    name.to_owned(),
+                    fleet_core::SensitiveString::new(path.display().to_string()),
+                ));
+            }
         }
         let secret = credentials
             .load(account_id)
             .await
             .map_err(|_| "account_credential_unreadable")?
             .ok_or("account_credential_missing")?;
-        Ok(SecretEnv::new(vec![
+        vars.extend([
             (
                 "PROXMOX_USERNAME".to_owned(),
                 fleet_core::SensitiveString::new(account.token_id),
@@ -140,7 +216,8 @@ impl ImagesExecutor {
                 "PROXMOX_TOKEN".to_owned(),
                 fleet_core::SensitiveString::new(secret),
             ),
-        ]))
+        ]);
+        Ok(SecretEnv::new(vars))
     }
 
     /// Writes the secret var file, resolving the references just in time.
@@ -346,6 +423,13 @@ impl ImagesExecutor {
         if has_external_assets(&version.content) {
             return Err("asset_snapshot_missing");
         }
+        // Skipping TLS verification sends the token to whatever answers at
+        // the recipe's address: only a version published with the audited
+        // opt-in may (#284).
+        let insecure_tls = fleet_core::requests_insecure_tls(&version.content);
+        if insecure_tls && !version.allow_insecure_tls {
+            return Err("insecure_tls_not_allowed");
+        }
         std::fs::create_dir_all(&self.work_root).map_err(|_| "work_directory_failed")?;
         let probe = self
             .transport
@@ -401,11 +485,15 @@ impl ImagesExecutor {
             .write_recipe(&operation.id, &version.content)
             .map_err(|_| "recipe_write_failed")?;
         let work_dir = recipe_path.parent().ok_or("recipe_write_failed")?;
+        // The certificate check comes first: a build refused for trust
+        // resolves no secret at all, neither the token nor recipe variables.
+        let env = self
+            .account_env(record.account_id.as_deref(), work_dir, insecure_tls)
+            .await?;
         let var_file = self
             .write_var_file(&operation.id, &payload.secret_vars)
             .await
             .map_err(|_| "secret_resolution_failed")?;
-        let env = self.account_env(record.account_id.as_deref()).await?;
         operations
             .record_progress(
                 &operation.id,
@@ -515,6 +603,45 @@ fn settle_build(
         // stays as that: a poll failure is never reported as a cancel.
         (Some(reason), Err(_)) | (None, Err(reason)) => Err(reason),
     }
+}
+
+/// Writes the pinned leaf as the build's only TLS root: a PEM file and an
+/// empty directory, both inside the operation's private work directory and
+/// removed with it. Answers `(SSL_CERT_FILE, SSL_CERT_DIR)`.
+fn write_pinned_roots(
+    work_dir: &std::path::Path,
+    der: &[u8],
+) -> std::io::Result<(PathBuf, PathBuf)> {
+    use base64::Engine as _;
+    let tls = work_dir.join(TLS_DIR);
+    let empty = tls.join(EMPTY_CERT_DIR);
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(&empty)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).map_err(std::io::Error::other)?);
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    let file = tls.join(PINNED_CERT_FILE);
+    // Owner-only and freshly created: a leftover from an earlier attempt of
+    // the same operation is replaced, never written through.
+    match std::fs::remove_file(&file) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&file)?, pem.as_bytes())?;
+    // Packer runs inside the work directory, so a relative data directory
+    // would make relative paths resolve beneath it: export absolute ones.
+    Ok((file.canonicalize()?, empty.canonicalize()?))
 }
 
 /// Removes one operation's private work directory after a terminal
@@ -769,6 +896,19 @@ mod tests {
         /// Per command: its args joined, the child's PROXMOX_TOKEN, and
         /// whether ambient PROXMOX_* are removed.
         saw_env: Mutex<Vec<(String, Option<String>, bool)>>,
+        /// Per command: its args joined and the trust it was handed, as
+        /// the child would read it at that moment.
+        saw_tls: Mutex<Vec<(String, Option<SeenTls>)>>,
+    }
+
+    /// The pinned roots one command saw on disk.
+    #[derive(Clone, Debug)]
+    struct SeenTls {
+        file: PathBuf,
+        dir: PathBuf,
+        pem: String,
+        dir_entries: usize,
+        mode: u32,
     }
     #[async_trait::async_trait]
     impl PackerTransport for Script {
@@ -782,6 +922,35 @@ mod tests {
                 command.env.get("PROXMOX_TOKEN").map(str::to_owned),
                 command.env.is_isolated(),
             ));
+            let tls = match (
+                command.env.get("SSL_CERT_FILE"),
+                command.env.get("SSL_CERT_DIR"),
+            ) {
+                (None, None) => None,
+                (file, dir) => {
+                    let file = PathBuf::from(file.expect("SSL_CERT_FILE travels with the dir"));
+                    let dir = PathBuf::from(dir.expect("SSL_CERT_DIR travels with the file"));
+                    Some(SeenTls {
+                        mode: {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt as _;
+                                std::fs::metadata(&file).unwrap().permissions().mode()
+                            }
+                            #[cfg(not(unix))]
+                            0o600
+                        },
+                        pem: std::fs::read_to_string(&file).unwrap(),
+                        dir_entries: std::fs::read_dir(&dir).unwrap().count(),
+                        file,
+                        dir,
+                    })
+                }
+            };
+            self.saw_tls
+                .lock()
+                .unwrap()
+                .push((command.args.join(" "), tls));
             let record = self.repository.get_build(&self.operation_id).await.unwrap();
             assert_eq!(
                 record.outcome, "running",
@@ -881,6 +1050,30 @@ mod tests {
         Operation,
         Arc<Script>,
     ) {
+        setup_with(
+            content,
+            payload_extra,
+            replies,
+            wait_build,
+            fleet_application::images::PublishOptions::default(),
+        )
+        .await
+    }
+
+    async fn setup_with(
+        content: &str,
+        payload_extra: serde_json::Value,
+        replies: Vec<Result<fleet_provider_packer::CliOutcome, String>>,
+        wait_build: bool,
+        options: fleet_application::images::PublishOptions,
+    ) -> (
+        tempfile::TempDir,
+        Store,
+        Arc<RecipeRepository>,
+        Arc<Operations>,
+        Operation,
+        Arc<Script>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         sqlx::query("INSERT INTO proxmox_accounts (id, name, host, port, token_id, created_at) VALUES ('account-1', 'fixture', 'pve.example.test', 8006, 'fixture@pve!builder', 1000)")
@@ -910,7 +1103,7 @@ mod tests {
             .await
             .unwrap();
         let version = images
-            .publish(&Allow, &principal, &recipe.id, 1001)
+            .publish_with(&Allow, &principal, &recipe.id, 1001, options)
             .await
             .unwrap();
         let operations = Arc::new(Operations::new(
@@ -958,6 +1151,7 @@ mod tests {
             interrupted: std::sync::atomic::AtomicBool::new(false),
             clean_cancel: std::sync::atomic::AtomicBool::new(true),
             saw_env: Mutex::new(Vec::new()),
+            saw_tls: Mutex::new(Vec::new()),
         });
         (dir, store, repository, operations, operation, script)
     }
@@ -1000,6 +1194,105 @@ mod tests {
         }
     }
 
+    /// A leaf certificate for `names`: what a PVE host would present.
+    fn leaf(names: &[&str]) -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        rcgen::CertificateParams::new(
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        .self_signed(&key)
+        .unwrap()
+        .der()
+        .to_vec()
+    }
+
+    /// The pin Fleet stores for `der`: the confirm step's normalized form.
+    fn pin_of(der: &[u8]) -> String {
+        let digest: [u8; 32] = sha2::Sha256::digest(der).into();
+        digest.iter().map(|byte| format!("{byte:02X}")).collect()
+    }
+
+    /// A certificate probe answering one fixed leaf, or no host at all.
+    /// It cannot carry a credential: nothing here sees one.
+    #[derive(Debug)]
+    struct Presents(Option<Vec<u8>>);
+
+    #[async_trait::async_trait]
+    impl fleet_provider_proxmox::PveTransport for Presents {
+        async fn execute(
+            &self,
+            _: fleet_provider_proxmox::PveHttpRequest,
+        ) -> Result<
+            fleet_provider_proxmox::PveHttpResponse,
+            fleet_provider_proxmox::PveTransportError,
+        > {
+            unreachable!("a build never calls the PVE API itself")
+        }
+        async fn execute_with_body(
+            &self,
+            _: fleet_provider_proxmox::PveHttpRequest,
+            _: Vec<u8>,
+        ) -> Result<
+            fleet_provider_proxmox::PveHttpResponse,
+            fleet_provider_proxmox::PveTransportError,
+        > {
+            unreachable!("a build never calls the PVE API itself")
+        }
+        async fn observe_certificate(
+            &self,
+            host: &str,
+            port: u16,
+        ) -> Result<
+            fleet_provider_proxmox::ObservedCertificate,
+            fleet_provider_proxmox::PveTransportError,
+        > {
+            assert_eq!((host, port), ("pve.example.test", 8006));
+            self.0
+                .clone()
+                .map(|der| fleet_provider_proxmox::ObservedCertificate {
+                    fingerprint: pin_of(&der),
+                    der,
+                })
+                .ok_or(fleet_provider_proxmox::PveTransportError::NoCertificate)
+        }
+    }
+
+    /// One credentialed build's inputs.
+    struct Case {
+        content: &'static str,
+        options: fleet_application::images::PublishOptions,
+        /// The certificate whose fingerprint the account pins, if trusted.
+        pinned: Option<Vec<u8>>,
+        /// The certificate the host presents now, if reachable.
+        presented: Option<Vec<u8>>,
+        token: Option<&'static str>,
+    }
+
+    impl Case {
+        fn pinned_and_presented(der: &[u8]) -> Self {
+            Self {
+                content: CONTENT,
+                options: fleet_application::images::PublishOptions::default(),
+                pinned: Some(der.to_vec()),
+                presented: Some(der.to_vec()),
+                token: Some("fixture-account-token"),
+            }
+        }
+    }
+
+    /// What one credentialed build left behind.
+    struct Ran {
+        record: fleet_core::ImageBuildRecord,
+        seen: Vec<(String, Option<String>, bool)>,
+        tls: Vec<(String, Option<SeenTls>)>,
+        stored: String,
+        work: PathBuf,
+    }
+
     /// Runs one build with account credentials wired; answers the record,
     /// what the transport saw, and every stored operation/audit text.
     async fn credential_build(
@@ -1010,15 +1303,33 @@ mod tests {
         Vec<(String, Option<String>, bool)>,
         String,
     ) {
+        let der = leaf(&["pve.example.test"]);
+        let mut case = Case::pinned_and_presented(&der);
+        case.token = token;
+        if !trusted {
+            case.pinned = None;
+        }
+        let ran = run_case(case).await;
+        (ran.record, ran.seen, ran.stored)
+    }
+
+    async fn run_case(case: Case) -> Ran {
         let mut replies = probes();
         replies.extend([
             reply("", Some(0), false),
             reply("1,proxmox-clone,artifact,0,id,pve:120", Some(0), false),
         ]);
-        let (dir, store, repository, operations, operation, transport) =
-            setup(CONTENT, serde_json::json!({}), replies, false).await;
-        if trusted {
-            sqlx::query("UPDATE proxmox_accounts SET fingerprint = 'AB' WHERE id = 'account-1'")
+        let (dir, store, repository, operations, operation, transport) = setup_with(
+            case.content,
+            serde_json::json!({}),
+            replies,
+            false,
+            case.options,
+        )
+        .await;
+        if let Some(pinned) = &case.pinned {
+            sqlx::query("UPDATE proxmox_accounts SET fingerprint = ?1 WHERE id = 'account-1'")
+                .bind(pin_of(pinned))
                 .execute(store.pool())
                 .await
                 .unwrap();
@@ -1033,7 +1344,8 @@ mod tests {
             Arc::new(fleet_storage_sqlite::ProxmoxAccountRepository::new(
                 store.pool().clone(),
             )),
-            Arc::new(OneToken(token)),
+            Arc::new(OneToken(case.token)),
+            Arc::new(Presents(case.presented.clone())),
         );
         assert!(
             operations
@@ -1049,7 +1361,136 @@ mod tests {
         .await
         .unwrap();
         let seen = transport.saw_env.lock().unwrap().clone();
-        (record, seen, stored.join("\n"))
+        let tls = transport.saw_tls.lock().unwrap().clone();
+        Ran {
+            record,
+            seen,
+            tls,
+            stored: stored.join("\n"),
+            work: dir.path().join("work").join(&operation.id),
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_and_build_trust_only_the_pinned_leaf_and_the_files_go_with_the_work_dir() {
+        let der = leaf(&["pve.example.test"]);
+        let ran = run_case(Case::pinned_and_presented(&der)).await;
+        assert_eq!(ran.record.outcome, "succeeded", "{:?}", ran.record.reason);
+        let pinned: Vec<_> = ran.tls.iter().filter(|(_, tls)| tls.is_some()).collect();
+        // Exactly validate and build get the pin; the version probes do not.
+        assert_eq!(pinned.len(), 2, "{:?}", ran.tls);
+        for (args, tls) in &ran.tls {
+            let wants = args.starts_with("validate") || args.contains(" build ");
+            assert_eq!(tls.is_some(), wants, "{args}");
+        }
+        use base64::Engine as _;
+        for (_, tls) in pinned {
+            let tls = tls.as_ref().unwrap();
+            // Absolute: Packer runs inside the work directory.
+            assert!(tls.file.is_absolute() && tls.dir.is_absolute());
+            assert_eq!(tls.mode & 0o777, 0o600, "{}", tls.file.display());
+            assert!(tls.file.starts_with(&ran.work), "{}", tls.file.display());
+            assert!(tls.dir.starts_with(&ran.work), "{}", tls.dir.display());
+            assert_eq!(tls.dir_entries, 0, "the root directory stays empty");
+            let body: String = tls
+                .pem
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            assert!(tls.pem.starts_with("-----BEGIN CERTIFICATE-----\n"));
+            assert!(tls.pem.lines().all(|line| line.len() <= 64));
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(body)
+                    .unwrap(),
+                der
+            );
+        }
+        // The pin lives only in the children's environment and the work
+        // directory, which is gone after the build.
+        assert!(
+            std::env::var_os("SSL_CERT_FILE")
+                .is_none_or(|value| { !std::path::Path::new(&value).starts_with(&ran.work) })
+        );
+        assert!(!ran.work.exists());
+    }
+
+    #[tokio::test]
+    async fn a_changed_certificate_fails_the_build_before_packer_or_the_token() {
+        let mut case = Case::pinned_and_presented(&leaf(&["pve.example.test"]));
+        case.presented = Some(leaf(&["pve.example.test"]));
+        let ran = run_case(case).await;
+        assert_eq!(
+            ran.record.reason.as_deref(),
+            Some("target_certificate_changed")
+        );
+        assert!(ran.seen.iter().all(|(args, token, _)| token.is_none()
+            && !args.starts_with("validate")
+            && !args.contains(" build ")));
+        assert!(!ran.stored.contains("fixture-account-token"));
+    }
+
+    #[tokio::test]
+    async fn a_leaf_that_does_not_name_the_host_is_refused_not_skipped() {
+        let der = leaf(&["pve1.example.test", "192.0.2.10"]);
+        let ran = run_case(Case::pinned_and_presented(&der)).await;
+        assert_eq!(
+            ran.record.reason.as_deref(),
+            Some("target_certificate_name_mismatch")
+        );
+        assert!(ran.seen.iter().all(|(_, token, _)| token.is_none()));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_hands_out_nothing() {
+        let mut case = Case::pinned_and_presented(&leaf(&["pve.example.test"]));
+        case.presented = None;
+        let ran = run_case(case).await;
+        assert_eq!(
+            ran.record.reason.as_deref(),
+            Some("target_certificate_unobservable")
+        );
+        assert!(ran.seen.iter().all(|(_, token, _)| token.is_none()));
+    }
+
+    const INSECURE: &str = r#"{"builders":[{"type":"proxmox-clone","node":"pve","insecure_skip_tls_verify":true,"disks":[{"type":"scsi","storage_pool":"local-lvm","disk_size":"8G"}],"vm_name":"ubuntu-base","proxmox_url":"https://pve.example.test:8006/api2/json"}]}"#;
+
+    #[tokio::test]
+    async fn skipping_verification_needs_the_versions_opt_in() {
+        let der = leaf(&["pve.example.test"]);
+        let mut case = Case::pinned_and_presented(&der);
+        case.content = INSECURE;
+        let ran = run_case(case).await;
+        assert_eq!(
+            ran.record.reason.as_deref(),
+            Some("insecure_tls_not_allowed")
+        );
+        // Refused before any Packer command at all.
+        assert!(ran.seen.is_empty(), "{:?}", ran.seen);
+
+        // With the opt-in it builds without a pin, but the token still
+        // goes only to the confirmed certificate.
+        let mut case = Case::pinned_and_presented(&der);
+        case.content = INSECURE;
+        case.options.allow_insecure_tls = true;
+        let ran = run_case(case).await;
+        assert_eq!(ran.record.outcome, "succeeded", "{:?}", ran.record.reason);
+        assert!(ran.tls.iter().all(|(_, tls)| tls.is_none()));
+        assert!(
+            ran.seen
+                .iter()
+                .any(|(args, token, _)| args.contains(" build ")
+                    && token.as_deref() == Some("fixture-account-token"))
+        );
+        let mut case = Case::pinned_and_presented(&der);
+        case.content = INSECURE;
+        case.options.allow_insecure_tls = true;
+        case.presented = Some(leaf(&["pve.example.test"]));
+        let ran = run_case(case).await;
+        assert_eq!(
+            ran.record.reason.as_deref(),
+            Some("target_certificate_changed")
+        );
     }
 
     #[tokio::test]

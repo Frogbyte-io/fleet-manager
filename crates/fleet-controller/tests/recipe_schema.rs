@@ -93,6 +93,7 @@ fn version(source: RecipeSource, content: String) -> RecipeVersion {
         promoted_at: None,
         promoted_by: None,
         promoted_build_id: None,
+        allow_insecure_tls: false,
     }
 }
 

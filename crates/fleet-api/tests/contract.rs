@@ -2308,6 +2308,78 @@ async fn image_build_history_requires_images_read_on_both_endpoints() {
     }
 }
 
+#[tokio::test]
+async fn publishing_takes_an_optional_body_with_the_insecure_tls_opt_in() {
+    use fleet_application::images::RecipePort as _;
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let recipes = Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+        store.pool().clone(),
+    ));
+    let mut state = (*test_state().0).clone();
+    state.authorizer = Arc::new(PermitAllAuthorizer);
+    state.images = Some(Arc::new(fleet_application::images::Images::new(
+        recipes.clone(),
+        Arc::new(FakeAudit),
+    )));
+    let router = principal_router(Arc::new(state));
+    let recipe = recipes
+        .create(
+            &fleet_application::images::NewRecipe {
+                content: fleet_core::RecipeContent {
+                    name: "insecure".to_owned(),
+                    description: String::new(),
+                    node: "pve".to_owned(),
+                    storage_pool: Some("local-lvm".to_owned()),
+                    source: fleet_core::RecipeSource::Clone,
+                    content:
+                        r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":true}]}"#
+                            .to_owned(),
+                },
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    let path = format!("{API_BASE_PATH}/images/recipes/{}/publish", recipe.id);
+    let publish = |content_type: Option<&str>, body: &str| {
+        let mut request = Request::builder().method("POST").uri(&path);
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        request.body(Body::from(body.to_owned())).unwrap()
+    };
+    // No body, an empty JSON body (what the generated client sends), `{}`,
+    // and `null` all publish the plain version.
+    let mut plain = None;
+    for (content_type, body) in [
+        (None, ""),
+        (Some("application/json"), ""),
+        (Some("application/json"), "{}"),
+        (Some("application/json"), "null"),
+    ] {
+        let (parts, value) = call_via(&router, publish(content_type, body)).await;
+        assert_eq!(parts.status, StatusCode::CREATED, "{body:?}: {value}");
+        assert_eq!(value["data"]["allowInsecureTls"], false, "{value}");
+        let id = value["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(plain.get_or_insert_with(|| id.clone()), &id);
+    }
+    let (parts, value) = call_via(
+        &router,
+        publish(Some("application/json"), r#"{"allowInsecureTls":true}"#),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::CREATED, "{value}");
+    assert_eq!(value["data"]["allowInsecureTls"], true);
+    assert_ne!(value["data"]["id"].as_str(), plain.as_deref());
+    for body in ["{", r#"{"allowInsecureTLS":true}"#, "[]"] {
+        let (parts, value) = call_via(&router, publish(Some("application/json"), body)).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}: {value}");
+    }
+}
+
 /// The project-linked lab surface over a real store: the router, the
 /// registered project, and one published template version to lease from.
 async fn project_linked_lab_router() -> (

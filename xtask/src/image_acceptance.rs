@@ -12,7 +12,7 @@ pub const RESULT_MARKER: &str = "FLEET_IMAGE_ACCEPTANCE_RESULT";
 
 /// The scenarios, in report order. Kept in step with the suite's
 /// `SCENARIOS`.
-pub const SCENARIOS: [&str; 7] = [
+pub const SCENARIOS: [&str; 8] = [
     "version-gate",
     "validate-failure",
     "build",
@@ -20,6 +20,7 @@ pub const SCENARIOS: [&str; 7] = [
     "promotion",
     "rebuild-keeps-promotion",
     "cancel-cleanup",
+    "pin-mismatch",
 ];
 
 /// The suite.
