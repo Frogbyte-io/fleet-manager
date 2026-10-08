@@ -397,10 +397,11 @@ fn a_file_copies_byte_for_byte_and_refusals_are_outcomes() {
     let (outcome, bytes) = fetch(&hostile, 1_000_000);
     assert_eq!(outcome, FetchOutcome::Fetched { bytes: 200_000 });
     assert_eq!(bytes, content);
-    assert!(
-        !guest.path().join("pwned").exists() && !std::path::Path::new("pwned").exists(),
-        "the path reached a shell"
-    );
+    // Had the path reached the remote shell, `touch pwned` would have run in
+    // the login user's home directory (the copy keeps the remote default
+    // working directory).
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+    assert!(!home.join("pwned").exists(), "the path reached a shell");
 
     // Exactly at the cap is fine; one byte over is refused.
     assert_eq!(

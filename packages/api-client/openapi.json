@@ -1514,7 +1514,7 @@
         "tags": [
           "lab"
         ],
-        "summary": "Lists the stored Lab artifacts, newest first.",
+        "summary": "Lists the stored Lab artifacts, newest first, one page at a time.",
         "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
         "operationId": "listLabArtifacts",
         "parameters": [
@@ -1534,6 +1534,26 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The `nextCursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The page size (1–200; default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
             }
           }
         ],

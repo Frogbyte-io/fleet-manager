@@ -614,3 +614,26 @@ fn the_lab_artifact_settings_default_layer_and_refuse_zero() {
         );
     }
 }
+
+#[test]
+fn validation_refuses_zero_lab_artifact_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    for (retention, max_bytes) in [(0, 1), (1, 0)] {
+        let config = ControllerConfig {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            web_dist: dir.path().to_path_buf(),
+            data_dir: dir.path().join("state"),
+            master_key_file: None,
+            lab_sweep_interval_seconds: 60,
+            lab_artifacts_dir: dir.path().join("lab-artifacts"),
+            lab_artifact_retention_seconds: retention,
+            lab_artifact_max_bytes: max_bytes,
+            tailscale_serve_listen: None,
+            lab_placement: fleet_config::LabPlacementConfig::default(),
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(fleet_config::ConfigError::LabArtifactSettingInvalid { .. })
+        ));
+    }
+}

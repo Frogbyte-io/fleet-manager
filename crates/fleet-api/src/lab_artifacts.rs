@@ -117,7 +117,8 @@ fn artifacts_or_error(
 }
 
 /// A lease's last failed collection, for the lease detail; `None` when the
-/// controller has no artifact store.
+/// controller has no artifact store. A backend failure degrades to `None`
+/// (logged): the lease read must not fail on auxiliary metadata.
 pub(crate) async fn lease_collection_failure(
     state: &crate::operations::ApiState,
     principal: &crate::ActingPrincipal,
@@ -127,11 +128,19 @@ pub(crate) async fn lease_collection_failure(
     let Some(artifacts) = state.lab.as_ref().and_then(|lab| lab.artifacts().cloned()) else {
         return Ok(None);
     };
-    artifacts
+    match artifacts
         .collection_failure(state.authorizer.as_ref(), principal, lease_id)
         .await
-        .map(|failure| failure.map(Into::into))
-        .map_err(|error| map_lab_error(&error, correlation_id))
+    {
+        Ok(failure) => Ok(failure.map(Into::into)),
+        Err(fleet_application::lab::LabUseCaseError::Backend { context, detail }) => {
+            eprintln!(
+                "lab artifacts: the collection failure of lease {lease_id} is unreadable ({context}): {detail}"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(map_lab_error(&error, correlation_id)),
+    }
 }
 
 /// Guest paths to copy from a ready lease.
@@ -174,6 +183,7 @@ pub async fn collect_lab_artifacts(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Path(lease_id): Path<String>,
     request: Result<Json<CollectArtifactsRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<Resource<crate::operations::OperationDto>>), ApiErrorResponse> {
@@ -196,6 +206,12 @@ pub async fn collect_lab_artifacts(
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     new.correlation_id = Some(correlation_id.to_string());
+    // A caller-scoped idempotency key makes a retry return the operation it
+    // already queued instead of copying again.
+    new.idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|key| format!("{}:lab-collect:{lease_id}:{key}", principal.id));
     let operation = state
         .operations
         .create_lab_collect(state.authorizer.as_ref(), &principal.id, &lease_id, &new)
@@ -212,9 +228,13 @@ pub struct ListArtifactsParams {
     pub lease_id: Option<String>,
     /// Only artifacts from leases serving this project.
     pub project_id: Option<String>,
+    /// The `nextCursor` of the previous page.
+    pub cursor: Option<String>,
+    /// The page size (1–200; default 50).
+    pub limit: Option<u32>,
 }
 
-/// Lists the stored Lab artifacts, newest first.
+/// Lists the stored Lab artifacts, newest first, one page at a time.
 ///
 /// # Errors
 ///
@@ -227,6 +247,8 @@ pub struct ListArtifactsParams {
     params(
         ("leaseId" = Option<String>, Query, description = "Only artifacts from this lease."),
         ("projectId" = Option<String>, Query, description = "Only artifacts from leases serving this project."),
+        ("cursor" = Option<String>, Query, description = "The `nextCursor` of the previous page."),
+        ("limit" = Option<u32>, Query, description = "The page size (1–200; default 50)."),
     ),
     responses(
         (status = 200, description = "The artifacts, newest first.", body = Page<LabArtifactDto>),
@@ -253,24 +275,31 @@ pub async fn list_lab_artifacts(
     })?;
     let artifacts = artifacts_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let items: Vec<LabArtifactDto> = artifacts
+    let limit = params
+        .limit
+        .unwrap_or(crate::envelope::DEFAULT_PAGE_LIMIT)
+        .clamp(1, crate::envelope::MAX_PAGE_LIMIT);
+    let mut listed = artifacts
         .list(
             state.authorizer.as_ref(),
             &principal,
-            params.lease_id.as_deref(),
-            params.project_id.as_deref(),
+            fleet_application::lab_artifacts::ArtifactFilter {
+                lease_id: params.lease_id.as_deref(),
+                project_id: params.project_id.as_deref(),
+                cursor: params.cursor.as_deref(),
+            },
+            limit + 1,
         )
         .await
-        .map_err(|error| map_lab_error(&error, correlation_id))?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
+    let has_more = listed.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+    listed.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let next_cursor = has_more
+        .then(|| listed.last().map(|artifact| artifact.id.clone()))
+        .flatten();
     Ok(Json(Page {
-        page: PageInfo {
-            next_cursor: None,
-            limit: items.len().try_into().unwrap_or(u32::MAX),
-        },
-        items,
+        page: PageInfo { next_cursor, limit },
+        items: listed.into_iter().map(Into::into).collect(),
     }))
 }
 

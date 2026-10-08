@@ -204,7 +204,9 @@ pub trait LabArtifactPort: fmt::Debug + Send + Sync {
     /// Fails on a backend failure.
     async fn get(&self, id: &str) -> Result<Option<LabArtifact>, String>;
 
-    /// Lists artifacts, newest first, narrowed by lease and/or project.
+    /// Lists up to `limit` artifacts, newest first, narrowed by lease
+    /// and/or project, after the artifact `cursor` names when given (an
+    /// unknown cursor answers nothing).
     ///
     /// # Errors
     ///
@@ -213,6 +215,8 @@ pub trait LabArtifactPort: fmt::Debug + Send + Sync {
         &self,
         lease_id: Option<&str>,
         project_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<LabArtifact>, String>;
 
     /// Up to `limit` artifacts whose retention deadline is at or before
@@ -230,12 +234,12 @@ pub trait LabArtifactPort: fmt::Debug + Send + Sync {
     /// Fails on a backend failure.
     async fn delete(&self, id: &str) -> Result<bool, String>;
 
-    /// Whether any artifact still names this location.
+    /// How many artifacts name this location.
     ///
     /// # Errors
     ///
     /// Fails on a backend failure.
-    async fn location_in_use(&self, location: &str) -> Result<bool, String>;
+    async fn location_references(&self, location: &str) -> Result<u64, String>;
 
     /// Records (replacing any earlier one) a lease's last failed collection.
     ///
@@ -435,6 +439,17 @@ pub fn exec_log_text(
     Some(text)
 }
 
+/// Narrows an artifact listing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArtifactFilter<'a> {
+    /// Only artifacts from this lease.
+    pub lease_id: Option<&'a str>,
+    /// Only artifacts from leases serving this project.
+    pub project_id: Option<&'a str>,
+    /// Only artifacts listed after this one.
+    pub cursor: Option<&'a str>,
+}
+
 /// What one retention pass did.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct RetentionReport {
@@ -487,7 +502,8 @@ impl LabArtifacts {
         self.policy
     }
 
-    /// Lists artifacts, newest first, narrowed by lease and/or project.
+    /// Lists up to `limit` artifacts, newest first, narrowed by lease
+    /// and/or project, after the `cursor` artifact when given.
     ///
     /// # Errors
     ///
@@ -496,12 +512,12 @@ impl LabArtifacts {
         &self,
         authorizer: &dyn Authorizer,
         principal: &ActingPrincipal,
-        lease_id: Option<&str>,
-        project_id: Option<&str>,
+        filter: ArtifactFilter<'_>,
+        limit: u32,
     ) -> Result<Vec<LabArtifact>, LabUseCaseError> {
         allow(authorizer, principal, Permission::LabRead, None)?;
         self.artifacts
-            .list(lease_id, project_id)
+            .list(filter.lease_id, filter.project_id, filter.cursor, limit)
             .await
             .map_err(backend)
     }
@@ -563,7 +579,7 @@ impl LabArtifacts {
         principal: &ActingPrincipal,
         lease_id: &str,
     ) -> Result<Option<CollectionFailure>, LabUseCaseError> {
-        allow(authorizer, principal, Permission::LabRead, None)?;
+        allow(authorizer, principal, Permission::LabRead, Some(lease_id))?;
         self.artifacts
             .collection_failure(lease_id)
             .await
@@ -600,10 +616,11 @@ impl LabArtifacts {
             Some(id) => Some(self.provisions.get(id).await.map_err(backend)?),
             None => None,
         };
-        if record
-            .as_ref()
-            .is_none_or(|record| record.machine_id.is_none() || record.endpoint_id.is_none())
-        {
+        if record.as_ref().is_none_or(|record| {
+            record.lease_id.as_deref() != Some(lease.id.as_str())
+                || record.machine_id.is_none()
+                || record.endpoint_id.is_none()
+        }) {
             return Err(LabUseCaseError::Invalid {
                 detail: "the lease's guest has no registered Lab machine to collect from"
                     .to_owned(),
@@ -653,7 +670,9 @@ impl LabArtifacts {
         let artifact = {
             let _guard = self.blob_lock.lock().await;
             let blob = self.blobs.put(log.as_bytes()).await.map_err(blob_refused)?;
-            self.artifacts
+            let location = blob.location.clone();
+            let inserted = self
+                .artifacts
                 .insert(&NewArtifact {
                     lease_id: lease.id.clone(),
                     project_id: lease.project_id.clone(),
@@ -665,8 +684,14 @@ impl LabArtifacts {
                     created_at: now,
                     retain_until: self.policy.retain_until(now),
                 })
-                .await
-                .map_err(backend)?
+                .await;
+            match inserted {
+                Ok(artifact) => artifact,
+                Err(detail) => {
+                    self.release_unreferenced(&location).await;
+                    return Err(backend(detail));
+                }
+            }
         };
         self.audit_recorded(principal, &artifact).await?;
         Ok(artifact)
@@ -705,7 +730,9 @@ impl LabArtifacts {
             let lease = self.lease(lease_id).await?;
             let _guard = self.blob_lock.lock().await;
             let blob = self.blobs.commit(staged).await.map_err(blob_refused)?;
-            self.artifacts
+            let location = blob.location.clone();
+            let inserted = self
+                .artifacts
                 .insert(&NewArtifact {
                     lease_id: lease.id.clone(),
                     project_id: lease.project_id.clone(),
@@ -717,8 +744,11 @@ impl LabArtifacts {
                     created_at: now,
                     retain_until: self.policy.retain_until(now),
                 })
-                .await
-                .map_err(backend)
+                .await;
+            if inserted.is_err() {
+                self.release_unreferenced(&location).await;
+            }
+            inserted.map_err(backend)
         }
         .await;
         let artifact = match recorded {
@@ -829,16 +859,22 @@ impl LabArtifacts {
     ) -> Result<bool, String> {
         {
             let _guard = self.blob_lock.lock().await;
-            if !self.artifacts.delete(&artifact.id).await? {
-                return Ok(false);
-            }
-            if !self.artifacts.location_in_use(&artifact.location).await? {
-                // The metadata is gone; bytes that fail to delete here are
-                // unreferenced and cannot be served. Report it.
+            // The bytes go first and the metadata last: a failure in between
+            // leaves the row, so the next pass retries, and removing bytes
+            // that are already gone succeeds.
+            if self
+                .artifacts
+                .location_references(&artifact.location)
+                .await?
+                <= 1
+            {
                 self.blobs
                     .remove(&artifact.location)
                     .await
                     .map_err(|error| format!("its bytes were not removed: {error}"))?;
+            }
+            if !self.artifacts.delete(&artifact.id).await? {
+                return Ok(false);
             }
         }
         self.audit_event(
@@ -854,6 +890,15 @@ impl LabArtifacts {
         .await
         .map_err(|error| error.to_string())?;
         Ok(true)
+    }
+
+    /// Removes committed bytes that no artifact references, after their
+    /// metadata insert failed; the caller holds the blob lock. A failure is
+    /// logged-only: the bytes were never servable.
+    async fn release_unreferenced(&self, location: &str) {
+        if matches!(self.artifacts.location_references(location).await, Ok(0)) {
+            let _ = self.blobs.remove(location).await;
+        }
     }
 
     async fn require(&self, id: &str) -> Result<LabArtifact, LabUseCaseError> {

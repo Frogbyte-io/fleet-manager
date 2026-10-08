@@ -88,14 +88,20 @@ impl LabArtifactPort for LabArtifactRepository {
         &self,
         lease_id: Option<&str>,
         project_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<LabArtifact>, String> {
         sqlx::query(
             "SELECT * FROM lab_artifacts \
              WHERE (?1 IS NULL OR lease_id = ?1) AND (?2 IS NULL OR project_id = ?2) \
-             ORDER BY created_at DESC, id DESC",
+             AND (?3 IS NULL OR (created_at, id) < \
+                  (SELECT created_at, id FROM lab_artifacts WHERE id = ?3)) \
+             ORDER BY created_at DESC, id DESC LIMIT ?4",
         )
         .bind(lease_id)
         .bind(project_id)
+        .bind(cursor)
+        .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("artifact list failed: {error}"))?
@@ -128,12 +134,12 @@ impl LabArtifactPort for LabArtifactRepository {
             .map_err(|error| format!("artifact delete failed: {error}"))
     }
 
-    async fn location_in_use(&self, location: &str) -> Result<bool, String> {
-        sqlx::query("SELECT 1 FROM lab_artifacts WHERE location = ?1 LIMIT 1")
+    async fn location_references(&self, location: &str) -> Result<u64, String> {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lab_artifacts WHERE location = ?1")
             .bind(location)
-            .fetch_optional(&self.pool)
+            .fetch_one(&self.pool)
             .await
-            .map(|row| row.is_some())
+            .map(|count| u64::try_from(count).unwrap_or(0))
             .map_err(|error| format!("artifact location check failed: {error}"))
     }
 

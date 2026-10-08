@@ -5760,6 +5760,15 @@ leaseId?: string;
  * Only artifacts from leases serving this project.
  */
 projectId?: string;
+/**
+ * The `nextCursor` of the previous page.
+ */
+cursor?: string;
+/**
+ * The page size (1–200; default 50).
+ * @minimum 0
+ */
+limit?: number;
 };
 
 export type ListLabLeasesParams = {
@@ -7474,7 +7483,7 @@ export const getListLabArtifactsUrl = (params?: ListLabArtifactsParams,) => {
  * # Errors
  *
  * Returns the public error envelope on refusal or backend failure.
- * @summary Lists the stored Lab artifacts, newest first.
+ * @summary Lists the stored Lab artifacts, newest first, one page at a time.
  */
 export const listLabArtifacts = async (params?: ListLabArtifactsParams, options?: RequestInit): Promise<listLabArtifactsResponse> => {
 

@@ -188,6 +188,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
         let executor = {
+            // SSH exec (machine and Lab) and Lab file collection share one
+            // session pool.
+            let exec_limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
             let ssh: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
@@ -196,7 +199,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(ScriptExecutor::new(
                     machines,
                     config.data_dir.join("ssh"),
-                    fleet_provider_ssh::ExecutionLimiter::new(4),
+                    exec_limiter.clone(),
                 ))
             };
             let limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
@@ -598,34 +601,41 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
             let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
                 match (&lab_artifacts, &lab_artifact_store) {
                     (Some(artifacts), Some(artifact_store)) => {
-                        match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                        // Without the SSH work directory, collections fail
+                        // honestly; exec logs are still recorded.
+                        let files: std::sync::Arc<
+                            dyn fleet_controller::lab_artifacts_store::GuestFiles,
+                        > = match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
                             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
                                 store.pool().clone(),
                             )),
                             config.data_dir.join("ssh"),
-                            limiter.clone(),
+                            exec_limiter.clone(),
                         ) {
-                            Ok(files) => std::sync::Arc::new(
-                                fleet_controller::lab_artifacts_store::LabArtifactDispatch::new(
-                                    with_lab,
-                                    artifacts.clone(),
-                                    artifact_store.clone(),
-                                    std::sync::Arc::new(
-                                        fleet_storage_sqlite::LeaseRepository::new(
-                                            store.pool().clone(),
-                                        ),
-                                    ),
-                                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
-                                        store.pool().clone(),
-                                    )),
-                                    std::sync::Arc::new(files),
-                                ),
-                            ),
+                            Ok(files) => std::sync::Arc::new(files),
                             Err(error) => {
                                 eprintln!("warning: Lab artifact collection unavailable: {error}");
-                                with_lab
+                                std::sync::Arc::new(
+                                    fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                        reason: error,
+                                    },
+                                )
                             }
-                        }
+                        };
+                        std::sync::Arc::new(
+                            fleet_controller::lab_artifacts_store::LabArtifactDispatch::new(
+                                with_lab,
+                                artifacts.clone(),
+                                artifact_store.clone(),
+                                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                files,
+                            ),
+                        )
                     }
                     _ => with_lab,
                 };

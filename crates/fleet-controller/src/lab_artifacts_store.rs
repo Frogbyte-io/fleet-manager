@@ -166,22 +166,19 @@ impl FsArtifactStore {
             return Err(BlobError::InvalidLocation);
         }
         let path = self.root.join(relative);
-        // An existing path (or its directory) must canonicalize inside the
-        // root: a symlink planted in the store cannot lead out of it.
-        let existing = if path.exists() {
-            Some(path.clone())
-        } else {
-            path.parent()
-                .filter(|parent| parent.exists())
-                .map(Path::to_path_buf)
-        };
-        if let Some(existing) = existing {
-            let canonical = existing
-                .canonicalize()
-                .map_err(|_| BlobError::InvalidLocation)?;
-            if !canonical.starts_with(&self.root) {
-                return Err(BlobError::InvalidLocation);
-            }
+        // The deepest existing ancestor (the path itself, its prefix
+        // directory, or `sha256/`) must canonicalize inside the root, so a
+        // symlink planted anywhere in the store cannot lead out of it. A
+        // dangling symlink exists for this check and fails to canonicalize.
+        let existing = path
+            .ancestors()
+            .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+            .ok_or(BlobError::InvalidLocation)?;
+        let canonical = existing
+            .canonicalize()
+            .map_err(|_| BlobError::InvalidLocation)?;
+        if !canonical.starts_with(&self.root) {
+            return Err(BlobError::InvalidLocation);
         }
         Ok(path)
     }
@@ -482,6 +479,36 @@ impl GuestFiles for SshGuestFiles {
     }
 }
 
+/// [`GuestFiles`] when the controller could not prepare its SSH work
+/// directory: every copy fails honestly (`transfer_failed`), while exec logs
+/// keep being recorded.
+#[derive(Debug)]
+pub struct UnavailableGuestFiles {
+    /// Why copies are unavailable.
+    pub reason: String,
+}
+
+#[async_trait]
+impl GuestFiles for UnavailableGuestFiles {
+    async fn fetch(
+        &self,
+        _machine_id: &str,
+        _endpoint_id: &str,
+        _path: &str,
+        _max_bytes: u64,
+        _deadline: Duration,
+        sink: StagingFile,
+    ) -> (Result<FetchOutcome, String>, StagingFile) {
+        (
+            Err(format!(
+                "guest file copies are unavailable: {}",
+                self.reason
+            )),
+            sink,
+        )
+    }
+}
+
 /// The longest one collection may take, across all its paths.
 pub const COLLECT_DEADLINE: Duration = Duration::from_secs(600);
 
@@ -598,11 +625,27 @@ impl LabArtifactDispatch {
                 .await;
         }
         let record = match &lease.provision_id {
-            Some(id) => Some(self.provisions.get(id).await?),
+            Some(id) => match self.provisions.get(id).await {
+                Ok(record) => Some(record),
+                Err(detail) => {
+                    return self
+                        .refuse(
+                            operations,
+                            operation,
+                            &lease_id,
+                            "provision_unavailable",
+                            &detail,
+                        )
+                        .await;
+                }
+            },
             None => None,
         };
-        let Some((machine_id, endpoint_id)) =
-            record.and_then(|record| record.machine_id.zip(record.endpoint_id))
+        // The record must link back to this lease: a stale link must never
+        // copy another lease's guest under this one.
+        let Some((machine_id, endpoint_id)) = record
+            .filter(|record| record.lease_id.as_deref() == Some(lease.id.as_str()))
+            .and_then(|record| record.machine_id.zip(record.endpoint_id))
         else {
             return self
                 .refuse(
@@ -920,6 +963,18 @@ mod tests {
                 store.resolve(&format!("sha256/9f/{DIGEST}")).err(),
                 Some(BlobError::InvalidLocation)
             );
+            // A symlink for the whole blob directory, before any prefix
+            // directory exists, is refused before anything is written.
+            let other = tempfile::tempdir().unwrap();
+            let store2 = FsArtifactStore::open(&other.path().join("artifacts"), 1024).unwrap();
+            std::fs::remove_dir(store2.root().join("sha256")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), store2.root().join("sha256")).unwrap();
+            assert_eq!(
+                store2.resolve(&format!("sha256/9f/{DIGEST}")).err(),
+                Some(BlobError::InvalidLocation)
+            );
+            assert!(store2.put(b"test").await.is_err());
+            assert!(!outside.path().join("9f").exists());
         }
     }
 

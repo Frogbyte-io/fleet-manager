@@ -305,7 +305,7 @@ impl fmt::Display for ConfigError {
             ),
             Self::LabArtifactSettingInvalid { setting, value } => write!(
                 f,
-                "{setting} must be a whole, positive number, not {value:?}"
+                "{setting} (or its config-file key) must be a whole, positive number, not {value:?}"
             ),
             Self::LabArtifactsDirUnavailable { path, error } => write!(
                 f,
@@ -616,6 +616,20 @@ impl ControllerConfig {
             });
         }
 
+        for (setting, value) in [
+            (
+                LAB_ARTIFACT_RETENTION_VAR,
+                self.lab_artifact_retention_seconds,
+            ),
+            (LAB_ARTIFACT_MAX_BYTES_VAR, self.lab_artifact_max_bytes),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::LabArtifactSettingInvalid {
+                    setting,
+                    value: "0".to_owned(),
+                });
+            }
+        }
         std::fs::create_dir_all(&self.lab_artifacts_dir).map_err(|error| {
             ConfigError::LabArtifactsDirUnavailable {
                 path: self.lab_artifacts_dir.clone(),

@@ -3511,14 +3511,30 @@ fn the_lab_artifact_commands_parse() {
         lab_parse(&["lab", "artifacts"]).unwrap(),
         fleetctl::Command::LabArtifacts {
             lease: None,
-            project: None
+            project: None,
+            cursor: None,
+            limit: None,
         }
     );
     assert_eq!(
-        lab_parse(&["lab", "artifacts", "--project", "p1", "--lease", "l1"]).unwrap(),
+        lab_parse(&[
+            "lab",
+            "artifacts",
+            "--project",
+            "p1",
+            "--lease",
+            "l1",
+            "--limit",
+            "5",
+            "--cursor",
+            "a9",
+        ])
+        .unwrap(),
         fleetctl::Command::LabArtifacts {
             lease: Some("l1".to_owned()),
             project: Some("p1".to_owned()),
+            cursor: Some("a9".to_owned()),
+            limit: Some(5),
         }
     );
     assert_eq!(
@@ -3552,6 +3568,8 @@ fn the_lab_artifact_commands_parse() {
         &["lab", "collect", "lease-1", "/x", "--force"],
         &["lab", "artifacts", "--lease"],
         &["lab", "artifacts", "--machine", "m1"],
+        &["lab", "artifacts", "--lease", "--project", "p1"],
+        &["lab", "artifacts", "--limit", "many"],
         &["lab", "artifact-get", "a1"],
         &["lab", "artifact-get", "a1", "--out"],
     ] {
@@ -3795,4 +3813,25 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
     let detail: serde_json::Value =
         serde_json::from_str(&run(&["lab", "status", &lease_id]).unwrap()).unwrap();
     assert!(detail["data"]["collectionFailure"].is_null());
+}
+
+#[test]
+fn text_output_renders_lab_artifacts() {
+    let page = json!({
+        "items": [{
+            "id": "a1", "kind": "file", "sizeBytes": 42,
+            "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "name": "/var/log/syslog"
+        }],
+        "page": { "nextCursor": "a1", "limit": 1 }
+    });
+    let text = fleetctl::render_lab_artifacts(&page);
+    assert!(text.contains("/var/log/syslog"), "{text}");
+    assert!(text.contains("9f86d081884c7d65"), "{text}");
+    assert!(text.contains("42"), "{text}");
+    assert!(text.contains("--cursor a1"), "{text}");
+    assert!(
+        fleetctl::render_lab_artifacts(&json!({ "items": [], "page": {} }))
+            .contains("(no Lab artifacts)")
+    );
 }

@@ -374,7 +374,7 @@ Refusals fail the provision operation with a reason:
 
 Lab artifacts are exec logs and guest files you collect. They outlive the lease. The controller stores their bytes in `FLEET_LAB_ARTIFACTS_DIR` (default `<FLEET_DATA_DIR>/lab-artifacts`) and their metadata in the database.
 
-- **Exec logs.** Every `lab exec` keeps its exit code and bounded output (at most 3,000 bytes per stream, credentials in URLs scrubbed) as an `exec-log` artifact.
+- **Exec logs.** Every `lab exec` that ran keeps its exit code and bounded output (at most 3,000 bytes per stream, credentials in URLs scrubbed) as an `exec-log` artifact.
 - **Collected files.** Copy files off a ready lease before you release it:
 
   ```sh
@@ -390,7 +390,7 @@ Lab artifacts are exec logs and guest files you collect. They outlive the lease.
   ```
 
   `artifact-get` writes the file only after its size and sha256 match the artifact's record. The controller also re-hashes the bytes before it sends them, and refuses (409) bytes that changed on disk.
-- **Retention.** The Lab sweeper deletes artifacts older than `FLEET_LAB_ARTIFACT_RETENTION_SECONDS` (default 7 days). The audit event is `lab_artifact_expired`. Identical content is stored once, and its bytes go when the last artifact that uses them expires.
+- **Retention.** The Lab sweeper deletes artifacts older than `FLEET_LAB_ARTIFACT_RETENTION_SECONDS` (default 7 days). Expiry needs the background sweeper: with `FLEET_LAB_SWEEP_INTERVAL_SECONDS=0`, artifacts stay until it runs. The audit event is `lab_artifact_expired`. Identical content is stored once, and its bytes go when the last artifact that uses them expires.
 - **Sizing.** Plan for the retention window's worth of collected files. One file is at most the size cap.
 - **Permissions.** Collecting and downloading need `lab.artifacts`. Listing needs `lab.read`.
 

@@ -139,8 +139,9 @@ pub struct TickReport {
     pub orphans: Vec<LabGuest>,
     /// Lab artifacts deleted past their retention deadline.
     pub artifacts_expired: usize,
-    /// Per-lease steps that failed this tick (logged by the loop and
-    /// retried on the next tick); the rest of the tick still ran.
+    /// Per-lease steps and per-artifact retention deletions that failed
+    /// this tick (logged by the loop and retried on the next tick); the rest
+    /// of the tick still ran.
     pub failures: Vec<String>,
 }
 

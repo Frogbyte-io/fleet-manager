@@ -103,8 +103,10 @@ impl ImagePinValidator for NoPins {
 }
 
 struct Fixture {
+    _store: Store,
     _dir: tempfile::TempDir,
     pool: sqlx::SqlitePool,
+    events: Arc<fleet_application::events::EventHub>,
     leases: Arc<LeaseRepository>,
     labs: Arc<LabRepository>,
     operations: Arc<Operations>,
@@ -217,9 +219,11 @@ impl Fixture {
         ready.expires_at = Some(now + 3_600_000);
         leases.update(&ready).await.unwrap();
 
-        let operations = Arc::new(Operations::new(
+        let events = Arc::new(fleet_application::events::EventHub::new(64));
+        let operations = Arc::new(Operations::new_with_events(
             Arc::new(OperationRepository::new(pool.clone())),
             Arc::new(AuditSink::new(pool.clone())),
+            events.clone(),
         ));
         let artifact_store =
             Arc::new(FsArtifactStore::open(&dir.path().join("lab-artifacts"), MAX_BYTES).unwrap());
@@ -268,10 +272,11 @@ impl Fixture {
             labs.clone(),
             guest.clone(),
         );
-        std::mem::forget(store);
         Self {
+            _store: store,
             _dir: dir,
             pool,
+            events,
             leases,
             labs,
             operations,
@@ -394,8 +399,11 @@ async fn every_lab_exec_keeps_its_redacted_output_as_an_exec_log() {
         .list(
             &fleet_auth::LanAllowAllAuthorizer,
             &Fixture::principal(),
-            Some(&fixture.lease_id),
-            None,
+            fleet_application::lab_artifacts::ArtifactFilter {
+                lease_id: Some(&fixture.lease_id),
+                ..Default::default()
+            },
+            50,
         )
         .await
         .unwrap();
@@ -429,6 +437,36 @@ async fn every_lab_exec_keeps_its_redacted_output_as_an_exec_log() {
             .iter()
             .any(|event| event.contains("lab_artifact_recorded"))
     );
+
+    // Listing pages newest first with a cursor.
+    let second = fixture.exec().await;
+    let page = |cursor: Option<String>| {
+        let artifacts = fixture.artifacts.clone();
+        async move {
+            artifacts
+                .list(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &Fixture::principal(),
+                    fleet_application::lab_artifacts::ArtifactFilter {
+                        cursor: cursor.as_deref(),
+                        ..Default::default()
+                    },
+                    1,
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let first_page = page(None).await;
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(
+        first_page[0].operation_id.as_deref(),
+        Some(second.id.as_str())
+    );
+    let next_page = page(Some(first_page[0].id.clone())).await;
+    assert_eq!(next_page.len(), 1);
+    assert_eq!(next_page[0].id, log.id);
+    assert!(page(Some(log.id.clone())).await.is_empty());
 }
 
 #[tokio::test]
@@ -463,7 +501,9 @@ async fn collection_stores_files_and_records_failures_beside_the_lease() {
     assert_eq!(fixture.read(id).await, b"line one\nline two\n");
 
     // Some paths fail: the rest are kept, the failure is recorded beside the
-    // lease, and nothing half-copied stays staged.
+    // lease (announced as a lease change), and nothing half-copied stays
+    // staged.
+    let cursor = fixture.events.current_id();
     let partial = fixture
         .collect(&["/var/log/app.log", "/tmp/huge.bin", "/tmp/dir", "/absent"])
         .await;
@@ -471,6 +511,15 @@ async fn collection_stores_files_and_records_failures_beside_the_lease() {
     let error: serde_json::Value =
         serde_json::from_str(partial.error_json.as_deref().unwrap()).unwrap();
     assert_eq!(error["reason"], "collection_partial");
+    assert!(
+        fixture
+            .events
+            .subscribe(Some(&cursor))
+            .replay
+            .iter()
+            .any(|event| event.kind == fleet_application::events::EventKind::LeaseChanged),
+        "a finished collection must announce the lease change"
+    );
     assert_eq!(error["artifacts"].as_array().unwrap().len(), 1);
     let reasons: Vec<&str> = error["failures"]
         .as_array()
@@ -583,8 +632,11 @@ async fn a_failed_collection_never_blocks_or_skips_cleanup() {
         .list(
             &fleet_auth::LanAllowAllAuthorizer,
             &Fixture::principal(),
-            Some(&fixture.lease_id),
-            None,
+            fleet_application::lab_artifacts::ArtifactFilter {
+                lease_id: Some(&fixture.lease_id),
+                ..Default::default()
+            },
+            50,
         )
         .await
         .unwrap();
@@ -643,8 +695,8 @@ async fn the_sweeper_deletes_artifacts_past_retention_and_shared_bytes_last() {
         .list(
             &fleet_auth::LanAllowAllAuthorizer,
             &Fixture::principal(),
-            None,
-            None,
+            fleet_application::lab_artifacts::ArtifactFilter::default(),
+            50,
         )
         .await
         .unwrap();
@@ -765,7 +817,12 @@ async fn collection_requests_are_validated_authorized_and_audited() {
     assert!(
         fixture
             .artifacts
-            .list(&DenyArtifacts, &principal, None, None)
+            .list(
+                &DenyArtifacts,
+                &principal,
+                fleet_application::lab_artifacts::ArtifactFilter::default(),
+                50,
+            )
             .await
             .is_ok()
     );

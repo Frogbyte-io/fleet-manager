@@ -685,7 +685,10 @@ impl Operations {
                 "agentless.inventory" | "node.inventory" | "machine.install-fleetd" => {
                     Some(crate::events::EventKind::MachineChanged)
                 }
-                "lab.provision" | "lab.cleanup" => Some(crate::events::EventKind::LeaseChanged),
+                // A collection records its failure on the lease detail.
+                "lab.provision" | "lab.cleanup" | "lab.collect" => {
+                    Some(crate::events::EventKind::LeaseChanged)
+                }
                 kind if kind.starts_with("proxmox.") => {
                     Some(crate::events::EventKind::ProxmoxChanged)
                 }
