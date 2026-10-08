@@ -742,6 +742,22 @@ pub trait LeasePort: fmt::Debug + Send + Sync {
         provision_id: Option<&str>,
         to: LeaseState,
     ) -> Result<bool, String>;
+    /// Re-arms the cleanup of a `cleanup_failed` lease: moves it back to
+    /// `releasing` with `attempts` recorded and nothing scheduled,
+    /// conditional on the lease still being `cleanup_failed` with
+    /// `observed_attempts`, so two concurrent re-arms (or a re-arm racing
+    /// the attempt it queued) cannot overwrite each other. Returns whether
+    /// this caller made the transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String>;
 }
 
 /// Result of linking a provision record to a lease.
@@ -1199,6 +1215,98 @@ impl Lab {
                 detail,
             })?;
         Ok(updated)
+    }
+
+    /// Re-arms the cleanup of a `cleanup_failed` lease once an operator has
+    /// fixed the cause (#292): the lease goes back to `releasing` with a
+    /// fresh round of [`MAX_CLEANUP_ATTEMPTS`] attempts and nothing
+    /// scheduled, so its next `lab.cleanup` is due at once. The caller
+    /// queues that operation. Re-arming needs `lab.lease`, the permission
+    /// that already queues the same cleanup through a release: it resumes
+    /// the release the lease recorded, with the same strategy and the same
+    /// destroy guards, and grants nothing a release does not.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial, an unknown lease, a lease that is not
+    /// `cleanup_failed` (invalid), a concurrent re-arm (conflict), or a
+    /// backend failure.
+    pub async fn retry_cleanup(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        id: &str,
+    ) -> Result<Lease, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabLease,
+                resource: Some(id),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        let lease = self.leases.get(id).await.map_err(|detail| {
+            if detail.contains("not found") {
+                LabUseCaseError::NotFound {
+                    what: format!("lease {id}"),
+                }
+            } else {
+                LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                }
+            }
+        })?;
+        if lease.state != LeaseState::CleanupFailed {
+            return Err(LabUseCaseError::Invalid {
+                detail: format!(
+                    "the lease {id} is {}; only a cleanup_failed lease can retry its cleanup",
+                    lease.state.id()
+                ),
+            });
+        }
+        let mut rearmed = lease.clone();
+        rearm_cleanup(&mut rearmed);
+        let failed_attempts = lease.cleanup_attempts.to_string();
+        // The intent precedes the mutation; the completion is recorded only
+        // once this caller's compare-and-set won, so a concurrent loser
+        // leaves a request, never a re-arm that did not happen.
+        self.audit_event(
+            principal,
+            Permission::LabLease,
+            Some(id),
+            "lab_lease_cleanup_rearm_requested",
+            Some(("failedAttempts", &failed_attempts)),
+        )
+        .await?;
+        let won = self
+            .leases
+            .rearm_cleanup(id, lease.cleanup_attempts, rearmed.cleanup_attempts)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })?;
+        if !won {
+            return Err(LabUseCaseError::Conflict {
+                detail: "the lease changed before its cleanup could be re-armed".to_owned(),
+            });
+        }
+        // The required audit is the intent above, recorded before the
+        // change. The completion record is best effort: the re-arm is
+        // committed, and failing here would return before the caller
+        // queues the cleanup the lease now owes.
+        let _ = self
+            .audit_event(
+                principal,
+                Permission::LabLease,
+                Some(id),
+                "lab_lease_cleanup_rearmed",
+                Some(("failedAttempts", &failed_attempts)),
+            )
+            .await;
+        Ok(rearmed)
     }
 
     /// Extends a ready lease by adding seconds to its existing expiry. The
@@ -2025,7 +2133,8 @@ impl Lab {
 
 /// The failed cleanup attempts after which a releasing lease stops
 /// retrying and becomes `cleanup_failed`: it then visibly owns whatever is
-/// left on the host until an operator resolves it.
+/// left on the host until an operator resolves it. An operator re-arm
+/// ([`rearm_cleanup`]) grants another round of this many attempts.
 pub const MAX_CLEANUP_ATTEMPTS: u32 = 5;
 
 /// The delay before the next cleanup attempt after `attempts` failed ones:
@@ -2038,18 +2147,42 @@ pub fn cleanup_backoff_millis(attempts: u32) -> i64 {
 }
 
 /// What one failed cleanup attempt does to its lease: it stays `releasing`
-/// with the next attempt scheduled, or, once the attempts are exhausted,
-/// becomes `cleanup_failed` with nothing scheduled.
+/// with the next attempt scheduled, or, once the round's attempts are
+/// exhausted, becomes `cleanup_failed` with nothing scheduled.
+///
+/// `cleanup_attempts` counts every failed attempt over the lease's life and
+/// never goes back: each attempt's idempotency key names that count
+/// ([`cleanup_operation`]), so a count that went back would name an old
+/// attempt's operation instead of queuing a new one. Attempts therefore
+/// run in rounds of [`MAX_CLEANUP_ATTEMPTS`]: a round ends at the next
+/// multiple, and the backoff restarts with each round.
 pub fn record_cleanup_failure(lease: &mut Lease, now: i64) {
     lease.cleanup_attempts = lease.cleanup_attempts.saturating_add(1);
-    if lease.cleanup_attempts >= MAX_CLEANUP_ATTEMPTS {
+    let in_round = lease.cleanup_attempts % MAX_CLEANUP_ATTEMPTS;
+    if in_round == 0 {
         lease.state = LeaseState::CleanupFailed;
         lease.cleanup_next_at = None;
     } else {
         lease.state = LeaseState::Releasing;
-        lease.cleanup_next_at =
-            Some(now.saturating_add(cleanup_backoff_millis(lease.cleanup_attempts)));
+        lease.cleanup_next_at = Some(now.saturating_add(cleanup_backoff_millis(in_round)));
     }
+}
+
+/// What an operator re-arm does to a `cleanup_failed` lease (#292): it is
+/// `releasing` again with a fresh round of [`MAX_CLEANUP_ATTEMPTS`]
+/// attempts and its next attempt due at once. The failed-attempt count is
+/// kept, so the next attempt's idempotency key is one no earlier attempt
+/// used. Fleet only ever raises the count, and a `cleanup_failed` lease
+/// ends on a round boundary; a count off it (after a change of the limit)
+/// is rounded up, never down onto an earlier key. A count lowered by
+/// editing the database by hand is outside that guarantee.
+pub fn rearm_cleanup(lease: &mut Lease) {
+    lease.state = LeaseState::Releasing;
+    lease.cleanup_attempts = lease
+        .cleanup_attempts
+        .max(1)
+        .next_multiple_of(MAX_CLEANUP_ATTEMPTS);
+    lease.cleanup_next_at = None;
 }
 
 /// Where a lease goes after its provision failed or was cancelled: to
@@ -2191,7 +2324,7 @@ pub fn cleanup_due(lease: &Lease, now: i64) -> bool {
 /// The `lab.cleanup` operation for a releasing lease's next attempt. The
 /// idempotency key names the attempt, so a repeated release or sweep never
 /// queues a second cleanup for the same attempt, while a retry after a
-/// failed attempt queues a new one.
+/// failed attempt, or after an operator re-arm, queues a new one.
 #[must_use]
 pub fn cleanup_operation(
     lease: &Lease,
@@ -2406,6 +2539,57 @@ mod tests {
         assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
         elsewhere.provision_id = None;
         assert!(!guest_owned(Some(&linked), Some(&elsewhere), "a1", 9000));
+    }
+
+    #[test]
+    fn a_rearm_grants_a_fresh_round_under_new_idempotency_keys() {
+        use fleet_core::LeaseState::{CleanupFailed, Releasing};
+        let max = super::MAX_CLEANUP_ATTEMPTS;
+        let mut lease = fleet_core::Lease {
+            id: "l1".to_owned(),
+            state: Releasing,
+            ..fleet_core::Lease::default()
+        };
+        let mut keys = std::collections::HashSet::new();
+        let mut attempt = |lease: &mut fleet_core::Lease| {
+            let key = super::cleanup_operation(lease, None)
+                .idempotency_key
+                .unwrap();
+            assert!(keys.insert(key.clone()), "{key} was already used");
+            super::record_cleanup_failure(lease, 1_000);
+        };
+        for _ in 0..max {
+            attempt(&mut lease);
+        }
+        assert_eq!(lease.state, CleanupFailed);
+        assert_eq!(lease.cleanup_attempts, max);
+
+        super::rearm_cleanup(&mut lease);
+        assert_eq!(lease.state, Releasing);
+        assert_eq!(lease.cleanup_next_at, None);
+        assert!(super::cleanup_due(&lease, 0));
+        // The round restarts the backoff and runs the full budget again,
+        // each attempt under a key no earlier attempt used.
+        attempt(&mut lease);
+        assert_eq!(lease.state, Releasing);
+        assert_eq!(
+            lease.cleanup_next_at,
+            Some(1_000 + super::cleanup_backoff_millis(1))
+        );
+        for _ in 1..max {
+            attempt(&mut lease);
+        }
+        assert_eq!(lease.state, CleanupFailed);
+        assert_eq!(lease.cleanup_attempts, 2 * max);
+
+        // A count off the round boundary (after a change of the limit) is
+        // rounded up, never back onto a used key.
+        lease.cleanup_attempts = 0;
+        super::rearm_cleanup(&mut lease);
+        assert_eq!(lease.cleanup_attempts, max);
+        lease.cleanup_attempts = max + 2;
+        super::rearm_cleanup(&mut lease);
+        assert_eq!(lease.cleanup_attempts, 2 * max);
     }
 
     #[test]

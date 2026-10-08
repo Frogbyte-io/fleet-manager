@@ -1747,6 +1747,89 @@
         }
       }
     },
+    "/api/v1/lab/leases/{leaseId}/cleanup/retry": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Re-arms the cleanup of a `cleanup_failed` lease once its cause is fixed\n(#292) and queues the next `lab.cleanup` attempt.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease, a lease\nthat is not `cleanup_failed`, or a concurrent re-arm.",
+        "operationId": "retryLabLeaseCleanup",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The lease is `releasing` again with a fresh round of cleanup attempts (its `cleanupAttempts` total is kept), and its next `lab.cleanup` operation is queued. A guest that is already gone counts as destroyed, so a guest removed by hand resolves the lease to `released`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is not `cleanup_failed`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not release the lease or queue its cleanup.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The lease changed while its cleanup was being re-armed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases/{leaseId}/exec": {
       "post": {
         "tags": [

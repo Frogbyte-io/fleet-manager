@@ -2177,6 +2177,80 @@ async fn lab_lease_extension_returns_the_updated_deadline() {
 }
 
 #[tokio::test]
+async fn lab_cleanup_retry_rearms_a_cleanup_failed_lease_and_queues_its_cleanup() {
+    use fleet_application::lab::{Lab, LeasePort, MAX_CLEANUP_ATTEMPTS, NewLease};
+    use fleet_core::{CleanupStrategy, LeaseState};
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let repository = Arc::new(LabRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let mut lease = leases
+        .create(
+            &NewLease {
+                template_version_id: "template-1@digest".to_owned(),
+                purpose: "the test".to_owned(),
+                project_id: None,
+                cleanup: CleanupStrategy::Destroy,
+                ttl_seconds: 3_600,
+            },
+            "anonymous-lan-admin",
+            now,
+        )
+        .await
+        .unwrap();
+    lease.state = LeaseState::CleanupFailed;
+    lease.cleanup_attempts = MAX_CLEANUP_ATTEMPTS;
+    leases.update(&lease).await.unwrap();
+
+    let lab = Arc::new(Lab::new(
+        repository.clone(),
+        repository,
+        leases.clone(),
+        Arc::new(NoPromotedVersions),
+        Arc::new(ProjectRepository::new(store.pool().clone())),
+        Arc::new(FakeAudit),
+    ));
+    let mut state = (*test_state().0).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+    let retry = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "{API_BASE_PATH}/lab/leases/{}/cleanup/retry",
+                lease.id
+            ))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (parts, body) = call_via(&router, retry()).await;
+    assert_eq!(parts.status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["data"]["kind"], "lab.cleanup");
+    let rearmed = leases.get(&lease.id).await.unwrap();
+    assert_eq!(rearmed.state, LeaseState::Releasing);
+    assert_eq!(rearmed.cleanup_next_at, None);
+
+    // Now releasing, not cleanup_failed: refused.
+    let (parts, body) = call_via(&router, retry()).await;
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request");
+
+    let unknown = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "{API_BASE_PATH}/lab/leases/no-such-lease/cleanup/retry"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let (parts, body) = call_via(&router, unknown).await;
+    assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
 async fn image_build_history_routes_and_schema_are_registered() {
     let (router, _, _) = test_router();
     for path in ["/images/builds", "/images/builds/no-such-build"] {

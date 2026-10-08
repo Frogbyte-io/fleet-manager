@@ -3197,6 +3197,24 @@ fn the_one_command_lab_flow_parses() {
             .unwrap_err()
             .contains("`--`")
     );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "cleanup-retry",
+            "lease-1",
+            "--wait",
+            "--timeout",
+            "300"
+        ])
+        .unwrap(),
+        fleetctl::Command::LabCleanupRetry {
+            lease_id: "lease-1".to_owned(),
+            wait: true,
+            timeout: Some(300),
+        }
+    );
+    assert!(lab_parse(&["lab", "cleanup-retry"]).is_err());
+    assert!(lab_parse(&["lab", "cleanup-retry", "lease-1", "--keep"]).is_err());
     assert!(matches!(
         lab_parse(&["lab", "destroy", "lease-1", "--keep", "--wait"]).unwrap(),
         fleetctl::Command::LabDestroy {
@@ -3388,4 +3406,85 @@ fn lab_create_refuses_an_ambiguous_account_before_creating_a_lease() {
             .iter()
             .any(|line| line.starts_with("POST")),
     );
+}
+
+/// A controller that accepts a cleanup re-arm, finishes its operation, and
+/// then reports the lease in `final_state`.
+fn cleanup_retry_stub(
+    final_state: &'static str,
+) -> (
+    tokio::runtime::Runtime,
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = seen.clone();
+    let address = runtime.block_on(async move {
+        let handler = move |request: axum::extract::Request| {
+            let recorded = recorded.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_owned();
+                recorded.lock().unwrap().push(format!("{method} {path}"));
+                let answer = match (method.as_str(), path.as_str()) {
+                    ("POST", "/api/v1/lab/leases/lease-1/cleanup/retry") => {
+                        json!({"data": {"id": "op-1", "kind": "lab.cleanup", "state": "pending"}})
+                    }
+                    ("GET", "/api/v1/operations/op-1") => {
+                        json!({"data": {"id": "op-1", "kind": "lab.cleanup", "state": "succeeded"}})
+                    }
+                    ("GET", "/api/v1/lab/leases/lease-1") => {
+                        json!({"data": {"id": "lease-1", "state": final_state}})
+                    }
+                    _ => json!({"code": "not_found", "message": path}),
+                };
+                axum::Json(answer)
+            }
+        };
+        let router = axum::Router::new().fallback(handler);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        address
+    });
+    (runtime, format!("http://{address}"), seen)
+}
+
+#[test]
+fn lab_cleanup_retry_wait_follows_the_attempt_and_reports_the_lease() {
+    for (final_state, exit) in [("released", 0), ("releasing", 1)] {
+        let (_runtime, base_url, seen) = cleanup_retry_stub(final_state);
+        let args: Vec<String> = [
+            "--url",
+            &base_url,
+            "--output",
+            "json",
+            "lab",
+            "cleanup-retry",
+            "lease-1",
+            "--wait",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let invocation = fleetctl::parse(&args).unwrap();
+        let (output, code) = fleetctl::run_with_exit(&invocation).unwrap();
+        assert_eq!(code, exit, "{final_state}: {output}");
+        let lease: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(lease["state"], final_state);
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            [
+                "POST /api/v1/lab/leases/lease-1/cleanup/retry",
+                "GET /api/v1/operations/op-1",
+                "GET /api/v1/lab/leases/lease-1",
+            ]
+        );
+    }
 }

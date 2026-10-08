@@ -52,6 +52,8 @@ requested -> queued -> reserving -> provisioning -> booting -> bootstrapping -> 
                                            +---+
                                            |
                                            +--> cleanup_failed  (attempts exhausted)
+                                                     |
+                     (operator re-arm: back to releasing, fresh round of attempts)
 ```
 
 Cancellation and expiry transition any non-terminal state into release/compensation. Provider VM state is tracked separately; a running VM does not imply a ready lease.
@@ -78,6 +80,8 @@ The controller's Lab sweeper (FM-716, every `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, 
 - it compares the `fm-lab-*` guests on every trusted account with the Lab records, and reports, once per controller run, any guest that no live lease, standalone provision, or `keep` release owns. A guest is owned only through the account and VMID its record names, the ones cleanup destroys through, and a leased record only when record and lease link to each other. It never deletes a guest it cannot attribute, and a store failure fails the pass rather than reading as a missing record.
 
 The rules live in `fleet_application::lab` (`stuck_compensation`, `cleanup_due`, `guest_owned`); the sweeper is an adapter. Each committed change publishes `lease.changed` immediately. A failure confined to one lease is logged and retried next tick without stalling the others. Shutdown cancels an in-flight tick; every step commits on its own. Every deadline and attempt lives in the rows, so a restarted controller continues where the last one stopped.
+
+`cleanup_failed` stops automatic cleanup, and `lab release` refuses it. Once an operator has fixed the cause, `POST /api/v1/lab/leases/{leaseId}/cleanup/retry` (`fleetctl lab cleanup-retry`) re-arms it (#292). The route requires `lab.lease` and `operation.create`, the same permissions a release needs to queue the same cleanup. The re-arm resumes the release that the lease already recorded, with the same strategy and destroy guards, so it grants nothing a release does not. It is audited: `lab_lease_cleanup_rearm_requested` is required and recorded before the change, and `lab_lease_cleanup_rearmed` is recorded best effort once it is made, so a failure to write it never strands the cleanup the lease now owes. The re-arm moves the lease back to `releasing` with nothing scheduled, conditional on the lease still being `cleanup_failed`. The next `lab.cleanup` attempt is queued at once. Because an absent guest counts as destroyed, a guest the operator removed by hand resolves to `released`, and the Lab-owned machine record goes with it. The re-arm grants a fresh round of five attempts with the backoff restarted. `cleanupAttempts` keeps counting across rounds instead of returning to zero, because each attempt's idempotency key (`lab-cleanup:<lease>:<attempts>`) names that count: a reset would name the first round's failed operation, and nothing new would be queued.
 
 Cleanup strategies:
 

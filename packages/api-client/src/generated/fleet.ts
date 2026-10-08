@@ -7493,6 +7493,81 @@ export const getLabLease = async (leaseId: string, options?: RequestInit): Promi
 
 
 
+export type retryLabLeaseCleanupResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type retryLabLeaseCleanupResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type retryLabLeaseCleanupResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type retryLabLeaseCleanupResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type retryLabLeaseCleanupResponse409 = {
+  data: ApiError
+  status: 409
+}
+
+export type retryLabLeaseCleanupResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type retryLabLeaseCleanupResponseSuccess = (retryLabLeaseCleanupResponse202) & {
+  headers: Headers;
+};
+export type retryLabLeaseCleanupResponseError = (retryLabLeaseCleanupResponse400 | retryLabLeaseCleanupResponse403 | retryLabLeaseCleanupResponse404 | retryLabLeaseCleanupResponse409 | retryLabLeaseCleanupResponse500) & {
+  headers: Headers;
+};
+
+export type retryLabLeaseCleanupResponse = (retryLabLeaseCleanupResponseSuccess | retryLabLeaseCleanupResponseError)
+
+export const getRetryLabLeaseCleanupUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/cleanup/retry`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not `cleanup_failed`, or a concurrent re-arm.
+ * @summary Re-arms the cleanup of a `cleanup_failed` lease once its cause is fixed
+(#292) and queues the next `lab.cleanup` attempt.
+ */
+export const retryLabLeaseCleanup = async (leaseId: string, options?: RequestInit): Promise<retryLabLeaseCleanupResponse> => {
+
+  const res = await fetch(getRetryLabLeaseCleanupUrl(leaseId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: retryLabLeaseCleanupResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as retryLabLeaseCleanupResponse
+}
+
+
+
 export type execLabLeaseResponse202 = {
   data: ResourceOperationDto
   status: 202

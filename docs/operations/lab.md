@@ -260,7 +260,7 @@ To resolve it:
 
 1. Find the cause. Common ones are a protected clone whose flag Lab could not clear (a missing `FleetLabTarget`; see [Proxmox accounts and privileges](#proxmox-accounts-and-privileges)), a missing `VM.Allocate` or `VM.PowerMgmt` on the clone VMID, an unconfirmed account, or an unreachable host.
 2. Check whether the guest still exists. It may already be gone if only the machine-record removal failed.
-3. Remove the guest. Fleet's reviewed destroy stops it first, and refuses templates and promoted image artifacts:
+3. If the cause stays (for example, you keep the clone protected), remove the guest yourself. If you fixed the cause, skip this step: the re-armed cleanup destroys the guest. Fleet's reviewed destroy stops the guest first, and refuses templates and promoted image artifacts:
 
    ```sh
    fleetctl --output json proxmox destroy <lab-account-id> <node> <vmid> --wait
@@ -268,7 +268,26 @@ To resolve it:
 
    A clone that is still protected (its provision failed at step `unprotect`) refuses deletion. Grant `FleetLabTarget` for the future, and for this guest run `qm set <vmid> --protection 0` on the host before the destroy.
 
-`cleanup_failed` is terminal. `lab release` refuses it, and no Fleet command re-arms cleanup today. The lease stays as the record that a guest was owned and needed a human. `fleetctl` cannot remove the guest's Lab machine record yet either.
+   If Fleet's destroy fails for the same reason as the cleanup (a missing ACL, an unconfirmed account, an unreachable API), remove the guest on the PVE node instead. First check that `qm config <vmid>` shows the lease's `fm-lab-<record-id>` name and is not a template:
+
+   ```sh
+   qm stop <vmid>
+   qm destroy <vmid> --purge
+   ```
+
+4. Re-arm the cleanup:
+
+   ```sh
+   fleetctl --output json lab cleanup-retry <lease-id> --wait
+   ```
+
+   The lease goes back to `releasing` and one new `lab.cleanup` attempt is queued at once. A guest that is already gone counts as destroyed, so a guest you removed by hand resolves the lease to `released`, and the cleanup removes the guest's Lab machine record. Fleet still has to ask the account's PVE API to learn that the guest is gone, so removing it by hand is not enough on its own: restore the account's trust (a confirmed fingerprint) and its connectivity first, or the new attempt fails like the last ones. If you cannot, leave the lease `cleanup_failed`. `--wait` waits for that one attempt and exits non-zero unless the lease ended `released`. Without `--wait` the command prints the queued operation.
+
+   **Exception: leases provisioned before FM-713.** Their provision record has no Proxmox account (and, for some, no node), and cleanup refuses such a lease before it looks for the guest. A re-arm therefore returns it to `cleanup_failed`, even after you removed the guest by hand. Destroy that guest by hand on the host and do not re-arm the lease: it stays `cleanup_failed` as the record, because `lab release` (with any strategy) refuses that state.
+
+The re-arm needs `lab.lease` on the lease and `operation.create`, as a release does; the controller checks both before it changes the lease. It is audited: `lab_lease_cleanup_rearm_requested` is recorded before the change, and a re-arm that cannot record it fails without changing the lease. `lab_lease_cleanup_rearmed` is recorded once the change is made, but only best effort, so do not rely on finding it; the requested event is the audit of record. It grants a fresh round of five attempts, with the backoff restarting at one minute. A failed attempt backs off as before, and the lease returns to `cleanup_failed` after the round. `cleanupAttempts` keeps counting across rounds: 5 just after the re-arm, and 10 if the new round is exhausted too. A lease that is not `cleanup_failed` when the request arrives is refused with `400 invalid_request`. If the lease changes between that check and the re-arm (another retry, release or sweep won the race), the request is refused with `409 conflict` and changes nothing; read the lease again before retrying.
+
+Until you re-arm it, `cleanup_failed` stays put: `lab release` refuses it, and Fleet does not retry it. The lease remains the record that it owned a guest that needed a human.
 
 `revert` cleanup needs pooled guests (FM-717, [#260](https://github.com/Frogbyte-io/fleet-manager/issues/260)). Until then, cleanup refuses `revert` with `unsupported_until_pooled`. It destroys nothing and spends no attempt; the lease stays `releasing`. Release it with `--keep`, then remove the guest yourself.
 
@@ -330,7 +349,7 @@ What Fleet guarantees on `dev`:
 What Fleet never does:
 
 - delete a guest it cannot attribute to a Lab record (an orphan), or one released with `keep`;
-- retry cleanup after `cleanup_failed`;
+- retry cleanup after `cleanup_failed` on its own (only an explicit retry request re-arms it: `lab cleanup-retry`, or `POST /api/v1/lab/leases/{leaseId}/cleanup/retry`);
 - promote a build or replace a promoted version on its own.
 
 Not yet guaranteed:
