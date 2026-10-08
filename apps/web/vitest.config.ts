@@ -20,5 +20,7 @@ export default defineConfig({
     // gives false failures. A real hang still fails, just later.
     testTimeout: 20_000,
     hookTimeout: 30_000,
+    // Keep slow tests visible in the reporter even though they no longer fail.
+    slowTestThreshold: 3_000,
   },
 })
