@@ -85,6 +85,12 @@ pub enum Command {
     /// The node and Fleet read status. Prefers the node's local socket
     /// unless `--url` names the controller explicitly.
     Status,
+    /// Per-command usage requested with `--help`/`-h`; answered locally,
+    /// never sent to the controller.
+    Help {
+        /// The usage text to print.
+        text: String,
+    },
     /// The system view.
     System,
     /// Tail payload-free fleet invalidation events from the controller.
@@ -1131,6 +1137,16 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     }
 
     let words: Vec<&str> = rest.iter().map(String::as_str).collect();
+    if let Some(text) = help_text(&words) {
+        return Ok(Invocation {
+            url,
+            url_explicit,
+            socket,
+            output,
+            command: Command::Help { text },
+        });
+    }
+    reject_flag_as_id(&words)?;
     let command = match words.as_slice() {
         ["status"] => Command::Status,
         ["system"] => Command::System,
@@ -2888,6 +2904,159 @@ fn parse_skills_catalog(rest: &[&str]) -> Result<Command, CliError> {
     }
 }
 
+/// The usage lines for one command: those of `words`' group and verb, the
+/// group's lines when the verb has none, the whole usage otherwise. `None`
+/// unless `--help`/`-h` appears among the command's own arguments.
+fn help_text(words: &[&str]) -> Option<String> {
+    let (group, args) = words.split_first()?;
+    // Everything after `--` belongs to a remote command (`lab exec ... -- ls -h`).
+    let own = args.split(|word| *word == "--").next().unwrap_or(&[]);
+    if !own.iter().any(|word| matches!(*word, "--help" | "-h")) {
+        return None;
+    }
+    let full = usage();
+    let word_at = |line: &str, index: usize| -> Vec<String> {
+        line.split_whitespace()
+            .nth(index)
+            .map(|word| word.split('|').map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let in_group: Vec<&str> = full
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .filter(|line| word_at(line, 0).iter().any(|word| word == group))
+        .collect();
+    if in_group.is_empty() {
+        // An unknown command group is the ordinary unknown-command error.
+        return None;
+    }
+    // Narrow by each leading word that names a verb (`lab pool create`),
+    // stopping at the first that matches no usage line (an id, a flag).
+    let mut shown = in_group;
+    for (depth, word) in args.iter().enumerate() {
+        if word.starts_with('-') {
+            break;
+        }
+        let narrowed: Vec<&str> = shown
+            .iter()
+            .copied()
+            .filter(|line| {
+                word_at(line, depth + 1).iter().any(|name| {
+                    name == word
+                        // `lab create` is also the deprecated alias of `lab template-create`.
+                        || (depth == 0
+                            && *group == "lab"
+                            && *word == "create"
+                            && name == "template-create")
+                })
+            })
+            .collect();
+        if narrowed.is_empty() {
+            break;
+        }
+        shown = narrowed;
+    }
+    shown.dedup();
+    Some(format!("Usage:\n{}", shown.join("\n")))
+}
+
+/// Verbs whose id positional sits at the given word index, so a leading
+/// `-` there is a mistyped flag, never an id.
+const ID_POSITIONALS: &[(&str, &[&str], usize)] = &[
+    ("operations", &["get", "cancel"], 2),
+    (
+        "machines",
+        &["get", "link-guest", "unlink-guest", "install-node"],
+        2,
+    ),
+    (
+        "projects",
+        &[
+            "get",
+            "update",
+            "delete",
+            "discover",
+            "record",
+            "ready",
+            "clone",
+            "pull",
+            "status",
+            "write-config",
+        ],
+        2,
+    ),
+    (
+        "proxmox",
+        &[
+            "delete",
+            "observe",
+            "confirm",
+            "discover",
+            "nodes",
+            "privileges",
+            "guests",
+            "tasks",
+            "observe-guest",
+        ],
+        2,
+    ),
+    (
+        "images",
+        &[
+            "build-show",
+            "publish",
+            "versions",
+            "build",
+            "version",
+            "promote",
+        ],
+        2,
+    ),
+    ("desired", &["fetch", "activate", "rollback"], 2),
+    (
+        "lab",
+        &[
+            "status",
+            "exec",
+            "destroy",
+            "cleanup-retry",
+            "publish",
+            "provision",
+            "provision-lease",
+            "release",
+            "extend",
+            "lease",
+            "collect",
+            "artifact-get",
+        ],
+        2,
+    ),
+    ("lab", &["pool"], 3),
+];
+
+/// Refuses an id positional that starts with `-`: an unknown flag is a
+/// usage error, never a request for an id like `--bogus`.
+fn reject_flag_as_id(words: &[&str]) -> Result<(), CliError> {
+    let [group, verb, ..] = words else {
+        return Ok(());
+    };
+    for (name, verbs, index) in ID_POSITIONALS {
+        if name != group || !verbs.contains(verb) {
+            continue;
+        }
+        // `lab pool list`/`create` take no id.
+        if *index == 3 && !matches!(words.get(2), Some(&("show" | "delete" | "fill" | "drain"))) {
+            continue;
+        }
+        if let Some(word) = words.get(*index)
+            && word.starts_with('-')
+        {
+            return Err(unknown_lab_flag(word));
+        }
+    }
+    Ok(())
+}
+
 fn usage() -> String {
     format!(
         "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id> [--allow-insecure-tls]\n  images versions <recipe-id>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--timeout <s>] [--wait] -- <command> [args...]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab cleanup-retry <lease-id> [--wait] [--timeout <s>]\n  lab pool list\n  lab pool show <pool-id>\n  lab pool create --template-version <version-id> --account <account-id> --baseline <snapshot> --size <n>\n  lab pool delete <pool-id>\n  lab pool fill <pool-id> --vmid <vmid>... [--wait] [--timeout <s>]\n  lab pool drain <pool-id> --vmid <vmid>...|--all\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> [--account <account-id>]\n  lab artifacts [--lease <lease-id>] [--project <id>] [--cursor <id>] [--limit <n>]\n  lab collect <lease-id> <absolute-guest-path>... [--wait] [--timeout <s>]\n  lab artifact-get <artifact-id> --out <file>\n  lab provisions\n  lab leases [--project <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
@@ -3187,6 +3356,10 @@ pub fn run(invocation: &Invocation) -> Result<String, CliError> {
 ///
 /// As [`run`].
 pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> {
+    // Help never builds a client: no request can leave the process.
+    if let Command::Help { text } = &invocation.command {
+        return Ok((text.clone(), 0));
+    }
     if invocation.command == Command::Events {
         stream_events(invocation)?;
         return Ok((String::new(), 0));
@@ -3806,6 +3979,160 @@ mod event_output_tests {
         assert_eq!(path, "/api/v1/proxmox/accounts/account-1/discovery");
         assert!(query.is_empty());
         assert!(body.is_none());
+    }
+
+    /// Every `lab` subcommand answers `--help`/`-h` with its usage, exit 0,
+    /// and never contacts the controller.
+    #[test]
+    fn lab_subcommand_help_makes_no_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let subcommands = [
+            "templates",
+            "create",
+            "template-create",
+            "status",
+            "exec",
+            "destroy",
+            "cleanup-retry",
+            "pool",
+            "publish",
+            "provision",
+            "provision-lease",
+            "provisions",
+            "leases",
+            "lease",
+            "release",
+            "extend",
+            "sweep",
+            "artifacts",
+            "collect",
+            "artifact-get",
+        ];
+        for sub in subcommands {
+            for flag in ["--help", "-h"] {
+                for args in [vec!["lab", sub, flag], vec!["lab", sub, "lease-1", flag]] {
+                    let mut argv = vec!["--url".to_owned(), url.clone()];
+                    argv.extend(args.iter().map(ToString::to_string));
+                    let invocation = parse(&argv).unwrap();
+                    assert!(
+                        matches!(invocation.command, Command::Help { .. }),
+                        "{args:?}"
+                    );
+                    let (text, code) = super::run_with_exit(&invocation).unwrap();
+                    assert_eq!(code, 0, "{args:?}");
+                    assert!(text.starts_with("Usage:\n  lab "), "{args:?}: {text}");
+                    assert!(
+                        text.lines().skip(1).all(|line| line.starts_with("  lab ")),
+                        "{args:?}: {text}"
+                    );
+                    assert!(text.lines().count() <= 7, "{args:?}: not narrowed: {text}");
+                    let exact = text.lines().skip(1).any(|line| {
+                        line.split_whitespace()
+                            .nth(1)
+                            .is_some_and(|word| word.split('|').any(|name| name == sub))
+                    });
+                    assert!(exact, "{args:?}: {text}");
+                }
+            }
+        }
+        for sub in ["list", "show", "create", "delete", "fill", "drain"] {
+            let argv: Vec<String> = ["lab", "pool", sub, "--help"].map(str::to_owned).into();
+            let invocation = parse(&argv).unwrap();
+            assert!(
+                matches!(invocation.command, Command::Help { ref text } if text.contains("lab pool"))
+            );
+        }
+        // After `--` the words belong to the remote command.
+        let exec = parse(&["lab", "exec", "lease-1", "--", "ls", "-h"].map(str::to_owned)).unwrap();
+        assert!(matches!(exec.command, Command::LabExec { .. }));
+        // No connection was ever attempted.
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn a_flag_is_never_taken_as_an_id() {
+        for args in [
+            vec!["lab", "destroy", "--bogus"],
+            vec!["lab", "status", "-x"],
+            vec!["lab", "cleanup-retry", "--bogus"],
+            vec!["lab", "release", "--bogus"],
+            vec!["lab", "pool", "show", "--bogus"],
+            vec!["lab", "destroy", "lease-1", "--bogus"],
+            vec!["machines", "get", "--bogus"],
+            vec!["operations", "cancel", "--bogus"],
+        ] {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            let error = parse(&argv).unwrap_err();
+            assert!(
+                error.message.contains("unknown flag"),
+                "{args:?}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn help_is_narrowed_to_the_verb_and_unknown_groups_still_fail() {
+        let help = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            match parse(&argv).unwrap().command {
+                Command::Help { text } => text,
+                other => panic!("{args:?}: {other:?}"),
+            }
+        };
+        let destroy = help(&["lab", "destroy", "--help"]);
+        assert_eq!(
+            destroy,
+            "Usage:\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]"
+        );
+        assert_eq!(help(&["lab", "leases", "-h"]).lines().count(), 2);
+        assert_eq!(help(&["lab", "pool", "create", "-h"]).lines().count(), 2);
+        assert!(help(&["lab", "-h"]).lines().count() > 10);
+        assert_eq!(help(&["images", "version", "-h"]).lines().count(), 2);
+        assert!(help(&["proxmox", "tasks", "-h"]).contains("proxmox tasks"));
+        // A typo plus `-h` is the ordinary unknown-command error.
+        let argv: Vec<String> = ["bogus", "-h"].map(str::to_owned).into();
+        assert!(parse(&argv).is_err());
+        // After `--` the words belong to the remote command.
+        let exec = parse(
+            &[
+                "frogenv",
+                "run",
+                "m",
+                "--root",
+                "/r",
+                "--endpoint",
+                "e",
+                "--auth",
+                "agent",
+                "--",
+                "ls",
+                "-h",
+            ]
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert!(!matches!(exec.command, Command::Help { .. }));
+    }
+
+    #[test]
+    fn help_for_other_command_groups_is_answered_locally() {
+        for args in [
+            vec!["machines", "get", "--help"],
+            vec!["projects", "delete", "-h"],
+            vec!["operations", "cancel", "--help"],
+        ] {
+            let argv: Vec<String> = args.iter().map(ToString::to_string).collect();
+            assert!(
+                matches!(parse(&argv).unwrap().command, Command::Help { .. }),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]
@@ -4959,6 +5286,7 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
         // `status` took one of the two routes above.
         Command::Status => unreachable!("the status command returned before dispatch"),
         Command::Events => unreachable!("the events command streams before request dispatch"),
+        Command::Help { .. } => unreachable!("help is answered before request dispatch"),
         Command::System => (
             reqwest::Method::GET,
             "/api/v1/system".to_owned(),

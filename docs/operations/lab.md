@@ -289,6 +289,7 @@ fleetctl --output json lab publish <template-id> | jq -r .id    # the template v
 - From the CLI, use `--probe guest_agent`. The `ssh_exec` probe needs a readiness command and `project_ready` needs a bootstrap project; `fleetctl lab template-create` sets neither, so create those templates through `POST /api/v1/lab/templates`. The SSH settings (`sshUser` root, `sshPort` 22, `sshTrustMode` tofu) also take their defaults from the CLI.
 - The clone keeps the image template's hardware today. The template's cores, memory, and disk are recorded but not applied to the guest.
 - `--readiness-deadline` is 1 to 3600 seconds, `--ttl` 1 to 2592000 seconds.
+- Every `fleetctl` command answers `--help`/`-h` with just its own usage lines, without contacting the controller; a flag value spelled `-h` or `--help` is read as the help request. An id positional that starts with `-` is refused as an unknown flag.
 - `lab create --name …` still creates a template. It is a deprecated alias of `lab template-create`; use `template-create` in new scripts. `lab create <template-version-id>` now creates a lease (step 6).
 
 ### 6. Lease, provision, and use
