@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod build_addresses;
 pub mod guest_links;
 pub mod images;
 pub mod lab;
@@ -31,6 +32,7 @@ pub mod skills;
 pub mod source;
 
 pub use audit::{AuditLedger, AuditSink};
+pub use build_addresses::BuildAddressRepository;
 pub use guest_links::GuestLinkRepository;
 pub use images::RecipeRepository;
 pub use lab::{LabRepository, LeaseRepository};

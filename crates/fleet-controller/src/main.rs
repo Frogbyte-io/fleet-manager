@@ -502,6 +502,31 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         )),
                     );
                 }
+                // #337: the opt-in pool of Fleet-assigned build addresses.
+                // Held addresses of builds that ended while the controller
+                // was down are released first, pool or no pool.
+                let build_addresses: std::sync::Arc<
+                    dyn fleet_application::images::BuildAddressPort,
+                > = std::sync::Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                    store.pool().clone(),
+                ));
+                let released =
+                    fleet_controller::images_exec::ImagesExecutor::reconcile_build_addresses(
+                        build_addresses.as_ref(),
+                    )
+                    .await;
+                if released > 0 {
+                    eprintln!("image build addresses released at startup: {released}");
+                }
+                if let Some(pool) = config.image_build_address_pool.clone() {
+                    build = build.with_build_addresses(
+                        pool,
+                        build_addresses,
+                        std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(
+                            store.pool().clone(),
+                        )),
+                    );
+                }
                 let build = std::sync::Arc::new(build);
                 // #314: a build that was cut short by a crash or reboot
                 // leaves its work directory, and the owner-only var file in

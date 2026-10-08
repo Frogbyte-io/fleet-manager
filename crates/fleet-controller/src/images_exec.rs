@@ -91,6 +91,17 @@ pub struct ImagesExecutor {
         fleet_config::ImageBuildProxy,
         Arc<dyn fleet_application::operation::AuditPort>,
     )>,
+    /// The operator's opt-in build address pool (#337), with the allocation
+    /// port and the audit sink that records each assignment.
+    build_addresses: Option<BuildAddresses>,
+}
+
+/// The build address pool and the ports it needs (#337).
+#[derive(Debug)]
+struct BuildAddresses {
+    pool: fleet_core::BuildAddressPool,
+    port: Arc<dyn fleet_application::images::BuildAddressPort>,
+    audit: Arc<dyn fleet_application::operation::AuditPort>,
 }
 
 /// The Proxmox plugin environments for a build: the `validate` child's
@@ -170,7 +181,87 @@ impl ImagesExecutor {
             credentials: None,
             certificates: None,
             build_proxy: None,
+            build_addresses: None,
         }
+    }
+
+    /// Gives each `proxmox-clone` build a Fleet-assigned address from the
+    /// operator's pool (#337): Fleet allocates it transactionally, puts it
+    /// into the guest through cloud-init, and sets the communicator host in
+    /// the copy of the recipe it writes for Packer, so the build guest no
+    /// longer chooses where the controller connects. `proxmox-iso` builds
+    /// cannot take an address and keep the documented residual risk (or are
+    /// refused, when the pool says so). Each assignment is audited before
+    /// `packer build`, and the address is released on every terminal
+    /// outcome.
+    #[must_use]
+    pub fn with_build_addresses(
+        mut self,
+        pool: fleet_core::BuildAddressPool,
+        port: Arc<dyn fleet_application::images::BuildAddressPort>,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+    ) -> Self {
+        self.build_addresses = Some(BuildAddresses { pool, port, audit });
+        self
+    }
+
+    /// Releases every address held by operations that are terminal or
+    /// unknown, for startup. Returns how many were released. Runs even
+    /// without a pool, so an address a previous configuration held is not
+    /// stranded.
+    pub async fn reconcile_build_addresses(
+        port: &dyn fleet_application::images::BuildAddressPort,
+    ) -> usize {
+        port.reconcile(fleet_core::SystemClock::now_unix_millis())
+            .await
+            .unwrap_or(0)
+    }
+
+    /// Records that the build was assigned its address(es), before
+    /// `packer build` runs. The record names the operation and the
+    /// addresses, nothing else.
+    async fn audit_address_assignment(
+        &self,
+        operation: &Operation,
+        addresses: &[std::net::Ipv4Addr],
+    ) -> Result<(), &'static str> {
+        let Some(assigned) = &self.build_addresses else {
+            return Ok(());
+        };
+        if addresses.is_empty() {
+            return Ok(());
+        }
+        let mut metadata = fleet_application::audit::AuditMetadata::default();
+        let list = addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        for (key, value) in [
+            ("event", "image_build_address_assigned"),
+            ("operation", operation.id.as_str()),
+            ("addresses", list.as_str()),
+        ] {
+            metadata
+                .insert(key, value)
+                .map_err(|_| fleet_core::REASON_AUDIT_FAILED)?;
+        }
+        assigned
+            .audit
+            .record_intent(&fleet_application::audit::AuditIntent {
+                actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                action: fleet_application::authz::Permission::ImagesConfig
+                    .id()
+                    .to_owned(),
+                resource: Some(operation.id.clone()),
+                decision: fleet_application::authz::Decision::allow(),
+                correlation_id: operation.correlation_id.clone(),
+                // Like the proxy event: not the operation's own audit pair.
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(|_| fleet_core::REASON_AUDIT_FAILED)
     }
 
     /// Lets the `packer build` child use the operator's proxy (#339): it
@@ -537,6 +628,16 @@ impl OperationExecutor for ImagesExecutor {
             settle_build(cancel, result)
         };
         record.ended_at = Some(fleet_core::SystemClock::now_unix_millis().max(record.started_at));
+        // The build is over, whatever its outcome: its address goes back to
+        // the pool. A failed release is not fatal: the operation is about to
+        // be terminal, and a held address of a terminal operation no longer
+        // counts (the next allocation or startup reconciles it).
+        if let Some(assigned) = &self.build_addresses {
+            let _ = assigned
+                .port
+                .release(&operation.id, record.ended_at.unwrap_or(record.started_at))
+                .await;
+        }
         match result {
             Ok(template) => {
                 record.outcome = "succeeded".to_owned();
@@ -582,6 +683,44 @@ impl OperationExecutor for ImagesExecutor {
 }
 
 impl ImagesExecutor {
+    /// The recipe content Packer will read, and the addresses it carries.
+    /// Without a pool: the stored content, unchanged. With one, every
+    /// builder must be classifiable, `proxmox-iso` builders are refused if
+    /// the pool says so, and each `proxmox-clone` builder is given an
+    /// address held for this operation until it ends.
+    async fn assign_build_addresses(
+        &self,
+        operation_id: &str,
+        stored: &str,
+    ) -> Result<(String, Vec<std::net::Ipv4Addr>), &'static str> {
+        let Some(assigned) = &self.build_addresses else {
+            return Ok((stored.to_owned(), Vec::new()));
+        };
+        let needed = fleet_core::build_addresses_needed(stored, &assigned.pool)?;
+        if needed == 0 {
+            return Ok((stored.to_owned(), Vec::new()));
+        }
+        let addresses = assigned
+            .port
+            .allocate(
+                operation_id,
+                &assigned.pool,
+                needed,
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .map_err(|error| match error {
+                fleet_application::images::BuildAddressError::Exhausted => {
+                    fleet_core::REASON_POOL_EXHAUSTED
+                }
+                fleet_application::images::BuildAddressError::Storage(_) => {
+                    fleet_core::REASON_ALLOCATION_FAILED
+                }
+            })?;
+        let content = fleet_core::with_build_addresses(stored, &assigned.pool, &addresses)?;
+        Ok((content, addresses))
+    }
+
     async fn run_build(
         &self,
         operations: &Operations,
@@ -613,6 +752,12 @@ impl ImagesExecutor {
         // resolved.
         if let Some(reason) = fleet_core::recipe_build_refusal(&version.content) {
             return Err(reason);
+        }
+        // #337: with a build address pool, a builder Fleet cannot classify
+        // (or an ISO builder, when the pool refuses them) is refused here,
+        // before any probe or secret.
+        if let Some(assigned) = &self.build_addresses {
+            fleet_core::build_addresses_needed(&version.content, &assigned.pool)?;
         }
         // The SDK's Windows build reaches the controller's SSH agent over a
         // named pipe, ignoring the empty `SSH_AUTH_SOCK` every Packer child
@@ -679,8 +824,14 @@ impl ImagesExecutor {
         if plugins.exit_code != Some(0) || plugins.killed_by_deadline || !supported {
             return Err("plugin_version_gate");
         }
+        // #337: with a build address pool, the copy Packer reads names the
+        // communicator host itself, so the build guest does not choose it.
+        // The stored version, its digest, and the gate's input are untouched.
+        let (content, addresses) = self
+            .assign_build_addresses(&operation.id, &version.content)
+            .await?;
         let recipe_path = self
-            .write_recipe(&operation.id, &version.content)
+            .write_recipe(&operation.id, &content)
             .map_err(|_| "recipe_write_failed")?;
         let work_dir = recipe_path.parent().ok_or("recipe_write_failed")?;
         // The certificate check comes first: a build refused for trust
@@ -742,6 +893,7 @@ impl ImagesExecutor {
         if let Some(proxy) = &envs.proxy {
             self.audit_proxy_hand_off(operation, proxy).await?;
         }
+        self.audit_address_assignment(operation, &addresses).await?;
         operations
             .record_progress(&operation.id, Some(1), Some(2), Some("building the image"))
             .await
@@ -1269,6 +1421,9 @@ mod tests {
         /// Per command: its args joined and the child's `SSH_AUTH_SOCK`,
         /// when Fleet sets one.
         saw_agent: Mutex<Vec<(String, Option<String>)>>,
+        /// Per `validate`/`build` command: its subcommand and the recipe
+        /// file's content as Packer would read it.
+        saw_recipe: Mutex<Vec<(String, String)>>,
     }
 
     /// The pinned roots one command saw on disk.
@@ -1352,6 +1507,14 @@ mod tests {
                         && command.work_dir.join(recipe).is_file(),
                     "the recipe path must resolve from the work directory"
                 );
+                self.saw_recipe.lock().unwrap().push((
+                    if command.args.iter().any(|a| a == "build") {
+                        "build".to_owned()
+                    } else {
+                        "validate".to_owned()
+                    },
+                    std::fs::read_to_string(recipe).unwrap(),
+                ));
             }
             if let Some(index) = command.args.iter().position(|a| a == "-var-file") {
                 let path = &command.args[index + 1];
@@ -1490,7 +1653,8 @@ mod tests {
                         description: String::new(),
                         node: "pve".to_owned(),
                         storage_pool: Some("local-lvm".to_owned()),
-                        source: RecipeSource::Clone,
+                        source: fleet_core::StructuredRecipe::from_raw(content)
+                            .map_or(RecipeSource::Clone, |structured| structured.source),
                         content: content.to_owned(),
                     },
                 },
@@ -1549,6 +1713,7 @@ mod tests {
             saw_env: Mutex::new(Vec::new()),
             saw_tls: Mutex::new(Vec::new()),
             saw_agent: Mutex::new(Vec::new()),
+            saw_recipe: Mutex::new(Vec::new()),
         });
         (dir, store, repository, operations, operation, script)
     }
@@ -2905,5 +3070,360 @@ mod tests {
             ),
             None
         );
+    }
+
+    // Build addresses (#337) ---------------------------------------------
+
+    fn address_pool(refuse_iso: bool) -> fleet_core::BuildAddressPool {
+        fleet_core::BuildAddressPool::parse(
+            "192.0.2.0/24",
+            "192.0.2.100-192.0.2.100",
+            "192.0.2.1",
+            Some("192.0.2.2"),
+            refuse_iso,
+        )
+        .unwrap()
+    }
+
+    fn with_pool(
+        repository: Arc<RecipeRepository>,
+        transport: Arc<Script>,
+        store: &Store,
+        work: PathBuf,
+        pool: fleet_core::BuildAddressPool,
+    ) -> ImagesExecutor {
+        ImagesExecutor::new(repository, transport, None, work).with_build_addresses(
+            pool,
+            Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(AuditSink::new(store.pool().clone())),
+        )
+    }
+
+    async fn held_addresses(store: &Store) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM image_build_addresses WHERE state = 'held'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    fn build_replies(
+        outcome: Result<fleet_provider_packer::CliOutcome, String>,
+    ) -> Vec<Result<fleet_provider_packer::CliOutcome, String>> {
+        let mut replies = probes();
+        replies.extend([reply("", Some(0), false), outcome]);
+        replies
+    }
+
+    #[tokio::test]
+    async fn without_a_pool_packer_reads_the_stored_recipe_unchanged() {
+        let (dir, _store, repository, operations, operation, transport) = setup(
+            CONTENT,
+            serde_json::json!({}),
+            build_replies(reply("1,proxmox-clone,artifact,0,id,120", Some(0), false)),
+            false,
+        )
+        .await;
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            None,
+            dir.path().join("work"),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        assert_eq!(
+            repository.get_build(&operation.id).await.unwrap().outcome,
+            "succeeded"
+        );
+        let seen = transport.saw_recipe.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        for (_, content) in seen {
+            assert_eq!(content, CONTENT);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clone_build_gets_a_fleet_assigned_address_that_is_audited_and_released() {
+        let (dir, store, repository, operations, operation, transport) = setup(
+            CONTENT,
+            serde_json::json!({}),
+            build_replies(reply("1,proxmox-clone,artifact,0,id,120", Some(0), false)),
+            false,
+        )
+        .await;
+        let executor = with_pool(
+            repository.clone(),
+            transport.clone(),
+            &store,
+            dir.path().join("work"),
+            address_pool(false),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
+        // Packer read a copy that names the host; the stored version did not
+        // change.
+        for (command, content) in transport.saw_recipe.lock().unwrap().iter() {
+            let value: serde_json::Value = serde_json::from_str(content).unwrap();
+            let builder = &value["builders"][0];
+            assert_eq!(builder["ssh_host"], "192.0.2.100", "{command}");
+            assert_eq!(builder["winrm_host"], "192.0.2.100", "{command}");
+            assert_eq!(builder["ipconfig"][0]["ip"], "192.0.2.100/24", "{command}");
+            assert_eq!(builder["ipconfig"][0]["gateway"], "192.0.2.1", "{command}");
+            assert_eq!(builder["nameserver"], "192.0.2.2", "{command}");
+            assert_eq!(builder["vm_name"], "ubuntu-base");
+        }
+        let stored = repository
+            .get_build(&operation.id)
+            .await
+            .map(|record| record.version_id)
+            .unwrap();
+        assert_eq!(
+            repository.get_version(&stored).await.unwrap().content,
+            CONTENT
+        );
+        // The assignment is on the audit ledger, before the build, and the
+        // address went back to the pool.
+        let events: Vec<String> = sqlx::query_scalar(
+            "SELECT metadata_json FROM audit_events WHERE metadata_json LIKE '%image_build_address_assigned%'",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains("192.0.2.100"), "{}", events[0]);
+        assert!(events[0].contains(&operation.id), "{}", events[0]);
+        assert_eq!(held_addresses(&store).await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_address_is_released_when_the_build_fails() {
+        for outcome in [
+            reply("", Some(1), false),
+            Err("fixture-secret-token".to_owned()),
+            reply("", None, true),
+        ] {
+            let (dir, store, repository, operations, operation, transport) = setup(
+                CONTENT,
+                serde_json::json!({}),
+                build_replies(outcome),
+                false,
+            )
+            .await;
+            let executor = with_pool(
+                repository.clone(),
+                transport,
+                &store,
+                dir.path().join("work"),
+                address_pool(false),
+            );
+            assert!(
+                operations
+                    .execute_claimed(&executor, operation.clone())
+                    .await
+            );
+            assert_eq!(
+                repository.get_build(&operation.id).await.unwrap().outcome,
+                "failed"
+            );
+            assert_eq!(held_addresses(&store).await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_pool_fails_the_build_before_any_secret() {
+        let (dir, store, repository, operations, operation, transport) = setup(
+            CONTENT,
+            serde_json::json!({"secretVars": [{"name": "token", "reference": "unavailable"}]}),
+            probes(),
+            false,
+        )
+        .await;
+        // Another live operation holds the pool's only address.
+        sqlx::query("INSERT INTO operations (id, kind, state, cancel_requested, created_at, updated_at) VALUES ('other', 'image.build', 'running', 0, 1, 1)")
+            .execute(store.pool()).await.unwrap();
+        fleet_application::images::BuildAddressPort::allocate(
+            &fleet_storage_sqlite::BuildAddressRepository::new(store.pool().clone()),
+            "other",
+            &address_pool(false),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        let executor = with_pool(
+            repository.clone(),
+            transport.clone(),
+            &store,
+            dir.path().join("work"),
+            address_pool(false),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("build_address_pool_exhausted")
+        );
+        // Reported before the var file (secret resolution) was reached.
+        assert!(transport.saw_var_file.lock().unwrap().is_none());
+        assert!(transport.saw_recipe.lock().unwrap().is_empty());
+        // The other operation's hold is untouched.
+        assert_eq!(held_addresses(&store).await, 1);
+    }
+
+    #[tokio::test]
+    async fn iso_builds_keep_the_residual_risk_or_are_refused_when_the_pool_says_so() {
+        let iso = CONTENT.replace("proxmox-clone", "proxmox-iso");
+        // Not refused: the recipe is built as written and takes no address.
+        let (dir, store, repository, operations, operation, transport) = setup(
+            &iso,
+            serde_json::json!({}),
+            build_replies(reply("1,proxmox-iso,artifact,0,id,120", Some(0), false)),
+            false,
+        )
+        .await;
+        let executor = with_pool(
+            repository.clone(),
+            transport.clone(),
+            &store,
+            dir.path().join("work"),
+            address_pool(false),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "succeeded", "{:?}", record.reason);
+        for (_, content) in transport.saw_recipe.lock().unwrap().iter() {
+            assert_eq!(content, &iso);
+        }
+        // Refused, before the Packer probes even run.
+        let (dir, store, repository, operations, operation, transport) =
+            setup(&iso, serde_json::json!({}), Vec::new(), false).await;
+        let executor = with_pool(
+            repository.clone(),
+            transport,
+            &store,
+            dir.path().join("work"),
+            address_pool(true),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.reason.as_deref(), Some("build_address_iso_refused"));
+        assert_eq!(held_addresses(&store).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_assignment_audit_fails_the_build_and_releases_the_address() {
+        #[derive(Debug)]
+        struct Failing;
+        #[async_trait::async_trait]
+        impl fleet_application::operation::AuditPort for Failing {
+            async fn record_intent(
+                &self,
+                _: &fleet_application::audit::AuditIntent,
+            ) -> Result<(), String> {
+                Err("down".to_owned())
+            }
+            async fn record_outcome(
+                &self,
+                _: &str,
+                _: fleet_application::audit::AuditOutcome,
+            ) -> Result<(), String> {
+                Err("down".to_owned())
+            }
+        }
+        let (dir, store, repository, operations, operation, transport) = setup(
+            CONTENT,
+            serde_json::json!({}),
+            // Validate runs; build must not.
+            {
+                let mut replies = probes();
+                replies.push(reply("", Some(0), false));
+                replies
+            },
+            false,
+        )
+        .await;
+        let executor = ImagesExecutor::new(
+            repository.clone(),
+            transport.clone(),
+            None,
+            dir.path().join("work"),
+        )
+        .with_build_addresses(
+            address_pool(false),
+            Arc::new(fleet_storage_sqlite::BuildAddressRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(Failing),
+        );
+        assert!(
+            operations
+                .execute_claimed(&executor, operation.clone())
+                .await
+        );
+        let record = repository.get_build(&operation.id).await.unwrap();
+        assert_eq!(record.reason.as_deref(), Some("build_address_audit_failed"));
+        assert!(
+            transport
+                .saw_recipe
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(command, _)| command != "build")
+        );
+        assert_eq!(held_addresses(&store).await, 0);
+    }
+
+    #[test]
+    fn the_runbook_recipes_take_a_build_address() {
+        // #337: with a pool configured, the documented SSH recipe is
+        // rewritten for Packer and still names its static address; the
+        // runbook's recipes are clone builds.
+        const RUNBOOK: &str = include_str!("../../../docs/operations/lab.md");
+        let pool = address_pool(true);
+        for (line, _, content) in runbook_recipes(RUNBOOK) {
+            assert_eq!(
+                fleet_core::build_addresses_needed(content.as_str(), &pool),
+                Ok(1),
+                "line {}",
+                line + 1
+            );
+            let rewritten = fleet_core::with_build_addresses(
+                &content,
+                &pool,
+                &["192.0.2.100".parse().unwrap()],
+            )
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+            assert_eq!(value["builders"][0]["ssh_host"], "192.0.2.100");
+            assert_eq!(value["builders"][0]["ipconfig"][0]["ip"], "192.0.2.100/24");
+            // A recipe's own DHCP ipconfig is what Fleet replaces.
+            if content.contains("\"communicator\": \"ssh\"") {
+                assert!(content.contains("\"dhcp\""), "line {}", line + 1);
+            }
+        }
     }
 }

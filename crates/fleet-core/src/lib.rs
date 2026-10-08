@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+mod build_address;
 mod difference;
 mod error;
 mod id;
@@ -21,6 +22,12 @@ mod source;
 mod time;
 mod value;
 
+pub use build_address::{
+    BUILD_ADDRESS_REASONS, BuildAddressPool, BuildAddressPoolError, MAX_BUILD_ADDRESS_DNS_SERVERS,
+    MAX_BUILD_ADDRESS_POOL_SIZE, REASON_ALLOCATION_FAILED, REASON_AUDIT_FAILED,
+    REASON_BUILDER_UNSUPPORTED, REASON_ISO_REFUSED, REASON_POOL_EXHAUSTED,
+    build_address_reason_message, build_addresses_needed, with_build_addresses,
+};
 pub use difference::{DifferenceSet, DifferenceState, FieldDifference, compare_field};
 pub use error::{ErrorCode, FleetError, ParseErrorCodeError, PublicError, RetryClass};
 pub use id::{CorrelationId, IdGenerator, ParseIdError, ResourceId, UuidV7Generator};
