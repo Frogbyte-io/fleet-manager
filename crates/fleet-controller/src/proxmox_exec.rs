@@ -2627,7 +2627,21 @@ impl ProvisionExecutor {
     ) -> Result<Result<fleet_provider_proxmox::PveQemuConfigFlags, Refusal>, String> {
         let started = std::time::Instant::now();
         let mut reported: Option<std::time::Instant> = None;
-        let clone_upid = clone_upid.and_then(|raw| fleet_provider_proxmox::Upid::parse(raw).ok());
+        // A stored UPID that does not parse cannot be polled: say so, and
+        // wait on the config alone within the bound.
+        let clone_upid = clone_upid.and_then(|raw| {
+            match fleet_provider_proxmox::Upid::parse(raw) {
+                Ok(upid) => Some(upid),
+                Err(detail) => {
+                    eprintln!(
+                        "the recorded clone task id of {node}/qemu/{vmid} is malformed ({detail}); waiting on the config alone"
+                    );
+                    None
+                }
+            }
+        });
+        // Consecutive unreadable-config reads while the clone task reads OK.
+        let mut task_ok_misses = 0_u32;
         loop {
             if operations
                 .cancel_requested(operation_id)
@@ -2653,7 +2667,10 @@ impl ProvisionExecutor {
             {
                 Ok(config) => match config.lock.clone() {
                     None => return Ok(Ok(config)),
-                    Some(lock) => format!("{lock} lock"),
+                    Some(lock) => {
+                        task_ok_misses = 0;
+                        format!("{lock} lock")
+                    }
                 },
                 Err(
                     error @ (fleet_provider_proxmox::PveApiError::Http { .. }
@@ -2667,36 +2684,36 @@ impl ProvisionExecutor {
                                 return Ok(Err(Refusal::new(
                                     "clone_task_failed",
                                     format!(
-                                        "the clone task for {node}/qemu/{vmid} failed: {detail}; the reserved target is released"
+                                        "the clone task for {node}/qemu/{vmid} failed: {detail}; the provision is recorded as failed at clone, and cleanup releases the reserved target and removes any partial guest"
                                     ),
                                 )));
                             }
-                            // The task ended cleanly, so the config must
-                            // exist: read it once more (it may have landed
-                            // since the read above) before refusing.
+                            // The task ended cleanly, so the config should
+                            // exist. A read that predates the task's end
+                            // proves nothing, so only a read after the OK
+                            // was seen counts: a definite "does not exist"
+                            // answer then refuses; any other failure must
+                            // repeat once more first (a transient error
+                            // must not read as a missing guest).
                             Ok(fleet_provider_proxmox::TaskStatus::Ok) => {
-                                match self
-                                    .client
-                                    .qemu_config_flags(request.clone(), node, vmid)
-                                    .await
-                                {
-                                    Ok(config) if config.lock.is_none() => {
-                                        return Ok(Ok(config));
-                                    }
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        return Ok(Err(Refusal::new(
-                                            "clone_task_failed",
-                                            format!(
-                                                "the clone task for {node}/qemu/{vmid} finished but left no readable config ({error}); the reserved target is released"
-                                            ),
-                                        )));
-                                    }
+                                task_ok_misses += 1;
+                                let missing = matches!(
+                                    &error,
+                                    fleet_provider_proxmox::PveApiError::Http { status: 500, detail }
+                                        if detail.contains("does not exist")
+                                );
+                                if (missing && task_ok_misses >= 2) || task_ok_misses >= 3 {
+                                    return Ok(Err(Refusal::new(
+                                        "clone_task_failed",
+                                        format!(
+                                            "the clone task for {node}/qemu/{vmid} finished OK but its config stays unreadable ({error}); the provision is recorded as failed at clone, and cleanup releases the reserved target and removes the guest if one exists"
+                                        ),
+                                    )));
                                 }
                             }
                             // Still running, rotated out, or unreadable:
                             // keep waiting within the bound.
-                            Ok(_) | Err(_) => {}
+                            Ok(_) | Err(_) => task_ok_misses = 0,
                         }
                     }
                     format!("config not readable yet: {error}")
