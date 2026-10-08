@@ -456,7 +456,9 @@ impl ProxmoxDestructiveExecutor {
     /// Supplies the Lab pool membership lookup (#368). With it, a destroy or
     /// snapshot delete re-asks at execution time whether its target is a
     /// pool member: the refusal at creation cannot see a VMID that a fill
-    /// registers while the operation waits in the queue.
+    /// registers while the operation waits in the queue. Without it the
+    /// executor does not check (the creation-time refusal alone applies), so
+    /// every production construction site must supply it.
     #[must_use]
     pub fn with_pool_members(
         mut self,
