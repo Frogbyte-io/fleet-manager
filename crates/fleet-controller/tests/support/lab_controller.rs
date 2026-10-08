@@ -396,6 +396,15 @@ impl LeasePort for SweeperLeases {
             .rearm_cleanup(id, observed_attempts, attempts)
             .await
     }
+    async fn record_failed_cleanup(
+        &self,
+        observed_attempts: u32,
+        failed: &Lease,
+    ) -> Result<bool, String> {
+        self.inner
+            .record_failed_cleanup(observed_attempts, failed)
+            .await
+    }
 }
 
 /// The scripted SSH trust and bootstrap project. The project child is the

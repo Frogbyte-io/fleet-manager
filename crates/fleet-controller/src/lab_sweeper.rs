@@ -351,8 +351,18 @@ impl LabSweeper {
                                 &mut current,
                                 fleet_core::SystemClock::now_unix_millis(),
                             );
-                            match self.leases.update(&current).await {
-                                Ok(()) => {
+                            // Conditional on the state and count just read:
+                            // a release, re-arm, or keep switch that landed
+                            // since, or a second sweep that already counted
+                            // this attempt, wins and nothing is written
+                            // (#361).
+                            match self
+                                .leases
+                                .record_failed_cleanup(lease.cleanup_attempts, &current)
+                                .await
+                            {
+                                Ok(false) => {}
+                                Ok(true) => {
                                     self.changed();
                                     report.cleanups_abandoned += 1;
                                     if current.state == fleet_core::LeaseState::CleanupFailed
