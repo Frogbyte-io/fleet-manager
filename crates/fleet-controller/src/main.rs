@@ -462,6 +462,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                         .with_image_artifacts(std::sync::Arc::new(
                             fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
                         ))
+                        .with_pool_members(std::sync::Arc::new(
+                            fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                                fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                            )),
+                        ))
                         .with_task_links(task_links),
                     ),
                 ))
@@ -609,6 +614,11 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     )
                     .with_image_artifacts(std::sync::Arc::new(
                         fleet_storage_sqlite::RecipeRepository::new(store.pool().clone()),
+                    ))
+                    .with_pool_members(std::sync::Arc::new(
+                        fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                            fleet_storage_sqlite::LabPoolRepository::new(store.pool().clone()),
+                        )),
                     ))
                     .with_task_links(std::sync::Arc::new(
                         fleet_storage_sqlite::ProxmoxTaskLinkRepository::new(store.pool().clone()),

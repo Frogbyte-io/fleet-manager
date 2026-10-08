@@ -432,6 +432,7 @@ pub struct ProxmoxDestructiveExecutor {
     client: fleet_provider_proxmox::ProxmoxClient,
     links: Option<Arc<dyn ProxmoxTaskLinkPort>>,
     artifacts: Option<Arc<dyn fleet_application::lab::ImageArtifactPort>>,
+    pool_members: Option<Arc<dyn fleet_application::operation::PoolMemberLookup>>,
 }
 
 impl ProxmoxDestructiveExecutor {
@@ -448,6 +449,76 @@ impl ProxmoxDestructiveExecutor {
             client,
             links: None,
             artifacts: None,
+            pool_members: None,
+        }
+    }
+
+    /// Supplies the Lab pool membership lookup (#368). With it, a destroy or
+    /// snapshot delete re-asks at execution time whether its target is a
+    /// pool member: the refusal at creation cannot see a VMID that a fill
+    /// registers while the operation waits in the queue.
+    #[must_use]
+    pub fn with_pool_members(
+        mut self,
+        pool_members: Arc<dyn fleet_application::operation::PoolMemberLookup>,
+    ) -> Self {
+        self.pool_members = Some(pool_members);
+        self
+    }
+
+    /// The pool the target belongs to, when it is a member. A membership
+    /// that cannot be read is an error: the caller fails closed.
+    async fn pool_of_target(&self, payload: &DestructivePayload) -> Result<Option<String>, String> {
+        match &self.pool_members {
+            Some(pools) => pools
+                .pool_of(&payload.account_id, payload.vmid)
+                .await
+                .map_err(|_| "the Lab pool membership could not be read".to_owned()),
+            None => Ok(None),
+        }
+    }
+
+    /// Refuses (by completing the operation as failed) a destroy or snapshot
+    /// delete whose target is a current Lab pool member. Runs before any
+    /// Proxmox call, so nothing is stopped or deleted. Answers whether the
+    /// operation ended here.
+    async fn refuse_pool_member(
+        &self,
+        operations: &Operations,
+        operation: &Operation,
+        payload: &DestructivePayload,
+    ) -> Result<bool, String> {
+        if !matches!(
+            operation.kind.as_str(),
+            "proxmox.guest.destroy" | "proxmox.guest.snapshot-delete"
+        ) {
+            return Ok(false);
+        }
+        match self.pool_of_target(payload).await {
+            Ok(None) => Ok(false),
+            Ok(Some(pool_id)) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    fleet_application::operation::POOL_MEMBER_REASON,
+                    &format!(
+                        "VMID {} is a member of Lab pool {pool_id}; drain it from the pool first",
+                        payload.vmid
+                    ),
+                )
+                .await?;
+                Ok(true)
+            }
+            Err(detail) => {
+                complete_failure(
+                    operations,
+                    &operation.id,
+                    "pool_membership_unreadable",
+                    &detail,
+                )
+                .await?;
+                Ok(true)
+            }
         }
     }
 
@@ -474,6 +545,12 @@ impl OperationExecutor for ProxmoxDestructiveExecutor {
     #[allow(clippy::too_many_lines)]
     async fn execute(&self, operations: &Operations, operation: &Operation) -> Result<(), String> {
         let payload: DestructivePayload = payload(operation)?;
+        if self
+            .refuse_pool_member(operations, operation, &payload)
+            .await?
+        {
+            return Ok(());
+        }
         let (account, secret) = self.bound(&payload.account_id).await?;
         let request = self.request(&account, &secret);
         let deadline = Duration::from_secs(payload.timeout_seconds.min(MAX_LIFECYCLE_TIMEOUT));
@@ -927,6 +1004,15 @@ impl ProxmoxDestructiveExecutor {
             .map_err(|error| error.to_string())?
         {
             return Err("destroy cancelled before delete".to_owned());
+        }
+        // A fill can register the VMID while the stop waits: ask again right
+        // before the delete is submitted.
+        if let Some(pool_id) = self.pool_of_target(payload).await? {
+            return Err(format!(
+                "{}: VMID {} became a member of Lab pool {pool_id} while the destroy ran; no delete was submitted",
+                fleet_application::operation::POOL_MEMBER_REASON,
+                payload.vmid
+            ));
         }
         fleet_application::lab::guard_destroy_target(payload.vmid, is_template, &image_vmids)
     }
@@ -4087,6 +4173,27 @@ mod destroy_tests {
             }
         }
     }
+    /// A scripted pool membership lookup: one answer per call, the last one
+    /// repeating.
+    #[derive(Debug)]
+    struct Members(Mutex<Vec<Result<Option<String>, String>>>);
+    impl Members {
+        fn new(answers: Vec<Result<Option<String>, String>>) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(answers)))
+        }
+    }
+    #[async_trait::async_trait]
+    impl fleet_application::operation::PoolMemberLookup for Members {
+        async fn pool_of(&self, _: &str, vmid: u32) -> Result<Option<String>, String> {
+            assert_eq!(vmid, 101);
+            let mut answers = self.0.lock().unwrap();
+            if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers[0].clone()
+            }
+        }
+    }
     struct Harness {
         _dir: tempfile::TempDir,
         operations: Arc<Operations>,
@@ -4151,6 +4258,49 @@ mod destroy_tests {
                 links,
                 transport,
             }
+        }
+        /// The same harness with the executor's pool membership lookup set.
+        fn with_members(self, members: Arc<Members>) -> Self {
+            Self {
+                executor: self.executor.with_pool_members(members),
+                ..self
+            }
+        }
+        /// Runs a reviewed operation of `kind` with `params` to its end.
+        async fn run_kind(&self, kind: &str, params: Value) -> Operation {
+            let payload = json!({"accountId":self.account,"node":"pve","vmid":101,"timeoutSeconds":30,"params":params}).to_string();
+            let operation = self
+                .operations
+                .create(
+                    &Policy(false),
+                    "anonymous-lan-admin",
+                    &fleet_application::operation::NewOperation {
+                        kind: kind.into(),
+                        payload_json: Some(payload.clone()),
+                        review_token: Some(fleet_application::operation::review_token_for(
+                            kind, &payload,
+                        )),
+                        idempotency_key: None,
+                        deadline_at: None,
+                        correlation_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            self.operations
+                .claim_only_execute(&self.executor, &operation.id, "pool-test")
+                .await
+                .unwrap();
+            self.operations
+                .get(&Policy(false), "anonymous-lan-admin", &operation.id)
+                .await
+                .unwrap()
+        }
+        fn error_reason(operation: &Operation) -> String {
+            serde_json::from_str::<Value>(operation.error_json.as_deref().unwrap_or("{}"))
+                .ok()
+                .and_then(|error| error["reason"].as_str().map(str::to_owned))
+                .unwrap_or_default()
         }
         fn app(&self, deny: bool) -> axum::Router {
             let mut state = fleet_api::operations::ApiState::for_document();
@@ -4298,6 +4448,90 @@ mod destroy_tests {
                     .any(|p| p.ends_with("/status/stop") || p.contains("?purge="))
             );
         }
+    }
+    /// #368: a destroy or snapshot delete queued for a VMID that was no pool
+    /// member at creation is refused at execution once a fill registered it,
+    /// before any Proxmox call.
+    #[tokio::test]
+    async fn a_pool_member_is_refused_at_execution_before_any_proxmox_call() {
+        for (kind, params) in [
+            ("proxmox.guest.destroy", json!({"purge": false})),
+            (
+                "proxmox.guest.snapshot-delete",
+                json!({"snapshot": "baseline"}),
+            ),
+        ] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_members(Members::new(vec![Ok(Some("pool-1".to_owned()))]));
+            let done = h.run_kind(kind, params).await;
+            assert_eq!(done.state, "failed", "{kind}");
+            assert_eq!(Harness::error_reason(&done), "pool_member", "{kind}");
+            assert!(
+                h.transport.seen.lock().unwrap().is_empty(),
+                "{kind}: nothing reached Proxmox: {:?}",
+                h.transport.seen.lock().unwrap()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn an_unreadable_pool_membership_fails_closed() {
+        for (kind, params) in [
+            ("proxmox.guest.destroy", json!({"purge": false})),
+            (
+                "proxmox.guest.snapshot-delete",
+                json!({"snapshot": "baseline"}),
+            ),
+        ] {
+            let h = Harness::new(false, false, false, false, false, false)
+                .await
+                .with_members(Members::new(vec![Err("database is locked".to_owned())]));
+            let done = h.run_kind(kind, params).await;
+            assert_eq!(done.state, "failed", "{kind}");
+            assert_eq!(
+                Harness::error_reason(&done),
+                "pool_membership_unreadable",
+                "{kind}"
+            );
+            assert!(h.transport.seen.lock().unwrap().is_empty(), "{kind}");
+        }
+    }
+    #[tokio::test]
+    async fn a_vmid_registered_while_the_destroy_stops_it_is_not_deleted() {
+        // Not a member at the start, a member by the time the stop is done.
+        let h = Harness::new(false, false, false, false, false, false)
+            .await
+            .with_members(Members::new(vec![Ok(None), Ok(Some("pool-1".to_owned()))]));
+        let done = h
+            .run_kind("proxmox.guest.destroy", json!({"purge": false}))
+            .await;
+        assert_eq!(done.state, "failed");
+        assert!(
+            done.error_json
+                .as_deref()
+                .unwrap_or_default()
+                .contains("pool_member"),
+            "{:?}",
+            done.error_json
+        );
+        let seen = h.transport.seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|p| p.ends_with("/status/stop")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|p| p.contains("?purge=")),
+            "no delete was submitted: {seen:?}"
+        );
+    }
+    #[tokio::test]
+    async fn a_non_member_is_destroyed_as_before() {
+        let h = Harness::new(false, false, true, false, false, false)
+            .await
+            .with_members(Members::new(vec![Ok(None)]));
+        assert_eq!(
+            h.run_kind("proxmox.guest.destroy", json!({"purge": false}))
+                .await
+                .state,
+            "succeeded"
+        );
     }
     #[tokio::test]
     async fn destroy_absence_succeeds_and_task_error_fails() {
