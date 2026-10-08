@@ -1229,6 +1229,10 @@ pub struct PveQemuConfigFlags {
     pub lock: Option<String>,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
+    /// The snapshot the current state derives from (`parent`), which a
+    /// rollback sets to the restored snapshot (FM-717 verifies a pool
+    /// member's revert by it).
+    pub parent: Option<String>,
 }
 
 /// One guest snapshot, normalized.
@@ -2350,6 +2354,8 @@ impl ProxmoxClient {
                 }
             },
             digest: text("digest", 64)?,
+            // A PVE snapshot name is at most 40 characters.
+            parent: text("parent", 40)?,
         })
     }
 

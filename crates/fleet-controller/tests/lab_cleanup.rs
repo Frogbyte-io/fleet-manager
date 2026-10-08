@@ -554,10 +554,7 @@ async fn revert_is_refused_without_a_destroy_or_a_spent_attempt() {
         .await;
     let destroyer = Arc::new(Destroyer::default());
     let (state, reason, after) = harness.run(&lease, &destroyer).await;
-    assert_eq!(
-        (state.as_str(), reason.as_str()),
-        ("failed", "unsupported_until_pooled")
-    );
+    assert_eq!((state.as_str(), reason.as_str()), ("failed", "not_pooled"));
     assert_eq!(after.state, LeaseState::Releasing);
     assert_eq!(after.cleanup_attempts, 0);
     assert!(destroyer.ran.lock().unwrap().is_empty());

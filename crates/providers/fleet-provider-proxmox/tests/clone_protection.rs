@@ -94,6 +94,7 @@ async fn a_fresh_clone_of_a_protected_template_reads_as_protected() {
             protection: true,
             lock: None,
             digest: Some("3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0".to_owned()),
+            parent: None,
         }
     );
     let seen = transport.seen.lock().unwrap();
@@ -195,4 +196,19 @@ async fn pve_refusals_of_the_update_surface_as_errors() {
             "{error:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn the_config_parent_names_the_snapshot_a_rollback_restored() {
+    // PVE's rollback sets `parent` to the restored snapshot (FM-717).
+    let (reverted, _) = flags(json!({"data": {
+        "name": "pool-member",
+        "parent": "baseline",
+        "digest": "3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0",
+    }}))
+    .await;
+    assert_eq!(reverted.unwrap().parent.as_deref(), Some("baseline"));
+    // An over-long parent is a payload error, never truncated into a match.
+    let (long, _) = flags(json!({"data": {"parent": "b".repeat(41)}})).await;
+    assert!(long.is_err());
 }

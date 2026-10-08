@@ -1875,6 +1875,9 @@ pub struct ProvisionExecutor {
     readiness: Option<Arc<dyn fleet_application::lab::LabReadinessPort>>,
     audit: Option<Arc<dyn fleet_application::operation::AuditPort>>,
     placement: Option<Placement>,
+    /// Pooled template versions take a pool member instead of a clone
+    /// (FM-717).
+    pools: Option<Arc<dyn fleet_application::lab_pool::LabPoolPort>>,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -1947,7 +1950,17 @@ impl ProvisionExecutor {
             readiness: None,
             audit: None,
             placement: None,
+            pools: None,
         }
+    }
+
+    /// Enables pooled leases (FM-717): a lease whose template version has a
+    /// pool claims one of its members instead of reserving capacity and
+    /// cloning.
+    #[must_use]
+    pub fn with_pools(mut self, pools: Arc<dyn fleet_application::lab_pool::LabPoolPort>) -> Self {
+        self.pools = Some(pools);
+        self
     }
 
     /// Enables placement and capacity reservation (FM-715): a lease
@@ -2821,6 +2834,112 @@ impl ProvisionExecutor {
 }
 
 impl ProvisionExecutor {
+    /// Step 1 for a pooled template version (FM-717): binds one free member
+    /// of the pool to the lease (or re-finds the one already bound) in one
+    /// storage transaction that also records it on the provision record,
+    /// then checks the live guest before anything starts it: it must still
+    /// be the verified QEMU guest, by its recorded name, and pass the
+    /// cleanup guard. Answers the node, VMID, and name. The outer error is
+    /// an infrastructure failure; the inner one a classified refusal.
+    async fn claim_pool_member(
+        &self,
+        pools: &dyn fleet_application::lab_pool::LabPoolPort,
+        pool: &fleet_application::lab_pool::LabPool,
+        lease_id: &str,
+        record_id: &str,
+        operation_id: &str,
+        request: &fleet_provider_proxmox::PveHttpRequest,
+    ) -> Result<Result<(String, u32, String), Refusal>, String> {
+        let now = fleet_core::SystemClock::now_unix_millis();
+        // The intent precedes the claim, and is required: a claim the
+        // audit sink refused is not made.
+        if let Some(audit) = &self.audit {
+            audit
+                .record_intent(&fleet_application::lab_pool::member_audit(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &pool.id,
+                    Some(operation_id),
+                    "lab_pool_claim_requested",
+                    &[("leaseId", lease_id.to_owned())],
+                ))
+                .await
+                .map_err(|detail| format!("the pool claim audit failed: {detail}"))?;
+        }
+        let member = match pools
+            .claim(&pool.id, lease_id, record_id, now)
+            .await
+            .map_err(|error| format!("the pool claim failed: {error}"))?
+        {
+            fleet_application::lab_pool::ClaimOutcome::Claimed(member) => member,
+            fleet_application::lab_pool::ClaimOutcome::Exhausted => {
+                return Ok(Err(Refusal::new(
+                    "pool_exhausted",
+                    format!(
+                        "every member of pool {} is leased, filling, draining, or quarantined; retry once a lease is released, or fill the pool",
+                        pool.id
+                    ),
+                )));
+            }
+        };
+        if let Some(audit) = &self.audit {
+            // Best effort: the member row is the truth.
+            let _ = audit
+                .record_intent(&fleet_application::lab_pool::member_audit(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &pool.id,
+                    Some(operation_id),
+                    "lab_pool_member_claimed",
+                    &[
+                        ("vmid", member.vmid.to_string()),
+                        ("leaseId", lease_id.to_owned()),
+                    ],
+                ))
+                .await;
+        }
+        let vmid = member.vmid;
+        let (decision, resources) = self.destroy_guard(request.clone(), vmid).await?;
+        if let Err(refusal) = decision {
+            return Ok(Err(Refusal::new(
+                "pool_member_unverified",
+                format!("pool member {vmid} must not be leased: {refusal}"),
+            )));
+        }
+        let recorded = member.name.clone().unwrap_or_default();
+        let Some((node, name)) = resources
+            .iter()
+            .find(|resource| resource.vmid == Some(vmid))
+            .filter(|guest| {
+                guest.kind == "qemu" && guest.name.as_deref() == Some(recorded.as_str())
+            })
+            .and_then(|guest| guest.node.clone().map(|node| (node, recorded.clone())))
+        else {
+            return Ok(Err(Refusal::new(
+                "pool_member_unverified",
+                format!(
+                    "pool member {vmid} is no longer the QEMU guest {recorded:?} its fill verified; its cleanup will quarantine it"
+                ),
+            )));
+        };
+        if member.node.as_deref() != Some(node.as_str()) {
+            // The guest moved: the record and the member follow it, so
+            // cleanup reverts it where it lives now.
+            let _ = pools.set_member_node(&member.id, &node, now).await;
+            let mut moved = self
+                .provisions
+                .get(record_id)
+                .await
+                .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
+            moved.node = Some(node.clone());
+            self.provisions
+                .update(&moved)
+                .await
+                .map_err(|detail| format!("the provision record is unwritable: {detail}"))?;
+        }
+        Ok(Ok((node, vmid, name)))
+    }
+}
+
+impl ProvisionExecutor {
     #[allow(clippy::too_many_lines)]
     async fn execute_linked(
         &self,
@@ -2903,7 +3022,51 @@ impl ProvisionExecutor {
         // account's host. The caller's account wins; a resumed record keeps
         // the account it recorded; otherwise placement selects the one
         // account that reaches the pinned template (FM-715).
-        let account_id = match requested_account.or_else(|| record.account_id.clone()) {
+        // FM-717: a pooled template version leases a member, reached
+        // through the pool's account; placement does not apply.
+        let pool = match &self.pools {
+            Some(pools) => pools
+                .for_template_version(&record.template_version_id)
+                .await
+                .map_err(|error| format!("the pool is unreadable: {error}"))?,
+            None => None,
+        };
+        // A record that already holds a guest of its own (a clone target
+        // reserved before the pool existed) finishes as a clone; only a
+        // record without one, or one whose guest is this lease's member,
+        // is pooled.
+        let pool = match (pool, &self.pools) {
+            (Some(pool), Some(pools)) if record.vmid.is_some() || record.clone_upid.is_some() => {
+                let bound = pools
+                    .member_for_lease(&lease_id)
+                    .await
+                    .map_err(|error| format!("the pool member is unreadable: {error}"))?;
+                bound.is_some().then_some(pool)
+            }
+            (pool, _) => pool,
+        };
+        if let Some(pool) = &pool
+            && requested_account
+                .as_deref()
+                .is_some_and(|account| account != pool.account_id)
+        {
+            return complete_failure(
+                operations,
+                &operation.id,
+                "pool_account_mismatch",
+                &format!(
+                    "the template version is pooled through account {}; provision without --account, or with that account",
+                    pool.account_id
+                ),
+            )
+            .await;
+        }
+        let account_id = match pool
+            .as_ref()
+            .map(|pool| pool.account_id.clone())
+            .or(requested_account)
+            .or_else(|| record.account_id.clone())
+        {
             Some(account_id) => account_id,
             None => match self
                 .place_account(&version.content.image_version_id)
@@ -2949,7 +3112,51 @@ impl ProvisionExecutor {
         // Step 1: clone from the pinned image into a reserved VMID, unless
         // the record's clone already started (resume instead of creating a
         // second VM).
-        let (node, vmid) = if record.clone_upid.is_some() {
+        let pooled = match (&self.pools, &pool) {
+            (Some(pools), Some(pool)) => {
+                operations
+                    .record_progress(
+                        &operation.id,
+                        Some(0),
+                        Some(3),
+                        Some("leasing a pool member"),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                match self
+                    .claim_pool_member(
+                        pools.as_ref(),
+                        pool,
+                        &lease_id,
+                        &record.id,
+                        &operation.id,
+                        &request,
+                    )
+                    .await?
+                {
+                    Ok(claimed) => Some(claimed),
+                    Err(refusal) => {
+                        return complete_failure(
+                            operations,
+                            &operation.id,
+                            refusal.reason,
+                            &refusal.detail,
+                        )
+                        .await;
+                    }
+                }
+            }
+            _ => None,
+        };
+        // The name the started guest must carry: a pool member's recorded
+        // name, else this provision's clone name.
+        let guest_name = pooled.as_ref().map_or_else(
+            || format!("fm-lab-{}", record.id),
+            |(_, _, name)| name.clone(),
+        );
+        let (node, vmid) = if let Some((node, vmid, _)) = &pooled {
+            (node.clone(), *vmid)
+        } else if record.clone_upid.is_some() {
             let (Some(node), Some(vmid)) = (record.node.clone(), record.vmid) else {
                 return Err("the provision record started a clone but carries no target".to_owned());
             };
@@ -3032,10 +3239,12 @@ impl ProvisionExecutor {
             .map_err(|detail| format!("the provision record is unreadable: {detail}"))?;
 
         // Step 1b: the clone has landed and carries no inherited
-        // protection flag before anything starts it.
-        if let Err(refusal) = self
-            .unprotect_clone(operations, &operation.id, &request, &record.id, &node, vmid)
-            .await?
+        // protection flag before anything starts it. A pool member is the
+        // operator's guest: Lab never destroys it, so its protection stays.
+        if pooled.is_none()
+            && let Err(refusal) = self
+                .unprotect_clone(operations, &operation.id, &request, &record.id, &node, vmid)
+                .await?
         {
             let step = if refusal.reason == "unprotect_failed" {
                 "unprotect"
@@ -3119,7 +3328,7 @@ impl ProvisionExecutor {
                 .any(|guest| {
                     guest.vmid == Some(vmid)
                         && guest.kind == "qemu"
-                        && guest.name.as_deref() == Some(format!("fm-lab-{}", record.id).as_str())
+                        && guest.name.as_deref() == Some(guest_name.as_str())
                         && guest.status.as_deref() == Some("running")
                 });
             if !running {
