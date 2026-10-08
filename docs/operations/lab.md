@@ -70,6 +70,68 @@ A Lab image must contain:
 
 - `qemu-guest-agent`, enabled in the guest and in the VM (`--agent enabled=1`). Readiness polls the agent for every template, whatever its probe.
 - The controller's SSH public key, authorized for the template's SSH user (default `root`). The controller authenticates with its own SSH agent (`SSH_AUTH_SOCK`); Fleet never installs keys.
+- A way to get an IPv4 address on every clone. Lab readiness (`guest_agent`) needs a non-loopback IPv4 address, and a lease that never gets one fails at step `guest_ip`.
+
+Cloud images (Debian, Ubuntu) break the last requirement in two ways, and both show up only on a clone:
+
+- **No `/etc/machine-id`.** A template whose `/etc/machine-id` is *missing* (not empty) leaves `systemd-networkd` unable to start its DHCP client (`Failed to configure DHCPv4 client: No such file or directory`). The guest has only loopback and IPv6 link-local. Leave an empty file instead (`truncate -s 0 /etc/machine-id`): the clone generates an ID on its first boot. Never boot the template again after you empty it.
+- **A network config bound to a MAC address.** The image's netplan file matches the MAC of the VM it was built on. A clone has a different MAC, so its NIC stays down. This also happens when `cloud-init clean` has run, or when the build's clone has no cloud-init drive to seed the network. Use a config that matches by name pattern (`match: {name: "e*"}`, `dhcp4: true`), and stop cloud-init from rewriting it. The NIC may be called `ens18` or `eth0`, depending on the image, so do not name it.
+
+[The Proxmox test-cluster runbook](proxmox-test-cluster.md#step-6-the-test-template-for-fm-611-and-lab) shows how to prepare such a source template by hand.
+
+#### Building an SSH-ready image from a DHCP template
+
+This recipe is the one the M7 exit-gate run built its working Lab image with, with placeholders. It is a `proxmox-clone` of a template that already has an empty machine ID and gets DHCP (`<dhcp-template-vmid>`). It uses an SSH communicator and an inline `shell` provisioner, so it passes the recipe gate: no `http_directory`, `cd_files`, `post-processors`, or template function (no `{{ … }}` at all), and only `shell` with `inline` lines. The SSH key file is read on the controller only to authenticate to the guest. Replace every `<…>` value.
+
+```json
+{
+  "builders": [{
+    "type": "proxmox-clone",
+    "proxmox_url": "https://<pve-host>:8006/api2/json",
+    "node": "<node>",
+    "clone_vm_id": <dhcp-template-vmid>,
+    "full_clone": false,
+    "vm_id": <new-template-vmid>,
+    "vm_name": "lab-base-<new-template-vmid>",
+    "template_name": "lab-base-<new-template-vmid>",
+    "scsi_controller": "virtio-scsi-pci",
+    "cores": 2,
+    "memory": 2048,
+    "network_adapters": [{ "model": "virtio", "bridge": "vmbr0" }],
+    "qemu_agent": true,
+    "communicator": "ssh",
+    "ssh_username": "root",
+    "ssh_private_key_file": "<path-to-build-key-on-controller>",
+    "ssh_timeout": "10m",
+    "task_timeout": "10m"
+  }],
+  "provisioners": [{
+    "type": "shell",
+    "inline": [
+      "mkdir -p /root/.ssh && chmod 700 /root/.ssh",
+      "echo '<controller-ssh-public-key>' >> /root/.ssh/authorized_keys",
+      "chmod 600 /root/.ssh/authorized_keys",
+      "rm -f /etc/netplan/*.yaml",
+      "printf 'network:\\n  version: 2\\n  ethernets:\\n    all-ethernets:\\n      match: {name: \"e*\"}\\n      dhcp4: true\\n' > /etc/netplan/50-fleet-dhcp.yaml",
+      "chmod 600 /etc/netplan/50-fleet-dhcp.yaml",
+      "echo 'network: {config: disabled}' > /etc/cloud/cloud.cfg.d/99-fleet-network.cfg",
+      "rm -f /etc/ssh/ssh_host_*",
+      "systemctl enable ssh",
+      "cloud-init clean --logs",
+      "truncate -s 0 /etc/machine-id",
+      "rm -f /var/lib/dbus/machine-id && ln -s /etc/machine-id /var/lib/dbus/machine-id",
+      "sync"
+    ]
+  }]
+}
+```
+
+Notes:
+
+- **Authorize a key that exists as a file on the controller.** The SSH provider forces `IdentitiesOnly yes` without an identity file, so OpenSSH never offers an agent-only key ([#326](https://github.com/Frogbyte-io/fleet-manager/issues/326)). Authorize the controller user's default public key (`~/.ssh/id_ed25519.pub`) as well as any agent key. With only an agent key, the lease becomes `ready` but `lab exec` fails with `Permission denied (publickey)`.
+- **Use a different name from `fm-lab-`.** Fleet reserves that prefix for its Lab guests, and the sweeper reports a build VM with it as an orphan.
+- **Software the guests need** (git, Node, and so on) goes into the same `inline` list. Pin a checksum for anything you download, and never put credentials in the recipe.
+- **Check the result.** After promotion, a lease on a template that uses the image should reach `ready` in about 20 seconds. A lease that fails at `guest_ip` points to the machine-id or the network config above.
 
 ## First run
 
@@ -469,7 +531,7 @@ What Fleet guarantees on `dev`:
 - **Adopt only its own guest.** On a re-run, a guest already at the recorded VMID is adopted only if it carries the record's name (`fm-lab-<record-id>`). Anything else there is a conflict, and Fleet touches nothing.
 - **Owed cleanup is not forgotten.** A failed or cancelled provision that allocated a guest moves its lease to `releasing`. Cleanup retries five times, then the lease becomes `cleanup_failed` with an audit event that names the guest.
 - **Cleanup refuses templates.** Cleanup refuses any VMID that is a promoted image's recorded build artifact, or that PVE reports as a template. It checks the template state before the stop and again after it. PVE has no conditional delete, so a guest converted to a template outside Fleet after the last check can still be deleted. Fleet never reserves such a VMID as a clone target.
-- **No credentials to unconfirmed hosts.** No Proxmox operation of Fleet's own sends a token to an account whose fingerprint you have not confirmed. Image builds fail with `target_account_untrusted` before any credential is resolved, and with `target_certificate_changed` when the host's certificate is no longer the confirmed one (see [Build](#3-build)). Recipe content that could read the token out of Packer's process is refused at publish time and again before every build (#313; see [Credentials](#build)).
+- **No credentials to unconfirmed hosts.** No Proxmox operation of Fleet's own sends a token to an account whose fingerprint you have not confirmed. Image builds fail with `target_account_untrusted` before any credential is resolved, and with `target_certificate_changed` when the host's certificate is no longer the confirmed one (see [Build](#3-build)). Recipe content that could read the token out of Packer's process is refused at publish time and again before every build (#313; see [Credentials](#3-build)).
 - **Recovery without an operator.** The sweeper expires leases, compensates stuck provisions, and queues due cleanups from what the database holds. After a controller crash or restart, it continues on its next tick.
 - **Builds leave records.** Every build has an immutable record, written before Packer runs and completed with its outcome.
 
