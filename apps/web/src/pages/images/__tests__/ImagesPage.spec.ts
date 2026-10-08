@@ -59,7 +59,7 @@ function recipe(overrides: Partial<RecipeDto> = {}): RecipeDto {
 function version(id: string, publishedAt: number, overrides: Partial<RecipeVersionDto> = {}): RecipeVersionDto {
   return {
     id, recipeId: 'r1', name: 'ubuntu-24-dev', description: '', contentDigest: `${id.split('@')[1]}${'0'.repeat(60)}`, content: CONTENT,
-    source: 'clone', node: 'pve-01', storagePool: 'local-lvm', publishedAt, promotedAt: null, promotedBy: null, structured: null, ...overrides,
+    source: 'clone', node: 'pve-01', storagePool: 'local-lvm', publishedAt, promotedAt: null, promotedBy: null, allowInsecureTls: false, structured: null, ...overrides,
   }
 }
 
