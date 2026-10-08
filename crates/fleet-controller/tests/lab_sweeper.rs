@@ -928,10 +928,12 @@ async fn an_abandoned_cleanup_is_counted_once_and_never_over_a_concurrent_change
         (LeaseState::Releasing, 1)
     );
     assert!(counted.cleanup_next_at.is_some());
-    // A second sweep over the same operation finds the count moved on (the
-    // attempt it would count is no longer the current one) and adds nothing.
+    // The next tick finds the backoff (stamped from the real clock, long
+    // before the test's `NOW`) passed and queues the next attempt under its
+    // fresh key; the abandoned one is not counted again.
     let again = harness.sweeper().tick(NOW).await.unwrap();
     assert_eq!(again.cleanups_abandoned, 0, "{again:?}");
+    assert_eq!(again.cleanups_queued, 1, "{again:?}");
     assert_eq!(
         harness
             .leases
