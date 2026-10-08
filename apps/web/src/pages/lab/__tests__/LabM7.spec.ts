@@ -234,7 +234,8 @@ describe('lease detail', () => {
   })
 
   it('says so when the reservation field is absent (an older controller)', async () => {
-    const { reservation: _omitted, ...withoutField } = detail()
+    const withoutField: Partial<LeaseDetailDto> = detail()
+    delete withoutField.reservation
     getLabLease.mockResolvedValue(ok({ data: withoutField }))
     const wrapper = await mountPage()
     await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
