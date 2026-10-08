@@ -179,9 +179,48 @@ The helper creates a fixture-only test user with `Administrator` on `/`, the use
 
 Secrets are written directly into `FLEET_PVE_TEST_SECRET_DIR/<role>-<ro|admin>.token` **on the machine running the helper**, never to the terminal (directory mode 0700, file mode 0600). Use the local `<role>-ro.token` path for `FLEET_PVE_TARGET_<NAME>_RO_TOKEN_SECRET_FILE`, and the helper's read-only token ID for `…_RO_TOKEN_ID`. Re-running with the token and file present reuses them. If the token exists but its local secret file is missing, the helper refuses: remove that stale token on the nested node using the exact `pveum user token remove … ro` recovery command printed by the helper (it names the configured `FLEET_PVE_TEST_USER`, default `fleet-test@pve`), then re-run `tokens`. Remove a stale local file only after revoking its token. Never overwrite a secret file for a token that is still in use.
 
-## Step 6: the test template for FM-611
+## Step 6: the test template for FM-611 and Lab
 
-FM-611's task-polling, destructive-gate, and association scenarios clone from a template on each target (`…_TEMPLATE_VMID`) that has the QEMU Guest Agent installed. On each target (`pve8`, and `node-a` for the cluster), create a small Linux VM with the guest agent enabled (`--agent enabled=1`) and `qemu-guest-agent` installed in the guest, with its NIC on `vmbr0`. Its NIC is `ens18` too; if you seed it with cloud-init, the seed must say `ens18`. Convert it with `qm template <vmid>`, give it a VMID **outside** the suite's `VMID_RANGE`, and put the template's VMID in your env file. FM-611 owns the exact template requirements. This runbook only guarantees the hosts.
+FM-611's task-polling, destructive-gate, and association scenarios clone from a template on each target (`…_TEMPLATE_VMID`) that has the QEMU Guest Agent installed. On each target (`pve8`, and `node-a` for the cluster), create a small Linux VM with the guest agent enabled (`--agent enabled=1`) and `qemu-guest-agent` installed in the guest, with its NIC on `vmbr0`. Convert it with `qm template <vmid>`, give it a VMID **outside** the suite's `VMID_RANGE`, and put the template's VMID in your env file.
+
+FM-611's scenarios do not need the guest to have an address. **Lab does**: readiness (`guest_agent`) needs a non-loopback IPv4 address, a Packer SSH-communicator build needs one to connect, and the Lab live scenarios (FM-741) clone and lease guests. A template that only satisfies FM-611 fails a Lab lease at step `guest_ip`, and an SSH build times out.
+
+Lab therefore uses two more templates on each target, built in this order:
+
+1. **A DHCP source template**, made by hand from the guest-agent template as shown below. Its clones get an address.
+2. **The Lab image**, built by Fleet from the DHCP source template with the recipe in [Building an SSH-ready image](lab.md#building-an-ssh-ready-image-from-a-dhcp-template). Its clones also accept the controller's SSH key. Point the Lab scenarios' `…_TEMPLATE_VMID` at this one. FM-611 and FM-704 keep using the guest-agent template.
+
+| Requirement | Why, and what goes wrong without it | Provided by |
+|---|---|---|
+| `/etc/machine-id` exists and is **empty** (0 bytes), not missing | `systemd-networkd` derives its DHCP client identifier from the machine ID. With no file it fails with `eth0: Failed to configure DHCPv4 client: No such file or directory`, and the guest keeps only loopback and IPv6 link-local. An empty file is regenerated on the clone's first boot. | The DHCP source template; the recipe keeps it empty |
+| A network config that follows the clone's MAC | Cloud images ship a netplan file that matches the source VM's MAC. A clone has another MAC, so its NIC stays down unless something rewrites the file. | The DHCP source template keeps its cloud-init drive with `ipconfig0=ip=dhcp`, so cloud-init writes a fresh config on each clone. The Lab image has no cloud-init drive (Packer drops it), so the recipe installs a name-matching config (`name: "e*"`, `dhcp4: true`) and disables cloud-init's network config. |
+| The controller's SSH public keys authorized for the Lab SSH user (default `root`) | Lab authenticates with the controller user's own key; see [the Lab image](lab.md#the-image) and [#326](https://github.com/Frogbyte-io/fleet-manager/issues/326). | The recipe |
+| SSH host keys unique to each clone, and present when `sshd` starts | Lab trusts the guest's host key on first contact. Debian's `ssh.service` does not create missing keys, and cloud-init does not run on the Lab image's clones. | The recipe's boot-time `ssh-keygen -A` unit |
+
+**The NIC name is not fixed.** A nested PVE node sees its VirtIO NIC as `ens18` (see [Network layout](#network-layout)), and so does a cloud image's guest by default. If cloud-init's netplan sets `set-name`, the guest calls it `eth0` instead: clones of the guest-agent template show `eth0`, clones of the Lab image show `ens18`. Do not hard-code either name in a guest network config; match `e*`.
+
+To make the DHCP source template, run this on the PVE node as root. `<agent-template-vmid>` is the guest-agent template above. It must be a cloud image with a cloud-init drive (`ide2: …cloudinit`), `ipconfig0: ip=dhcp`, and `agent: enabled=1`; check with `qm config <agent-template-vmid>`. Pick a `<dhcp-template-vmid>` outside the suite's `VMID_RANGE`.
+
+```sh
+qm clone <agent-template-vmid> <dhcp-template-vmid> --full 1 --name fleet-agent-template-dhcp
+qm set <dhcp-template-vmid> --tags fleet-acceptance
+qm start <dhcp-template-vmid>
+until qm agent <dhcp-template-vmid> ping 2>/dev/null; do sleep 5; done
+# Inside the guest, through the guest agent: let cloud-init finish, leave an EMPTY
+# machine-id (not a missing one), and reset cloud-init so each clone is a new instance.
+qm guest exec <dhcp-template-vmid> --timeout 120 -- sh -c 'cloud-init status --wait >/dev/null 2>&1; rm -f /etc/machine-id; : > /etc/machine-id; chmod 444 /etc/machine-id; cloud-init clean --logs; sync'
+qm shutdown <dhcp-template-vmid> --timeout 120
+qm template <dhcp-template-vmid>
+```
+
+Do not start the VM again between the `guest exec` and `qm template`: the next boot writes a machine ID. If it did boot, run the `guest exec` line again.
+
+Check it: a clone (`qm clone <dhcp-template-vmid> <scratch-vmid>`, then `qm start`) should show an IPv4 address in `qm guest cmd <scratch-vmid> network-get-interfaces` within about 10 seconds. Destroy the clone afterwards. Then build, promote, and check the Lab image as [the Lab runbook](lab.md#building-an-ssh-ready-image-from-a-dhcp-template) describes.
+
+Do not name any of these templates, or their clones, with the reserved `fm-lab-` prefix. The Lab sweeper reports such guests that it did not create as orphans.
+
+The M7 exit-gate run ([#266](https://github.com/Frogbyte-io/fleet-manager/issues/266)) found the original guest-agent template without `/etc/machine-id` ([#328](https://github.com/Frogbyte-io/fleet-manager/issues/328)). It kept that template, 7000, unchanged for FM-611 and FM-704, made the DHCP source template 7001 with the commands above, and built its Lab image from 7001 through Fleet.
+
 
 ## Step 7: environment for the acceptance suite (FM-611)
 
