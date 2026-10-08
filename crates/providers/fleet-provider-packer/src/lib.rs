@@ -80,6 +80,8 @@ pub struct PackerCommand {
 /// Proxy variables are deliberately absent: the Proxmox plugin's API client
 /// uses `http.ProxyFromEnvironment`, so they would route the connection
 /// that carries the token, and a proxy URL can carry its own credentials.
+/// The operator's explicit opt-in (#339) is handed to the `build` child as
+/// `HTTPS_PROXY`/`NO_PROXY` through [`SecretEnv::new`], never inherited.
 pub const AMBIENT_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",

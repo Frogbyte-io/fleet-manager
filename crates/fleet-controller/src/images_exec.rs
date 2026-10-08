@@ -85,6 +85,12 @@ pub struct ImagesExecutor {
     accounts: Option<Arc<dyn fleet_application::proxmox::ProxmoxAccountPort>>,
     credentials: Option<Arc<dyn fleet_application::proxmox::ProxmoxCredentialStore>>,
     certificates: Option<Arc<dyn fleet_provider_proxmox::PveTransport>>,
+    /// The operator's opt-in proxy for the `build` child (#339), with the
+    /// audit sink that records each hand-off.
+    build_proxy: Option<(
+        fleet_config::ImageBuildProxy,
+        Arc<dyn fleet_application::operation::AuditPort>,
+    )>,
 }
 
 /// The Proxmox plugin environments for a build: the `validate` child's
@@ -95,6 +101,8 @@ pub struct ImagesExecutor {
 struct BuildEnvs {
     validate: SecretEnv,
     build: SecretEnv,
+    /// The proxy the `build` env carries, when the operator opted in.
+    proxy: Option<fleet_config::ImageBuildProxy>,
 }
 
 /// An empty `SSH_AUTH_SOCK`, for every Packer child (#333). The SDK
@@ -161,7 +169,69 @@ impl ImagesExecutor {
             accounts: None,
             credentials: None,
             certificates: None,
+            build_proxy: None,
         }
+    }
+
+    /// Lets the `packer build` child use the operator's proxy (#339): it
+    /// gets `HTTPS_PROXY` (and `NO_PROXY` when configured) over the
+    /// allowlisted environment, and nothing else does. Each hand-off is
+    /// audited, without anything but the credential-free URL. Builds whose
+    /// version skips TLS verification are refused while a proxy is
+    /// configured: without the pin, the proxy could read the token. Only
+    /// effective once [`Self::with_account_credentials`] is wired.
+    #[must_use]
+    pub fn with_build_proxy(
+        mut self,
+        proxy: fleet_config::ImageBuildProxy,
+        audit: Arc<dyn fleet_application::operation::AuditPort>,
+    ) -> Self {
+        self.build_proxy = Some((proxy, audit));
+        self
+    }
+
+    /// Records that the `build` child is about to get the proxy, before it
+    /// runs. The record names the credential-free proxy and the direct
+    /// list, nothing else.
+    async fn audit_proxy_hand_off(
+        &self,
+        operation: &Operation,
+        proxy: &fleet_config::ImageBuildProxy,
+    ) -> Result<(), &'static str> {
+        let Some((_, audit)) = &self.build_proxy else {
+            return Ok(());
+        };
+        let mut metadata = fleet_application::audit::AuditMetadata::default();
+        let mut insert = |key: &str, value: &str| {
+            metadata
+                .insert(key, value)
+                .map_err(|_| "proxy_audit_failed")
+        };
+        insert("event", "image_build_proxy_applied")?;
+        insert("operation", &operation.id)?;
+        insert("proxy", proxy.url())?;
+        if let Some(no_proxy) = proxy.no_proxy() {
+            insert("no_proxy", no_proxy)?;
+        }
+        audit
+            .record_intent(&fleet_application::audit::AuditIntent {
+                actor: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
+                action: fleet_application::authz::Permission::ImagesConfig
+                    .id()
+                    .to_owned(),
+                resource: Some(operation.id.clone()),
+                decision: fleet_application::authz::Decision::allow(),
+                correlation_id: operation.correlation_id.clone(),
+                // Not the operation's own audit pair: `record_outcome`
+                // closes the newest open intent carrying the operation id,
+                // and that must stay the request's intent. The event is
+                // complete as written, and names the operation in its
+                // metadata.
+                operation_id: None,
+                metadata,
+            })
+            .await
+            .map_err(|_| "proxy_audit_failed")
     }
 
     /// Hands each build its target account's token (#272): resolved just in
@@ -214,6 +284,7 @@ impl ImagesExecutor {
             return Ok(BuildEnvs {
                 validate: inherited_env(),
                 build: inherited_env(),
+                proxy: None,
             });
         };
         let account_id = account_id.ok_or("target_account_missing")?;
@@ -258,32 +329,52 @@ impl ImagesExecutor {
             cert_vars.push(("SSL_CERT_FILE", file.display().to_string()));
             cert_vars.push(("SSL_CERT_DIR", dir.display().to_string()));
         }
+        // The proxy sees the connection that carries the token. The pin
+        // survives a CONNECT tunnel, but an audited insecure-TLS build has
+        // no pin, so it never goes through one (#339).
+        let proxy = self.build_proxy.as_ref().map(|(proxy, _)| proxy.clone());
+        if proxy.is_some() && insecure_tls {
+            return Err("proxy_insecure_tls_refused");
+        }
         let secret = credentials
             .load(account_id)
             .await
             .map_err(|_| "account_credential_unreadable")?
             .ok_or("account_credential_missing")?;
-        let env_with = |username: String, token: String| {
-            let mut vars: Vec<(String, fleet_core::SensitiveString)> = cert_vars
-                .iter()
-                .map(|(name, path)| {
-                    (
-                        (*name).to_owned(),
-                        fleet_core::SensitiveString::new(path.clone()),
-                    )
-                })
-                .collect();
-            vars.push(no_ssh_agent());
-            vars.push((
-                "PROXMOX_USERNAME".to_owned(),
-                fleet_core::SensitiveString::new(username),
-            ));
-            vars.push((
-                "PROXMOX_TOKEN".to_owned(),
-                fleet_core::SensitiveString::new(token),
-            ));
-            SecretEnv::new(vars)
-        };
+        let env_with =
+            |username: String, token: String, proxy: Option<&fleet_config::ImageBuildProxy>| {
+                let mut vars: Vec<(String, fleet_core::SensitiveString)> = cert_vars
+                    .iter()
+                    .map(|(name, path)| {
+                        (
+                            (*name).to_owned(),
+                            fleet_core::SensitiveString::new(path.clone()),
+                        )
+                    })
+                    .collect();
+                vars.push(no_ssh_agent());
+                if let Some(proxy) = proxy {
+                    vars.push((
+                        "HTTPS_PROXY".to_owned(),
+                        fleet_core::SensitiveString::new(proxy.url().to_owned()),
+                    ));
+                    if let Some(no_proxy) = proxy.no_proxy() {
+                        vars.push((
+                            "NO_PROXY".to_owned(),
+                            fleet_core::SensitiveString::new(no_proxy.to_owned()),
+                        ));
+                    }
+                }
+                vars.push((
+                    "PROXMOX_USERNAME".to_owned(),
+                    fleet_core::SensitiveString::new(username),
+                ));
+                vars.push((
+                    "PROXMOX_TOKEN".to_owned(),
+                    fleet_core::SensitiveString::new(token),
+                ));
+                SecretEnv::new(vars)
+            };
         // `packer validate` runs the Proxmox plugin's `Prepare`, which needs
         // a non-empty username and token or it errors, but never opens a
         // connection — it returns before `Builder.Run`. So the real token is
@@ -295,8 +386,10 @@ impl ImagesExecutor {
             validate: env_with(
                 "fleet@pve!validate".to_owned(),
                 "00000000-0000-0000-0000-000000000000".to_owned(),
+                None,
             ),
-            build: env_with(account.token_id, secret),
+            build: env_with(account.token_id, secret, proxy.as_ref()),
+            proxy,
         })
     }
 
@@ -643,6 +736,11 @@ impl ImagesExecutor {
         }
         if validated.exit_code != Some(0) {
             return Err("validate_failed");
+        }
+        // The hand-off is on the record before the child that gets it runs;
+        // a failed write refuses the build.
+        if let Some(proxy) = &envs.proxy {
+            self.audit_proxy_hand_off(operation, proxy).await?;
         }
         operations
             .record_progress(&operation.id, Some(1), Some(2), Some("building the image"))
