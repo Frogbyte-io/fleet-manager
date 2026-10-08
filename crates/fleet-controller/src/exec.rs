@@ -71,6 +71,9 @@ pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 /// The bound for the operation's public result; output is trimmed to fit.
 pub(crate) const RESULT_STRING_BOUND: usize = 3_000;
 
+/// How much of a stream is scrubbed before it is bounded.
+const SCRUB_WINDOW: usize = 16 * 1024;
+
 /// The kind-dispatching executor.
 #[derive(Debug)]
 pub struct ScriptExecutor {
@@ -312,12 +315,19 @@ impl ScriptExecutor {
 
         match (result, detail) {
             (Some(result), _) => {
+                // The stored output is scrubbed of credential shapes and
+                // then bounded; each flag stays true when either the
+                // provider or this bound dropped output.
+                let (stdout, truncated_stdout) =
+                    scrub_and_bound(&result.stdout, result.truncated_stdout);
+                let (stderr, truncated_stderr) =
+                    scrub_and_bound(&result.stderr, result.truncated_stderr);
                 let result_json = serde_json::json!({
                     "exitCode": result.exit_code,
-                    "stdout": trim_to_bound(&result.stdout),
-                    "stderr": trim_to_bound(&result.stderr),
-                    "truncatedStdout": result.truncated_stdout,
-                    "truncatedStderr": result.truncated_stderr,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "truncatedStdout": truncated_stdout,
+                    "truncatedStderr": truncated_stderr,
                 })
                 .to_string();
                 if result.killed_by_deadline {
@@ -325,10 +335,10 @@ impl ScriptExecutor {
                         "reason": "deadline_killed",
                         "detail": "the local ssh process was killed at the deadline; the remote command's fate is unknown",
                         "partialOutput": {
-                            "stdout": trim_to_bound(&result.stdout),
-                            "stderr": trim_to_bound(&result.stderr),
-                            "truncatedStdout": result.truncated_stdout,
-                            "truncatedStderr": result.truncated_stderr,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "truncatedStdout": truncated_stdout,
+                            "truncatedStderr": truncated_stderr,
                         },
                     })
                     .to_string();
@@ -474,21 +484,136 @@ pub(crate) async fn resolve_ssh_endpoint(
     ))
 }
 
-fn trim_to_bound(text: &str) -> String {
-    if text.len() <= RESULT_STRING_BOUND {
-        text.to_owned()
-    } else {
-        let mut end = RESULT_STRING_BOUND;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &text[..end])
-    }
-}
-
 /// Convenience: the noop executor remains available for hosts that do not
 /// carry SSH machines.
 #[must_use]
 pub fn noop_only_executor() -> impl OperationExecutor {
     fleet_application::worker::NoopExecutor
+}
+
+/// Scrubs credential shapes from command output, then bounds it. Scrubbing
+/// first means a credential straddling the bound is never half kept. The
+/// returned flag is true when the provider already truncated the output or
+/// this bound cut it.
+fn scrub_and_bound(text: &str, provider_truncated: bool) -> (String, bool) {
+    // The transport allows up to 1 MiB per stream and the scrubber is not
+    // linear on adversarial input, so scrub only a window that is far larger
+    // than the bound. A cut window ends at whitespace, so no credential is
+    // split by it, and the dropped remainder counts as truncation.
+    let (window, windowed) = scrub_window(text);
+    let scrubbed = fleet_core::redact_credentials(window);
+    let (bounded, cut) = trim_to_bound(&scrubbed);
+    (bounded, provider_truncated || windowed || cut)
+}
+
+/// The prefix of `text` that is scrubbed, and whether text was left out.
+fn scrub_window(text: &str) -> (&str, bool) {
+    if text.len() <= SCRUB_WINDOW {
+        return (text, false);
+    }
+    let mut end = SCRUB_WINDOW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end]
+        .rfind(char::is_whitespace)
+        .filter(|&space| space >= RESULT_STRING_BOUND)
+        .unwrap_or(RESULT_STRING_BOUND);
+    let mut end = end;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&text[..end], true)
+}
+
+fn trim_to_bound(text: &str) -> (String, bool) {
+    if text.len() <= RESULT_STRING_BOUND {
+        (text.to_owned(), false)
+    } else {
+        let mut end = RESULT_STRING_BOUND;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (format!("{}…", &text[..end]), true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RESULT_STRING_BOUND, scrub_and_bound};
+
+    #[test]
+    fn output_is_scrubbed_before_it_is_stored() {
+        let (text, truncated) =
+            scrub_and_bound("cloned https://user:secret@host.invalid/repo\n", false);
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("***@host.invalid"), "{text}");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_credential_at_the_bound_is_not_half_kept() {
+        let filler = "x".repeat(RESULT_STRING_BOUND - 100);
+        let password = "p".repeat(200);
+        let (text, truncated) = scrub_and_bound(
+            &format!("{filler} https://user:{password}@host.invalid/repo"),
+            false,
+        );
+        assert!(!text.contains("pppp"), "no part of the password survives");
+        assert!(
+            text.ends_with("***@host.invalid/repo"),
+            "{}",
+            &text[text.len() - 40..]
+        );
+        assert!(
+            !truncated,
+            "the raw text was over the bound but nothing was dropped after scrubbing"
+        );
+        // Cut at the bound: the credential is already gone, so the cut can
+        // never leave a fragment of it.
+        let (text, truncated) = scrub_and_bound(
+            &format!(
+                "https://user:{password}@host.invalid/{}",
+                "z".repeat(RESULT_STRING_BOUND)
+            ),
+            false,
+        );
+        assert!(!text.contains("pppp"), "no part of the password survives");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn huge_adversarial_output_is_scrubbed_in_bounded_time() {
+        let started = std::time::Instant::now();
+        let (text, truncated) = scrub_and_bound(&"@".repeat(1024 * 1024), false);
+        assert!(truncated);
+        assert!(text.len() <= RESULT_STRING_BOUND + 4);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let emails = "abc@example.com,".repeat(64 * 1024);
+        let (_, truncated) = scrub_and_bound(&emails, false);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn a_window_cut_never_splits_a_credential() {
+        let filler = "x ".repeat(RESULT_STRING_BOUND);
+        let tail = format!(
+            "{filler}{}https://user:secret@host.invalid/r",
+            "y ".repeat(16 * 1024)
+        );
+        let (text, truncated) = scrub_and_bound(&tail, false);
+        assert!(truncated);
+        assert!(!text.contains("secret"), "{text}");
+    }
+
+    #[test]
+    fn the_flags_stay_accurate() {
+        let (_, provider) = scrub_and_bound("short", true);
+        assert!(provider, "a provider truncation is kept");
+        let (text, cut) = scrub_and_bound(&"y".repeat(RESULT_STRING_BOUND + 50), false);
+        assert!(cut, "this bound's own cut is reported");
+        assert!(text.ends_with('…'));
+        let (_, clean) = scrub_and_bound("short", false);
+        assert!(!clean);
+    }
 }

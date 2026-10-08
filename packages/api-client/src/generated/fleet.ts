@@ -8402,8 +8402,10 @@ export const getExecLabLeaseUrl = (leaseId: string,) => {
  * Returns the public error envelope on refusal, an unknown lease, a lease
  * that is not ready, or an invalid command.
  * @summary Runs a command on a ready lease's guest as a `lab.exec` operation. The
-result carries the exit code and bounded, redacted stdout and stderr,
-as machine exec does.
+result carries the exit code and stdout and stderr, each scrubbed of
+credentials (URL userinfo and `user:password@`) and bounded, as machine
+exec does. A truncated flag is true when output was dropped, whether by
+the transport or by the result bound.
  */
 export const execLabLease = async (leaseId: string,
     execLeaseRequest: ExecLeaseRequest, options?: RequestInit): Promise<execLabLeaseResponse> => {

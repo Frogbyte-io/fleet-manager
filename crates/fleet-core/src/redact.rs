@@ -13,7 +13,14 @@ pub fn redact_url_credentials(text: &str) -> String {
     while let Some(position) = rest.find("://") {
         let (before, after) = rest.split_at(position + 3);
         result.push_str(before);
-        let authority_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+        // A URL authority never contains whitespace, quotes or angle
+        // brackets: stop there, so a bare URL in multi-line output cannot
+        // swallow the lines up to a later '@'.
+        let authority_end = after
+            .find(|c: char| {
+                matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>') || c.is_whitespace()
+            })
+            .unwrap_or(after.len());
         let authority = &after[..authority_end];
         let tail = &after[authority_end..];
         // The authority's LAST '@' separates userinfo from host: a
@@ -75,6 +82,14 @@ pub fn redact_schemeless_credentials(text: &str) -> String {
     result
 }
 
+/// Redacts every credential shape this module knows: URL userinfo, then
+/// schemeless `user:password@`. The single entry point for output that is
+/// stored or returned (command output, logs), so a fix lands once.
+#[must_use]
+pub fn redact_credentials(text: &str) -> String {
+    redact_schemeless_credentials(&redact_url_credentials(text))
+}
+
 /// Flattens control characters (except newlines) to spaces: hostile
 /// terminal output stays data.
 #[must_use]
@@ -116,6 +131,21 @@ mod tests {
         let schemeless = redact_schemeless_credentials("reach user:p@ss@host:repo now");
         assert!(!schemeless.contains("p@ss"), "{schemeless}");
         assert!(schemeless.contains("***@host:repo"), "{schemeless}");
+    }
+
+    #[test]
+    fn redact_credentials_applies_both_passes() {
+        let redacted = redact_credentials("a https://u:one@h.invalid/x b scp u:two@h.invalid:r c");
+        assert!(
+            !redacted.contains("one") && !redacted.contains("two"),
+            "{redacted}"
+        );
+    }
+
+    #[test]
+    fn a_bare_url_does_not_swallow_following_lines() {
+        let text = "see https://example.com\nmail bob@corp.example\nmore";
+        assert_eq!(redact_url_credentials(text), text);
     }
 
     #[test]

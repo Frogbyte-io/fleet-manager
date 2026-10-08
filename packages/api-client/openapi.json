@@ -2238,7 +2238,7 @@
         "tags": [
           "lab"
         ],
-        "summary": "Runs a command on a ready lease's guest as a `lab.exec` operation. The\nresult carries the exit code and bounded, redacted stdout and stderr,\nas machine exec does.",
+        "summary": "Runs a command on a ready lease's guest as a `lab.exec` operation. The\nresult carries the exit code and stdout and stderr, each scrubbed of\ncredentials (URL userinfo and `user:password@`) and bounded, as machine\nexec does. A truncated flag is true when output was dropped, whether by\nthe transport or by the result bound.",
         "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease, a lease\nthat is not ready, or an invalid command.",
         "operationId": "execLabLease",
         "parameters": [
