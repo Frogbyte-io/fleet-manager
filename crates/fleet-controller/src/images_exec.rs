@@ -22,10 +22,14 @@
 //! leaf to name the account host, and hands the validate/build children
 //! that one leaf as their only root (an empty `SSL_CERT_DIR` keeps the
 //! system directories out). Go accepts a leaf that is itself in the pool as
-//! a chain of one, still checking the host name, validity, and key usage;
-//! any other certificate fails the handshake before a request, and so the
-//! token, is sent. An opted-in build gets only the check-time pin: Packer
-//! then skips verification itself.
+//! a chain of one, still checking the host name, validity, and key usage.
+//! Any other certificate fails the handshake before a request is sent, so
+//! the token is never sent to it. The pin constrains Go TLS clients that
+//! honor these variables (Packer and its Proxmox plugin); other TLS stacks
+//! in a subprocess are not covered, and HTTPS downloads by Packer itself
+//! (an `iso_url` fetched on the controller) are unsupported under the pin.
+//! An opted-in build gets only the check-time pin: Packer then skips
+//! verification itself.
 
 use std::path::PathBuf;
 use std::sync::Arc;
