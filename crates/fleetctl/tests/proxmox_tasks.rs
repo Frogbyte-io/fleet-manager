@@ -113,7 +113,7 @@ fn parsing_refuses_the_undocumented_task_history_forms() {
         vec!["proxmox", "tasks", "--node", "pve"],
         // The account guard: an empty ID or any leading `-` is not one.
         vec!["proxmox", "tasks", ""],
-        vec!["proxmox", "tasks", "-h"],
+        vec!["proxmox", "tasks", "-x"],
         vec!["proxmox", "tasks", "-acc-1", "--node", "pve"],
         vec!["proxmox", "tasks", "acc-1", "--vmid", "abc"],
         vec!["proxmox", "tasks", "acc-1", "--limit"],
