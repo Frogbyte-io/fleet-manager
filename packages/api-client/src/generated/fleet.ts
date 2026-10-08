@@ -12636,10 +12636,15 @@ export type startReviewedProxmoxOperationResponse403 = {
   status: 403
 }
 
+export type startReviewedProxmoxOperationResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type startReviewedProxmoxOperationResponseSuccess = (startReviewedProxmoxOperationResponse202) & {
   headers: Headers;
 };
-export type startReviewedProxmoxOperationResponseError = (startReviewedProxmoxOperationResponse400 | startReviewedProxmoxOperationResponse403) & {
+export type startReviewedProxmoxOperationResponseError = (startReviewedProxmoxOperationResponse400 | startReviewedProxmoxOperationResponse403 | startReviewedProxmoxOperationResponse409) & {
   headers: Headers;
 };
 

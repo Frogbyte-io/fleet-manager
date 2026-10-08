@@ -648,6 +648,12 @@ pub(crate) fn map_use_case_error(
             RetryClass::Never,
             error.to_string(),
         ),
+        OperationUseCaseError::Refused { reason, .. } => (
+            StatusCode::CONFLICT,
+            reason,
+            RetryClass::Never,
+            error.to_string(),
+        ),
         OperationUseCaseError::Backend { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",

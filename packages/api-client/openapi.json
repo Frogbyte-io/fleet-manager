@@ -6523,6 +6523,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The guest is a Lab pool member (`pool_member`): destroy and snapshot-delete are refused until it is drained.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }

@@ -235,7 +235,12 @@ fn api_state(
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
                 events.clone(),
                 std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
-            );
+            )
+            .with_pool_members(std::sync::Arc::new(
+                fleet_application::operation::PoolMembership(std::sync::Arc::new(
+                    fleet_storage_sqlite::LabPoolRepository::new(pool.clone()),
+                )),
+            ));
         let machines = fleet_application::machine::Machines::new(
             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
