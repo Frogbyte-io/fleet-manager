@@ -245,6 +245,23 @@ A two-node cluster has two expected votes, so losing either node leaves the surv
 
 These figures come from one run on one host. FM-613 should re-check them on 8.x and record anything that differs. In particular, the survivor took 30 s to give up on an unreachable node in every slow case. That figure is measured, not taken from PVE's documentation or source. An operation deadline in Fleet shorter than that turns an unreachable node into a Fleet timeout before PVE answers with 595.
 
+## Step 9: the image build suite (FM-704)
+
+`cargo xtask image-acceptance [--target NAME]` ([#255](https://github.com/Frogbyte-io/fleet-manager/issues/255)) reuses the Step 7 targets and gate: export `FLEET_PVE_LIVE=1` and the `FLEET_PVE_TARGET_<NAME>_*` lines you put in your local env file in Step 7 (this example calls it `~/.config/fleet/pve-acceptance.env`; any untracked path works):
+
+```sh
+set -a; . ~/.config/fleet/pve-acceptance.env; set +a
+cargo xtask image-acceptance --target PVE8 > ~/image-acceptance.json
+```
+
+It also needs an operator-installed `packer` inside the FM-S09 pins (`>= 1.15 < 2`) with the Proxmox plugin (`>= 1.2.4 < 2`, `packer plugins install github.com/hashicorp/proxmox`) on the machine that runs it. The suite asks the product's own version gate. Without a usable Packer, only `version-gate` can pass (it needs no Packer); every other scenario fails with the gate's reason, so a live run never passes without building.
+
+A whole run is bounded: four hours for this suite, two for Step 7's, counted from the start (the builds spend it too; a `cargo build` that itself hangs is not interrupted). Past the bound the runner kills the suite's process tree, and every scenario that has not reported fails with that reason in the summary.
+
+Builds are linked clones of `…_TEMPLATE_VMID` into `…_VMID_RANGE`. Each built template is named `fleet-acceptance-image-*` and tagged `fleet-acceptance`. The suite destroys exactly those templates at the start and end of every scenario. The shared Step 7 sweep never destroys a template.
+
+Each build gets the trusted account's token through the product's own path (#272): the account is resolved from the recipe's `proxmox_url`, and its token reaches only the Packer child process, in its environment. Recipe secrets take the other channel: their resolved values go to Packer in a `-var-file` inside the operation's private work directory. The suite's recipes declare no secrets, so only the account token is exercised here. The harness strips any `PROXMOX_*` variables from the controller's environment, so a passing build proves the token came from the account. The recipes still set `insecure_skip_tls_verify` until [#284](https://github.com/Frogbyte-io/fleet-manager/issues/284) gives Packer the pinned certificate.
+
 ## Evidence for #211
 
 ```sh

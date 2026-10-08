@@ -1,5 +1,7 @@
 //! Repeatable repository verification and packaging tasks.
 
+pub mod acceptance;
+pub mod image_acceptance;
 pub mod lab_acceptance;
 pub mod package;
 pub mod pve_acceptance;
