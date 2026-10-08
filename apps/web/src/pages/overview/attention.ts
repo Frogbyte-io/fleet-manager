@@ -186,7 +186,7 @@ export function orphanRows(
     if (!guest && guests.complete)
       continue
     const where = [
-      guest?.node ? `on ${guest.node}` : 'on an unknown node (not every Proxmox account\'s guests could be listed)',
+      guest?.node ? `on ${guest.node}` : 'on an unknown node (not every Proxmox account\'s guests could be listed, so Fleet could not confirm it is gone)',
       orphan.vmid ? `VMID ${orphan.vmid}` : null,
     ].filter(Boolean).join(' · ')
     rows.push({

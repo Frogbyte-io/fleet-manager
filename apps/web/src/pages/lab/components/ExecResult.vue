@@ -5,12 +5,19 @@ import StatusChip from '@/components/fleet/StatusChip.vue'
 
 import type { ExecOutput } from '../lab'
 
-// One command's bounded, redacted output as the controller recorded it: the
-// exit code, then stdout and stderr, each marked when the controller cut it.
+// One command's bounded output as the controller recorded it on the
+// operation: the exit code, then stdout and stderr, each marked when the
+// controller cut it.
 const props = defineProps<{ output: ExecOutput }>()
 
 const exitLabel = computed(() => (props.output.exitCode === null ? 'no exit code' : `exit ${props.output.exitCode}`))
-const exitTone = computed(() => (props.output.exitCode === 0 ? 'ok' as const : 'err' as const))
+// A nonzero exit failed; no exit code at all (killed, never ran) is a
+// warning beside its stated reason, not a claim about the command.
+const exitTone = computed(() => {
+  if (props.output.exitCode === null)
+    return 'warn' as const
+  return props.output.exitCode === 0 ? 'ok' as const : 'err' as const
+})
 
 const streams = computed(() => [
   { name: 'stdout', text: props.output.stdout, truncated: props.output.truncatedStdout },
@@ -53,8 +60,7 @@ const streams = computed(() => [
         >truncated by the controller</span>
       </p>
       <pre
-        class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-sm border border-fc-line bg-fc-inset p-2 font-mono text-[11.5px]"
-        :class="stream.name === 'stderr' && stream.text ? 'text-fc-err' : 'text-fc-ink'"
+        class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-sm border border-fc-line bg-fc-inset p-2 font-mono text-[11.5px] text-fc-ink"
         :data-testid="`exec-${stream.name}`"
       >{{ stream.text || '(empty)' }}</pre>
     </div>

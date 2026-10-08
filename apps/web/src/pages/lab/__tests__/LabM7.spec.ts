@@ -445,3 +445,118 @@ describe('request and placement', () => {
     expect(q('[data-testid="provision-failure-detail"]').textContent?.trim()).toBe(refusal)
   })
 })
+
+describe('review follow-ups', () => {
+  it('refreshes the exec history again after the controller writes the log', async () => {
+    execLabLease.mockResolvedValue(ok({ data: { id: 'op-new', kind: 'lab.exec', state: 'pending' } }, 202))
+    getOperation.mockResolvedValue(operation({ id: 'op-new', state: 'succeeded', resultJson: '{"exitCode":0,"stdout":"hi","stderr":""}' }))
+    await mountPage('/lab?lease=lease-ready-0001')
+    q<HTMLButtonElement>('[data-testid="lease-tab-exec"]').click()
+    await settle()
+    // The log lands only after the operation settles: the first refetch misses it.
+    let first = true
+    listLabArtifacts.mockImplementation(async () => {
+      if (first) {
+        first = false
+        return ok(page([]))
+      }
+      return ok(page([artifact({ id: 'log-new', kind: 'exec-log', name: 'exec-op-new.log', operationId: 'op-new' })]))
+    })
+    await type('textarea[id^="script-"]', 'echo hi')
+    q<HTMLButtonElement>('[data-testid="run-command"]').click()
+    await settle()
+    await new Promise(resolve => setTimeout(resolve, 1700))
+    await settle()
+    expect(q('[data-testid="exec-history"]').querySelectorAll('li')).toHaveLength(1)
+  })
+
+  it('keeps a typed command and its result across a tab switch', async () => {
+    execLabLease.mockResolvedValue(ok({ data: { id: 'op-exec', kind: 'lab.exec', state: 'pending' } }, 202))
+    getOperation.mockResolvedValue(operation({ id: 'op-exec', state: 'succeeded', resultJson: '{"exitCode":0,"stdout":"kept","stderr":""}' }))
+    await mountPage('/lab?lease=lease-ready-0001')
+    q<HTMLButtonElement>('[data-testid="lease-tab-exec"]').click()
+    await settle()
+    await type('textarea[id^="script-"]', 'echo kept')
+    q<HTMLButtonElement>('[data-testid="run-command"]').click()
+    await settle()
+    q<HTMLButtonElement>('[data-testid="lease-tab-artifacts"]').click()
+    await settle()
+    q<HTMLButtonElement>('[data-testid="lease-tab-exec"]').click()
+    await settle()
+    expect(q<HTMLTextAreaElement>('textarea[id^="script-"]').value).toBe('echo kept')
+    expect(q('[data-testid="exec-current"] [data-testid="exec-stdout"]').textContent).toContain('kept')
+    expect(execLabLease).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a deadline kill as a warning with its reason, not an exit code', async () => {
+    execLabLease.mockResolvedValue(ok({ data: { id: 'op-exec', kind: 'lab.exec', state: 'pending' } }, 202))
+    getOperation.mockResolvedValue(operation({ id: 'op-exec', state: 'failed', errorJson: '{"reason":"deadline_killed","detail":"killed at the deadline","partialOutput":{"stdout":"half","stderr":"","truncatedStdout":false,"truncatedStderr":false}}' }))
+    await mountPage('/lab?lease=lease-ready-0001')
+    q<HTMLButtonElement>('[data-testid="lease-tab-exec"]').click()
+    await settle()
+    await type('textarea[id^="script-"]', 'sleep 999')
+    q<HTMLButtonElement>('[data-testid="run-command"]').click()
+    await settle()
+    const result = q('[data-testid="exec-current"]')
+    expect(result.querySelector('[data-testid="exit-code"]')!.textContent).toContain('no exit code')
+    expect(result.querySelector('[data-testid="exit-code"]')!.className).toContain('text-fc-warn')
+    expect(result.textContent).toContain('deadline_killed')
+    expect(result.querySelector('[data-testid="exec-stdout"]')!.textContent).toContain('half')
+  })
+
+  it('says when a history entry\'s operation recorded no output', async () => {
+    listLabArtifacts.mockResolvedValue(ok(page([artifact({ id: 'log-1', kind: 'exec-log', name: 'exec-op-c.log', operationId: 'op-c' })])))
+    getOperation.mockResolvedValue(operation({ id: 'op-c', state: 'cancelled' }))
+    await mountPage('/lab?lease=lease-ready-0001')
+    q<HTMLButtonElement>('[data-testid="lease-tab-exec"]').click()
+    await settle()
+    ;(q('[data-testid="exec-history"]').querySelector('button') as HTMLButtonElement).click()
+    await settle()
+    expect(q('[data-testid="exec-history"]').textContent).toContain('No output was recorded')
+  })
+
+  it('keeps the retry\'s operation visible after the lease leaves cleanup_failed', async () => {
+    listLabLeases.mockResolvedValue(ok(page([lease({ state: 'cleanup_failed', cleanupAttempts: 5 })])))
+    getLabLease.mockResolvedValue(ok({ data: detail({ state: 'cleanup_failed', cleanupAttempts: 5 }) }))
+    retryLabLeaseCleanup.mockImplementation(async () => {
+      // The re-arm moves the lease back to releasing.
+      getLabLease.mockResolvedValue(ok({ data: detail({ state: 'releasing', cleanupAttempts: 5 }) }))
+      listLabLeases.mockResolvedValue(ok(page([lease({ state: 'releasing', cleanupAttempts: 5 })])))
+      return ok({ data: { id: 'op-clean', kind: 'lab.cleanup', state: 'pending' } }, 202)
+    })
+    getOperation.mockResolvedValue(operation({ id: 'op-clean', kind: 'lab.cleanup', state: 'running' }))
+    await mountPage('/lab?lease=lease-ready-0001')
+    const drawer = q('[data-testid="lease-drawer"]')
+    ;(drawer.querySelector('[data-testid="retry-cleanup"]') as HTMLButtonElement).click()
+    await settle()
+    ;(drawer.querySelector('[data-testid="confirm-retry-cleanup"]') as HTMLButtonElement).click()
+    await settle()
+    expect(drawer.textContent).toContain('releasing')
+    expect(drawer.querySelector('[data-testid="operation-status"]')?.textContent).toContain('op-clean')
+    expect(drawer.querySelector('[data-testid="retry-cleanup"]')).toBeNull()
+  })
+
+  it('opens a lease as a history entry and clears ?lease= on close', async () => {
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="details-lease-ready-0001"]').trigger('click')
+    await settle()
+    expect(router.currentRoute.value.query.lease).toBe('lease-ready-0001')
+    router.back()
+    await settle()
+    expect(router.currentRoute.value.query.lease).toBeUndefined()
+  })
+
+  it('moves between drawer tabs with the arrow keys', async () => {
+    await mountPage('/lab?lease=lease-ready-0001')
+    const details = q<HTMLButtonElement>('#lease-tab-details')
+    expect(details.getAttribute('tabindex')).toBe('0')
+    expect(details.getAttribute('aria-controls')).toBe('lease-panel-details')
+    details.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await settle()
+    expect(q('#lease-tab-exec').getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement?.id).toBe('lease-tab-exec')
+    q('#lease-tab-exec').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))
+    await settle()
+    expect(q('#lease-tab-artifacts').getAttribute('aria-selected')).toBe('true')
+  })
+})

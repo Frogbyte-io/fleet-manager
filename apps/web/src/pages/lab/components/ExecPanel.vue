@@ -5,10 +5,20 @@ import { computed, ref, watch } from 'vue'
 import { execLabLease, type LabArtifactDto, type OperationDto } from '@frogbyte-io/fleet-api-client'
 import StatusChip from '@/components/fleet/StatusChip.vue'
 
+import { operationTone } from '../../overview/attention'
+
 import { relativeTime } from '../../fleet/inventory'
 import { errorMessage, isTerminal, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
-import { execCommand, execOutput, formatBytes, shortId } from '../lab'
+import {
+  EXEC_TIMEOUT_MAX_SECONDS,
+  EXEC_TIMEOUT_MIN_SECONDS,
+  execCommand,
+  execOutput,
+  formatBytes,
+  operationLabel,
+  shortId,
+} from '../lab'
 import { ARTIFACTS_KEY, useOperation } from '../useLab'
 import ExecResult from './ExecResult.vue'
 
@@ -32,20 +42,29 @@ const busy = ref(false)
 const error = ref('')
 const runningId = ref<string | null>(null)
 
-const timeoutValid = computed(() => Number.isInteger(timeoutSeconds.value) && timeoutSeconds.value >= 1 && timeoutSeconds.value <= 900)
+const timeoutValid = computed(() => Number.isInteger(timeoutSeconds.value)
+  && timeoutSeconds.value >= EXEC_TIMEOUT_MIN_SECONDS && timeoutSeconds.value <= EXEC_TIMEOUT_MAX_SECONDS)
 const command = computed(() => (script.value.trim() && timeoutValid.value ? execCommand(props.leaseId, script.value, timeoutSeconds.value) : null))
 
 const current = useOperation(runningId)
 const currentOutput = computed(() => (current.data.value ? execOutput(current.data.value) : null))
 
-// A finished command's log becomes an artifact; refresh the history then.
+/** A command is in flight from the moment it is accepted until it settles. */
+const running = computed(() => runningId.value !== null && !(current.data.value && isTerminal(current.data.value.state)))
+
+// A finished command's log becomes an artifact just after the operation
+// settles (the controller writes it second), so refresh the history now and
+// again shortly after; no event announces the artifact.
+const HISTORY_RETRY_MS = [0, 1500, 5000]
 watch(() => current.data.value?.state, (state) => {
-  if (state && isTerminal(state))
-    void queryClient.invalidateQueries({ queryKey: ARTIFACTS_KEY })
+  if (!state || !isTerminal(state))
+    return
+  for (const delay of HISTORY_RETRY_MS)
+    setTimeout(() => void queryClient.invalidateQueries({ queryKey: ARTIFACTS_KEY }), delay)
 })
 
 async function run() {
-  if (!command.value)
+  if (!command.value || running.value)
     return
   busy.value = true
   error.value = ''
@@ -75,13 +94,7 @@ function toggle(entry: LabArtifactDto) {
 
 const execHistory = computed(() => props.history.filter(artifact => artifact.kind === 'exec-log'))
 
-function stateTone(state: string) {
-  if (state === 'succeeded')
-    return 'ok' as const
-  if (state === 'failed' || state === 'timed_out')
-    return 'err' as const
-  return state === 'cancelled' ? 'muted' as const : 'info' as const
-}
+
 </script>
 
 <template>
@@ -112,29 +125,37 @@ function stateTone(state: string) {
         class="rounded-sm border border-input bg-fc-inset p-2 font-mono text-[11.5px] disabled:opacity-50"
       />
       <p class="text-fc-faint">
-        Runs as a shell script on the guest. The script is never audited; its output is bounded and redacted.
+        Runs as a shell script (at most 64 KiB) on the guest. The script is never audited. The output shown here is the
+        operation's bounded record, as the controller stores it.
       </p>
       <label class="flex items-center gap-2">
         <span class="fc-kicker">Timeout (s)</span>
         <input
           v-model.number="timeoutSeconds"
           type="number"
-          min="1"
-          max="900"
+          :min="EXEC_TIMEOUT_MIN_SECONDS"
+          :max="EXEC_TIMEOUT_MAX_SECONDS"
           :disabled="!ready"
           class="h-8 w-20 rounded-sm border border-input bg-background px-2 font-mono"
           :aria-invalid="!timeoutValid"
         >
-        <span class="text-fc-faint">1–900</span>
+        <span class="text-fc-faint">{{ EXEC_TIMEOUT_MIN_SECONDS }}–{{ EXEC_TIMEOUT_MAX_SECONDS }}</span>
       </label>
       <CopyFleetctl
         :command="command"
-        missing="Enter a command (and a 1–900 s timeout) to see the equivalent."
+        :missing="`Enter a command (and a ${EXEC_TIMEOUT_MIN_SECONDS}–${EXEC_TIMEOUT_MAX_SECONDS} s timeout) to see the equivalent.`"
       />
+      <p
+        v-if="command"
+        class="-mt-1 text-fc-faint"
+      >
+        The CLI joins the words after <span class="font-mono">--</span> into the script, so it runs this script wrapped
+        once more in <span class="font-mono">sh -c</span>.
+      </p>
       <button
         type="submit"
         class="fc-grad-bg h-8 w-fit rounded-sm px-3 font-semibold disabled:opacity-50"
-        :disabled="!ready || busy || !command || (current.data.value !== undefined && !isTerminal(current.data.value.state))"
+        :disabled="!ready || busy || !command || running"
         data-testid="run-command"
       >
         Run command →
@@ -151,14 +172,18 @@ function stateTone(state: string) {
     <div
       v-if="runningId"
       class="grid gap-2 rounded-sm border border-fc-line bg-fc-panel p-3"
-      aria-live="polite"
       data-testid="exec-current"
     >
       <div class="flex items-center gap-2 text-xs">
-        <StatusChip
-          :label="current.data.value?.state ?? 'pending'"
-          :tone="stateTone(current.data.value?.state ?? 'pending')"
-        />
+        <span
+          role="status"
+          aria-live="polite"
+        >
+          <StatusChip
+            :label="operationLabel(current.data.value?.state ?? 'pending')"
+            :tone="operationTone(current.data.value?.state ?? 'pending')"
+          />
+        </span>
         <span class="font-mono text-[10px] text-fc-faint">{{ runningId }}</span>
       </div>
       <p
@@ -242,6 +267,12 @@ function stateTone(state: string) {
               v-else-if="openedOutput"
               :output="openedOutput"
             />
+            <p
+              v-else-if="opened.data.value"
+              class="text-xs text-fc-muted"
+            >
+              No output was recorded on this command's operation ({{ operationLabel(opened.data.value.state) }}).
+            </p>
             <p
               v-else
               class="text-xs text-fc-muted"

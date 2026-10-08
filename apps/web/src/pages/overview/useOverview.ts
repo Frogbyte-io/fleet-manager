@@ -95,6 +95,8 @@ export function useOverview() {
       return { items, truncated }
     },
     retry: retryTransient,
+    // No event announces an orphan report, so re-read on a slow clock.
+    refetchInterval: 60_000,
   })
   const operations = useOperationsList()
   const proxmox = useProxmox()
@@ -155,7 +157,8 @@ export function useOverview() {
     drift.query.error.value && 'skill drift',
     images.leases.error.value && 'Lab leases',
     orphanAudit.error.value && 'Lab orphan reports',
-    orphanAudit.data.value?.truncated && 'Lab orphan reports (too many to read in full)',
+    // Audit pages run oldest first, so a cut read misses the newest reports.
+    orphanAudit.data.value?.truncated && 'Lab orphan reports (too many events to read; the newest may be missing)',
     images.templates.error.value && 'Lab templates',
     images.loadError.value.some(([what]) => what === 'versions' || what === 'recipes') && 'image versions',
     [...proxmox.discoveryErrors.value.values(), ...proxmox.guestErrors.value.values()].some(e => e && !isFingerprintMismatch(e)) && 'Proxmox discovery',

@@ -49,6 +49,10 @@ function setQuery(key: string, value: string | null) {
     delete query[key]
   void router.replace({ query })
 }
+// Opening a lease is a history entry, so Back closes the drawer.
+function openLease(leaseId: string) {
+  void router.push({ query: { ...route.query, lease: leaseId } })
+}
 
 const { leases, templates, provisions, accounts, provisioningAccounts, projects } = useLab(projectFilter)
 const queryClient = useQueryClient()
@@ -156,6 +160,19 @@ const TABS: { id: Tab, label: string, count: () => number | null }[] = [
   { id: 'history', label: 'History', count: () => history.value.length },
   { id: 'artifacts', label: 'Artifacts', count: () => artifacts.data.value?.items.length ?? null },
 ]
+
+// Tabs per the console's pattern (ProxmoxPage): roving tabindex, arrows,
+// Home and End.
+function onTabKey(event: KeyboardEvent, index: number) {
+  const last = TABS.length - 1
+  const moves: Record<string, number> = { ArrowRight: index === last ? 0 : index + 1, ArrowLeft: index === 0 ? last : index - 1, Home: 0, End: last }
+  const next = moves[event.key]
+  if (next === undefined)
+    return
+  event.preventDefault()
+  tab.value = TABS[next]!.id
+  document.getElementById(`lab-tab-${TABS[next]!.id}`)?.focus()
+}
 
 const loadError = computed(() => {
   // Accounts and projects feed the request drawer and provisioning; when they
@@ -284,15 +301,19 @@ const loadError = computed(() => {
       role="tablist"
     >
       <button
-        v-for="item in TABS"
+        v-for="(item, index) in TABS"
+        :id="`lab-tab-${item.id}`"
         :key="item.id"
         type="button"
         role="tab"
+        :tabindex="tab === item.id ? 0 : -1"
+        aria-controls="lab-tabpanel"
         class="shrink-0 pb-2 text-[13px] font-semibold"
         :class="tab === item.id ? 'text-fc-ink shadow-[inset_0_-2px_0_var(--fc-g1)]' : 'text-fc-muted hover:text-fc-ink'"
         :aria-selected="tab === item.id"
         :data-testid="`tab-${item.id}`"
         @click="tab = item.id"
+        @keydown="onTabKey($event, index)"
       >
         {{ item.label }}<span
           v-if="item.count() !== null"
@@ -310,204 +331,210 @@ const loadError = computed(() => {
     </div>
 
     <div
-      v-if="leases.isLoading.value || templates.isLoading.value"
-      class="mt-4 grid gap-3"
+      id="lab-tabpanel"
+      role="tabpanel"
+      :aria-labelledby="`lab-tab-${tab}`"
     >
-      <Skeleton
-        v-for="i in 3"
-        :key="i"
-        class="h-28 rounded-sm"
-      />
-    </div>
-
-    <template v-else-if="tab === 'environments'">
-      <div class="mt-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
-        <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
-          <p class="fc-kicker">
-            Ready
-          </p>
-          <p class="font-head text-2xl font-extrabold">
-            {{ counts.ready }}
-          </p>
-        </div>
-        <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
-          <p class="fc-kicker">
-            In progress
-          </p>
-          <p class="font-head text-2xl font-extrabold">
-            {{ counts.progressing }}
-          </p>
-        </div>
-        <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
-          <p class="fc-kicker">
-            Cleanup failed
-          </p>
-          <p
-            class="font-head text-2xl font-extrabold"
-            :class="{ 'text-fc-err': counts.failing > 0 }"
-          >
-            {{ counts.failing }}
-          </p>
-        </div>
-        <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
-          <p class="fc-kicker">
-            Released
-          </p>
-          <p class="font-head text-2xl font-extrabold">
-            {{ counts.released }}
-          </p>
-        </div>
-      </div>
-
       <div
-        v-if="startedOperation"
-        class="mt-4"
+        v-if="leases.isLoading.value || templates.isLoading.value"
+        class="mt-4 grid gap-3"
       >
-        <ProvisionStatus
-          :operation-id="startedOperation"
-          @settled="refreshLeases"
-          @dismiss="startedOperation = null"
+        <Skeleton
+          v-for="i in 3"
+          :key="i"
+          class="h-28 rounded-sm"
         />
       </div>
 
-      <div class="mt-7 flex items-baseline justify-between border-b-2 border-fc-ink pb-1.5">
-        <h2 class="font-head text-sm font-extrabold uppercase tracking-wide">
-          Active
-        </h2>
-        <span class="fc-kicker">most urgent first</span>
-      </div>
+      <template v-else-if="tab === 'environments'">
+        <div class="mt-4 grid grid-cols-2 gap-2.5 md:grid-cols-4">
+          <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
+            <p class="fc-kicker">
+              Ready
+            </p>
+            <p class="font-head text-2xl font-extrabold">
+              {{ counts.ready }}
+            </p>
+          </div>
+          <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
+            <p class="fc-kicker">
+              In progress
+            </p>
+            <p class="font-head text-2xl font-extrabold">
+              {{ counts.progressing }}
+            </p>
+          </div>
+          <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
+            <p class="fc-kicker">
+              Cleanup failed
+            </p>
+            <p
+              class="font-head text-2xl font-extrabold"
+              :class="{ 'text-fc-err': counts.failing > 0 }"
+            >
+              {{ counts.failing }}
+            </p>
+          </div>
+          <div class="rounded-sm border border-fc-line bg-card px-3.5 py-3">
+            <p class="fc-kicker">
+              Released
+            </p>
+            <p class="font-head text-2xl font-extrabold">
+              {{ counts.released }}
+            </p>
+          </div>
+        </div>
+
+        <div
+          v-if="startedOperation"
+          class="mt-4"
+        >
+          <ProvisionStatus
+            :operation-id="startedOperation"
+            @settled="refreshLeases"
+            @dismiss="startedOperation = null"
+          />
+        </div>
+
+        <div class="mt-7 flex items-baseline justify-between border-b-2 border-fc-ink pb-1.5">
+          <h2 class="font-head text-sm font-extrabold uppercase tracking-wide">
+            Active
+          </h2>
+          <span class="fc-kicker">most urgent first</span>
+        </div>
+        <div
+          v-if="active.length === 0 && !leases.error.value"
+          class="mt-3 rounded-sm border border-fc-line bg-card p-8 text-center"
+          data-testid="no-leases"
+        >
+          <p class="text-sm font-semibold">
+            No active environments{{ projectFilter ? ' for this project' : '' }}
+          </p>
+          <p class="mt-1 text-xs text-fc-muted">
+            Request one from a published template; it is destroyed when released or when its TTL runs out.
+          </p>
+        </div>
+        <div
+          v-else
+          class="mt-3 grid grid-cols-[minmax(0,1fr)] gap-2.5"
+        >
+          <LeaseCard
+            v-for="lease in active"
+            :key="lease.id"
+            :lease="lease"
+            :template="byVersion.get(lease.templateVersionId) ?? null"
+            :project-name="lease.projectId ? projectNames.get(lease.projectId) ?? null : null"
+            :accounts="provisioningAccounts"
+            :now="now"
+            @open="openLease"
+          />
+        </div>
+      </template>
+
       <div
-        v-if="active.length === 0 && !leases.error.value"
-        class="mt-3 rounded-sm border border-fc-line bg-card p-8 text-center"
-        data-testid="no-leases"
+        v-else-if="tab === 'templates'"
+        class="mt-4"
       >
-        <p class="text-sm font-semibold">
-          No active environments{{ projectFilter ? ' for this project' : '' }}
-        </p>
-        <p class="mt-1 text-xs text-fc-muted">
-          Request one from a published template; it is destroyed when released or when its TTL runs out.
-        </p>
+        <TemplatesTab
+          :templates="allTemplates"
+          :now="now"
+        />
       </div>
+
       <div
-        v-else
-        class="mt-3 grid grid-cols-[minmax(0,1fr)] gap-2.5"
+        v-else-if="tab === 'provisions'"
+        class="mt-4"
       >
+        <p
+          v-if="provisions.error.value"
+          class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
+          role="alert"
+        >
+          Could not load provisioning records: {{ errorMessage(provisions.error.value) }}
+        </p>
+        <ProvisionsTab
+          v-else
+          :provisions="provisions.data.value ?? []"
+          :templates="allTemplates"
+          :now="now"
+          :loading="provisions.isLoading.value"
+        />
+      </div>
+
+      <div
+        v-else-if="tab === 'history'"
+        class="mt-4 grid grid-cols-[minmax(0,1fr)] gap-2.5"
+      >
+        <p
+          v-if="history.length === 0"
+          class="rounded-sm border border-fc-line bg-card p-6 text-center text-sm text-fc-muted"
+        >
+          No released or failed leases yet.
+        </p>
         <LeaseCard
-          v-for="lease in active"
+          v-for="lease in history"
           :key="lease.id"
           :lease="lease"
           :template="byVersion.get(lease.templateVersionId) ?? null"
           :project-name="lease.projectId ? projectNames.get(lease.projectId) ?? null : null"
           :accounts="provisioningAccounts"
           :now="now"
-          @open="setQuery('lease', $event)"
+          @open="openLease"
         />
       </div>
-    </template>
 
-    <div
-      v-else-if="tab === 'templates'"
-      class="mt-4"
-    >
-      <TemplatesTab
-        :templates="allTemplates"
-        :now="now"
-      />
-    </div>
-
-    <div
-      v-else-if="tab === 'provisions'"
-      class="mt-4"
-    >
-      <p
-        v-if="provisions.error.value"
-        class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
-        role="alert"
-      >
-        Could not load provisioning records: {{ errorMessage(provisions.error.value) }}
-      </p>
-      <ProvisionsTab
-        v-else
-        :provisions="provisions.data.value ?? []"
-        :templates="allTemplates"
-        :now="now"
-        :loading="provisions.isLoading.value"
-      />
-    </div>
-
-    <div
-      v-else-if="tab === 'history'"
-      class="mt-4 grid grid-cols-[minmax(0,1fr)] gap-2.5"
-    >
-      <p
-        v-if="history.length === 0"
-        class="rounded-sm border border-fc-line bg-card p-6 text-center text-sm text-fc-muted"
-      >
-        No released or failed leases yet.
-      </p>
-      <LeaseCard
-        v-for="lease in history"
-        :key="lease.id"
-        :lease="lease"
-        :template="byVersion.get(lease.templateVersionId) ?? null"
-        :project-name="lease.projectId ? projectNames.get(lease.projectId) ?? null : null"
-        :accounts="provisioningAccounts"
-        :now="now"
-        @open="setQuery('lease', $event)"
-      />
-    </div>
-
-    <div
-      v-else
-      class="mt-4 grid grid-cols-[minmax(0,1fr)] gap-3"
-      data-testid="artifacts-tab"
-    >
-      <p class="text-xs text-fc-muted">
-        Files collected from leases and the output of every finished command, kept until their retention runs out.
-        Collect more from a ready lease's Details → Artifacts.
-      </p>
-      <p
-        v-if="artifacts.error.value"
-        class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
-        role="alert"
-      >
-        Could not load artifacts: {{ errorMessage(artifacts.error.value) }}
-      </p>
       <div
-        v-else-if="artifacts.isLoading.value"
-        class="grid gap-2"
+        v-else
+        class="mt-4 grid grid-cols-[minmax(0,1fr)] gap-3"
+        data-testid="artifacts-tab"
       >
-        <Skeleton
-          v-for="i in 2"
-          :key="i"
-          class="h-20 rounded-sm"
-        />
-      </div>
-      <p
-        v-else-if="(artifacts.data.value?.items.length ?? 0) === 0"
-        class="rounded-sm border border-fc-line bg-card p-6 text-center text-sm text-fc-muted"
-        data-testid="no-artifacts"
-      >
-        No artifacts{{ projectFilter ? ' for this project' : '' }} yet.
-      </p>
-      <template v-else>
-        <ArtifactList
-          :artifacts="artifacts.data.value?.items ?? []"
-          :now="now"
-          show-lease
-          :lease-label="leaseLabel"
-          @open-lease="setQuery('lease', $event)"
-        />
-        <p
-          v-if="artifacts.data.value?.truncated"
-          class="text-xs text-fc-warn"
-        >
-          Showing the newest {{ artifacts.data.value.items.length }} artifacts; narrow by project to see older ones.
+        <p class="text-xs text-fc-muted">
+          Files collected from leases and the logs of finished commands that produced output, kept until their retention
+          runs out. Collect more from a ready lease's Details → Artifacts.
         </p>
-      </template>
-      <p class="break-all font-mono text-[10px] text-fc-faint">
-        {{ artifactsCommand({ projectId: projectFilter }) }}
-      </p>
+        <p
+          v-if="artifacts.error.value"
+          class="border-l-2 border-l-fc-err bg-card px-3 py-2 text-xs text-fc-muted"
+          role="alert"
+        >
+          Could not load artifacts: {{ errorMessage(artifacts.error.value) }}
+        </p>
+        <div
+          v-else-if="artifacts.isLoading.value"
+          class="grid gap-2"
+        >
+          <Skeleton
+            v-for="i in 2"
+            :key="i"
+            class="h-20 rounded-sm"
+          />
+        </div>
+        <p
+          v-else-if="(artifacts.data.value?.items.length ?? 0) === 0"
+          class="rounded-sm border border-fc-line bg-card p-6 text-center text-sm text-fc-muted"
+          data-testid="no-artifacts"
+        >
+          No artifacts{{ projectFilter ? ' for this project' : '' }} yet.
+        </p>
+        <template v-else>
+          <ArtifactList
+            :artifacts="artifacts.data.value?.items ?? []"
+            :now="now"
+            show-lease
+            :lease-label="leaseLabel"
+            @open-lease="openLease"
+          />
+          <p
+            v-if="artifacts.data.value?.truncated"
+            class="text-xs text-fc-warn"
+          >
+            Showing the newest {{ artifacts.data.value.items.length }} artifacts; narrow by project to see older ones.
+          </p>
+        </template>
+        <p class="break-all font-mono text-[10px] text-fc-faint">
+          {{ artifactsCommand({ projectId: projectFilter }) }}
+        </p>
+      </div>
     </div>
 
     <LeaseDrawer

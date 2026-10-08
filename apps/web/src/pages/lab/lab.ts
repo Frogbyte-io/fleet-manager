@@ -280,6 +280,20 @@ export function artifactGetCommand(artifactId: string, out: string): string {
   return fleetctl(['lab', 'artifact-get', artifactId, '--out', out])
 }
 
+// ---- request limits ---------------------------------------------------------
+// The controller enforces these; the console only uses them to explain a
+// refusal before sending it. Sources: `ExecLeaseRequest` (1–900 s, at most
+// 64 KiB) and `CollectArtifactsRequest` (1 to 16 paths).
+
+export const EXEC_TIMEOUT_MIN_SECONDS = 1
+export const EXEC_TIMEOUT_MAX_SECONDS = 900
+export const COLLECT_MAX_PATHS = 16
+
+/** An operation state as a chip label (DESIGN.md §3: `BLOCKED APPROVAL`). */
+export function operationLabel(state: string): string {
+  return state === 'blocked_manual_approval' ? 'blocked approval' : state.replaceAll('_', ' ')
+}
+
 // ---- operation results ------------------------------------------------------
 
 export interface OperationFailure {

@@ -74,7 +74,7 @@ const canExtend = computed(() => props.lease.state === 'ready')
 // Releasing is already underway; a terminal lease has nothing left to release.
 const canRelease = computed(() => !isTerminal(props.lease.state) && props.lease.state !== 'releasing')
 
-const stateLabel = computed(() => props.lease.state.replace('_', ' '))
+const stateLabel = computed(() => props.lease.state.replaceAll('_', ' '))
 
 const templateLabel = computed(() =>
   props.template ? props.template.name : `version ${shortId(props.lease.templateVersionId)}`,
@@ -258,7 +258,6 @@ function release() {
         Cleanup gave up after its attempts: the lease still owns whatever the controller could not remove, and nothing
         retries it on its own. Fix the cause (Details shows the node and VMID), then retry.
       </p>
-      <CleanupRetry :lease-id="lease.id" />
     </div>
     <p
       v-else-if="lease.state === 'releasing' && lease.cleanupNextAt"
@@ -267,6 +266,17 @@ function release() {
     >
       Cleanup attempt {{ lease.cleanupAttempts }} failed; the next attempt is {{ nextAttempt(lease.cleanupNextAt).toLowerCase() }}.
     </p>
+
+    <!-- Mounted through the cleanup_failed → releasing flip, so a retry's outcome stays visible. -->
+    <div
+      v-if="lease.state === 'cleanup_failed' || lease.state === 'releasing'"
+      class="mt-2"
+    >
+      <CleanupRetry
+        :lease-id="lease.id"
+        :available="lease.state === 'cleanup_failed'"
+      />
+    </div>
 
     <!-- Provision: automatic placement, or the Proxmox account whose pinned trust the clone uses. -->
     <div

@@ -80,6 +80,19 @@ const TABS: { id: Tab, label: string }[] = [
   { id: 'exec', label: 'Run command' },
   { id: 'artifacts', label: 'Artifacts' },
 ]
+
+// Tabs per the console's pattern (ProxmoxPage): roving tabindex, arrows,
+// Home and End.
+function onTabKey(event: KeyboardEvent, index: number) {
+  const last = TABS.length - 1
+  const moves: Record<string, number> = { ArrowRight: index === last ? 0 : index + 1, ArrowLeft: index === 0 ? last : index - 1, Home: 0, End: last }
+  const next = moves[event.key]
+  if (next === undefined)
+    return
+  event.preventDefault()
+  tab.value = TABS[next]!.id
+  document.getElementById(`lease-tab-${TABS[next]!.id}`)?.focus()
+}
 </script>
 
 <template>
@@ -100,7 +113,7 @@ const TABS: { id: Tab, label: string }[] = [
           {{ lease?.purpose || (detail.isLoading.value ? 'Loading…' : 'Lease') }}
           <StatusChip
             v-if="lease"
-            :label="lease.state.replace('_', ' ')"
+            :label="lease.state.replaceAll('_', ' ')"
             :tone="leaseTone(lease.state)"
           />
         </SheetTitle>
@@ -125,15 +138,19 @@ const TABS: { id: Tab, label: string }[] = [
             aria-label="Lease sections"
           >
             <button
-              v-for="item in TABS"
+              v-for="(item, index) in TABS"
+              :id="`lease-tab-${item.id}`"
               :key="item.id"
               type="button"
               role="tab"
+              :tabindex="tab === item.id ? 0 : -1"
+              :aria-controls="`lease-panel-${item.id}`"
               class="pb-2 text-[13px] font-semibold"
               :class="tab === item.id ? 'text-fc-ink shadow-[inset_0_-2px_0_var(--fc-g1)]' : 'text-fc-muted hover:text-fc-ink'"
               :aria-selected="tab === item.id"
               :data-testid="`lease-tab-${item.id}`"
               @click="tab = item.id"
+              @keydown="onTabKey($event, index)"
             >
               {{ item.label }}<span
                 v-if="item.id === 'artifacts' && artifacts.data.value"
@@ -142,9 +159,12 @@ const TABS: { id: Tab, label: string }[] = [
             </button>
           </div>
 
-          <!-- Details -->
+          <!-- Panels stay mounted (v-show), so a typed command or a running one survives a tab switch. -->
           <div
-            v-if="tab === 'details'"
+            v-show="tab === 'details'"
+            id="lease-panel-details"
+            role="tabpanel"
+            aria-labelledby="lease-tab-details"
             class="grid grid-cols-[minmax(0,1fr)] gap-4"
           >
             <LeaseStepper :lease="lease" />
@@ -308,15 +328,18 @@ const TABS: { id: Tab, label: string }[] = [
                 v-if="lease.state === 'cleanup_failed'"
                 class="text-xs text-fc-err"
               >
-                Cleanup gave up. The lease still holds its guest<template v-if="lease.vmid !== null && lease.vmid !== undefined">
-                  (VMID {{ lease.vmid }}<template v-if="lease.node">
+                Cleanup gave up.<template v-if="lease.vmid !== null && lease.vmid !== undefined">
+                  The lease may still hold its guest (VMID {{ lease.vmid }}<template v-if="lease.node">
                     on {{ lease.node }}
-                  </template>)
-                </template> and its capacity reservation until a retried cleanup removes it.
+                  </template>) until a retried cleanup removes it.
+                </template><template v-else>
+                  Whatever the controller could not remove stays until a retried cleanup removes it.
+                </template>
               </p>
               <CleanupRetry
-                v-if="lease.state === 'cleanup_failed'"
+                v-if="lease.state === 'cleanup_failed' || lease.state === 'releasing'"
                 :lease-id="lease.id"
+                :available="lease.state === 'cleanup_failed'"
               />
             </section>
 
@@ -332,21 +355,32 @@ const TABS: { id: Tab, label: string }[] = [
             <CopyFleetctl :command="statusCommand(lease.id)" />
           </div>
 
-          <ExecPanel
-            v-else-if="tab === 'exec'"
-            :lease-id="lease.id"
-            :ready="ready"
-            :history="artifactItems"
-            :history-loading="artifacts.isLoading.value"
-            :history-error="artifactError"
-            :now="now"
-          />
+          <div
+            v-show="tab === 'exec'"
+            id="lease-panel-exec"
+            role="tabpanel"
+            aria-labelledby="lease-tab-exec"
+          >
+            <ExecPanel
+              :key="lease.id"
+              :lease-id="lease.id"
+              :ready="ready"
+              :history="artifactItems"
+              :history-loading="artifacts.isLoading.value"
+              :history-error="artifactError"
+              :now="now"
+            />
+          </div>
 
           <div
-            v-else
+            v-show="tab === 'artifacts'"
+            id="lease-panel-artifacts"
+            role="tabpanel"
+            aria-labelledby="lease-tab-artifacts"
             class="grid grid-cols-[minmax(0,1fr)] gap-4"
           >
             <CollectPanel
+              :key="lease.id"
               :lease-id="lease.id"
               :ready="ready"
             />
@@ -375,6 +409,13 @@ const TABS: { id: Tab, label: string }[] = [
               :artifacts="artifactItems"
               :now="now"
             />
+            <p
+              v-if="artifacts.data.value?.truncated"
+              class="text-xs text-fc-warn"
+              data-testid="lease-artifacts-truncated"
+            >
+              Showing the newest {{ artifactItems.length }} artifacts; older ones (and older exec history) are not listed here.
+            </p>
             <p class="break-all font-mono text-[10px] text-fc-faint">
               {{ artifactsCommand({ leaseId: lease.id }) }}
             </p>

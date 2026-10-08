@@ -13,7 +13,10 @@ import { LEASES_KEY, PROVISIONS_KEY } from '../useLab'
 // Re-arms a `cleanup_failed` lease's cleanup (FM-713, #292). The lease goes
 // back to `releasing` with a fresh round of attempts; the controller decides
 // everything else, including that a guest removed by hand counts as gone.
-const props = defineProps<{ leaseId: string }>()
+// The parent keeps this mounted while the lease is `releasing` too, so the
+// retry's operation stays visible after the lease leaves `cleanup_failed`;
+// `available` says whether a retry can be requested now.
+const props = defineProps<{ leaseId: string, available: boolean }>()
 
 const queryClient = useQueryClient()
 const open = ref(false)
@@ -47,9 +50,12 @@ async function retry() {
 </script>
 
 <template>
-  <div class="grid gap-2">
+  <div
+    v-if="available || operationId || error"
+    class="grid gap-2"
+  >
     <button
-      v-if="!open"
+      v-if="available && !open"
       type="button"
       class="h-7 w-fit rounded-sm border border-input px-2.5 text-xs hover:border-fc-muted"
       :aria-expanded="open"
@@ -59,7 +65,7 @@ async function retry() {
       Retry cleanup…
     </button>
     <div
-      v-else
+      v-else-if="available"
       class="grid gap-2 rounded-sm border border-fc-line bg-fc-inset p-3 text-xs"
     >
       <p>

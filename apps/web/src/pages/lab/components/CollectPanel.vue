@@ -7,7 +7,7 @@ import { collectLabArtifacts, type OperationDto } from '@frogbyte-io/fleet-api-c
 import { errorMessage, unwrap } from '../../machine/api'
 import CopyFleetctl from '../../machine/components/CopyFleetctl.vue'
 import OperationStatus from '../../machine/components/OperationStatus.vue'
-import { collectCommand, parsePaths } from '../lab'
+import { COLLECT_MAX_PATHS, collectCommand, parsePaths } from '../lab'
 import { ARTIFACTS_KEY, LEASES_KEY } from '../useLab'
 
 // Copy files off a ready lease's guest as artifacts (`lab.collect`). The
@@ -70,7 +70,8 @@ async function collect() {
       class="rounded-sm border border-input bg-fc-inset p-2 font-mono text-[11.5px] disabled:opacity-50"
     />
     <p class="text-fc-faint">
-      Absolute guest paths of regular files, one per line (up to 16). Each must fit the controller's artifact size cap.
+      Absolute guest paths of regular files, one per line (up to {{ COLLECT_MAX_PATHS }}). Each must fit the controller's
+      artifact size cap.
     </p>
     <p
       v-if="!ready"
