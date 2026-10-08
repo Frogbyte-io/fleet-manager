@@ -63,6 +63,19 @@ impl fleet_application::worker::OperationExecutor for StubInner {
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             }
+            Some("status_failed_other") => {
+                // A status failure that is not the "no CLI" report.
+                let error_json = serde_json::json!({
+                    "reason": "status_failed",
+                    "detail": "frogenv: the secrets repository is unreachable",
+                })
+                .to_string();
+                operations
+                    .complete(&operation.id, "failed", None, Some(&error_json))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
             Some("failed") => {
                 let error_json = serde_json::json!({
                     "reason": "step_failed",
@@ -338,5 +351,19 @@ async fn an_undeclared_payload_keeps_frogenv_and_an_unknown_probe_still_runs_set
             "verify"
         ])
     );
+    assert!(fixture.ran().iter().any(|kind| kind == "frogenv.setup"));
+}
+
+#[tokio::test]
+async fn an_inconclusive_status_failure_is_not_frogenv_missing() {
+    // Only the fixed "not installed" report refuses: another status
+    // failure leaves the state unknown, so setup runs.
+    let fixture = compose(vec![(
+        "frogenv.status".to_owned(),
+        "status_failed_other".to_owned(),
+    )])
+    .await;
+    let (state, _result, error) = fixture.run_ready(payload()).await;
+    assert_eq!(state, "succeeded", "{error:?}");
     assert!(fixture.ran().iter().any(|kind| kind == "frogenv.setup"));
 }

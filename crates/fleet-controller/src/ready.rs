@@ -292,7 +292,11 @@ impl ReadyExecutor {
                 .await;
             }
             // A step the machine positively cannot satisfy is refused by
-            // name before it runs, instead of failing generically.
+            // name before it runs, instead of failing generically. The
+            // refusal is deliberately at the step, not before the plan:
+            // the earlier steps (clone, tools) keep running exactly as
+            // they did before the refusal existed, and a retry after
+            // installing the CLI re-runs only the remainder.
             if let Some(refusal) = step_refusal(step, &observed) {
                 return complete_failed(
                     operations,

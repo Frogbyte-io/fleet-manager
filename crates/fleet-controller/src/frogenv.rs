@@ -664,5 +664,11 @@ mod not_installed_tests {
         ] {
             assert!(script.contains(&marker), "{script}");
         }
+        // The status failure's detail passes through redaction unchanged,
+        // so the ready workflow can recognize it.
+        assert_eq!(
+            super::redact_output(&format!("{}\n", super::NOT_INSTALLED_DETAIL)),
+            super::NOT_INSTALLED_DETAIL
+        );
     }
 }
