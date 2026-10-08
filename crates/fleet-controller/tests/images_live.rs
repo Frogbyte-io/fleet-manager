@@ -408,7 +408,17 @@ async fn version_gate(run: &TargetRun) -> Result<Outcome, String> {
 /// the host. FM-702 keeps provider output out of the record by design, so
 /// the reason code is the whole public diagnostic.
 async fn validate_failure(run: &TargetRun) -> Result<Outcome, String> {
-    let before: Vec<u32> = run.pve.resources().await?.iter().map(|r| r.vmid).collect();
+    // Only the scratch range: guests elsewhere on the cluster are not the
+    // suite's and may come and go during the build.
+    let range = run.pve.range();
+    let in_range = |resources: Vec<proxmox_live_support::pve::VmResource>| -> Vec<u32> {
+        resources
+            .iter()
+            .map(|r| r.vmid)
+            .filter(|&vmid| range.contains(vmid))
+            .collect()
+    };
+    let before = in_range(run.pve.resources().await?);
     let vmid = run.guard.allocate().await?;
     let version = publish(run, "invalid", &invalid_recipe(&run.target, vmid)).await?;
     let data = build_wait(run, &version).await?;
@@ -418,7 +428,7 @@ async fn validate_failure(run: &TargetRun) -> Result<Outcome, String> {
         "an invalid recipe ended {} ({reason}: {detail}), not failed/validate_failed",
         data["state"]
     );
-    let after: Vec<u32> = run.pve.resources().await?.iter().map(|r| r.vmid).collect();
+    let after = in_range(run.pve.resources().await?);
     let created: Vec<&u32> = after.iter().filter(|vmid| !before.contains(vmid)).collect();
     check!(
         created.is_empty(),

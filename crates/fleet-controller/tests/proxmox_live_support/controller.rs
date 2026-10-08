@@ -441,9 +441,12 @@ fn spawn_child(
         .map_err(|error| error.to_string())?;
     let log_err = log.try_clone().map_err(|error| error.to_string())?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_fleet-controller"));
-    // The child sees none of the suite's own FLEET_* variables.
+    // The child sees none of the suite's own FLEET_* variables, and no
+    // ambient PROXMOX_* credentials the Proxmox plugin would read: a build
+    // must get its token from its account. A scenario passes any it needs.
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("FLEET_") {
+        let name = key.to_string_lossy();
+        if name.starts_with("FLEET_") || name.starts_with("PROXMOX_") {
             command.env_remove(key);
         }
     }

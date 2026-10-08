@@ -197,28 +197,36 @@ impl Summary {
                 }));
             }
         }
-        // A scenario the suite reported but this runner does not list is
-        // drift between the two lists: kept, and failed loudly, never
-        // dropped.
+        // A row the matrix has no cell for is drift between the suite and
+        // this runner: a scenario the runner does not list, or a row
+        // without a target while the matrix has named targets. It is kept,
+        // and failed loudly, never dropped.
         let mut unexpected: Vec<ResultRow> = Vec::new();
         for row in reported {
-            if !spec.scenarios.contains(&row.scenario.as_str())
-                && !unexpected
+            let known = spec.scenarios.contains(&row.scenario.as_str());
+            if (known && columns.contains(&row.target))
+                || unexpected
                     .iter()
                     .any(|seen| seen.scenario == row.scenario && seen.target == row.target)
             {
-                unexpected.push(ResultRow {
-                    status: Status::Fail,
-                    reason: format!(
-                        "scenario {:?} is not in the runner's list ({}); update its SCENARIOS (reported {}: {})",
-                        row.scenario,
-                        spec.suite,
-                        row.status.id(),
-                        row.reason
-                    ),
-                    ..row.clone()
-                });
+                continue;
             }
+            let drift = if known {
+                format!(
+                    "scenario {:?} reported without a target while the matrix has targets ({}); update the suite to report its target",
+                    row.scenario, spec.suite
+                )
+            } else {
+                format!(
+                    "scenario {:?} is not in the runner's list ({}); update its SCENARIOS",
+                    row.scenario, spec.suite
+                )
+            };
+            unexpected.push(ResultRow {
+                status: Status::Fail,
+                reason: format!("{drift} (reported {}: {})", row.status.id(), row.reason),
+                ..row.clone()
+            });
         }
         results.extend(unexpected);
         Self {
@@ -523,11 +531,16 @@ struct SuiteProcess {
 }
 
 impl SuiteProcess {
+    /// Waits for the suite. The child stays in `self` until it is reaped,
+    /// so a failed wait still kills the tree on drop.
     fn wait(mut self) -> std::io::Result<ExitStatus> {
-        match self.child.take() {
-            Some(mut child) => child.wait(),
-            None => Err(std::io::Error::other("the suite was already reaped")),
-        }
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("the suite was already reaped"))?;
+        let status = child.wait()?;
+        self.child = None;
+        Ok(status)
     }
 }
 
@@ -1039,6 +1052,23 @@ mod tests {
         }
         drop(SuiteProcess { child: Some(child) });
         assert_eq!(running_markers(), 0, "a forked process outlived the suite");
+    }
+
+    #[test]
+    fn a_targetless_row_in_a_targeted_matrix_fails_loudly() {
+        let reported = vec![
+            row("trust", Some("PVE9"), Status::Pass, ""),
+            row("trust", None, Status::Skipped, "gate off"),
+        ];
+        let summary = Summary::build(SPEC, true, None, &["PVE9".to_owned()], &reported, true);
+        let drift = summary
+            .results
+            .iter()
+            .find(|row| row.scenario == "trust" && row.target.is_none())
+            .expect("kept, not dropped");
+        assert_eq!(drift.status, Status::Fail);
+        assert!(drift.reason.contains("without a target"));
+        assert!(drift.reason.contains("gate off"));
     }
 
     #[test]
