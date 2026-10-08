@@ -246,6 +246,7 @@ pub async fn start_ready_workflow(
         "auth": serde_json::to_value(&request.auth)
             .map_err(|error| crate::machines::invalid_request(&error.to_string(), correlation_id))?,
         "remote": project.remote,
+        "fetch": project.fetch,
         "root": root,
         "tools": request.tools,
         "skillId": request.skill_id,

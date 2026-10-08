@@ -2930,6 +2930,19 @@ export interface PageOperationDto {
 }
 
 /**
+ * How a project's remote is fetched.
+ */
+export interface RemoteFetchDto {
+  /** `https`, `http`, `ssh`, or `scp`. */
+  scheme: string;
+  /**
+     * The ssh login user (`git` in `git@host:path`); null for http(s).
+     * @nullable
+     */
+  user?: string | null;
+}
+
+/**
  * A project as the detail view displays it.
  */
 export type PageProjectDtoItemsItem = {
@@ -2939,6 +2952,11 @@ export type PageProjectDtoItemsItem = {
   createdAt: number;
   /** Operator notes. */
   description: string;
+  /**
+     * How the remote is fetched: the scheme and, for ssh, the login user.
+     * Never a credential.
+     */
+  fetch: RemoteFetchDto;
   /** The project's identity. */
   id: string;
   /** The display name. */
@@ -3352,6 +3370,11 @@ export interface ProjectDto {
   createdAt: number;
   /** Operator notes. */
   description: string;
+  /**
+     * How the remote is fetched: the scheme and, for ssh, the login user.
+     * Never a credential.
+     */
+  fetch: RemoteFetchDto;
   /** The project's identity. */
   id: string;
   /** The display name. */
@@ -4951,6 +4974,11 @@ export type ResourceProjectDtoData = {
   createdAt: number;
   /** Operator notes. */
   description: string;
+  /**
+     * How the remote is fetched: the scheme and, for ssh, the login user.
+     * Never a credential.
+     */
+  fetch: RemoteFetchDto;
   /** The project's identity. */
   id: string;
   /** The display name. */

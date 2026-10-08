@@ -27,6 +27,7 @@ function project(
   return {
     id: 'project-1',
     remote: 'github.com/Frogbyte-io/fleet-manager',
+    fetch: { scheme: 'https', user: null },
     name: 'fleet-manager',
     description: '',
     checkouts: [],

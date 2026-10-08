@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use fleet_application::operation::PortFailure;
 use fleet_application::project::{NewProject, ProjectFilter, ProjectPort};
-use fleet_core::{CheckoutFact, Project};
+use fleet_core::{CheckoutFact, FetchScheme, Project, RemoteFetch};
 
 /// The project repository over a pool.
 #[derive(Debug)]
@@ -37,8 +37,8 @@ impl ProjectPort for ProjectRepository {
         let id = Uuid::now_v7().to_string();
         let now = fleet_core::SystemClock::now_unix_millis();
         let result = sqlx::query(
-            "INSERT INTO projects (id, remote, name, description, idempotency_key, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            "INSERT INTO projects (id, remote, name, description, idempotency_key, created_at, updated_at, fetch_scheme, fetch_user) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
         )
         .bind(&id)
         .bind(&project.remote)
@@ -46,6 +46,8 @@ impl ProjectPort for ProjectRepository {
         .bind(&project.description)
         .bind(&project.idempotency_key)
         .bind(now)
+        .bind(project.fetch.scheme.as_str())
+        .bind(project.fetch.user.as_deref())
         .execute(&self.pool)
         .await;
         match result {
@@ -242,6 +244,12 @@ fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Project {
     Project {
         id: row.get("id"),
         remote: row.get("remote"),
+        fetch: RemoteFetch {
+            // An unreadable stored scheme falls back to https, the form
+            // every row had before it was stored.
+            scheme: FetchScheme::parse(&row.get::<String, _>("fetch_scheme")).unwrap_or_default(),
+            user: row.get("fetch_user"),
+        },
         name: row.get("name"),
         description: row.get("description"),
         created_at: row.get("created_at"),

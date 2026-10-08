@@ -635,6 +635,7 @@ impl Harness {
         let projects = ProjectRepository::new(self.store.pool().clone());
         let unrelated = projects
             .create(&NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: "github.com/acme/unrelated".to_owned(),
                 idempotency_key: None,
                 name: "unrelated".to_owned(),

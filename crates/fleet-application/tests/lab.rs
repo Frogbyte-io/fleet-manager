@@ -64,6 +64,7 @@ fn sample_project(id: &str) -> fleet_core::Project {
     fleet_core::Project {
         id: id.to_owned(),
         remote: format!("github.com/example/{id}.git"),
+        fetch: fleet_core::RemoteFetch::default(),
         name: id.to_owned(),
         description: String::new(),
         created_at: NOW,

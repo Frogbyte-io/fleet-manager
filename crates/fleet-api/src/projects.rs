@@ -114,6 +114,9 @@ pub struct ProjectDto {
     pub id: String,
     /// The normalized remote.
     pub remote: String,
+    /// How the remote is fetched: the scheme and, for ssh, the login user.
+    /// Never a credential.
+    pub fetch: RemoteFetchDto,
     /// The display name.
     pub name: String,
     /// Operator notes.
@@ -126,11 +129,31 @@ pub struct ProjectDto {
     pub updated_at: i64,
 }
 
+/// How a project's remote is fetched.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFetchDto {
+    /// `https`, `http`, `ssh`, or `scp`.
+    pub scheme: String,
+    /// The ssh login user (`git` in `git@host:path`); null for http(s).
+    pub user: Option<String>,
+}
+
+impl From<fleet_core::RemoteFetch> for RemoteFetchDto {
+    fn from(fetch: fleet_core::RemoteFetch) -> Self {
+        Self {
+            scheme: fetch.scheme.as_str().to_owned(),
+            user: fetch.user,
+        }
+    }
+}
+
 impl From<fleet_core::Project> for ProjectDto {
     fn from(project: fleet_core::Project) -> Self {
         Self {
             id: project.id,
             remote: project.remote,
+            fetch: project.fetch.into(),
             name: project.name,
             description: project.description,
             checkouts: Vec::new(),
@@ -145,6 +168,7 @@ impl From<fleet_core::ProjectView> for ProjectDto {
         Self {
             id: view.id,
             remote: view.remote,
+            fetch: view.fetch.into(),
             name: view.name,
             description: view.description,
             checkouts: view
@@ -256,6 +280,7 @@ pub async fn create_project(
             state.authorizer.as_ref(),
             &principal,
             NewProject {
+                fetch: fleet_core::RemoteFetch::default(),
                 remote: request.remote,
                 name: request.name,
                 description: request.description.unwrap_or_default(),

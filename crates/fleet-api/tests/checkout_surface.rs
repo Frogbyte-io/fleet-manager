@@ -249,6 +249,7 @@ fn project() -> Project {
     Project {
         id: "p-1".to_owned(),
         remote: remote.as_str().to_owned(),
+        fetch: fleet_core::RemoteFetch::default(),
         name: "fleet-manager".to_owned(),
         description: String::new(),
         created_at: 0,
