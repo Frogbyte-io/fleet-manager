@@ -703,7 +703,7 @@ enum FrogenvProbe {
 /// (`host[:port]/path`). Parsed bare, its port colon would read as an scp
 /// separator and the port would become a path segment, so a bare identity is
 /// read as an https remote. A full URL or scp spelling is parsed as written.
-pub(crate) fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, String> {
+fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, String> {
     // An `@` before the first `/` is a login (an scp or ssh spelling); one
     // later is part of an identity's path.
     let login = remote

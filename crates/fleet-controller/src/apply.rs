@@ -95,7 +95,8 @@ impl ApplyExecutor {
     }
 
     /// Resolves clone targets through the project registry so the clone
-    /// uses each project's stored fetch form.
+    /// uses each project's stored fetch form. Production composition must
+    /// call this; without it clones fall back to the default https form.
     #[must_use]
     pub fn with_projects(
         mut self,
@@ -115,7 +116,7 @@ impl ApplyExecutor {
                         "invalid_project_remote: no project is registered for {identity}"
                     ));
                 }
-                Err(error) => return Err(format!("project lookup failed: {error}")),
+                Err(_) => return Err("project lookup failed; retry the apply".to_owned()),
             },
             None => fleet_core::RemoteFetch::default(),
         };
