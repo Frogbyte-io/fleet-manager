@@ -31,7 +31,8 @@ use std::time::Duration;
 use fleet_application::audit::{AuditIntent, AuditMetadata};
 use fleet_application::authz::{Decision, Permission};
 use fleet_application::lab::{
-    Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned, stuck_compensation,
+    Lab, LeasePort, ProvisionPort, cleanup_due, cleanup_operation, guest_owned,
+    record_cleanup_failure, stuck_compensation,
 };
 use fleet_application::operation::{AuditPort, Operations};
 
@@ -133,6 +134,8 @@ pub struct TickReport {
     pub expired: usize,
     /// Cleanup attempts queued (new pending operations).
     pub cleanups_queued: usize,
+    /// Cleanup attempts interrupted by a crash, counted as failed (#301).
+    pub cleanups_abandoned: usize,
     /// Stuck leases compensated.
     pub compensated: usize,
     /// Guests newly reported as unowned this tick.
@@ -309,6 +312,53 @@ impl LabSweeper {
                 Ok(operation) if operation.created_at >= tick_started => {
                     self.changed();
                     report.cleanups_queued += 1;
+                }
+                // The attempt's operation already ended without releasing
+                // the lease: the controller died mid-cleanup and worker
+                // maintenance failed it, which records nothing on the lease.
+                // Count it as a failed attempt so the next one gets a fresh
+                // key, with backoff (#301).
+                Ok(operation) if abandoned_attempt(&operation) => {
+                    match self.leases.get(&lease.id).await {
+                        Ok(mut current)
+                            if current.state == fleet_core::LeaseState::Releasing
+                                && current.cleanup_attempts == lease.cleanup_attempts =>
+                        {
+                            record_cleanup_failure(
+                                &mut current,
+                                fleet_core::SystemClock::now_unix_millis(),
+                            );
+                            match self.leases.update(&current).await {
+                                Ok(()) => {
+                                    self.changed();
+                                    report.cleanups_abandoned += 1;
+                                    if current.state == fleet_core::LeaseState::CleanupFailed
+                                        && let Err(error) = self
+                                            .audit(
+                                                &lease.id,
+                                                "lab_lease_cleanup_failed",
+                                                &[("reason", "worker_lease_expired".to_owned())],
+                                            )
+                                            .await
+                                    {
+                                        report.failures.push(format!(
+                                            "auditing the cleanup failure of lease {}: {error}",
+                                            lease.id
+                                        ));
+                                    }
+                                }
+                                Err(error) => report.failures.push(format!(
+                                    "recording the abandoned cleanup of lease {}: {error}",
+                                    lease.id
+                                )),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => report.failures.push(format!(
+                            "re-reading lease {} after an abandoned cleanup: {error}",
+                            lease.id
+                        )),
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => report.failures.push(format!(
@@ -490,4 +540,18 @@ impl LabSweeper {
             }
         }
     }
+}
+
+/// Whether a cleanup operation was failed by worker maintenance after its
+/// worker's lease expired: the controller died mid-attempt. The executor
+/// records its own failures on the lease and completes the operation with a
+/// different reason, and a `not_pooled` refusal deliberately spends no
+/// attempt, so only this signature is an abandoned attempt.
+fn abandoned_attempt(operation: &fleet_application::operation::Operation) -> bool {
+    operation.state == fleet_core::OperationState::Failed.id()
+        && operation
+            .error_json
+            .as_deref()
+            .and_then(|error| serde_json::from_str::<serde_json::Value>(error).ok())
+            .is_some_and(|error| error["reason"] == "worker_lease_expired")
 }

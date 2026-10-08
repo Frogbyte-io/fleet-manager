@@ -842,6 +842,7 @@ impl Controller {
             let idle = report.expired == 0
                 && report.compensated == 0
                 && report.cleanups_queued == 0
+                && report.cleanups_abandoned == 0
                 && ran == 0;
             reports.push(report);
             if idle {
