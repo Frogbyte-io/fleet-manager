@@ -1113,21 +1113,27 @@ pub fn endpoint_reference_matches(reference: &str, endpoint: &DraftEndpoint) -> 
 
 /// The host part of an endpoint reference, ignoring userinfo. Bracketed
 /// IPv6 literals strip their brackets; the comparison sees the bare
-/// address.
+/// address. A bracketed reference needs no port to have a host.
 #[must_use]
 pub(crate) fn reference_host(reference: &str) -> Option<&str> {
     let (_, host_port) = reference.rsplit_once('@')?;
-    let host_port = match host_port.strip_prefix('[') {
-        Some(rest) => rest.split_once(']').map_or(host_port, |(inner, _)| inner),
-        None => host_port,
-    };
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let (inner, _) = rest.split_once(']')?;
+        return Some(inner);
+    }
     let (host, _) = host_port.rsplit_once(':')?;
     Some(host)
 }
 
-/// The port part of an endpoint reference, as text.
+/// The port part of an endpoint reference, as text. For a bracketed IPv6
+/// reference the port follows `]:`; the colons inside the brackets are
+/// part of the address.
 fn reference_port(reference: &str) -> Option<&str> {
     let (_, host_port) = reference.rsplit_once('@')?;
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let (_, after) = rest.split_once(']')?;
+        return after.strip_prefix(':');
+    }
     let (_, port) = host_port.rsplit_once(':')?;
     Some(port)
 }
@@ -1232,4 +1238,40 @@ fn validate_ssh_host(host: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::{reference_host, reference_port};
+
+    #[test]
+    fn bracketed_ipv6_with_a_port_keeps_the_whole_address() {
+        let reference = "ops@[2001:db8::1]:22";
+        assert_eq!(reference_host(reference), Some("2001:db8::1"));
+        assert_eq!(reference_port(reference), Some("22"));
+    }
+
+    #[test]
+    fn bracketed_ipv6_without_a_port_has_a_host_and_no_port() {
+        let reference = "ops@[2001:db8::1]";
+        assert_eq!(reference_host(reference), Some("2001:db8::1"));
+        assert_eq!(reference_port(reference), None);
+    }
+
+    #[test]
+    fn a_malformed_bracket_has_no_host_or_port() {
+        assert_eq!(reference_host("ops@[2001:db8::1:22"), None);
+        assert_eq!(reference_port("ops@[2001:db8::1:22"), None);
+    }
+
+    #[test]
+    fn ipv4_and_dns_references_split_at_the_last_colon() {
+        assert_eq!(reference_host("***@192.0.2.10:2222"), Some("192.0.2.10"));
+        assert_eq!(reference_port("***@192.0.2.10:2222"), Some("2222"));
+        assert_eq!(
+            reference_host("ops@host-one.example:22"),
+            Some("host-one.example")
+        );
+        assert_eq!(reference_port("ops@host-one.example:22"), Some("22"));
+    }
 }

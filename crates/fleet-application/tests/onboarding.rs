@@ -862,3 +862,24 @@ fn duplicate_matching_ignores_the_userinfo_and_case() {
     assert!(!endpoint_reference_matches("deploy@host-one:22", &endpoint));
     assert!(!endpoint_reference_matches("deploy@other:2222", &endpoint));
 }
+
+#[test]
+fn duplicate_matching_sees_a_bracketed_ipv6_endpoint() {
+    let endpoint = DraftEndpoint {
+        user: "deploy".to_owned(),
+        host: "2001:db8::1".to_owned(),
+        port: 22,
+    };
+    assert!(endpoint_reference_matches(
+        "***@[2001:db8::1]:22",
+        &endpoint
+    ));
+    assert!(!endpoint_reference_matches(
+        "deploy@[2001:db8::1]:2222",
+        &endpoint
+    ));
+    assert!(!endpoint_reference_matches(
+        "deploy@[2001:db8::2]:22",
+        &endpoint
+    ));
+}
