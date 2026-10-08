@@ -438,7 +438,10 @@ impl LabPoolPort for LabPoolRepository {
             let recorded = record
                 .get::<Option<i64>, _>("vmid")
                 .and_then(|vmid| u32::try_from(vmid).ok());
-            if member.pool_id != pool_id
+            // Only a member still leased to this lease resumes: a
+            // quarantined one owes a revert and never boots again.
+            if member.state != MemberState::Leased
+                || member.pool_id != pool_id
                 || recorded != Some(member.vmid)
                 || record.get::<Option<String>, _>("account_id").as_deref()
                     != Some(member.account_id.as_str())

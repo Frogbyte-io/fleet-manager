@@ -923,6 +923,11 @@ impl LabPools {
         now: i64,
     ) -> Result<DrainReport, LabUseCaseError> {
         allow(authorizer, principal, Permission::LabConfig, Some(id))?;
+        if vmids.is_some_and(<[u32]>::is_empty) {
+            return Err(invalid(
+                "name at least one VMID to drain, or drain every member".to_owned(),
+            ));
+        }
         self.pools.get(id).await.map_err(store_error)?;
         let listed = vmids.map_or_else(
             || "all".to_owned(),

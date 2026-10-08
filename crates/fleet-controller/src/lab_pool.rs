@@ -388,6 +388,30 @@ impl OperationExecutor for LabPoolFillExecutor {
         let mut quarantined = Vec::new();
         let mut pending = Vec::new();
         for (done, member) in filling.into_iter().enumerate() {
+            if member.draining {
+                // Drained while filling: it leaves without a revert.
+                let now = fleet_core::SystemClock::now_unix_millis();
+                self.pools
+                    .finish_fill(
+                        &member.id,
+                        &FillResult::Quarantined {
+                            detail: "drained before its fill".to_owned(),
+                        },
+                        now,
+                    )
+                    .await?;
+                let _ = self
+                    .audit
+                    .record_intent(&member_audit(
+                        fleet_auth::LAN_PRINCIPAL_ID,
+                        &pool.id,
+                        Some(&operation.id),
+                        "lab_pool_member_removed",
+                        &[("vmid", member.vmid.to_string())],
+                    ))
+                    .await;
+                continue;
+            }
             let _ = operations
                 .record_progress(
                     &operation.id,

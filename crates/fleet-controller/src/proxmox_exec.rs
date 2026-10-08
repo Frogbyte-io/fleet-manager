@@ -2851,6 +2851,20 @@ impl ProvisionExecutor {
         request: &fleet_provider_proxmox::PveHttpRequest,
     ) -> Result<Result<(String, u32, String), Refusal>, String> {
         let now = fleet_core::SystemClock::now_unix_millis();
+        // The intent precedes the claim, and is required: a claim the
+        // audit sink refused is not made.
+        if let Some(audit) = &self.audit {
+            audit
+                .record_intent(&fleet_application::lab_pool::member_audit(
+                    fleet_auth::LAN_PRINCIPAL_ID,
+                    &pool.id,
+                    Some(operation_id),
+                    "lab_pool_claim_requested",
+                    &[("leaseId", lease_id.to_owned())],
+                ))
+                .await
+                .map_err(|detail| format!("the pool claim audit failed: {detail}"))?;
+        }
         let member = match pools
             .claim(&pool.id, lease_id, record_id, now)
             .await
@@ -3016,6 +3030,20 @@ impl ProvisionExecutor {
                 .await
                 .map_err(|error| format!("the pool is unreadable: {error}"))?,
             None => None,
+        };
+        // A record that already holds a guest of its own (a clone target
+        // reserved before the pool existed) finishes as a clone; only a
+        // record without one, or one whose guest is this lease's member,
+        // is pooled.
+        let pool = match (pool, &self.pools) {
+            (Some(pool), Some(pools)) if record.vmid.is_some() || record.clone_upid.is_some() => {
+                let bound = pools
+                    .member_for_lease(&lease_id)
+                    .await
+                    .map_err(|error| format!("the pool member is unreadable: {error}"))?;
+                bound.is_some().then_some(pool)
+            }
+            (pool, _) => pool,
         };
         if let Some(pool) = &pool
             && requested_account

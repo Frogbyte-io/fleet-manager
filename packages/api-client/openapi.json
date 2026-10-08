@@ -2809,7 +2809,7 @@
         "tags": [
           "lab"
         ],
-        "summary": "Drains members from a pool (every member when no VMIDs are named).\nUnbound members leave at once; a member bound to a lease, or still\nfilling, leaves once that finishes instead of returning to the pool.\nFleet never destroys a pool guest: drained guests stay where they are.",
+        "summary": "Drains the named members from a pool, or every member with `all`.\nUnbound members leave at once; a member bound to a lease, or still\nfilling, leaves once that finishes instead of returning to the pool.\nFleet never destroys a pool guest: drained guests stay where they are.",
         "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown pool or VMID.",
         "operationId": "drainLabPool",
         "parameters": [
@@ -2840,6 +2840,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Resource_LabPoolDrainDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither, or both, of vmids and all were given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -8972,6 +8982,10 @@
         "type": "object",
         "description": "A drain request.",
         "properties": {
+          "all": {
+            "type": "boolean",
+            "description": "Drains every member; required instead of `vmids`, so a drain of the\nwhole pool is never implied by an empty body."
+          },
           "vmids": {
             "type": [
               "array",
@@ -8982,7 +8996,7 @@
               "format": "int32",
               "minimum": 0
             },
-            "description": "The VMIDs to drain; every member when absent."
+            "description": "The VMIDs to drain. Name them, or set `all` instead."
           }
         },
         "additionalProperties": false

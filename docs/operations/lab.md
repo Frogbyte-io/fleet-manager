@@ -360,7 +360,7 @@ Fill registers the VMIDs as `filling` and queues a `lab.pool.fill` operation. Fo
 - rolls it back to the baseline through the reviewed `proxmox.guest.snapshot-revert` path. The rollback stops a running guest first;
 - reads the config back. The config's `parent` must name the baseline, with no lock left.
 
-Only then is the member `available`. Otherwise it is `quarantined` and its `detail` says why. Sometimes Fleet cannot decide: the account is untrusted, the cluster or a config cannot be read, or the rollback did not finish in time. The member then stays `filling` (listed as `pending`), and the operation fails with `fill_incomplete`. Fix the cause and run `lab pool fill <pool-id>` again. `--wait` exits non-zero when any member was quarantined or left pending. The member records the guest's name, and later reverts refuse a guest at that VMID with another name: a replaced guest is never rolled back. Fill refuses more VMIDs than the pool's `size` (at most 16), and a guest that is already a member of any pool. `lab pool fill <pool-id>` with no `--vmid` re-queues members that are still `filling`, for example after a controller restart.
+Only then is the member `available`. The rollback task's success is the evidence of the revert. The config read is a cross-check, not proof: `parent` already names a snapshot that was just taken, so it rejects a guest left elsewhere or still locked, but it cannot prove that a rollback ran. Fill trusts the VMIDs you name. Its first rollback checks only the kind, the name prefix, the artifact list, and the baseline's presence, because no name is recorded yet; name only guests you mean to roll back. Otherwise it is `quarantined` and its `detail` says why. Sometimes Fleet cannot decide: the account is untrusted, the cluster or a config cannot be read, or the rollback did not finish in time. The member then stays `filling` (listed as `pending`), and the operation fails with `fill_incomplete`. Fix the cause and run `lab pool fill <pool-id>` again. `--wait` exits non-zero when any member was quarantined or left pending. The member records the guest's name, and later reverts refuse a guest at that VMID with another name: a replaced guest is never rolled back. Fill refuses more VMIDs than the pool's `size` (at most 16), and a guest that is already a member of any pool. `lab pool fill <pool-id>` with no `--vmid` re-queues members that are still `filling`, for example after a controller restart.
 
 Leasing works as before. `lab create <version-id> --purpose ...` takes the free member with the lowest VMID, in the same SQLite transaction that records it on the lease's provision. Two leases never share a member. A pooled provision uses the pool's account; `--account` must name it or be omitted. It reserves no capacity, because the member already exists. It boots the member and runs the template's readiness as usual. With no free member, the provision fails with `pool_exhausted` and the lease ends `failed`, owning nothing.
 
@@ -373,11 +373,13 @@ Drain releases members from Lab:
 
 ```sh
 fleetctl --output json lab pool drain <pool-id> --vmid 701
-fleetctl --output json lab pool drain <pool-id>
+fleetctl --output json lab pool drain <pool-id> --all
 fleetctl --output json lab pool delete <pool-id>
 ```
 
-A member that no lease holds leaves at once (`removed`). A member that is bound to a lease, or still filling, is flagged and leaves when that cleanup or fill finishes, instead of returning (`deferred`). Without `--vmid`, drain covers every member. A pool is deleted only once it is empty. After that, leases from its template version clone again.
+A member that no lease holds leaves at once (`removed`). A member that is bound to a lease, or still filling, is flagged and leaves when that cleanup or fill finishes, instead of returning (`deferred`). A drained `filling` member leaves at the next fill run without being reverted; run `lab pool fill <pool-id>` to process it. Drain needs `--vmid` or `--all` (the API's `vmids` or `"all": true`), so it never drains the whole pool by omission. A pool is deleted only once it is empty. After that, leases from its template version clone again.
+
+Lab never destroys a member, and its cleanup refuses any VMID that is one. The reviewed Proxmox routes (`proxmox destroy`, `proxmox snapshot-delete`) are separate privileged operator actions and do not consult pools. If you destroy a member or its baseline that way, its next revert fails its identity check and quarantines it; drain it.
 
 Every pool mutation needs `lab.config`, and fill also needs `operation.create`. The controller checks both before anything is registered. The intent is audited before the change: `lab_pool_creating`, `lab_pool_fill_requested`, `lab_pool_draining`, `lab_pool_deleting`. The executors record each member change best effort (resource: the pool):
 - `lab_pool_member_available` and `lab_pool_member_quarantined` (with `reason`);

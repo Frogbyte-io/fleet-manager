@@ -1054,7 +1054,12 @@ export interface DraftEndpointDto {
  */
 export interface DrainLabPoolRequest {
   /**
-     * The VMIDs to drain; every member when absent.
+     * Drains every member; required instead of `vmids`, so a drain of the
+     * whole pool is never implied by an empty body.
+     */
+  all?: boolean;
+  /**
+     * The VMIDs to drain. Name them, or set `all` instead.
      * @nullable
      * @items.minimum 0
      */
@@ -8927,6 +8932,11 @@ export type drainLabPoolResponse200 = {
   status: 200
 }
 
+export type drainLabPoolResponse400 = {
+  data: ApiError
+  status: 400
+}
+
 export type drainLabPoolResponse403 = {
   data: ApiError
   status: 403
@@ -8940,7 +8950,7 @@ export type drainLabPoolResponse404 = {
 export type drainLabPoolResponseSuccess = (drainLabPoolResponse200) & {
   headers: Headers;
 };
-export type drainLabPoolResponseError = (drainLabPoolResponse403 | drainLabPoolResponse404) & {
+export type drainLabPoolResponseError = (drainLabPoolResponse400 | drainLabPoolResponse403 | drainLabPoolResponse404) & {
   headers: Headers;
 };
 
@@ -8958,7 +8968,7 @@ export const getDrainLabPoolUrl = (poolId: string,) => {
  * # Errors
  *
  * Returns the public error envelope on refusal or an unknown pool or VMID.
- * @summary Drains members from a pool (every member when no VMIDs are named).
+ * @summary Drains the named members from a pool, or every member with `all`.
 Unbound members leave at once; a member bound to a lease, or still
 filling, leaves once that finishes instead of returning to the pool.
 Fleet never destroys a pool guest: drained guests stay where they are.

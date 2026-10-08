@@ -120,8 +120,10 @@ impl LabCleanupExecutor {
     }
 
     /// Reverts pooled leases' members instead of destroying them (FM-717).
-    /// Without it, a lease bound to a pool member cannot be cleaned up: the
-    /// executor refuses rather than destroy a member.
+    /// The controller always composes it. Without it the executor knows no
+    /// pool, so it must not run where pools exist: a `revert` lease is then
+    /// refused (`not_pooled`), but a `destroy` lease is destroyed as a
+    /// clone, with no pool-membership check.
     #[must_use]
     pub fn with_pools(
         mut self,

@@ -467,3 +467,82 @@ async fn fills_respect_size_and_global_membership() {
         Err(PoolStoreError::Conflict(_))
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_racing_claims_never_leaves_a_member_bound_and_removed() {
+    let world = Arc::new(World::new(&[200, 201, 202, 203]).await);
+    let mut leases = Vec::new();
+    for _ in 0..4 {
+        leases.push(world.provisioning().await);
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(leases.len() + 1));
+    let mut tasks = Vec::new();
+    for (lease_id, record_id) in leases {
+        let world = world.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let outcome = world
+                .pools
+                .claim(&world.pool_id, &lease_id, &record_id, NOW)
+                .await
+                .unwrap();
+            (lease_id, outcome)
+        }));
+    }
+    let drain = {
+        let world = world.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            world.pools.drain(&world.pool_id, None, NOW).await.unwrap()
+        })
+    };
+    let mut claimed = BTreeSet::new();
+    for task in tasks {
+        let (lease_id, outcome) = task.await.unwrap();
+        if let ClaimOutcome::Claimed(member) = outcome {
+            assert_eq!(member.lease_id.as_deref(), Some(lease_id.as_str()));
+            claimed.insert(member.vmid);
+        }
+    }
+    let report = drain.await.unwrap();
+    // Every member a lease won is deferred, never removed; every other one
+    // was removed; nothing is both.
+    let removed: BTreeSet<u32> = report.removed.iter().copied().collect();
+    let deferred: BTreeSet<u32> = report.deferred.iter().copied().collect();
+    assert!(removed.is_disjoint(&claimed), "{removed:?} {claimed:?}");
+    assert_eq!(deferred, claimed);
+    assert_eq!(
+        removed.union(&deferred).copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([200, 201, 202, 203])
+    );
+    for vmid in &claimed {
+        let (state, lease, draining) = world.state(*vmid).await.unwrap();
+        assert_eq!(state, MemberState::Leased);
+        assert!(lease.is_some() && draining);
+    }
+}
+
+#[tokio::test]
+async fn a_quarantined_member_never_resumes_a_claim() {
+    let world = World::new(&[200]).await;
+    let (lease_id, record_id) = world.provisioning().await;
+    world
+        .pools
+        .claim(&world.pool_id, &lease_id, &record_id, NOW)
+        .await
+        .unwrap();
+    world
+        .pools
+        .quarantine_bound(&lease_id, "the rollback task failed", NOW)
+        .await
+        .unwrap();
+    assert!(matches!(
+        world
+            .pools
+            .claim(&world.pool_id, &lease_id, &record_id, NOW)
+            .await,
+        Err(PoolStoreError::Conflict(_))
+    ));
+}

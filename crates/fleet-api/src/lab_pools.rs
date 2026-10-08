@@ -141,9 +141,13 @@ pub struct FillLabPoolRequest {
 #[derive(Clone, Debug, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DrainLabPoolRequest {
-    /// The VMIDs to drain; every member when absent.
+    /// The VMIDs to drain. Name them, or set `all` instead.
     #[serde(default)]
     pub vmids: Option<Vec<u32>>,
+    /// Drains every member; required instead of `vmids`, so a drain of the
+    /// whole pool is never implied by an empty body.
+    #[serde(default)]
+    pub all: bool,
 }
 
 /// What a drain did.
@@ -374,7 +378,7 @@ pub async fn fill_lab_pool(
     Ok((StatusCode::ACCEPTED, Json(Resource::new(operation.into()))))
 }
 
-/// Drains members from a pool (every member when no VMIDs are named).
+/// Drains the named members from a pool, or every member with `all`.
 /// Unbound members leave at once; a member bound to a lease, or still
 /// filling, leaves once that finishes instead of returning to the pool.
 /// Fleet never destroys a pool guest: drained guests stay where they are.
@@ -391,6 +395,7 @@ pub async fn fill_lab_pool(
     request_body = DrainLabPoolRequest,
     responses(
         (status = 200, description = "What the drain did.", body = Resource<LabPoolDrainDto>),
+        (status = 400, description = "Neither, or both, of vmids and all were given.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not configure the Lab surface.", body = crate::error::ApiError),
         (status = 404, description = "The pool, or a named VMID in it, does not exist.", body = crate::error::ApiError),
     )
@@ -404,6 +409,14 @@ pub async fn drain_lab_pool(
 ) -> Result<Json<Resource<LabPoolDrainDto>>, ApiErrorResponse> {
     let pools = pools_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    if request.all == request.vmids.is_some() {
+        return Err(map_lab_error(
+            &fleet_application::lab::LabUseCaseError::Invalid {
+                detail: "name the VMIDs to drain, or set all to drain every member".to_owned(),
+            },
+            correlation_id,
+        ));
+    }
     let report = pools
         .drain(
             state.authorizer.as_ref(),

@@ -300,12 +300,21 @@ async fn a_pool_is_created_filled_and_drained_with_every_step_audited() {
     // A pool with members is not deleted.
     let (status, _) = call(&state, "DELETE", &format!("/lab/pools/{pool_id}"), None).await;
     assert_eq!(status, StatusCode::CONFLICT);
+    // A whole-pool drain is never implied by an empty body.
+    let (status, _) = call(
+        &state,
+        "POST",
+        &format!("/lab/pools/{pool_id}/drain"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     // Filling members leave once their fill ends.
     let (status, body) = call(
         &state,
         "POST",
         &format!("/lab/pools/{pool_id}/drain"),
-        Some(serde_json::json!({})),
+        Some(serde_json::json!({ "all": true })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -380,7 +389,7 @@ async fn pool_mutations_are_authorized_before_anything_changes() {
         (
             "POST",
             format!("/lab/pools/{pool_id}/drain"),
-            Some(serde_json::json!({})),
+            Some(serde_json::json!({ "all": true })),
         ),
         ("DELETE", format!("/lab/pools/{pool_id}"), None),
     ] {
