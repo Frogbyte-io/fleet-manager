@@ -515,6 +515,41 @@ async fn a_finished_leases_held_row_never_counts_even_without_its_release_write(
 }
 
 #[tokio::test]
+async fn a_finished_leases_held_row_is_released_not_returned() {
+    use fleet_core::LeaseState;
+    let (_dir, store) = setup().await;
+    let leases = LeaseRepository::new(store.pool().clone());
+    let capacity = CapacityRepository::new(store.pool().clone());
+    capacity
+        .record_observation("account-1", &observation(16, NOW))
+        .await
+        .unwrap();
+    let policy = PlacementPolicy::default();
+    for finished in [LeaseState::Released, LeaseState::Failed] {
+        let holder = lease(&leases).await;
+        assert!(matches!(
+            capacity
+                .reserve(&request(&holder, 4096), &policy, NOW)
+                .await
+                .unwrap(),
+            ReserveOutcome::Reserved(_)
+        ));
+        // The lease ends but its release write is lost.
+        let mut ended = leases.get(&holder).await.unwrap();
+        ended.state = finished;
+        leases.update(&ended).await.unwrap();
+        let error = capacity
+            .reserve(&request(&holder, 4096), &policy, NOW + 1)
+            .await
+            .expect_err("a finished lease's held row is not a reservation");
+        assert!(error.contains("finished lease"), "{finished:?}: {error}");
+        let row = capacity.for_lease(&holder).await.unwrap().unwrap();
+        assert_eq!(row.state, ReservationState::Released, "{finished:?}");
+        assert_eq!(row.released_at, Some(NOW + 1));
+    }
+}
+
+#[tokio::test]
 async fn a_failed_lease_whose_guest_was_allocated_still_counts() {
     use fleet_application::lab::{NewProvision, ProvisionPort as _};
     use fleet_core::LeaseState;

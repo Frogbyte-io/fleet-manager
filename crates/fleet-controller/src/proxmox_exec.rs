@@ -2717,8 +2717,8 @@ impl ProvisionExecutor {
                 let refusal = Refusal::new(
                     "reservation_mismatch",
                     format!(
-                        "the lease holds capacity on {} but the template is now on {node}; release the lease and request a new one",
-                        existing.node
+                        "the lease holds capacity on node {} of account {}, but this provision would clone on node {node} of account {account_id}; release the lease and request a new one",
+                        existing.node, existing.account_id
                     ),
                 );
                 audit_placement_refusal(placement, lease_id, operation_id, node, &refusal).await;

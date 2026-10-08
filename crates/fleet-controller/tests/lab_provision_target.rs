@@ -2496,6 +2496,11 @@ async fn a_reservation_on_another_node_refuses_the_resumed_clone() {
     assert_eq!(state, "failed");
     let (reason, detail) = error.unwrap();
     assert_eq!(reason, "reservation_mismatch", "{detail}");
+    assert!(
+        detail.contains("node pve-a of account")
+            && detail.contains(&format!("node pve-b of account {}", harness.account_id)),
+        "the detail names the held and the requested node and account: {detail}"
+    );
     assert!(pve.clones().is_empty());
     assert_eq!(stored.vmid, None);
     assert_eq!(harness.audit_events("lab_placement_refused").await, 1);

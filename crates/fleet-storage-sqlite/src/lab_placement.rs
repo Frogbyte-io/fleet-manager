@@ -103,6 +103,78 @@ fn row_to_observation(row: &sqlx::sqlite::SqliteRow) -> Result<ProxmoxNodeCapaci
     })
 }
 
+/// Sums the node's held reservations whose leases still count.
+async fn held_totals(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node: &str,
+    storage: &str,
+) -> Result<ReservedTotals, String> {
+    // Held reservations count per node across every account: two
+    // clusters with the same node name share the count, which is
+    // conservative, never permissive. The lease's state is
+    // authoritative: a held row whose lease is released, or failed
+    // without an allocated VMID, no longer counts, even if its own
+    // release write was lost.
+    let totals = sqlx::query(
+        "SELECT COALESCE(SUM(r.cores), 0) AS cores, COALESCE(SUM(r.memory_mib), 0) AS memory_mib, \
+         COALESCE(SUM(CASE WHEN r.storage = ?2 THEN r.disk_gib ELSE 0 END), 0) AS disk_gib \
+         FROM lab_capacity_reservations r \
+         JOIN lab_leases l ON l.id = r.lease_id \
+         LEFT JOIN lab_provisions p ON p.id = l.provision_id \
+         WHERE r.node = ?1 AND r.state = 'held' AND l.state != 'released' \
+         AND NOT (l.state = 'failed' AND p.vmid IS NULL)",
+    )
+    .bind(node)
+    .bind(storage)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| format!("read held reservations failed: {error}"))?;
+    // A negative sum cannot come from the CHECKed rows; if it does, the
+    // reservation errors rather than counting it as nothing reserved.
+    let sum = |column: &str| {
+        to_u64(Some(totals.get(column)))
+            .ok_or_else(|| format!("the held reservations' {column} total is out of range"))
+    };
+    Ok(ReservedTotals {
+        cores: sum("cores")?,
+        memory_mib: sum("memory_mib")?,
+        disk_gib: sum("disk_gib")?,
+    })
+}
+
+/// Releases `existing` when its lease no longer counts (released, or failed
+/// without an allocated VMID), the same rule the held totals apply, and
+/// answers whether it did.
+async fn release_if_finished(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    existing: &CapacityReservation,
+    now: i64,
+) -> Result<bool, String> {
+    let counts: bool = sqlx::query_scalar(
+        "SELECT l.state != 'released' AND NOT (l.state = 'failed' AND p.vmid IS NULL) \
+         FROM lab_leases l LEFT JOIN lab_provisions p ON p.id = l.provision_id \
+         WHERE l.id = ?1",
+    )
+    .bind(&existing.lease_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| format!("read the reservation's lease failed: {error}"))?
+    .unwrap_or(false);
+    if counts {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE lab_capacity_reservations SET state = 'released', released_at = ?2 \
+         WHERE id = ?1 AND state = 'held'",
+    )
+    .bind(&existing.id)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| format!("release the stale reservation failed: {error}"))?;
+    Ok(true)
+}
+
 #[async_trait]
 impl CapacityReservationPort for CapacityRepository {
     async fn record_observation(
@@ -172,7 +244,23 @@ impl CapacityReservationPort for CapacityRepository {
                     request.lease_id
                 ));
             }
-            return Ok(ReserveOutcome::Reserved(existing));
+            // The same eligibility rule the totals apply: a held row whose
+            // lease is released, or failed without an allocated VMID, is a
+            // lost release write, not a reservation. It is released here, in
+            // this transaction, and the request errors like one for an
+            // already released row; a finished lease is never re-reserved.
+            if !release_if_finished(&mut transaction, &existing, now).await? {
+                // Nothing changed: the row still counts for a live lease.
+                return Ok(ReserveOutcome::Reserved(existing));
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|error| format!("commit reservation transaction failed: {error}"))?;
+            return Err(format!(
+                "the capacity reservation of lease {} belonged to a finished lease and was released",
+                request.lease_id
+            ));
         }
         let observation = sqlx::query(
             "SELECT * FROM lab_capacity_observations WHERE account_id = ?1 AND node = ?2",
@@ -184,37 +272,8 @@ impl CapacityReservationPort for CapacityRepository {
         .map_err(|error| format!("read capacity observation failed: {error}"))?
         .map(|row| row_to_observation(&row))
         .transpose()?;
-        // Held reservations count per node across every account: two
-        // clusters with the same node name share the count, which is
-        // conservative, never permissive. The lease's state is
-        // authoritative: a held row whose lease is released, or failed
-        // without an allocated VMID, no longer counts, even if its own
-        // release write was lost.
-        let totals = sqlx::query(
-            "SELECT COALESCE(SUM(r.cores), 0) AS cores, COALESCE(SUM(r.memory_mib), 0) AS memory_mib, \
-             COALESCE(SUM(CASE WHEN r.storage = ?2 THEN r.disk_gib ELSE 0 END), 0) AS disk_gib \
-             FROM lab_capacity_reservations r \
-             JOIN lab_leases l ON l.id = r.lease_id \
-             LEFT JOIN lab_provisions p ON p.id = l.provision_id \
-             WHERE r.node = ?1 AND r.state = 'held' AND l.state != 'released' \
-             AND NOT (l.state = 'failed' AND p.vmid IS NULL)",
-        )
-        .bind(&request.node)
-        .bind(&request.demand.storage)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|error| format!("read held reservations failed: {error}"))?;
-        // A negative sum cannot come from the CHECKed rows; if it does, the
-        // reservation errors rather than counting it as nothing reserved.
-        let sum = |column: &str| {
-            to_u64(Some(totals.get(column)))
-                .ok_or_else(|| format!("the held reservations' {column} total is out of range"))
-        };
-        let reserved = ReservedTotals {
-            cores: sum("cores")?,
-            memory_mib: sum("memory_mib")?,
-            disk_gib: sum("disk_gib")?,
-        };
+        let reserved =
+            held_totals(&mut transaction, &request.node, &request.demand.storage).await?;
         if let Err(refusal) = check_capacity(
             &request.node,
             observation.as_ref(),
