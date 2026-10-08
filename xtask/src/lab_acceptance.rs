@@ -338,19 +338,26 @@ pub fn run(repo_root: &Path, target: Option<&str>) -> Result<Summary, String> {
                 .to_owned(),
         );
     }
+    // Both cargo commands build into this one directory, set explicitly
+    // (CARGO_TARGET_DIR overrides a configured `build.target-dir`), so the
+    // fleetctl the suite drives is the one just built.
+    let target_dir = resolve_target_dir(repo_root, std::env::var_os("CARGO_TARGET_DIR"));
     let mut command = Command::new("cargo");
-    command.current_dir(repo_root);
+    command
+        .current_dir(repo_root)
+        .env("CARGO_TARGET_DIR", &target_dir);
     if live {
         eprintln!("==> building fleetctl for the live suite");
         let status = Command::new("cargo")
             .current_dir(repo_root)
+            .env("CARGO_TARGET_DIR", &target_dir)
             .args(["build", "--locked", "-p", "fleetctl"])
             .status()
             .map_err(|error| format!("cargo build could not run: {error}"))?;
         if !status.success() {
             return Err("building fleetctl failed".to_owned());
         }
-        let fleetctl = resolve_target_dir(repo_root, std::env::var_os("CARGO_TARGET_DIR"))
+        let fleetctl = target_dir
             .join("debug")
             .join(format!("fleetctl{}", std::env::consts::EXE_SUFFIX));
         command.env(FLEETCTL_VAR, fleetctl);
