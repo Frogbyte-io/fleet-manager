@@ -73,7 +73,7 @@ A Lab image must contain:
 
 ## First run
 
-The walkthrough builds a linked clone of an existing cloud-image template, promotes it, and leases a guest from it. Every command uses `--output json`, the machine-readable form agents use too. Set the two account IDs first:
+The walkthrough builds a linked clone of an existing cloud-image template, promotes it, and leases a guest from it. Every command uses `--output json`, the machine-readable form agents use too. It prints the resource itself (so `jq -r .id`), or a page with `items` for a list. Set the two account IDs first:
 
 ```sh
 BUILD_ACCOUNT=<build-account-id>
@@ -109,7 +109,7 @@ Recipes are legacy-JSON Packer templates with exactly one `proxmox-iso` or `prox
 
 What the live runs taught:
 
-- **`proxmox_url` must end in `/api2/json`.** The plugin does not append it. Without it, PVE answers `500 no such file '/cluster/resources'`, which looks like a permission error. Fleet also uses this URL to pick the build's account: it must equal `https://<account host>:<account port>/api2/json`.
+- **`proxmox_url` must end in `/api2/json`.** The plugin does not append it. Without it, PVE answers `500 no such file '/cluster/resources'`, which looks like a permission error. Fleet also uses this URL to pick the build's account: it must equal `https://<account host>:<account port>/api2/json`, or `https://<account host>/api2/json` when the account's port is 443. A trailing `/` is ignored.
 - **Set `"scsi_controller": "virtio-scsi-pci"` for clones of cloud-image templates.** The plugin default is `lsi`. The clone then hangs in its initramfs, and the shutdown before template conversion times out with "VM quit/powerdown failed - got timeout".
 - **`"communicator": "none"` works for a plain clone-to-template.** Add provisioners and an SSH communicator only when you change the guest. Then the guest needs DHCP on its bridge.
 - **Do not add `disks` to a clone just to choose storage.** The plugin adds clone `disks` after the source's disks, so you get an extra disk. A clone without `disks` keeps the source template's storage.
@@ -122,8 +122,8 @@ What the live runs taught:
 ```sh
 fleetctl --output json images create --name lab-base --description "Ubuntu base for Lab" \
   --node pve1 --storage-pool local-lvm --source clone < lab-base.json \
-  | jq -r .data.id                         # the recipe id
-fleetctl --output json images publish <recipe-id> | jq -r .data.id   # the version id
+  | jq -r .id                         # the recipe id
+fleetctl --output json images publish <recipe-id> | jq -r .id   # the version id
 ```
 
 The flags must appear in exactly this order. `--node` and `--source` must match the builder. A clone without `disks` cannot show its storage, so `--storage-pool` is your declaration of the source template's storage, and Fleet cannot verify it. With `disks`, every disk must name that pool. A mismatch fails the build with `target_snapshot_mismatch`.
@@ -136,9 +136,9 @@ Publishing freezes the content as an immutable version, identified by its digest
 fleetctl --output json images build <version-id> --account "$BUILD_ACCOUNT" --wait --timeout 3600
 ```
 
-- Pass `--account` when more than one account matches the recipe's `proxmox_url`. Otherwise the build fails with `target_account_missing`.
+- Without `--account`, exactly one account must match the recipe's `proxmox_url`. With none or several, the build fails with `target_account_missing`; pass `--account` to choose among several. An `--account` that does not match the URL fails with `target_account_resolution_failed`.
 - The build's own deadline is four hours. `--timeout` only bounds how long `fleetctl` waits; the default of 300 s is short for a build.
-- **Credentials (pending [PR #285](https://github.com/Frogbyte-io/fleet-manager/pull/285)).** On `dev`, Fleet does not hand Packer the account's token yet. The only path that works is `PROXMOX_USERNAME` (the token ID) and `PROXMOX_TOKEN` in the controller's own environment. Every build then shares that one credential, and Fleet's trust gate does not cover it. Use it on a test host only. After #285, each build gets its account's token in Packer's child environment, and an account with an unconfirmed fingerprint is refused (`target_account_untrusted`).
+- **Credentials.** Each build gets its account's token ID and secret as `PROXMOX_USERNAME` and `PROXMOX_TOKEN` in Packer's child environment, and nowhere else. Do not set `PROXMOX_*` in the controller's environment: Fleet removes every ambient `PROXMOX_*` variable from Packer's environment, including the version probes', so a build never uses a credential you did not give its account. An account whose fingerprint you have not confirmed is refused after the version checks and before `packer validate` or the build run (`target_account_untrusted`), and so is an account without a stored token (`account_credential_missing`). Other secret recipe variables travel separately: the build request's `secretVars` (API only) name secret-store references, which Fleet resolves into a `-var-file` in the build's work directory (`<FLEET_DATA_DIR>/image-builds/<operation-id>/`) and deletes with it. Fleet does not restrict that file's permissions itself; it gets the controller's umask. Keep `FLEET_DATA_DIR` readable by the controller's user only (for example `chmod 700`).
 
 Read the immutable build record:
 
@@ -149,9 +149,17 @@ fleetctl --output json images build-show <build-id>
 
 The record holds the content digest, the Packer and plugin versions, the account, the node, the storage pool, the `outcome`, a `reason` on failure, and the built `template` (node and VMID) on success. Packer's output never enters the record.
 
-Common reasons: `version_gate` and `plugin_version_gate` (Packer or plugin outside the pins), `validate_failed` (`packer validate` refused the recipe), `build_failed`, `artifact_missing` (Packer reported no template on the version's node), and `deadline_killed`.
+Common reasons: `version_gate` and `plugin_version_gate` (Packer or plugin outside the pins), `target_account_untrusted` and `account_credential_missing` (see Credentials above), `validate_failed` (`packer validate` refused the recipe), `build_failed`, `artifact_missing` (Packer reported no template on the version's node), and the cancel and deadline reasons below.
 
-**Cancel and deadline.** On `dev`, cancelling a build (`fleetctl operations cancel <operation-id>`) or hitting its deadline kills Packer. The plugin removes its in-progress VM only when Packer is interrupted, so a killed build can leave that VM at the recipe's `vm_id`. Fleet does not check the host afterwards. Look for it, and remove it by hand if it is there (it is not a template yet). Graceful interrupt is **pending** ([PR #283](https://github.com/Frogbyte-io/fleet-manager/pull/283)): Packer gets SIGINT, up to 180 s to clean up, and only then a kill. The record then tells `deadline_interrupted` (clean) apart from `deadline_killed` (host state unknown).
+**Cancel and deadline.** Cancelling a build (`fleetctl operations cancel <operation-id>`) or hitting its deadline interrupts Packer the way Ctrl-C does (SIGINT). The plugin then stops and deletes its in-progress VM. Packer gets up to 180 s for that, and is killed only if it is still running. Fleet trusts only Packer's own "Cleanly cancelled builds" report; it does not check the host itself. The record's `reason` says what happened:
+
+- `cancelled`: you cancelled, and Packer reported a clean cancel.
+- `cancelled_unverified`: you cancelled, and Packer did not report a clean cancel.
+- `deadline_interrupted`: the deadline interrupted Packer, and it reported a clean cancel.
+- `deadline_interrupted_unverified`: the deadline interrupted Packer, and it exited within the grace period without reporting a clean cancel.
+- `deadline_killed`: Packer was killed after the grace period. Host state is unknown.
+
+After any of the `_unverified` reasons or `deadline_killed`, the in-progress VM may still be at the recipe's `vm_id`. Look for it, and remove it by hand if it is there (it is not a template yet). A build that finished before the interrupt took effect keeps its template and succeeds.
 
 ### 4. Promote
 
@@ -166,31 +174,44 @@ Then grant `FleetLab` on the new template's VMID (`/vms/8100` here), as in [toke
 ### 5. Create and publish a Lab template
 
 ```sh
-fleetctl --output json lab create --name lab-base --description "Disposable Ubuntu guest" \
+fleetctl --output json lab template-create --name lab-base --description "Disposable Ubuntu guest" \
   --image-version <version-id> --cores 2 --memory 2048 --disk 20 \
   --probe guest_agent --readiness-deadline 600 --ttl 3600 --cleanup destroy \
-  | jq -r .data.id                         # the template id
-fleetctl --output json lab publish <template-id> | jq -r .data.id    # the template version id
+  | jq -r .id                         # the template id
+fleetctl --output json lab publish <template-id> | jq -r .id    # the template version id
 ```
 
 - A template can pin only a promoted image version.
-- From the CLI, use `--probe guest_agent`. The `ssh_exec` probe needs a readiness command and `project_ready` needs a bootstrap project; `fleetctl lab create` sets neither, so create those templates through `POST /api/v1/lab/templates`. The SSH settings (`sshUser` root, `sshPort` 22, `sshTrustMode` tofu) also take their defaults from the CLI.
+- From the CLI, use `--probe guest_agent`. The `ssh_exec` probe needs a readiness command and `project_ready` needs a bootstrap project; `fleetctl lab template-create` sets neither, so create those templates through `POST /api/v1/lab/templates`. The SSH settings (`sshUser` root, `sshPort` 22, `sshTrustMode` tofu) also take their defaults from the CLI.
 - The clone keeps the image template's hardware today. The template's cores, memory, and disk are recorded but not applied to the guest.
 - `--readiness-deadline` is 1 to 3600 seconds, `--ttl` 1 to 2592000 seconds.
-
-The one-command `fleetctl lab create/status/exec/destroy` workflow is **pending** (FM-720, [#259](https://github.com/Frogbyte-io/fleet-manager/issues/259)). Its command names may replace the ones in steps 5 and 6.
+- `lab create --name …` still creates a template. It is a deprecated alias of `lab template-create`; use `template-create` in new scripts. `lab create <template-version-id>` now creates a lease (step 6).
 
 ### 6. Lease, provision, and use
 
+One command creates the lease and provisions it:
+
 ```sh
-fleetctl --output json lab lease <template-version-id> --purpose "first run" | jq -r .data.id   # the lease id
-fleetctl --output json lab provision-lease <lease-id> --account "$LAB_ACCOUNT" | jq -r .data.id # the operation id
+fleetctl --output json lab create <template-version-id> --purpose "first run" \
+  --account "$LAB_ACCOUNT" --wait --timeout 900   # prints the lease; its id is the lease id
+fleetctl --output json lab status <lease-id>
+```
+
+- `--purpose` is required. `--project <id>` ties the lease to a project.
+- Without `--account`, `lab create` uses the only trusted account (one with a confirmed fingerprint). With none or more than one, pass `--account`. `fleetctl` picks that account before it creates the lease, so finding none or several leaves no lease behind. Nothing checks an explicit `--account` first: if the provision request is refused after the lease was created, the lease stays `requested`. Release it with `lab destroy <lease-id>`.
+- `--wait` polls until the lease is `ready`, or ends in `failed`, `releasing`, `released`, or `cleanup_failed`. It exits non-zero unless the lease is `ready`. `--timeout` bounds the wait (default 900 s). Without `--wait`, the command prints the lease as it is right after the provision was queued.
+- `lab status` shows the lease with its guest: `provisionState`, `node`, `vmid`, `address` (for example `192.0.2.50`), `machineId`, `endpointId`, and `failedStep` when provisioning failed.
+
+The two-step form still works:
+
+```sh
+fleetctl --output json lab lease <template-version-id> --purpose "first run" | jq -r .id   # the lease id
+fleetctl --output json lab provision-lease <lease-id> --account "$LAB_ACCOUNT" | jq -r .id # the operation id
 fleetctl --output json operations get <operation-id>
-fleetctl --output json lab leases | jq '.items[] | select(.id == "<lease-id>") | {state, expiresAt}'
 fleetctl --output json lab provisions
 ```
 
-The lease moves through `provisioning`, `booting`, and `bootstrapping` to `ready`. The provision record shows the node, the VMID, and the guest's address (`guestIpv4`, for example `192.0.2.50`). The guest is named `fm-lab-<record-id>` in PVE.
+The lease moves through `provisioning`, `booting`, and `bootstrapping` to `ready`. The provision record shows the node, the VMID, and the guest's address (`guestIpv4`). The guest is named `fm-lab-<record-id>` in PVE.
 
 At `bootstrapping`, the controller trusts the guest's SSH host key on first contact (`tofu`) and registers a temporary Fleet machine tagged `lab`, in the groups `lab-provision:<id>` and `lab-lease:<id>`. Find it with:
 
@@ -198,7 +219,16 @@ At `bootstrapping`, the controller trusts the guest's SSH host key on first cont
 fleetctl --output json machines list --tag lab
 ```
 
-Lab exec through the lease (`fleetctl lab exec`) is **pending** (FM-720). Until then, run commands on that machine through the normal machine surfaces.
+Run a command on the guest through the lease:
+
+```sh
+fleetctl --output json lab exec <lease-id> --wait --timeout 120 -- uname -a
+```
+
+- The words after `--` are shell-quoted and run as one command over SSH on the lease's Lab machine, through the controller's SSH agent. Output has the same size limits and redaction as machine exec.
+- The lease must be `ready` and unexpired, both when you ask and when the command runs. The command is at most 64 KiB. `--timeout` is the command's deadline, 1 to 900 seconds (default 60).
+- With `--wait`, `fleetctl` prints `exitCode`, `stdout`, `stderr`, and whether either was truncated, and exits with the remote command's exit code (1 if the command did not run; `reason` and `detail` say why). It waits at most `--timeout` plus 60 seconds. If the operation has not finished by then, `fleetctl` prints an error naming the operation and exits 1 like any other CLI error, so an exit code of 1 does not always come from the remote command. Read the result later with `fleetctl --output json operations get <operation-id>`. Without `--wait`, it prints the queued `lab.exec` operation; read it with `fleetctl --output json operations get <operation-id>`.
+- It needs the `lab.exec` permission. The request is audited (`lab_exec_requested`) without the command text. The queued `lab.exec` operation does store the command in its payload, in the controller's database, though `operations get` does not show the payload. Do not put secrets on the command line.
 
 The TTL starts at `ready`. Extend it, up to 30 days after the lease was created:
 
@@ -206,36 +236,36 @@ The TTL starts at `ready`. Extend it, up to 30 days after the lease was created:
 fleetctl --output json lab extend <lease-id> --seconds 3600
 ```
 
-### 7. Release
+### 7. Destroy
 
 ```sh
-fleetctl --output json lab release <lease-id>
+fleetctl --output json lab destroy <lease-id> --wait
 ```
 
-Release moves the lease to `releasing` and queues one `lab.cleanup` operation. With the default `destroy` strategy, cleanup stops and destroys the guest, removes the Lab machine record, and marks the lease `released`.
+`lab destroy` releases the lease: it moves to `releasing`, and one `lab.cleanup` operation is queued. With the default `destroy` strategy, cleanup stops and destroys the guest, removes the Lab machine record, and marks the lease `released`. `--wait` polls until the lease is `released` or `cleanup_failed`, and exits non-zero unless it is `released`. `--timeout` bounds the wait (default 900 s). `fleetctl lab release <lease-id>` does the same without waiting.
 
-`fleetctl --output json lab release <lease-id> --keep` needs the elevated `lab.keep` permission. It releases the lease and leaves the guest and its machine record in place, outside automatic cleanup. From then on the guest is yours to remove.
+`fleetctl --output json lab destroy <lease-id> --keep` (or `lab release <lease-id> --keep`) needs the elevated `lab.keep` permission. It releases the lease and leaves the guest and its machine record in place, outside automatic cleanup. From then on the guest is yours to remove.
 
 ## Operations
 
 ### Expiry and the sweeper
 
-On `dev`, nothing sweeps on its own. An expired `ready` lease stays `ready` until someone runs:
+The controller runs a sweeper every `FLEET_LAB_SWEEP_INTERVAL_SECONDS` seconds (TOML `lab_sweep_interval_seconds`; default 60; `0` disables it). Each tick:
+
+1. releases expired `ready` leases;
+2. compensates leases stuck in `provisioning`, `booting`, or `bootstrapping` once 10 minutes have passed since their readiness deadline, or once their maximum lifetime is reached: to `releasing` if a guest was allocated, otherwise to `failed`. A `failed` lease whose provision still holds a guest moves to `releasing` at once. Each compensation is audited as `lab_lease_stuck_compensated`;
+3. queues the `lab.cleanup` of every `releasing` lease whose next attempt is due. That covers retries after a failed attempt, and a release whose cleanup was never queued;
+4. reports orphan guests (see [Orphans](#orphans)).
+
+The sweeper runs as the controller and never talks to Proxmox except to list guests for step 4. A step that fails for one lease is logged (`lab sweeper: …`) and retried on the next tick; the other leases still run. All deadlines and attempt counts live in the database, so a restarted controller continues where it stopped.
+
+With the sweeper disabled, nothing expires on its own. Run the manual sweep from a timer instead:
 
 ```sh
 fleetctl --output json lab sweep
 ```
 
-The sweep moves each expired lease to `releasing` and queues its cleanup. Run it from a timer until the sweeper merges.
-
-**Pending ([PR #286](https://github.com/Frogbyte-io/fleet-manager/pull/286), FM-716).** The controller runs a sweeper every `FLEET_LAB_SWEEP_INTERVAL_SECONDS` seconds (TOML `lab_sweep_interval_seconds`; default 60; `0` disables it, and `lab sweep` stays available). Each tick:
-
-1. releases expired `ready` leases;
-2. compensates provisions stuck more than 10 minutes past their readiness deadline, or past their maximum lifetime: to `releasing` if a guest was allocated, otherwise to `failed`;
-3. queues every due cleanup retry, and repairs a release whose cleanup was never queued;
-4. reports orphan guests (see [Orphans](#orphans)).
-
-All deadlines and attempt counts live in the database, so a restarted controller continues where it stopped.
+`lab sweep` does step 1 only: it moves each expired lease to `releasing` and queues its cleanup. It does not compensate stuck leases, retry cleanups, or look for orphans.
 
 ### Cleanup retries and `cleanup_failed`
 
@@ -246,7 +276,7 @@ fleetctl --output json lab leases | jq '.items[] | select(.state == "releasing" 
   | {id, state, cleanup, cleanupAttempts, cleanupNextAt}'
 ```
 
-On `dev`, nothing queues the retry for you. Run `fleetctl --output json lab release <lease-id>` again once `cleanupNextAt` has passed. An earlier repeat queues nothing, so it cannot burn attempts. The sweeper does this automatically (pending, #286).
+The sweeper queues the next attempt once `cleanupNextAt` has passed. With the sweeper disabled, run `fleetctl --output json lab release <lease-id>` again after that time. An earlier repeat queues nothing, so it cannot burn attempts.
 
 After five failed attempts the lease becomes `cleanup_failed` and Fleet stops retrying. An audit event records why, and the node and VMID the lease last knew:
 
@@ -283,7 +313,13 @@ To resolve it:
 
    The lease goes back to `releasing` and one new `lab.cleanup` attempt is queued at once. A guest that is already gone counts as destroyed, so a guest you removed by hand resolves the lease to `released`, and the cleanup removes the guest's Lab machine record. Fleet still has to ask the account's PVE API to learn that the guest is gone, so removing it by hand is not enough on its own: restore the account's trust (a confirmed fingerprint) and its connectivity first, or the new attempt fails like the last ones. If you cannot, leave the lease `cleanup_failed`. `--wait` waits for that one attempt and exits non-zero unless the lease ended `released`. Without `--wait` the command prints the queued operation.
 
-   **Exception: leases provisioned before FM-713.** Their provision record has no Proxmox account (and, for some, no node), and cleanup refuses such a lease before it looks for the guest. A re-arm therefore returns it to `cleanup_failed`, even after you removed the guest by hand. Destroy that guest by hand on the host and do not re-arm the lease: it stays `cleanup_failed` as the record, because `lab release` (with any strategy) refuses that state.
+   **Exception: leases provisioned before FM-713.** Their provision record has no Proxmox account (and, for some, no node), so every `destroy` attempt fails before it looks for the guest. Removing the guest by hand does not change that, so a plain re-arm only spends another round: the lease stays `releasing` through five failed attempts, with 1, 2, 4, and 8 minutes between them (about 15 minutes in all), and then returns to `cleanup_failed`. The way out is the `keep` strategy, which releases a lease without touching Proxmox:
+
+   1. Destroy the guest by hand on the host (`qm config <vmid>` first, as above).
+   2. Re-arm with `fleetctl --output json lab cleanup-retry <lease-id> --wait`. Its one attempt fails, and the lease is `releasing`, backing off.
+   3. While it is still `releasing`, run `fleetctl --output json lab release <lease-id> --keep` (needs `lab.keep`). The next attempt, which the sweeper queues once `cleanupNextAt` passes, takes the `keep` path and marks the lease `released`. With the sweeper disabled, repeat the same command after `cleanupNextAt`. The `keep` path leaves the Lab machine record in place; remove it yourself if you no longer need it.
+
+   If the round runs out before step 3, the lease is `cleanup_failed` again; re-arm and try step 3 once more. Leaving the lease `cleanup_failed` instead is also fine: it stays as the record, because `lab release` (with any strategy) refuses that state.
 
 The re-arm needs `lab.lease` on the lease and `operation.create`, as a release does; the controller checks both before it changes the lease. It is audited: `lab_lease_cleanup_rearm_requested` is recorded before the change, and a re-arm that cannot record it fails without changing the lease. `lab_lease_cleanup_rearmed` is recorded once the change is made, but only best effort, so do not rely on finding it; the requested event is the audit of record. It grants a fresh round of five attempts, with the backoff restarting at one minute. A failed attempt backs off as before, and the lease returns to `cleanup_failed` after the round. `cleanupAttempts` keeps counting across rounds: 5 just after the re-arm, and 10 if the new round is exhausted too. A lease that is not `cleanup_failed` when the request arrives is refused with `400 invalid_request`. If the lease changes between that check and the re-arm (another retry, release or sweep won the race), the request is refused with `409 conflict` and changes nothing; read the lease again before retrying.
 
@@ -295,17 +331,17 @@ Until you re-arm it, `cleanup_failed` stays put: `lab release` refuses it, and F
 
 An orphan is a Fleet-named guest (`fm-lab-*`) that no live lease or standalone provision owns.
 
-On `dev`, find them by hand. Compare the account's guests with the provision records:
+Each sweeper tick lists the `fm-lab-*` QEMU guests on every trusted account. A guest is owned when its provision record names that account and VMID, and the record is standalone or its lease still links back to that same record (a lease whose provision link names another record does not vouch for this guest). Such a lease owns the guest in any state but `released` or `failed`, and also when it was released with `keep`. The sweeper reports each unowned guest once per controller run, as the audit event `lab_orphan_guest` (resource: the guest's name; facts: `accountId`, `node`, `vmid`) and a log line (`lab sweeper: guest … has no live Lab owner`). A restarted controller reports it again.
+
+```sh
+fleetctl --output json audit list --action lab.lease
+```
+
+The sweeper skips an account it cannot read (unconfirmed, no stored token, or unreachable) without a log line. A controller without a secret store skips step 4 entirely. For such an account, without a secret store, or with the sweeper disabled, find orphans by hand. Compare the account's guests with the provision records:
 
 ```sh
 fleetctl --output json proxmox guests <lab-account-id>
 fleetctl --output json lab provisions
-```
-
-**Pending (#286).** Each sweeper tick lists the `fm-lab-*` guests on every trusted account. It reports each unowned guest once per controller run, as the audit event `lab_orphan_guest` (account, node, VMID) and a log line:
-
-```sh
-fleetctl --output json audit list --action lab.lease
 ```
 
 Fleet **never** deletes an orphan. To remove one:
@@ -353,7 +389,8 @@ What Fleet guarantees on `dev`:
 - **Adopt only its own guest.** On a re-run, a guest already at the recorded VMID is adopted only if it carries the record's name (`fm-lab-<record-id>`). Anything else there is a conflict, and Fleet touches nothing.
 - **Owed cleanup is not forgotten.** A failed or cancelled provision that allocated a guest moves its lease to `releasing`. Cleanup retries five times, then the lease becomes `cleanup_failed` with an audit event that names the guest.
 - **Cleanup refuses templates.** Cleanup refuses any VMID that is a promoted image's recorded build artifact, or that PVE reports as a template. It checks the template state before the stop and again after it. PVE has no conditional delete, so a guest converted to a template outside Fleet after the last check can still be deleted. Fleet never reserves such a VMID as a clone target.
-- **No credentials to unconfirmed hosts.** No Proxmox operation sends a token to an account whose fingerprint you have not confirmed. Image builds on `dev` are the exception until #285 merges (see [Build](#3-build)).
+- **No credentials to unconfirmed hosts.** No Proxmox operation sends a token to an account whose fingerprint you have not confirmed. That includes image builds: Packer gets the build account's token only after that check (see [Build](#3-build)). Packer's own connection does not pin that fingerprint, though: with `insecure_skip_tls_verify` it would send the token to whatever answers at the recipe's URL. Pinning is **pending** ([#284](https://github.com/Frogbyte-io/fleet-manager/issues/284)).
+- **Recovery without an operator.** The sweeper expires leases, compensates stuck provisions, and queues due cleanups from what the database holds. After a controller crash or restart, it continues on its next tick.
 - **Builds leave records.** Every build has an immutable record, written before Packer runs and completed with its outcome.
 
 What Fleet never does:
@@ -364,9 +401,8 @@ What Fleet never does:
 
 Not yet guaranteed:
 
-- **After a controller crash, on `dev`.** A lease stuck mid-provision, an expired lease, or a cleanup retry waits for an operator (`lab sweep`, `lab release`) until the sweeper merges (#286).
 - **The failure-injection suite.** The suite that interrupts the controller at every lifecycle transition and checks these guarantees is **pending** (FM-741, [#262](https://github.com/Frogbyte-io/fleet-manager/issues/262)).
-- **Cancelled builds.** Until #283 merges, a cancelled or timed-out build can leave its in-progress VM on the host.
+- **Cancelled builds leave a clean host.** Fleet relies on Packer's clean-cancel report and does not check the host. A build that ends `cancelled_unverified`, `deadline_interrupted_unverified`, or `deadline_killed` can leave its in-progress VM on the host (see [Build](#3-build)).
 
 ## Out of scope
 
