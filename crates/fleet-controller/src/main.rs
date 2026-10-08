@@ -368,10 +368,15 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             let with_apply: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 std::sync::Arc::new(fleet_controller::apply::ApplyDispatch::new(
                     with_ready.clone(),
-                    std::sync::Arc::new(fleet_controller::apply::ApplyExecutor::new(
-                        worker_operations.clone(),
-                        with_ready.clone(),
-                    )),
+                    std::sync::Arc::new(
+                        fleet_controller::apply::ApplyExecutor::new(
+                            worker_operations.clone(),
+                            with_ready.clone(),
+                        )
+                        .with_projects(std::sync::Arc::new(
+                            fleet_storage_sqlite::ProjectRepository::new(store.pool().clone()),
+                        )),
+                    ),
                 ))
             };
             // The source executor handles the FM-403 kinds over the git

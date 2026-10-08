@@ -75,6 +75,10 @@ struct PlannedActionPayload {
 pub struct ApplyExecutor {
     operations: Arc<Operations>,
     inner: Arc<dyn OperationExecutor>,
+    /// Resolves a `checkout:<identity>` difference to its project, whose
+    /// stored fetch form makes the clone URL. Absent, the default (https)
+    /// fetch form applies.
+    projects: Option<Arc<dyn fleet_application::project::ProjectPort>>,
 }
 
 impl ApplyExecutor {
@@ -83,7 +87,39 @@ impl ApplyExecutor {
     /// through it in-process.
     #[must_use]
     pub fn new(operations: Arc<Operations>, inner: Arc<dyn OperationExecutor>) -> Self {
-        Self { operations, inner }
+        Self {
+            operations,
+            inner,
+            projects: None,
+        }
+    }
+
+    /// Resolves clone targets through the project registry so the clone
+    /// uses each project's stored fetch form.
+    #[must_use]
+    pub fn with_projects(
+        mut self,
+        projects: Arc<dyn fleet_application::project::ProjectPort>,
+    ) -> Self {
+        self.projects = Some(projects);
+        self
+    }
+
+    /// The fetchable URL for a `checkout:<identity>` difference.
+    async fn clone_url(&self, identity: &str) -> Result<String, String> {
+        let fetch = match &self.projects {
+            Some(projects) => match projects.find_by_remote(identity).await {
+                Ok(Some(project)) => project.fetch,
+                Ok(None) => {
+                    return Err(format!(
+                        "invalid_project_remote: no project is registered for {identity}"
+                    ));
+                }
+                Err(error) => return Err(format!("project lookup failed: {error}")),
+            },
+            None => fleet_core::RemoteFetch::default(),
+        };
+        crate::ready::clone_remote(identity, &fetch)
     }
 }
 
@@ -729,10 +765,11 @@ impl ApplyExecutor {
                 })
             }
             "projects.clone" => {
-                let remote = difference
+                let identity = difference
                     .identity
                     .strip_prefix("checkout:")
                     .unwrap_or_default();
+                let remote = self.clone_url(identity).await?;
                 serde_json::json!({
                     "machineId": payload.machine_id,
                     "endpointId": payload.endpoint_id,

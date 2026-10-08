@@ -703,7 +703,7 @@ enum FrogenvProbe {
 /// (`host[:port]/path`). Parsed bare, its port colon would read as an scp
 /// separator and the port would become a path segment, so a bare identity is
 /// read as an https remote. A full URL or scp spelling is parsed as written.
-fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, String> {
+pub(crate) fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, String> {
     // An `@` before the first `/` is a login (an scp or ssh spelling); one
     // later is part of an identity's path.
     let login = remote
@@ -720,7 +720,10 @@ fn parse_payload_remote(remote: &str) -> Result<fleet_core::NormalizedRemote, St
 /// The URL the clone step hands to git, derived from the payload's remote
 /// (normally the stored normalized identity; see
 /// [`fleet_core::NormalizedRemote::clone_url`]).
-fn clone_remote(remote: &str, fetch: &fleet_core::RemoteFetch) -> Result<String, String> {
+pub(crate) fn clone_remote(
+    remote: &str,
+    fetch: &fleet_core::RemoteFetch,
+) -> Result<String, String> {
     fetch
         .validate()
         .map_err(|detail| format!("invalid_project_remote: {detail}"))?;
