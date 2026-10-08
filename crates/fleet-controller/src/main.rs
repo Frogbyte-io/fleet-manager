@@ -469,27 +469,34 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
                         store.pool().clone(),
                     ));
+                let build = std::sync::Arc::new(
+                    fleet_controller::images_exec::ImagesExecutor::new(
+                        versions,
+                        std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
+                        secrets.clone(),
+                        config.data_dir.join("image-builds"),
+                    )
+                    // #272: each build gets its own account's token, in
+                    // Packer's child environment only; #284: unless the
+                    // version carries the audited insecure-TLS opt-in,
+                    // with the account's confirmed certificate as its
+                    // only TLS root, captured through the shared
+                    // transport.
+                    .with_account_credentials(
+                        proxmox_accounts.clone(),
+                        proxmox_credentials.clone(),
+                        pve_transport.clone(),
+                    ),
+                );
+                // #314: a build that was cut short by a crash or reboot
+                // leaves its work directory, and the owner-only var file in
+                // it, behind. Sweep before the worker claims anything; only
+                // the count is logged.
+                let swept = build.sweep_orphaned_work_dirs(&worker_operations).await;
+                eprintln!("image build work directories removed at startup: {swept}");
                 std::sync::Arc::new(fleet_controller::images_exec::ImagesDispatch::new(
                     with_proxmox.clone(),
-                    std::sync::Arc::new(
-                        fleet_controller::images_exec::ImagesExecutor::new(
-                            versions,
-                            std::sync::Arc::new(fleet_provider_packer::ProcessTransport::new()),
-                            secrets.clone(),
-                            config.data_dir.join("image-builds"),
-                        )
-                        // #272: each build gets its own account's token, in
-                        // Packer's child environment only; #284: unless the
-                        // version carries the audited insecure-TLS opt-in,
-                        // with the account's confirmed certificate as its
-                        // only TLS root, captured through the shared
-                        // transport.
-                        .with_account_credentials(
-                            proxmox_accounts.clone(),
-                            proxmox_credentials.clone(),
-                            pve_transport.clone(),
-                        ),
-                    ),
+                    build,
                 ))
             };
             // The Lab provision executor drives the FM-710 saga's external
