@@ -336,6 +336,7 @@ fn validation_creates_the_state_directory() {
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
+        image_build_proxy: None,
     };
     config
         .validate()
@@ -359,6 +360,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
+        image_build_proxy: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::DataDirUnavailable { .. }));
@@ -378,6 +380,7 @@ fn a_missing_master_key_file_fails_validation() {
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
+        image_build_proxy: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyMissing { .. }));
@@ -397,6 +400,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
+        image_build_proxy: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyNotAFile { .. }));
@@ -422,6 +426,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
+            image_build_proxy: None,
         };
         let error = config.validate().unwrap_err();
         match error {
@@ -445,6 +450,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
+        image_build_proxy: None,
     };
     config
         .validate()
@@ -477,6 +483,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
+        image_build_proxy: None,
     };
     config
         .validate()
@@ -641,10 +648,112 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             lab_artifact_max_bytes: max_bytes,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
+            image_build_proxy: None,
         };
         assert!(matches!(
             config.validate(),
             Err(fleet_config::ConfigError::LabArtifactSettingInvalid { .. })
         ));
+    }
+}
+
+// Image-build proxy (#339) ---------------------------------------------------
+
+#[test]
+fn the_image_build_proxy_is_off_by_default_and_for_an_empty_value() {
+    assert_eq!(
+        fleet_config::load(None, &none_env)
+            .unwrap()
+            .image_build_proxy,
+        None
+    );
+    // A Compose `${VAR:-}` default hands the controller an empty string.
+    let env = env_of(&[
+        ("FLEET_IMAGE_BUILD_PROXY", ""),
+        ("FLEET_IMAGE_BUILD_NO_PROXY", "pve.example.test"),
+    ]);
+    let config = fleet_config::load(None, &env).unwrap();
+    assert_eq!(config.image_build_proxy, None);
+    assert!(
+        config
+            .summary()
+            .contains("image_build_proxy = <unset; builds connect directly>")
+    );
+}
+
+#[test]
+fn the_image_build_proxy_layers_from_file_then_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        "version = 1\nimage_build_proxy = \"http://file-proxy.example.test:3128\"\nimage_build_no_proxy = \"localhost\"\n",
+    );
+    let config = fleet_config::load(Some(&path), &none_env).unwrap();
+    let proxy = config.image_build_proxy.unwrap();
+    assert_eq!(proxy.url(), "http://file-proxy.example.test:3128");
+    assert_eq!(proxy.no_proxy(), Some("localhost"));
+
+    let env = env_of(&[
+        (
+            "FLEET_IMAGE_BUILD_PROXY",
+            " HTTPS://Env-Proxy.example.test:8443/ ",
+        ),
+        ("FLEET_IMAGE_BUILD_NO_PROXY", ".lan,10.0.0.0/8"),
+    ]);
+    let config = fleet_config::load(Some(&path), &env).unwrap();
+    let proxy = config.image_build_proxy.clone().unwrap();
+    assert_eq!(proxy.url(), "https://Env-Proxy.example.test:8443");
+    assert_eq!(proxy.no_proxy(), Some(".lan,10.0.0.0/8"));
+    let summary = config.summary();
+    assert!(summary.contains("image_build_proxy = https://Env-Proxy.example.test:8443"));
+    assert!(summary.contains("image_build_no_proxy = .lan,10.0.0.0/8"));
+}
+
+#[test]
+fn a_bad_image_build_proxy_is_refused_without_echoing_the_value() {
+    for bad in [
+        "http://user:hunter2@proxy.example.test:3128",
+        "http://:hunter2@proxy.example.test:3128",
+        "http://proxy.example.test:3128/path?token=hunter2",
+        "http://proxy.example.test:3128#hunter2",
+        "socks5://proxy.example.test:1080",
+        "proxy.example.test:3128",
+        "http://",
+        "http://proxy.example.test:0",
+        "http://proxy.example.test:99999",
+        "http://proxy.example.test:",
+        "http://pro xy.example.test",
+        "http://[::1",
+        "http://a:b:c",
+    ] {
+        let entries = [("FLEET_IMAGE_BUILD_PROXY", bad)];
+        let env = env_of(&entries);
+        let error = fleet_config::load(None, &env).unwrap_err();
+        assert!(matches!(error, ConfigError::ImageBuildProxyInvalid { .. }));
+        let text = error.to_string();
+        assert!(text.contains("FLEET_IMAGE_BUILD_PROXY"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("proxy.example"), "{text}");
+        assert!(!format!("{error:?}").contains("hunter2"));
+    }
+    let env = env_of(&[
+        ("FLEET_IMAGE_BUILD_PROXY", "http://proxy.example.test:3128"),
+        ("FLEET_IMAGE_BUILD_NO_PROXY", "a@b"),
+    ]);
+    let error = fleet_config::load(None, &env).expect_err("no_proxy");
+    assert!(error.to_string().contains("FLEET_IMAGE_BUILD_NO_PROXY"));
+}
+
+#[test]
+fn well_formed_image_build_proxies_are_accepted() {
+    for (raw, expected) in [
+        ("http://proxy.example.test", "http://proxy.example.test"),
+        ("http://127.0.0.1:3128/", "http://127.0.0.1:3128"),
+        ("https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443"),
+    ] {
+        let entries = [("FLEET_IMAGE_BUILD_PROXY", raw)];
+        let env = env_of(&entries);
+        let config = fleet_config::load(None, &env).unwrap();
+        assert_eq!(config.image_build_proxy.unwrap().url(), expected);
     }
 }

@@ -274,6 +274,19 @@ async fn serve(leaf: &(CertificateDer<'static>, PrivateKeyDer<'static>)) -> u16 
 /// Runs one build through the executor over the fake CLI, with account
 /// credentials wired or not; answers the build's outcome and reason.
 async fn build(fake_dir: &Path, wired: bool) -> (String, Option<String>) {
+    let (outcome, reason, _) = build_with(fake_dir, wired, None, false).await;
+    (outcome, reason)
+}
+
+/// [`build`], with the operator's proxy configured and the version's
+/// insecure-TLS opt-in on or off; also answers the audit metadata of every
+/// event the build wrote.
+async fn build_with(
+    fake_dir: &Path,
+    wired: bool,
+    proxy: Option<fleet_config::ImageBuildProxy>,
+    insecure: bool,
+) -> (String, Option<String>, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
     let pinned = leaf();
@@ -302,8 +315,12 @@ async fn build(fake_dir: &Path, wired: bool) -> (String, Option<String>) {
         "template_name": "fleet-child-env",
         "communicator": "none",
         "task_timeout": "30s"
-    }]})
-    .to_string();
+    }]});
+    let mut content = content;
+    if insecure {
+        content["builders"][0]["insecure_skip_tls_verify"] = true.into();
+    }
+    let content = content.to_string();
     let recipe = images
         .create(
             &Allow,
@@ -323,12 +340,20 @@ async fn build(fake_dir: &Path, wired: bool) -> (String, Option<String>) {
         .await
         .unwrap();
     let version = images
-        .publish(&Allow, &principal, &recipe.id, 2)
+        .publish_with(
+            &Allow,
+            &principal,
+            &recipe.id,
+            2,
+            fleet_application::images::PublishOptions {
+                allow_insecure_tls: insecure,
+            },
+        )
         .await
         .unwrap();
     let operations = Operations::new(
         Arc::new(OperationRepository::new(store.pool().clone())),
-        audit,
+        audit.clone(),
     );
     operations
         .create(
@@ -374,6 +399,9 @@ async fn build(fake_dir: &Path, wired: bool) -> (String, Option<String>) {
             Arc::new(Token),
             Arc::new(fleet_provider_proxmox::ReqwestPveTransport::new()),
         );
+        if let Some(proxy) = proxy {
+            executor = executor.with_build_proxy(proxy, audit);
+        }
     }
     assert!(
         operations
@@ -381,7 +409,11 @@ async fn build(fake_dir: &Path, wired: bool) -> (String, Option<String>) {
             .await
     );
     let record = repository.get_build(&operation.id).await.unwrap();
-    (record.outcome, record.reason)
+    let audit_texts: Vec<String> = sqlx::query_scalar("SELECT metadata_json FROM audit_events")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    (record.outcome, record.reason, audit_texts)
 }
 
 #[tokio::test]
@@ -459,5 +491,164 @@ async fn without_accounts_wired_packer_gets_only_the_allowlist_and_the_ambient_p
         assert_no_sentinel(name, &env);
         assert_eq!(env, with(baseline(), AMBIENT_PROXMOX), "{name}");
     }
+    mark_ran();
+}
+
+/// The proxy URL the operator configures in these tests, and its direct
+/// list. Distinct from every sentinel.
+const CONFIGURED_PROXY: &str = "http://build-proxy.example.test:3128";
+const CONFIGURED_NO_PROXY: &str = "pve.example.test,.lan";
+
+fn configured_proxy() -> fleet_config::ImageBuildProxy {
+    fleet_config::ImageBuildProxy::parse(CONFIGURED_PROXY, Some(CONFIGURED_NO_PROXY)).unwrap()
+}
+
+/// Every proxy variable, in either case, that a child may carry.
+const PROXY_NAMES: &[&str] = &[
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+fn proxy_vars(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    env.iter()
+        .filter(|(key, _)| PROXY_NAMES.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_configured_proxy_reaches_only_the_build_child_and_is_audited_without_credentials() {
+    let test = "a_configured_proxy_reaches_only_the_build_child_and_is_audited_without_credentials";
+    if rerun_with_sentinels(test) {
+        return;
+    }
+    assert_sentinels_present();
+    let fake = tempfile::tempdir().unwrap();
+    let (outcome, reason, audit) =
+        build_with(fake.path(), true, Some(configured_proxy()), false).await;
+    assert_eq!(outcome, "failed");
+    assert_eq!(reason.as_deref(), Some("build_failed"));
+
+    // The probes and `validate` never connect: no proxy variable at all,
+    // and not the controller's ambient ones either.
+    for name in ["version", "installed", "validate"] {
+        let env = dumped(fake.path(), name);
+        assert_no_sentinel(name, &env);
+        assert_eq!(proxy_vars(&env), BTreeMap::new(), "{name}");
+    }
+    // The build child gets exactly the two Fleet derived from the setting.
+    let build = dumped(fake.path(), "build");
+    assert_no_sentinel("build", &build);
+    assert_eq!(
+        proxy_vars(&build),
+        [
+            ("HTTPS_PROXY".to_owned(), CONFIGURED_PROXY.to_owned()),
+            ("NO_PROXY".to_owned(), CONFIGURED_NO_PROXY.to_owned()),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>()
+    );
+
+    // The hand-off is on the audit ledger, with the credential-free URL.
+    let events: Vec<&String> = audit
+        .iter()
+        .filter(|text| text.contains("image_build_proxy_applied"))
+        .collect();
+    assert_eq!(events.len(), 1, "{audit:?}");
+    assert!(events[0].contains(CONFIGURED_PROXY), "{}", events[0]);
+    // The operation's own intent still gets its outcome.
+    assert!(
+        audit
+            .iter()
+            .filter(|text| text.contains("image.build"))
+            .count()
+            >= 1,
+        "{audit:?}"
+    );
+    for text in &audit {
+        assert!(!text.contains("sentinel"), "{text}");
+    }
+    mark_ran();
+}
+
+#[tokio::test]
+async fn a_proxy_without_a_no_proxy_list_hands_over_only_https_proxy() {
+    let test = "a_proxy_without_a_no_proxy_list_hands_over_only_https_proxy";
+    if rerun_with_sentinels(test) {
+        return;
+    }
+    assert_sentinels_present();
+    let fake = tempfile::tempdir().unwrap();
+    let proxy = fleet_config::ImageBuildProxy::parse(CONFIGURED_PROXY, None).unwrap();
+    let (_, reason, _) = build_with(fake.path(), true, Some(proxy), false).await;
+    assert_eq!(reason.as_deref(), Some("build_failed"));
+    let build = dumped(fake.path(), "build");
+    assert_eq!(
+        proxy_vars(&build),
+        [("HTTPS_PROXY".to_owned(), CONFIGURED_PROXY.to_owned())]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    );
+    mark_ran();
+}
+
+#[tokio::test]
+async fn an_insecure_tls_build_is_refused_while_a_proxy_is_configured() {
+    let test = "an_insecure_tls_build_is_refused_while_a_proxy_is_configured";
+    if rerun_with_sentinels(test) {
+        return;
+    }
+    assert_sentinels_present();
+    let fake = tempfile::tempdir().unwrap();
+    let (outcome, reason, audit) =
+        build_with(fake.path(), true, Some(configured_proxy()), true).await;
+    assert_eq!(outcome, "failed");
+    assert_eq!(reason.as_deref(), Some("proxy_insecure_tls_refused"));
+    // Refused before `validate` and `build`: neither child ran, so no
+    // token and no proxy left the controller.
+    assert!(!fake.path().join("env-validate").exists());
+    assert!(!fake.path().join("env-build").exists());
+    assert!(
+        audit
+            .iter()
+            .all(|text| !text.contains("image_build_proxy_applied"))
+    );
+    // Without a proxy the same insecure build proceeds, and without the
+    // setting no proxy variable arrives.
+    let direct = tempfile::tempdir().unwrap();
+    let (_, reason, _) = build_with(direct.path(), true, None, true).await;
+    assert_eq!(reason.as_deref(), Some("build_failed"));
+    assert_eq!(proxy_vars(&dumped(direct.path(), "build")), BTreeMap::new());
+    mark_ran();
+}
+
+#[tokio::test]
+async fn without_the_setting_no_proxy_variable_reaches_any_child() {
+    let test = "without_the_setting_no_proxy_variable_reaches_any_child";
+    if rerun_with_sentinels(test) {
+        return;
+    }
+    assert_sentinels_present();
+    let fake = tempfile::tempdir().unwrap();
+    let (_, reason, audit) = build_with(fake.path(), true, None, false).await;
+    assert_eq!(reason.as_deref(), Some("build_failed"));
+    for name in SUBCOMMANDS {
+        assert_eq!(
+            proxy_vars(&dumped(fake.path(), name)),
+            BTreeMap::new(),
+            "{name}"
+        );
+    }
+    assert!(
+        audit
+            .iter()
+            .all(|text| !text.contains("image_build_proxy_applied"))
+    );
     mark_ran();
 }

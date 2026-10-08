@@ -16,7 +16,13 @@
 //!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, `FLEET_LAB_MEMORY_OVERCOMMIT`,
 //!    `FLEET_LAB_CPU_OVERCOMMIT`, `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`,
 //!    `FLEET_LAB_ARTIFACTS_DIR`, `FLEET_LAB_ARTIFACT_RETENTION_SECONDS`,
-//!    `FLEET_LAB_ARTIFACT_MAX_BYTES`).
+//!    `FLEET_LAB_ARTIFACT_MAX_BYTES`, `FLEET_IMAGE_BUILD_PROXY`,
+//!    `FLEET_IMAGE_BUILD_NO_PROXY`).
+//!
+//! `FLEET_IMAGE_BUILD_PROXY` (TOML `image_build_proxy`, off by default) is
+//! the explicit proxy Packer image builds may use (#339). It must be a bare
+//! `http(s)://host[:port]`: a value with credentials, a path, a query, or a
+//! fragment fails loading, and the error never repeats the value.
 //!
 //! `FLEET_LAB_SWEEP_INTERVAL_SECONDS` (TOML `lab_sweep_interval_seconds`,
 //! default 60) is the Lab sweeper's interval; `0` disables the background
@@ -89,6 +95,15 @@ pub const DEFAULT_LAB_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// The Lab artifact directory's name under the data directory by default.
 pub const DEFAULT_LAB_ARTIFACTS_SUBDIR: &str = "lab-artifacts";
 
+/// Environment variable holding the proxy image builds may use (#339). Off
+/// when unset or empty.
+pub const IMAGE_BUILD_PROXY_VAR: &str = "FLEET_IMAGE_BUILD_PROXY";
+/// Environment variable holding the hosts an image build reaches directly
+/// even with a proxy configured (`NO_PROXY` syntax).
+pub const IMAGE_BUILD_NO_PROXY_VAR: &str = "FLEET_IMAGE_BUILD_NO_PROXY";
+/// The longest `NO_PROXY` list accepted.
+pub const MAX_IMAGE_BUILD_NO_PROXY_BYTES: usize = 1024;
+
 /// The default listen address: loopback only, because the controller is a
 /// trusted-LAN service and must not face an untrusted network by accident.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
@@ -125,6 +140,128 @@ pub struct ControllerConfig {
     pub lab_artifact_max_bytes: u64,
     /// The Lab placement policy (FM-715).
     pub lab_placement: LabPlacementConfig,
+    /// The proxy image builds may use, when the operator opted in (#339).
+    pub image_build_proxy: Option<ImageBuildProxy>,
+}
+
+/// The proxy Packer image builds may use (#339). Credential-free by
+/// construction: a URL with userinfo is refused when the setting is read,
+/// so everything here may appear in logs, audit metadata, and summaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageBuildProxy {
+    /// `http://host[:port]` or `https://host[:port]`, normalized.
+    url: String,
+    /// The `NO_PROXY` list, when one was configured.
+    no_proxy: Option<String>,
+}
+
+impl ImageBuildProxy {
+    /// Parses and validates the two settings.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the URL is not a bare `http(s)://host[:port]` (userinfo,
+    /// a path, a query, or a fragment are refused) or the list holds
+    /// anything but host-list characters. The error names the setting and
+    /// the rule, never the value.
+    pub fn parse(url: &str, no_proxy: Option<&str>) -> Result<Self, ConfigError> {
+        let invalid = |setting: &'static str, rule: &'static str| {
+            ConfigError::ImageBuildProxyInvalid { setting, rule }
+        };
+        let url = url.trim();
+        let (scheme, rest) = url
+            .split_once("://")
+            .ok_or_else(|| invalid(IMAGE_BUILD_PROXY_VAR, "must start with http:// or https://"))?;
+        let scheme = scheme.to_ascii_lowercase();
+        if scheme != "http" && scheme != "https" {
+            return Err(invalid(
+                IMAGE_BUILD_PROXY_VAR,
+                "must start with http:// or https://",
+            ));
+        }
+        let authority = rest.strip_suffix('/').unwrap_or(rest);
+        if authority.contains('@') {
+            return Err(invalid(
+                IMAGE_BUILD_PROXY_VAR,
+                "must not carry credentials (user:password@); a proxy that needs them is not supported",
+            ));
+        }
+        if authority.contains(['/', '?', '#', '\\']) || authority.chars().any(char::is_whitespace) {
+            return Err(invalid(
+                IMAGE_BUILD_PROXY_VAR,
+                "must be a bare scheme://host[:port], with no path, query, or fragment",
+            ));
+        }
+        let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+            let (host, tail) = bracketed
+                .split_once(']')
+                .ok_or_else(|| invalid(IMAGE_BUILD_PROXY_VAR, "has an unclosed IPv6 bracket"))?;
+            if host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(invalid(
+                    IMAGE_BUILD_PROXY_VAR,
+                    "has an invalid IPv6 address",
+                ));
+            }
+            (format!("[{host}]"), tail.strip_prefix(':'))
+        } else {
+            match authority.split_once(':') {
+                Some((host, port)) => (host.to_owned(), Some(port)),
+                None => (authority.to_owned(), None),
+            }
+        };
+        let host_ok = !host.is_empty()
+            && host.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '[')
+            && host.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':')
+            });
+        if !host_ok || (!authority.starts_with('[') && host.contains(':')) {
+            return Err(invalid(IMAGE_BUILD_PROXY_VAR, "has an invalid host"));
+        }
+        let port = match port {
+            Some(port) => Some(
+                Some(port)
+                    .filter(|port| port.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|port| port.parse::<u16>().ok())
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| invalid(IMAGE_BUILD_PROXY_VAR, "has an invalid port"))?,
+            ),
+            None => None,
+        };
+        let url = match port {
+            Some(port) => format!("{scheme}://{host}:{port}"),
+            None => format!("{scheme}://{host}"),
+        };
+        let no_proxy = match no_proxy.map(str::trim).filter(|list| !list.is_empty()) {
+            None => None,
+            Some(list) => {
+                let list_ok = list.len() <= MAX_IMAGE_BUILD_NO_PROXY_BYTES
+                    && list.chars().all(|c| {
+                        c.is_ascii_alphanumeric()
+                            || matches!(c, '.' | '-' | '_' | ',' | ':' | '*' | '/' | '[' | ']')
+                    });
+                if !list_ok {
+                    return Err(invalid(
+                        IMAGE_BUILD_NO_PROXY_VAR,
+                        "must be a comma-separated host list of letters, digits, and . - _ : * / [ ] (at most 1024 bytes)",
+                    ));
+                }
+                Some(list.to_owned())
+            }
+        };
+        Ok(Self { url, no_proxy })
+    }
+
+    /// The proxy URL, without credentials.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The `NO_PROXY` list, when one is set.
+    #[must_use]
+    pub fn no_proxy(&self) -> Option<&str> {
+        self.no_proxy.as_deref()
+    }
 }
 
 /// The Lab placement policy settings (FM-715).
@@ -168,6 +305,8 @@ struct ConfigFile {
     lab_artifacts_dir: Option<String>,
     lab_artifact_retention_seconds: Option<u64>,
     lab_artifact_max_bytes: Option<u64>,
+    image_build_proxy: Option<String>,
+    image_build_no_proxy: Option<String>,
 }
 
 /// A configuration problem that is safe to print: paths and expected facts,
@@ -256,6 +395,14 @@ pub enum ConfigError {
         /// The observed permission bits.
         mode: u32,
     },
+    /// An image-build proxy setting breaks a rule. Never carries the
+    /// value: a proxy URL can hold credentials.
+    ImageBuildProxyInvalid {
+        /// The setting's environment variable.
+        setting: &'static str,
+        /// The rule it breaks.
+        rule: &'static str,
+    },
     /// A Lab placement setting is not a number in its accepted range.
     LabPlacementInvalid {
         /// The setting as its source names it: the environment variable, or
@@ -271,6 +418,10 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ImageBuildProxyInvalid { setting, rule } => write!(
+                f,
+                "{setting} (or its config-file key) {rule}; the value is not shown"
+            ),
             Self::LabPlacementInvalid {
                 setting,
                 value,
@@ -364,6 +515,7 @@ pub fn process_env() -> EnvLookup<'static> {
 ///
 /// Fails when the file cannot be read or parsed, declares a foreign version,
 /// or the listen setting is not a socket address.
+#[allow(clippy::too_many_lines)]
 pub fn load(
     config_file: Option<&Path>,
     env: EnvLookup<'_>,
@@ -378,6 +530,8 @@ pub fn load(
     let mut lab_artifacts_dir: Option<String> = None;
     let mut lab_artifact_retention_seconds: Option<u64> = None;
     let mut lab_artifact_max_bytes: Option<u64> = None;
+    let mut image_build_proxy: Option<String> = None;
+    let mut image_build_no_proxy: Option<String> = None;
 
     if let Some(path) = config_file {
         let raw = std::fs::read_to_string(path).map_err(|error| ConfigError::FileRead {
@@ -411,6 +565,8 @@ pub fn load(
         lab_artifacts_dir = file.lab_artifacts_dir;
         lab_artifact_retention_seconds = file.lab_artifact_retention_seconds;
         lab_artifact_max_bytes = file.lab_artifact_max_bytes;
+        image_build_proxy = file.image_build_proxy;
+        image_build_no_proxy = file.image_build_no_proxy;
     }
 
     listen = env(LISTEN_VAR).or(listen);
@@ -441,6 +597,8 @@ pub fn load(
         DEFAULT_LAB_ARTIFACT_MAX_BYTES,
     )?;
 
+    let image_build_proxy = layer_image_build_proxy(image_build_proxy, image_build_no_proxy, env)?;
+
     let listen_raw = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     let listen: SocketAddr = listen_raw
         .parse()
@@ -469,7 +627,23 @@ pub fn load(
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
         lab_placement,
+        image_build_proxy,
     })
+}
+
+/// Layers the image-build proxy environment over the file's keys. An empty
+/// value (a Compose `${VAR:-}` default) means off.
+fn layer_image_build_proxy(
+    file_proxy: Option<String>,
+    file_no_proxy: Option<String>,
+    env: EnvLookup<'_>,
+) -> Result<Option<ImageBuildProxy>, ConfigError> {
+    let proxy = env(IMAGE_BUILD_PROXY_VAR).or(file_proxy);
+    let no_proxy = env(IMAGE_BUILD_NO_PROXY_VAR).or(file_no_proxy);
+    match proxy.as_deref().map(str::trim) {
+        Some(url) if !url.is_empty() => Ok(Some(ImageBuildProxy::parse(url, no_proxy.as_deref())?)),
+        _ => Ok(None),
+    }
 }
 
 /// Layers the `FLEET_LAB_*` environment over the file's Lab placement
@@ -688,6 +862,15 @@ impl ControllerConfig {
                 path.display()
             )),
             None => lines.push("master_key_file = <unset; secret store unavailable>".to_owned()),
+        }
+        match &self.image_build_proxy {
+            Some(proxy) => {
+                lines.push(format!("image_build_proxy = {}", proxy.url()));
+                if let Some(no_proxy) = proxy.no_proxy() {
+                    lines.push(format!("image_build_no_proxy = {no_proxy}"));
+                }
+            }
+            None => lines.push("image_build_proxy = <unset; builds connect directly>".to_owned()),
         }
         lines.push(format!(
             "lab_memory_overcommit = {}",

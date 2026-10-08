@@ -26,6 +26,10 @@ services:
       # data volume under /var/lib/fleet/lab-artifacts.
       FLEET_LAB_ARTIFACT_RETENTION_SECONDS: ${FLEET_LAB_ARTIFACT_RETENTION_SECONDS:-604800}
       FLEET_LAB_ARTIFACT_MAX_BYTES: ${FLEET_LAB_ARTIFACT_MAX_BYTES:-67108864}
+      # Opt-in proxy for Packer image builds (#339); empty means off. Never put
+      # credentials in it: the controller refuses a URL that carries them.
+      FLEET_IMAGE_BUILD_PROXY: ${FLEET_IMAGE_BUILD_PROXY:-}
+      FLEET_IMAGE_BUILD_NO_PROXY: ${FLEET_IMAGE_BUILD_NO_PROXY:-}
     volumes:
       - fleet-data:/var/lib/fleet
     secrets:
