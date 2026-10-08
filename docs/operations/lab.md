@@ -198,7 +198,7 @@ fleetctl --output json lab status <lease-id>
 ```
 
 - `--purpose` is required. `--project <id>` ties the lease to a project.
-- Without `--account`, `lab create` uses the only trusted account (one with a confirmed fingerprint). With none or more than one, pass `--account`. It checks this before it creates the lease, so a missing account leaves no lease behind.
+- Without `--account`, `lab create` uses the only trusted account (one with a confirmed fingerprint). With none or more than one, pass `--account`. `fleetctl` picks that account before it creates the lease, so finding none or several leaves no lease behind. Nothing checks an explicit `--account` first: if the provision request is refused after the lease was created, the lease stays `requested`. Release it with `lab destroy <lease-id>`.
 - `--wait` polls until the lease is `ready`, or ends in `failed`, `releasing`, `released`, or `cleanup_failed`. It exits non-zero unless the lease is `ready`. `--timeout` bounds the wait (default 900 s). Without `--wait`, the command prints the lease as it is right after the provision was queued.
 - `lab status` shows the lease with its guest: `provisionState`, `node`, `vmid`, `address` (for example `192.0.2.50`), `machineId`, `endpointId`, and `failedStep` when provisioning failed.
 
