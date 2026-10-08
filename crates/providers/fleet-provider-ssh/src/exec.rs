@@ -250,7 +250,7 @@ fn execute_script_inner(
     deadline: Duration,
 ) -> Result<ExecutionResult, SshProviderError> {
     let started = Instant::now();
-    let config_path = provider.write_config()?;
+    let config_path = provider.write_config(&endpoint.auth)?;
     let blob = encode_metadata(metadata);
 
     let mut command = std::process::Command::new("ssh");
