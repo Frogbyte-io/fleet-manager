@@ -707,8 +707,6 @@ impl Harness {
             .await
     }
 
-    /// FM-715: the executor with placement enabled over the real capacity
-    /// repository.
     /// How many audit intents carry `event` in their metadata. The
     /// operation's completion appends an outcome row to its latest intent,
     /// so outcome rows are not counted.
@@ -723,6 +721,8 @@ impl Harness {
         usize::try_from(count).unwrap()
     }
 
+    /// FM-715: the executor with placement enabled over the real capacity
+    /// repository.
     fn placed_executor(
         &self,
         pve: &Arc<Pve>,

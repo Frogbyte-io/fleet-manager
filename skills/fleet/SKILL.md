@@ -83,7 +83,8 @@ fleetctl --output json lab release <lease-id>
 1. Pick a published template version from `lab templates` (`publishedFrom`).
 2. `lab lease` creates the lease; `lab provision-lease` builds it on the one
    Proxmox account whose cluster holds the template's image, after reserving
-   its CPU, memory, and disk. The provision operation fails with an
+   its CPU, memory, and disk against the node's latest observed capacity (not
+   a live host guarantee: workloads outside Fleet can still use that room). The provision operation fails with an
    explanation when no trusted account holds the template, when several do
    (pass `--account <account-id>` to choose one), when the node lacks
    capacity, or when its capacity cannot be observed or is stale. Report the

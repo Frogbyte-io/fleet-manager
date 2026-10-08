@@ -550,6 +550,40 @@ async fn a_finished_leases_held_row_is_released_not_returned() {
 }
 
 #[tokio::test]
+async fn a_finished_or_unknown_lease_gets_no_new_reservation() {
+    use fleet_core::LeaseState;
+    let (_dir, store) = setup().await;
+    let leases = LeaseRepository::new(store.pool().clone());
+    let capacity = CapacityRepository::new(store.pool().clone());
+    capacity
+        .record_observation("account-1", &observation(16, NOW))
+        .await
+        .unwrap();
+    let policy = PlacementPolicy::default();
+    for finished in [LeaseState::Released, LeaseState::Failed] {
+        let id = lease(&leases).await;
+        let mut ended = leases.get(&id).await.unwrap();
+        ended.state = finished;
+        leases.update(&ended).await.unwrap();
+        let error = capacity
+            .reserve(&request(&id, 1024), &policy, NOW)
+            .await
+            .expect_err("a finished lease reserves nothing");
+        assert!(error.contains("finished"), "{finished:?}: {error}");
+        assert!(
+            capacity.for_lease(&id).await.unwrap().is_none(),
+            "{finished:?}"
+        );
+    }
+    assert!(
+        capacity
+            .reserve(&request("no-such-lease", 1024), &policy, NOW)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn a_failed_lease_whose_guest_was_allocated_still_counts() {
     use fleet_application::lab::{NewProvision, ProvisionPort as _};
     use fleet_core::LeaseState;

@@ -142,6 +142,25 @@ async fn held_totals(
     })
 }
 
+/// Whether a reservation of `lease_id` counts, the rule the held totals
+/// apply: the lease exists, is not `released`, and has not `failed` without
+/// an allocated VMID.
+async fn lease_counts(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lease_id: &str,
+) -> Result<bool, String> {
+    Ok(sqlx::query_scalar(
+        "SELECT l.state != 'released' AND NOT (l.state = 'failed' AND p.vmid IS NULL) \
+         FROM lab_leases l LEFT JOIN lab_provisions p ON p.id = l.provision_id \
+         WHERE l.id = ?1",
+    )
+    .bind(lease_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| format!("read the reservation's lease failed: {error}"))?
+    .unwrap_or(false))
+}
+
 /// Releases `existing` when its lease no longer counts (released, or failed
 /// without an allocated VMID), the same rule the held totals apply, and
 /// answers whether it did.
@@ -150,17 +169,7 @@ async fn release_if_finished(
     existing: &CapacityReservation,
     now: i64,
 ) -> Result<bool, String> {
-    let counts: bool = sqlx::query_scalar(
-        "SELECT l.state != 'released' AND NOT (l.state = 'failed' AND p.vmid IS NULL) \
-         FROM lab_leases l LEFT JOIN lab_provisions p ON p.id = l.provision_id \
-         WHERE l.id = ?1",
-    )
-    .bind(&existing.lease_id)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(|error| format!("read the reservation's lease failed: {error}"))?
-    .unwrap_or(false);
-    if counts {
+    if lease_counts(transaction, &existing.lease_id).await? {
         return Ok(false);
     }
     sqlx::query(
@@ -259,6 +268,14 @@ impl CapacityReservationPort for CapacityRepository {
                 .map_err(|error| format!("commit reservation transaction failed: {error}"))?;
             return Err(format!(
                 "the capacity reservation of lease {} belonged to a finished lease and was released",
+                request.lease_id
+            ));
+        }
+        // A finished lease gets no new reservation: the totals would not
+        // count it, so it would hold capacity no later request sees.
+        if !lease_counts(&mut transaction, &request.lease_id).await? {
+            return Err(format!(
+                "lease {} is finished or unknown; it reserves no capacity",
                 request.lease_id
             ));
         }

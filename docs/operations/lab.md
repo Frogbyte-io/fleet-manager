@@ -316,13 +316,20 @@ Fleet **never** deletes an orphan. To remove one:
 
 ### Capacity
 
-**Pending (FM-715, [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257)).** On `dev` there is no placement and no capacity reservation. The caller picks the account, and nothing stops over-allocation. Capacity refusals and an overcommit policy do not exist yet. Until they do:
+Before a provision takes a VMID, Fleet reserves the template's CPU, memory, and disk on the node that holds the template (FM-715, [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257)). Without `--account`, `lab provision-lease` places the lease on the one trusted account whose cluster holds the pinned template, and refuses when none or several do. The check runs against the node's latest capacity observation, refreshed just before reserving, minus the reservations Fleet already holds there. It is not a live host guarantee: workloads started outside Fleet consume headroom that only a later observation shows.
 
-- The `next-id` range size caps how many Lab guests exist at once.
-- Size the image template's CPU, memory, and disk for the node, because the clone uses the template's hardware.
-- Watch the node and storage with `fleetctl --output json proxmox nodes <account-id>` and PVE's own graphs.
+Refusals fail the provision operation with a reason:
 
-This section will describe refusals and overcommit when FM-715 merges.
+| Reason | Meaning | What to do |
+| --- | --- | --- |
+| `placement_no_candidate`, `placement_ambiguous`, `placement_unresolved` | No trusted account holds the template, several do, or one could not be read | Pass `--account`, or fix the unreadable account |
+| `capacity_unknown` | No usable observation, or it lacks a CPU or memory figure | Check that the account can read node status (`proxmox nodes <account-id>`) |
+| `capacity_stale` | The observation is older than `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`, or dated in the future | Fix the node read or the controller clock |
+| `storage_unknown` | The image's storage pool is unknown, or the observation does not report it | Check the build's storage pool and the token's storage visibility |
+| `insufficient_memory`, `insufficient_cpu`, `insufficient_disk` | The node lacks room after held reservations | Release leases, free the node, or raise the overcommit ratio |
+| `reservation_mismatch` | A resumed provision would now clone on another node or account | Release the lease and request a new one |
+
+`FLEET_LAB_MEMORY_OVERCOMMIT` and `FLEET_LAB_CPU_OVERCOMMIT` (default `1.0`, at most 16) scale the node's total memory and CPU count; disk is never overcommitted. A lease's reservation stops counting once the lease is released, or failed without a guest. A lease in `cleanup_failed` keeps its reservation until `lab cleanup-retry` destroys the guest. [`docs/architecture/lab.md`](../architecture/lab.md) has the exact rule.
 
 ### Artifacts and storage sizing
 
