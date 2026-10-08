@@ -45,6 +45,15 @@ services:
       # credentials in it: the controller refuses a URL that carries them.
       FLEET_IMAGE_BUILD_PROXY: ${FLEET_IMAGE_BUILD_PROXY:-}
       FLEET_IMAGE_BUILD_NO_PROXY: ${FLEET_IMAGE_BUILD_NO_PROXY:-}
+      # Opt-in pool of Fleet-assigned build addresses (#337); empty means off.
+      # With it, `proxmox-clone` builds get a static address and the build
+      # guest no longer chooses where the controller connects. All of CIDR,
+      # range and gateway are required together; DNS is optional.
+      FLEET_IMAGE_BUILD_ADDRESS_POOL: ${FLEET_IMAGE_BUILD_ADDRESS_POOL:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS:-}
+      FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO: ${FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO:-}
     volumes:
       # Runtime state (the SQLite database and friends). Named volume so a
       # `compose down -v` is the explicit destructive act.

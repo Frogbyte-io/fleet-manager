@@ -923,3 +923,81 @@ impl Images {
             })
     }
 }
+
+/// How long an address stays out of allocation after a build that did not
+/// end verifiably (24 hours). Packer removes its VM on a clean failure or
+/// cancel; when it could not report that, the VM may still hold the address.
+pub const BUILD_ADDRESS_QUARANTINE_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
+/// A build address allocation failed (#337).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuildAddressError {
+    /// The pool has too few free addresses for the build.
+    Exhausted,
+    /// The repository failed; the detail is for logs, never for the build
+    /// record.
+    Storage(String),
+}
+
+impl fmt::Display for BuildAddressError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exhausted => f.write_str("the build address pool is exhausted"),
+            Self::Storage(detail) => write!(f, "the build address store failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for BuildAddressError {}
+
+/// The transactional allocation of Fleet-assigned build addresses (#337).
+///
+/// A held address belongs to exactly one live operation. The operation's own
+/// state is authoritative, like the Lab capacity reservations: a held row
+/// whose operation is terminal or unknown no longer counts, so a lost release
+/// can never strand an address, and allocation reclaims such rows in its own
+/// transaction.
+#[async_trait]
+pub trait BuildAddressPort: fmt::Debug + Send + Sync {
+    /// Holds `count` free addresses of `pool` for the operation, in one
+    /// transaction. Asking again for the same operation and count returns
+    /// the addresses it already holds. Addresses released longest ago are
+    /// preferred, so a guest that is still being destroyed is not handed
+    /// straight to the next build.
+    ///
+    /// # Errors
+    /// [`BuildAddressError::Exhausted`] when the pool has fewer free
+    /// addresses than `count`; storage failure otherwise.
+    async fn allocate(
+        &self,
+        operation_id: &str,
+        pool: &fleet_core::BuildAddressPool,
+        count: usize,
+        now_millis: i64,
+    ) -> Result<Vec<std::net::Ipv4Addr>, BuildAddressError>;
+
+    /// Releases every address the operation holds. Idempotent.
+    ///
+    /// With `quarantine`, the addresses also stay out of allocation for
+    /// [`BUILD_ADDRESS_QUARANTINE_MILLIS`]. Use it when the build did not
+    /// end verifiably: Packer may not have removed its VM, which may still
+    /// answer on the address, and the next build would connect to it.
+    ///
+    /// # Errors
+    /// Fails on a storage error.
+    async fn release(
+        &self,
+        operation_id: &str,
+        now_millis: i64,
+        quarantine: bool,
+    ) -> Result<usize, String>;
+
+    /// Releases every held address whose operation is terminal or unknown,
+    /// for startup. The holder died without releasing, so nothing says its
+    /// VM is gone: these addresses are quarantined. Returns how many were
+    /// released.
+    ///
+    /// # Errors
+    /// Fails on a storage error.
+    async fn reconcile(&self, now_millis: i64) -> Result<usize, String>;
+}

@@ -17,7 +17,19 @@
 //!    `FLEET_LAB_CPU_OVERCOMMIT`, `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`,
 //!    `FLEET_LAB_ARTIFACTS_DIR`, `FLEET_LAB_ARTIFACT_RETENTION_SECONDS`,
 //!    `FLEET_LAB_ARTIFACT_MAX_BYTES`, `FLEET_IMAGE_BUILD_PROXY`,
-//!    `FLEET_IMAGE_BUILD_NO_PROXY`).
+//!    `FLEET_IMAGE_BUILD_NO_PROXY`, `FLEET_IMAGE_BUILD_ADDRESS_POOL`,
+//!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE`,
+//!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY`,
+//!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS`,
+//!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO`).
+//!
+//! `FLEET_IMAGE_BUILD_ADDRESS_POOL` (TOML `image_build_address_pool`, off by
+//! default) is the opt-in build address pool (#337): an IPv4 CIDR, with
+//! `..._RANGE` (`first-last`), `..._GATEWAY`, and optionally `..._DNS`. With
+//! it, each `proxmox-clone` image build gets a Fleet-assigned static address
+//! and Fleet, not the build guest, chooses where the communicator connects.
+//! The range, gateway, DNS, and refuse-ISO settings without the CIDR fail
+//! loading, so a typo cannot silently leave the pool off.
 //!
 //! `FLEET_IMAGE_BUILD_PROXY` (TOML `image_build_proxy`, off by default) is
 //! the explicit proxy Packer image builds may use (#339). It must be a bare
@@ -101,6 +113,18 @@ pub const IMAGE_BUILD_PROXY_VAR: &str = "FLEET_IMAGE_BUILD_PROXY";
 /// Environment variable holding the hosts an image build reaches directly
 /// even with a proxy configured (`NO_PROXY` syntax).
 pub const IMAGE_BUILD_NO_PROXY_VAR: &str = "FLEET_IMAGE_BUILD_NO_PROXY";
+/// Environment variable holding the build address pool's CIDR (#337). Off
+/// when unset or empty.
+pub const IMAGE_BUILD_ADDRESS_POOL_VAR: &str = "FLEET_IMAGE_BUILD_ADDRESS_POOL";
+/// The inclusive `first-last` range Fleet hands out from the pool.
+pub const IMAGE_BUILD_ADDRESS_POOL_RANGE_VAR: &str = "FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE";
+/// The gateway handed to build guests.
+pub const IMAGE_BUILD_ADDRESS_POOL_GATEWAY_VAR: &str = "FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY";
+/// Optional DNS servers handed to build guests.
+pub const IMAGE_BUILD_ADDRESS_POOL_DNS_VAR: &str = "FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS";
+/// Whether `proxmox-iso` builds are refused while the pool is set.
+pub const IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO_VAR: &str =
+    "FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO";
 /// The longest `NO_PROXY` list accepted.
 pub const MAX_IMAGE_BUILD_NO_PROXY_BYTES: usize = 1024;
 
@@ -142,6 +166,8 @@ pub struct ControllerConfig {
     pub lab_placement: LabPlacementConfig,
     /// The proxy image builds may use, when the operator opted in (#339).
     pub image_build_proxy: Option<ImageBuildProxy>,
+    /// The build address pool, when the operator opted in (#337).
+    pub image_build_address_pool: Option<fleet_core::BuildAddressPool>,
 }
 
 /// The proxy Packer image builds may use (#339). Credential-free by
@@ -309,6 +335,11 @@ struct ConfigFile {
     lab_artifact_max_bytes: Option<u64>,
     image_build_proxy: Option<String>,
     image_build_no_proxy: Option<String>,
+    image_build_address_pool: Option<String>,
+    image_build_address_pool_range: Option<String>,
+    image_build_address_pool_gateway: Option<String>,
+    image_build_address_pool_dns: Option<String>,
+    image_build_address_pool_refuse_iso: Option<bool>,
 }
 
 /// A configuration problem that is safe to print: paths and expected facts,
@@ -405,6 +436,14 @@ pub enum ConfigError {
         /// The rule it breaks.
         rule: &'static str,
     },
+    /// A build address pool setting breaks a rule (#337). Names the rule,
+    /// never the value.
+    ImageBuildAddressPoolInvalid {
+        /// The setting's environment variable.
+        setting: &'static str,
+        /// The rule it breaks.
+        rule: &'static str,
+    },
     /// A Lab placement setting is not a number in its accepted range.
     LabPlacementInvalid {
         /// The setting as its source names it: the environment variable, or
@@ -423,6 +462,10 @@ impl fmt::Display for ConfigError {
             Self::ImageBuildProxyInvalid { setting, rule } => write!(
                 f,
                 "{setting} (or its config-file key) {rule}; the value is not shown"
+            ),
+            Self::ImageBuildAddressPoolInvalid { setting, rule } => write!(
+                f,
+                "{setting} (or its config-file key): {rule}; the value is not shown"
             ),
             Self::LabPlacementInvalid {
                 setting,
@@ -534,6 +577,7 @@ pub fn load(
     let mut lab_artifact_max_bytes: Option<u64> = None;
     let mut image_build_proxy: Option<String> = None;
     let mut image_build_no_proxy: Option<String> = None;
+    let mut address_pool = AddressPoolSettings::default();
 
     if let Some(path) = config_file {
         let raw = std::fs::read_to_string(path).map_err(|error| ConfigError::FileRead {
@@ -569,6 +613,13 @@ pub fn load(
         lab_artifact_max_bytes = file.lab_artifact_max_bytes;
         image_build_proxy = file.image_build_proxy;
         image_build_no_proxy = file.image_build_no_proxy;
+        address_pool = AddressPoolSettings {
+            cidr: file.image_build_address_pool,
+            range: file.image_build_address_pool_range,
+            gateway: file.image_build_address_pool_gateway,
+            dns: file.image_build_address_pool_dns,
+            refuse_iso: file.image_build_address_pool_refuse_iso,
+        };
     }
 
     listen = env(LISTEN_VAR).or(listen);
@@ -600,6 +651,7 @@ pub fn load(
     )?;
 
     let image_build_proxy = layer_image_build_proxy(image_build_proxy, image_build_no_proxy, env)?;
+    let image_build_address_pool = layer_address_pool(address_pool, env)?;
 
     let listen_raw = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     let listen: SocketAddr = listen_raw
@@ -630,6 +682,90 @@ pub fn load(
             .unwrap_or(DEFAULT_LAB_SWEEP_INTERVAL_SECONDS),
         lab_placement,
         image_build_proxy,
+        image_build_address_pool,
+    })
+}
+
+/// The build address pool settings before layering.
+#[derive(Default)]
+struct AddressPoolSettings {
+    cidr: Option<String>,
+    range: Option<String>,
+    gateway: Option<String>,
+    dns: Option<String>,
+    refuse_iso: Option<bool>,
+}
+
+/// Layers the build address pool environment over the file's keys (#337).
+/// An empty environment value (a Compose `${VAR:-}` default) means unset and
+/// does not override the file. The companion settings without the CIDR are
+/// refused, so a typo cannot leave the pool silently off.
+fn layer_address_pool(
+    file: AddressPoolSettings,
+    env: EnvLookup<'_>,
+) -> Result<Option<fleet_core::BuildAddressPool>, ConfigError> {
+    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let cidr = set(env(IMAGE_BUILD_ADDRESS_POOL_VAR)).or_else(|| set(file.cidr));
+    let range = set(env(IMAGE_BUILD_ADDRESS_POOL_RANGE_VAR)).or_else(|| set(file.range));
+    let gateway = set(env(IMAGE_BUILD_ADDRESS_POOL_GATEWAY_VAR)).or_else(|| set(file.gateway));
+    let dns = set(env(IMAGE_BUILD_ADDRESS_POOL_DNS_VAR)).or_else(|| set(file.dns));
+    let refuse_iso = match set(env(IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO_VAR)) {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => {
+                return Err(ConfigError::ImageBuildAddressPoolInvalid {
+                    setting: IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO_VAR,
+                    rule: "must be true or false",
+                });
+            }
+        },
+        None => file.refuse_iso,
+    };
+    let Some(cidr) = cidr else {
+        let orphan = [
+            (IMAGE_BUILD_ADDRESS_POOL_RANGE_VAR, range.is_some()),
+            (IMAGE_BUILD_ADDRESS_POOL_GATEWAY_VAR, gateway.is_some()),
+            (IMAGE_BUILD_ADDRESS_POOL_DNS_VAR, dns.is_some()),
+            (
+                IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO_VAR,
+                refuse_iso == Some(true),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(setting, present)| present.then_some(setting));
+        return match orphan {
+            Some(setting) => Err(ConfigError::ImageBuildAddressPoolInvalid {
+                setting,
+                rule: "is set but FLEET_IMAGE_BUILD_ADDRESS_POOL (the CIDR) is not",
+            }),
+            None => Ok(None),
+        };
+    };
+    let range = range.ok_or(ConfigError::ImageBuildAddressPoolInvalid {
+        setting: IMAGE_BUILD_ADDRESS_POOL_RANGE_VAR,
+        rule: "is required with FLEET_IMAGE_BUILD_ADDRESS_POOL",
+    })?;
+    let gateway = gateway.ok_or(ConfigError::ImageBuildAddressPoolInvalid {
+        setting: IMAGE_BUILD_ADDRESS_POOL_GATEWAY_VAR,
+        rule: "is required with FLEET_IMAGE_BUILD_ADDRESS_POOL",
+    })?;
+    fleet_core::BuildAddressPool::parse(
+        &cidr,
+        &range,
+        &gateway,
+        dns.as_deref(),
+        refuse_iso.unwrap_or(false),
+    )
+    .map(Some)
+    .map_err(|error| ConfigError::ImageBuildAddressPoolInvalid {
+        setting: match error.field {
+            "range" => IMAGE_BUILD_ADDRESS_POOL_RANGE_VAR,
+            "gateway" => IMAGE_BUILD_ADDRESS_POOL_GATEWAY_VAR,
+            "dns" => IMAGE_BUILD_ADDRESS_POOL_DNS_VAR,
+            _ => IMAGE_BUILD_ADDRESS_POOL_VAR,
+        },
+        rule: error.rule,
     })
 }
 
@@ -913,6 +1049,35 @@ impl ControllerConfig {
                 }
             }
             None => lines.push("image_build_proxy = <unset; builds connect directly>".to_owned()),
+        }
+        match &self.image_build_address_pool {
+            Some(pool) => lines.push(format!(
+                "image_build_address_pool = {} range {} gateway {}{}{}",
+                pool.cidr(),
+                pool.range(),
+                pool.gateway(),
+                if pool.dns().is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " dns {}",
+                        pool.dns()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                },
+                if pool.refuses_iso() {
+                    " (proxmox-iso builds refused)"
+                } else {
+                    ""
+                },
+            )),
+            None => lines.push(
+                "image_build_address_pool = <unset; build guests choose their own address>"
+                    .to_owned(),
+            ),
         }
         lines.push(format!(
             "lab_memory_overcommit = {}",

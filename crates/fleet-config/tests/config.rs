@@ -337,6 +337,7 @@ fn validation_creates_the_state_directory() {
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
+        image_build_address_pool: None,
     };
     config
         .validate()
@@ -361,6 +362,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
+        image_build_address_pool: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::DataDirUnavailable { .. }));
@@ -381,6 +383,7 @@ fn a_missing_master_key_file_fails_validation() {
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
+        image_build_address_pool: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyMissing { .. }));
@@ -401,6 +404,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
+        image_build_address_pool: None,
     };
     let error = config.validate().unwrap_err();
     assert!(matches!(error, ConfigError::MasterKeyNotAFile { .. }));
@@ -427,6 +431,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
+            image_build_address_pool: None,
         };
         let error = config.validate().unwrap_err();
         match error {
@@ -451,6 +456,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
+        image_build_address_pool: None,
     };
     config
         .validate()
@@ -484,6 +490,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
+        image_build_address_pool: None,
     };
     config
         .validate()
@@ -649,6 +656,7 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
+            image_build_address_pool: None,
         };
         assert!(matches!(
             config.validate(),
@@ -831,4 +839,145 @@ fn toml_errors_never_quote_a_proxy_setting() {
         .unwrap_err()
         .to_string();
     assert!(shown.contains("listen"), "{shown}");
+}
+
+// Build address pool (#337) --------------------------------------------------
+
+const POOL_ENV: [(&str, &str); 4] = [
+    ("FLEET_IMAGE_BUILD_ADDRESS_POOL", "192.0.2.0/24"),
+    (
+        "FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE",
+        "192.0.2.100-192.0.2.150",
+    ),
+    ("FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY", "192.0.2.1"),
+    ("FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS", "192.0.2.2"),
+];
+
+#[test]
+fn the_build_address_pool_is_off_by_default_and_for_empty_values() {
+    let config = fleet_config::load(None, &none_env).unwrap();
+    assert!(config.image_build_address_pool.is_none());
+    assert!(
+        config
+            .summary()
+            .contains("image_build_address_pool = <unset; build guests choose their own address>")
+    );
+    // A Compose `${VAR:-}` default hands the controller empty strings.
+    let env = env_of(&[
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL", ""),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE", ""),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY", ""),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS", ""),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO", ""),
+    ]);
+    assert!(
+        fleet_config::load(None, &env)
+            .unwrap()
+            .image_build_address_pool
+            .is_none()
+    );
+}
+
+#[test]
+fn the_build_address_pool_loads_from_the_environment_and_shows_in_the_summary() {
+    let mut entries = POOL_ENV.to_vec();
+    entries.push(("FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO", "true"));
+    let config = fleet_config::load(None, &env_of(&entries)).unwrap();
+    let pool = config.image_build_address_pool.clone().unwrap();
+    assert_eq!(pool.size(), 51);
+    assert!(pool.refuses_iso());
+    let summary = config.summary();
+    assert!(
+        summary.contains(
+            "image_build_address_pool = 192.0.2.0/24 range 192.0.2.100-192.0.2.150 gateway 192.0.2.1 dns 192.0.2.2 (proxmox-iso builds refused)"
+        ),
+        "{summary}"
+    );
+}
+
+#[test]
+fn the_build_address_pool_layers_from_file_then_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_config(
+        dir.path(),
+        "version = 1\n\
+         image_build_address_pool = \"198.51.100.0/24\"\n\
+         image_build_address_pool_range = \"198.51.100.20-198.51.100.30\"\n\
+         image_build_address_pool_gateway = \"198.51.100.1\"\n\
+         image_build_address_pool_refuse_iso = true\n",
+    );
+    let config = fleet_config::load(Some(&path), &none_env).unwrap();
+    let pool = config.image_build_address_pool.unwrap();
+    assert_eq!(pool.cidr(), "198.51.100.0/24");
+    assert!(pool.refuses_iso());
+    // The environment wins, key by key; an empty value does not override.
+    let env = env_of(&[
+        (
+            "FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE",
+            "198.51.100.40-198.51.100.50",
+        ),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY", ""),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO", "false"),
+    ]);
+    let pool = fleet_config::load(Some(&path), &env)
+        .unwrap()
+        .image_build_address_pool
+        .unwrap();
+    assert_eq!(pool.range(), "198.51.100.40-198.51.100.50");
+    assert_eq!(pool.gateway().to_string(), "198.51.100.1");
+    assert!(!pool.refuses_iso());
+}
+
+#[test]
+fn a_bad_or_partial_build_address_pool_fails_loading_without_echoing_values() {
+    let bad: [(&str, &str); 6] = [
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL", "192.0.2.77/24"),
+        (
+            "FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE",
+            "192.0.2.150-192.0.2.100",
+        ),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY", "192.0.2.120"),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS", "127.0.0.1"),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO", "maybe"),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL", "169.254.0.0/16"),
+    ];
+    for (key, value) in bad {
+        let mut entries: Vec<(&str, &str)> = POOL_ENV.to_vec();
+        entries.retain(|(k, _)| *k != key);
+        entries.push((key, value));
+        let error = fleet_config::load(None, &env_of(&entries))
+            .expect_err(&format!("{key}={value} must be refused"))
+            .to_string();
+        assert!(error.contains("FLEET_IMAGE_BUILD_ADDRESS_POOL"), "{error}");
+        assert!(
+            !error.contains(value) && !error.contains("192.0.2."),
+            "{error}"
+        );
+    }
+    // A companion setting needs the CIDR; the CIDR needs range and gateway.
+    for (key, value) in [
+        (
+            "FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE",
+            "192.0.2.10-192.0.2.20",
+        ),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY", "192.0.2.1"),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_DNS", "192.0.2.2"),
+        ("FLEET_IMAGE_BUILD_ADDRESS_POOL_REFUSE_ISO", "true"),
+    ] {
+        assert!(
+            fleet_config::load(None, &env_of(&[(key, value)])).is_err(),
+            "{key}"
+        );
+    }
+    for missing in [
+        "FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE",
+        "FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY",
+    ] {
+        let mut entries: Vec<(&str, &str)> = POOL_ENV.to_vec();
+        entries.retain(|(k, _)| *k != missing);
+        assert!(
+            fleet_config::load(None, &env_of(&entries)).is_err(),
+            "{missing}"
+        );
+    }
 }
