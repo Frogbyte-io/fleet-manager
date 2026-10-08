@@ -374,7 +374,12 @@ impl FakePve {
                 let body = body.unwrap_or_default();
                 let target = u32::try_from(body["newid"].as_u64().unwrap()).unwrap();
                 let name = body["name"].as_str().unwrap_or_default().to_owned();
-                if !state.guests.contains_key(&source) {
+                // PVE serves a guest's config only on the node that holds it.
+                if !state
+                    .guests
+                    .get(&source)
+                    .is_some_and(|guest| guest.node == *node)
+                {
                     return Self::absent(node, source);
                 }
                 if state.guests.contains_key(&target) {

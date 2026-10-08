@@ -549,6 +549,9 @@ pub struct Controller {
     /// The provision rows.
     pub labs: Arc<LabRepository>,
     account_id: String,
+    /// The latest time the Lab was settled at: a ready lease must not be
+    /// past its TTL then.
+    settled_at: std::sync::Mutex<Option<i64>>,
     version_id: String,
 }
 
@@ -660,6 +663,7 @@ impl Controller {
             leases,
             labs,
             account_id: world.account_id.clone(),
+            settled_at: std::sync::Mutex::new(None),
             version_id: world.version_id.clone(),
         }
     }
@@ -812,6 +816,10 @@ impl Controller {
     /// until a round changes nothing. Panics on a crash: settling runs on a
     /// healthy controller.
     pub async fn settle(&self, world: &World, now: i64) -> Vec<TickReport> {
+        {
+            let mut settled = self.settled_at.lock().unwrap();
+            *settled = Some(settled.map_or(now, |before| before.max(now)));
+        }
         let mut reports = Vec::new();
         for _ in 0..20 {
             let Run::Done(report) = self.sweep(world, now).await else {
@@ -933,8 +941,18 @@ impl Controller {
                             lease.id, record.state
                         ));
                     }
-                    if lease.expires_at.is_none() {
-                        violations.push(format!("ready lease {} has no TTL", lease.id));
+                    match (lease.expires_at, *self.settled_at.lock().unwrap()) {
+                        (None, _) => {
+                            violations.push(format!("ready lease {} has no TTL", lease.id));
+                        }
+                        (Some(expires), Some(settled)) if expires <= settled => {
+                            violations.push(format!(
+                                "ready lease {} expired at {expires} but was still ready when \
+                                 the Lab settled at {settled}",
+                                lease.id
+                            ));
+                        }
+                        _ => {}
                     }
                 }
                 LeaseState::Released | LeaseState::Failed => {

@@ -329,6 +329,15 @@ pub fn run(repo_root: &Path, target: Option<&str>) -> Result<Summary, String> {
         Vec::new()
     };
 
+    // The runner stops a live suite by killing its process tree, which it
+    // finds through /proc. Without /proc it could only kill cargo and leave
+    // the test binary and its controller changing guests.
+    if live && !Path::new("/proc").is_dir() {
+        return Err(
+            "a live run needs /proc to stop the suite's whole process tree; run it on Linux"
+                .to_owned(),
+        );
+    }
     let mut command = Command::new("cargo");
     command.current_dir(repo_root);
     if live {
