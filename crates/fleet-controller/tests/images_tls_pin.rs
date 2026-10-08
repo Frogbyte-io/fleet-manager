@@ -93,6 +93,7 @@ fn acceptor(leaf: &(CertificateDer<'static>, PrivateKeyDer<'static>)) -> tokio_r
 /// (with whether any carried the token header).
 #[derive(Debug, Default)]
 struct Seen {
+    connections: AtomicUsize,
     handshakes: AtomicUsize,
     request_bytes: AtomicUsize,
     token_headers: AtomicUsize,
@@ -117,6 +118,7 @@ async fn serve(
                 later.clone()
             };
             connections += 1;
+            shared.connections.fetch_add(1, Ordering::SeqCst);
             let seen = Arc::clone(&shared);
             tokio::spawn(async move {
                 let Ok(mut tls) = acceptor.accept(stream).await else {
@@ -290,8 +292,10 @@ async fn a_leaf_changed_after_the_pin_check_never_receives_the_token() {
     let (outcome, reason) = build(port, &pinned.0).await;
     assert_eq!(outcome, "failed");
     assert_eq!(reason.as_deref(), Some("build_failed"));
-    // Fleet's check passed on the first connection; the plugin's own
+    // Fleet's check passed on the first connection, and the plugin did
+    // connect (so the build did not fail before reaching the network); its
     // handshake against the swapped leaf failed, so nothing was sent.
+    assert!(seen.connections.load(Ordering::SeqCst) >= 2, "{seen:?}");
     assert_eq!(seen.handshakes.load(Ordering::SeqCst), 0, "{seen:?}");
     assert_eq!(seen.request_bytes.load(Ordering::SeqCst), 0, "{seen:?}");
 }

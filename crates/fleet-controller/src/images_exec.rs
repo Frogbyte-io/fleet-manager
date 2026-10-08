@@ -16,13 +16,16 @@
 //! #284 pins the account's confirmed certificate for Packer. The Proxmox
 //! plugin verifies TLS against Go's system root pool, which on Linux is
 //! exactly `SSL_CERT_FILE` plus the directories in `SSL_CERT_DIR`. Each
-//! build captures the host's leaf without credentials, refuses it unless
-//! its SHA-256 equals the confirmed pin and it names the account host, and
-//! hands the validate/build children that one leaf as their only root (an
-//! empty `SSL_CERT_DIR` keeps the system directories out). Go accepts a
-//! leaf that is itself in the pool as a chain of one, still checking the
-//! host name, validity, and key usage; any other certificate fails the
-//! handshake before a request, and so the token, is sent.
+//! build captures the host's leaf without credentials and refuses it unless
+//! its SHA-256 equals the confirmed pin. A build that verifies TLS (every
+//! version without the audited `allowInsecureTls` opt-in) also requires the
+//! leaf to name the account host, and hands the validate/build children
+//! that one leaf as their only root (an empty `SSL_CERT_DIR` keeps the
+//! system directories out). Go accepts a leaf that is itself in the pool as
+//! a chain of one, still checking the host name, validity, and key usage;
+//! any other certificate fails the handshake before a request, and so the
+//! token, is sent. An opted-in build gets only the check-time pin: Packer
+//! then skips verification itself.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -622,7 +625,9 @@ fn write_pinned_roots(
     pem.push_str("-----END CERTIFICATE-----\n");
     let file = tls.join(PINNED_CERT_FILE);
     std::fs::write(&file, pem)?;
-    Ok((file, empty))
+    // Packer runs inside the work directory, so a relative data directory
+    // would make relative paths resolve beneath it: export absolute ones.
+    Ok((file.canonicalize()?, empty.canonicalize()?))
 }
 
 /// Removes one operation's private work directory after a terminal
@@ -1357,6 +1362,8 @@ mod tests {
         use base64::Engine as _;
         for (_, tls) in pinned {
             let tls = tls.as_ref().unwrap();
+            // Absolute: Packer runs inside the work directory.
+            assert!(tls.file.is_absolute() && tls.dir.is_absolute());
             assert!(tls.file.starts_with(&ran.work), "{}", tls.file.display());
             assert!(tls.dir.starts_with(&ran.work), "{}", tls.dir.display());
             assert_eq!(tls.dir_entries, 0, "the root directory stays empty");
