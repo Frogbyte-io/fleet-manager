@@ -332,6 +332,20 @@ impl LabSweeper {
                                 Ok(()) => {
                                     self.changed();
                                     report.cleanups_abandoned += 1;
+                                    if current.state == fleet_core::LeaseState::CleanupFailed
+                                        && let Err(error) = self
+                                            .audit(
+                                                &lease.id,
+                                                "lab_lease_cleanup_failed",
+                                                &[("reason", "worker_lease_expired".to_owned())],
+                                            )
+                                            .await
+                                    {
+                                        report.failures.push(format!(
+                                            "auditing the cleanup failure of lease {}: {error}",
+                                            lease.id
+                                        ));
+                                    }
                                 }
                                 Err(error) => report.failures.push(format!(
                                     "recording the abandoned cleanup of lease {}: {error}",
@@ -528,11 +542,16 @@ impl LabSweeper {
     }
 }
 
-/// Whether a cleanup operation ended without succeeding while its lease is
-/// still `releasing` at the same attempt count. The executor records its
-/// own failures on the lease before it completes the operation, so this
-/// only holds for an attempt interrupted by a crash.
+/// Whether a cleanup operation was failed by worker maintenance after its
+/// worker's lease expired: the controller died mid-attempt. The executor
+/// records its own failures on the lease and completes the operation with a
+/// different reason, and a `not_pooled` refusal deliberately spends no
+/// attempt, so only this signature is an abandoned attempt.
 fn abandoned_attempt(operation: &fleet_application::operation::Operation) -> bool {
-    fleet_core::OperationState::from_id(&operation.state)
-        .is_ok_and(|state| state.is_terminal() && state != fleet_core::OperationState::Succeeded)
+    operation.state == fleet_core::OperationState::Failed.id()
+        && operation
+            .error_json
+            .as_deref()
+            .and_then(|error| serde_json::from_str::<serde_json::Value>(error).ok())
+            .is_some_and(|error| error["reason"] == "worker_lease_expired")
 }
