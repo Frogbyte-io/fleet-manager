@@ -1086,11 +1086,20 @@ mod live {
 
     /// lease → ready → exec → destroy.
     pub async fn lease_exec_destroy(run: &TargetRun, lab: &Lab) -> Result<Outcome, String> {
-        if std::env::var_os("SSH_AUTH_SOCK").is_none() {
+        let default_key = std::env::var_os("HOME").is_some_and(|home| {
+            ["id_rsa", "id_ecdsa", "id_ed25519"].iter().any(|name| {
+                std::path::Path::new(&home)
+                    .join(".ssh")
+                    .join(name)
+                    .is_file()
+            })
+        });
+        if std::env::var_os("SSH_AUTH_SOCK").is_none() && !default_key {
             // The gate is on: a missing prerequisite must not read as a pass.
             return Err(String::from(
-                "SSH_AUTH_SOCK is unset; Lab exec authenticates with the controller's SSH \
-                 agent, which must hold a key the template's user accepts",
+                "neither SSH_AUTH_SOCK nor a default ~/.ssh key file is present; Lab exec \
+                 offers the controller's SSH agent keys, then its default key files, and one \
+                 must be accepted by the template's user",
             ));
         }
         let (account, version) = lab.prepare(run, 3_600).await?;
