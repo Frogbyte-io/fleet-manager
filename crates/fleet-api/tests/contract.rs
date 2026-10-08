@@ -2309,6 +2309,43 @@ async fn image_build_history_requires_images_read_on_both_endpoints() {
 }
 
 #[tokio::test]
+async fn an_unknown_recipe_source_is_a_json_400_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = fleet_storage_sqlite::Store::open(&dir.path().join("fleet.db"))
+        .await
+        .unwrap();
+    let recipes = Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+        store.pool().clone(),
+    ));
+    let mut state = (*test_state().0).clone();
+    state.authorizer = Arc::new(PermitAllAuthorizer);
+    state.images = Some(Arc::new(fleet_application::images::Images::new(
+        recipes,
+        Arc::new(FakeAudit),
+    )));
+    let router = principal_router(Arc::new(state));
+    let body = r#"{"name":"r","description":"","node":"pve","storagePool":"local-lvm","source":"x","content":"{}"}"#;
+    for (method, path) in [
+        ("POST", format!("{API_BASE_PATH}/images/recipes")),
+        ("PUT", format!("{API_BASE_PATH}/images/recipes/some-recipe")),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(&path)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let (parts, body) = call_via(&router, request).await;
+        assert_eq!(parts.status, StatusCode::BAD_REQUEST, "{method}: {body}");
+        assert_eq!(body["code"], "invalid_request");
+        assert_ne!(
+            body["correlationId"], "00000000-0000-0000-0000-000000000000",
+            "the real request correlation id is used"
+        );
+    }
+}
+
+#[tokio::test]
 async fn publishing_takes_an_optional_body_with_the_insecure_tls_opt_in() {
     use fleet_application::images::RecipePort as _;
     let dir = tempfile::tempdir().unwrap();

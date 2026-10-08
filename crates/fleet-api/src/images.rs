@@ -307,21 +307,12 @@ pub struct SaveRecipeRequest {
 }
 
 impl SaveRecipeRequest {
-    fn into_content(self) -> Result<RecipeContent, ApiErrorResponse> {
-        let source = RecipeSource::from_id(&self.source).map_err(|detail| {
-            let public = PublicError::new(
-                ErrorCode::from_str("invalid_request")
-                    .expect("the literal is valid error code syntax"),
-                detail,
-                RetryClass::Never,
-            );
-            ApiError::new(
-                &public,
-                CorrelationId::from_str("00000000-0000-0000-0000-000000000000")
-                    .expect("the literal is valid"),
-            )
-            .with_status(StatusCode::BAD_REQUEST)
-        })?;
+    fn into_content(
+        self,
+        correlation_id: CorrelationId,
+    ) -> Result<RecipeContent, ApiErrorResponse> {
+        let source = RecipeSource::from_id(&self.source)
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         Ok(RecipeContent {
             name: self.name,
             description: self.description,
@@ -429,7 +420,7 @@ pub async fn create_image_recipe(
 ) -> Result<(StatusCode, Json<Resource<RecipeDto>>), ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let content = request.into_content()?;
+    let content = request.into_content(correlation_id)?;
     let recipe = images
         .create(
             state.authorizer.as_ref(),
@@ -502,7 +493,7 @@ pub async fn update_image_recipe(
 ) -> Result<Json<Resource<RecipeDto>>, ApiErrorResponse> {
     let images = images_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let content = request.into_content()?;
+    let content = request.into_content(correlation_id)?;
     let recipe = images
         .update(
             state.authorizer.as_ref(),
