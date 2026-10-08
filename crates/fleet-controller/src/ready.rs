@@ -535,17 +535,26 @@ impl ReadyExecutor {
         workflow_deadline: std::time::Instant,
     ) -> StepOutcome {
         let (kind, payload_json) = match step {
-            ReadyStep::Clone { root } => (
-                "projects.clone",
-                serde_json::json!({
-                    "machineId": payload.machine_id,
-                    "endpointId": payload.endpoint_id,
-                    "auth": payload.auth,
-                    "remote": payload.remote,
-                    "root": root,
-                    "timeoutSeconds": 600,
-                }),
-            ),
+            ReadyStep::Clone { root } => {
+                // The payload carries the normalized identity; git needs a
+                // fetchable URL (#329). An unparseable remote is a named
+                // refusal, not a git error.
+                let remote = match clone_remote(&payload.remote) {
+                    Ok(remote) => remote,
+                    Err(detail) => return StepOutcome::Failed(detail),
+                };
+                (
+                    "projects.clone",
+                    serde_json::json!({
+                        "machineId": payload.machine_id,
+                        "endpointId": payload.endpoint_id,
+                        "auth": payload.auth,
+                        "remote": remote,
+                        "root": root,
+                        "timeoutSeconds": 600,
+                    }),
+                )
+            }
             ReadyStep::MiseInstall { tool, version } => (
                 "mise.install",
                 serde_json::json!({
@@ -686,6 +695,15 @@ enum FrogenvProbe {
     Unavailable,
 }
 
+/// The URL the clone step hands to git, derived from the payload's remote
+/// (normally the stored normalized identity; see
+/// [`fleet_core::NormalizedRemote::clone_url`]).
+fn clone_remote(remote: &str) -> Result<String, String> {
+    fleet_core::NormalizedRemote::parse(remote)
+        .map(|normalized| normalized.clone_url())
+        .map_err(|detail| format!("invalid_project_remote: {detail}"))
+}
+
 /// The workflow's generic failure reason, for a step that ran and failed.
 const STEP_FAILED: &str = "step_failed";
 
@@ -820,6 +838,23 @@ mod lab_discovery_tests {
         async fn execute(&self, _: &Operations, _: &Operation) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn clone_step_remote_is_fetchable_and_malformed_is_refused() {
+        assert_eq!(
+            clone_remote("github.com/Frogbyte-io/fleet-manager").unwrap(),
+            "https://github.com/Frogbyte-io/fleet-manager"
+        );
+        assert_eq!(
+            clone_remote("git@github.com:Frogbyte-io/fleet-manager.git").unwrap(),
+            "https://github.com/Frogbyte-io/fleet-manager"
+        );
+        assert!(
+            clone_remote("")
+                .unwrap_err()
+                .starts_with("invalid_project_remote")
+        );
     }
 
     #[tokio::test]

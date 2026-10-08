@@ -172,6 +172,18 @@ impl NormalizedRemote {
     pub fn as_str(&self) -> &str {
         &self.value
     }
+
+    /// The URL a `git clone` can fetch: `https://` plus the normalized
+    /// `host[:port]/path`.
+    ///
+    /// The normalized form drops the scheme (and an scp-style user), so it
+    /// is an identity, not a fetchable address; git would read it as a local
+    /// path. The rule is explicit: always `https`. No credential can appear,
+    /// because credential-shaped userinfo is refused at parse time.
+    #[must_use]
+    pub fn clone_url(&self) -> String {
+        format!("https://{}", self.value)
+    }
 }
 
 impl fmt::Display for NormalizedRemote {
@@ -341,6 +353,25 @@ mod tests {
             "github.com/Frogbyte-io/fleet-manager",
             "scp-style user without a colon is a spelling, not a credential"
         );
+    }
+
+    #[test]
+    fn clone_url_is_a_fetchable_https_url_for_every_spelling() {
+        for raw in [
+            "https://github.com/Frogbyte-io/fleet-manager.git",
+            "git@github.com:Frogbyte-io/fleet-manager.git",
+            "ssh://git@GitHub.com/Frogbyte-io/fleet-manager",
+            "github.com/Frogbyte-io/fleet-manager",
+        ] {
+            let remote = NormalizedRemote::parse(raw).unwrap();
+            assert_eq!(
+                remote.clone_url(),
+                "https://github.com/Frogbyte-io/fleet-manager",
+                "{raw}"
+            );
+        }
+        let ported = NormalizedRemote::parse("https://git.example.test:8443/a/b.git").unwrap();
+        assert_eq!(ported.clone_url(), "https://git.example.test:8443/a/b");
     }
 
     #[test]
