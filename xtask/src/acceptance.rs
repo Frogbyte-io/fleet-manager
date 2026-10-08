@@ -93,10 +93,9 @@ pub struct ResultRow {
 pub fn parse_result_line(marker: &str, line: &str) -> Option<ResultRow> {
     let start = line.find(marker)?;
     let rest = line[start + marker.len()..].trim_start();
-    let (fields, reason) = match rest.find("reason=") {
-        Some(at) => (&rest[..at], rest[at + "reason=".len()..].trim()),
-        None => (rest, ""),
-    };
+    // `reason=` is required (and last); only a pass may leave it empty.
+    let at = rest.find("reason=")?;
+    let (fields, reason) = (&rest[..at], rest[at + "reason=".len()..].trim());
     let mut values = BTreeMap::new();
     for field in fields.split_whitespace() {
         let (key, value) = field.split_once('=')?;
@@ -107,10 +106,14 @@ pub fn parse_result_line(marker: &str, line: &str) -> Option<ResultRow> {
         "-" => None,
         name => Some(name.to_owned()),
     };
+    let status = Status::parse(values.get("status")?)?;
+    if status != Status::Pass && reason.is_empty() {
+        return None;
+    }
     Some(ResultRow {
         scenario,
         target,
-        status: Status::parse(values.get("status")?)?,
+        status,
         reason: reason.to_owned(),
         // Required: a line without a valid duration is malformed, and a
         // malformed line must leave its pair unreported (a failure).
@@ -390,6 +393,11 @@ pub fn parse_args(spec: &SuiteSpec, args: &[String]) -> Result<Option<String>, S
                 if !valid_target_name(name) {
                     return Err(format!(
                         "--target takes the <NAME> of FLEET_PVE_TARGET_<NAME>_* ([A-Za-z0-9_]), not {name:?}"
+                    ));
+                }
+                if let Some(first) = &target {
+                    return Err(format!(
+                        "--target given twice ({first} and {name}); pass it once"
                     ));
                 }
                 target = Some(name.clone());
@@ -1152,6 +1160,31 @@ mod tests {
         assert_eq!(rows.len(), 1, "rows before the deadline are kept");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         drop(writer);
+    }
+
+    #[test]
+    fn a_result_line_without_its_reason_is_malformed_unless_it_passes() {
+        let line = |status: &str, tail: &str| {
+            format!(
+                "{} scenario=trust target=PVE9 status={status} duration_ms=1{tail}",
+                SPEC.marker
+            )
+        };
+        assert_eq!(parse_result_line(SPEC.marker, &line("pass", "")), None);
+        assert_eq!(parse_result_line(SPEC.marker, &line("skipped", "")), None);
+        assert_eq!(
+            parse_result_line(SPEC.marker, &line("skipped", " reason=")),
+            None
+        );
+        assert!(parse_result_line(SPEC.marker, &line("pass", " reason=")).is_some());
+        assert!(parse_result_line(SPEC.marker, &line("skipped", " reason=no cluster")).is_some());
+    }
+
+    #[test]
+    fn a_repeated_target_flag_is_refused() {
+        let args = ["--target", "PVE9", "--target", "PVE8"].map(str::to_owned);
+        let error = parse_args(&SPEC, &args).unwrap_err();
+        assert!(error.contains("twice"), "{error}");
     }
 
     #[test]
