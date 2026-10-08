@@ -26,6 +26,7 @@ async fn record(labs: &LabRepository) -> fleet_application::lab::ProvisionRecord
             template_version_id: "template-1@digest".to_owned(),
             lease_id: None,
             idempotency_key: None,
+            readiness_deadline_at: None,
         },
         NOW,
     )
@@ -782,6 +783,7 @@ async fn booting_and_bootstrapping_lease_links_resume_and_commit_ready_atomicall
                     template_version_id: "version-1".to_owned(),
                     lease_id: Some(lease.id.clone()),
                     idempotency_key: None,
+                    readiness_deadline_at: None,
                 },
                 NOW,
             )

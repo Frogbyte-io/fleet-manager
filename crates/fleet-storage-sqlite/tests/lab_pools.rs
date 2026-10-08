@@ -96,6 +96,7 @@ impl World {
                     template_version_id: "template-version-1".to_owned(),
                     lease_id: Some(lease.id.clone()),
                     idempotency_key: None,
+                    readiness_deadline_at: None,
                 },
                 NOW,
             )

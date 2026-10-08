@@ -134,6 +134,7 @@ async fn lab_exec_runs_on_the_lease_machine_and_refuses_an_expired_lease() {
             template_version_id: version.id.clone(),
             lease_id: Some(lease.id.clone()),
             idempotency_key: None,
+            readiness_deadline_at: None,
         },
         now,
     )

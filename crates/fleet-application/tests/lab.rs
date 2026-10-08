@@ -177,6 +177,8 @@ impl LabTemplatePort for FakeTemplates {
 struct FakeProvisions {
     records: Mutex<Vec<fleet_application::lab::ProvisionRecord>>,
     leases: Option<Arc<Mutex<Vec<fleet_application::lab::Lease>>>>,
+    /// Every `update` fails: a crash right after the insert (#360).
+    refuse_updates: bool,
 }
 
 impl FakeProvisions {
@@ -184,6 +186,7 @@ impl FakeProvisions {
         Self {
             records: Mutex::new(Vec::new()),
             leases: Some(leases),
+            refuse_updates: false,
         }
     }
 }
@@ -208,7 +211,7 @@ impl ProvisionPort for FakeProvisions {
             machine_id: None,
             endpoint_id: None,
             ready_project_operation_id: None,
-            readiness_deadline_at: None,
+            readiness_deadline_at: new.readiness_deadline_at,
             failed_step: None,
             account_id: None,
             ready_at: None,
@@ -231,6 +234,9 @@ impl ProvisionPort for FakeProvisions {
     }
 
     async fn update(&self, record: &fleet_application::lab::ProvisionRecord) -> Result<(), String> {
+        if self.refuse_updates {
+            return Err("the controller died after the insert".to_owned());
+        }
         let mut records = self.records.lock().unwrap();
         let stored = records
             .iter_mut()
@@ -768,6 +774,51 @@ fn service_with_pins(pins: Arc<FakePins>) -> (Lab, Arc<FakeTemplates>, Arc<FakeA
         templates,
         audit,
     )
+}
+
+/// #360: the readiness deadline is part of the insert, so a controller that
+/// dies right after creating the record leaves it with its deadline.
+#[tokio::test]
+async fn the_readiness_deadline_is_written_with_the_record() {
+    let templates = Arc::new(FakeTemplates::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions {
+        refuse_updates: true,
+        ..FakeProvisions::with_leases(leases.leases.clone())
+    });
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases,
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let record = lab
+        .start_provision(&AllowAll, &principal(), &version.id, None, None, NOW + 2)
+        .await
+        .unwrap();
+    let deadline = Some(NOW + 2 + 300_000 + fleet_application::lab::PRE_BOOT_ALLOWANCE_MILLIS);
+    assert_eq!(record.readiness_deadline_at, deadline);
+    // What the store holds, with no update ever having succeeded.
+    let stored = provisions.records.lock().unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].readiness_deadline_at, deadline);
 }
 
 #[tokio::test]
@@ -1745,6 +1796,7 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
                 template_version_id: version.id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             NOW + 3,
         )

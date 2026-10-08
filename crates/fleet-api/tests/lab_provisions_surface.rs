@@ -238,6 +238,7 @@ impl World {
                 template_version_id: VERSION.to_owned(),
                 lease_id: lease_id.map(str::to_owned),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             NOW,
         )

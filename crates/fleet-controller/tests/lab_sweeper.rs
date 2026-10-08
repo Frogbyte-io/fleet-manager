@@ -166,6 +166,7 @@ impl Harness {
                 template_version_id: self.version_id.clone(),
                 lease_id: Some(lease.id.clone()),
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             NOW - 60_000,
         )
@@ -605,6 +606,7 @@ async fn a_record_left_in_flight_by_a_finished_lease_ends_and_frees_its_vmid() {
                 template_version_id: harness.version_id.clone(),
                 lease_id: None,
                 idempotency_key: None,
+                readiness_deadline_at: None,
             },
             NOW,
         )
@@ -640,6 +642,7 @@ async fn a_ready_record_and_a_record_another_owner_holds_are_left_alone() {
             template_version_id: harness.version_id.clone(),
             lease_id: None,
             idempotency_key: None,
+            readiness_deadline_at: None,
         },
         NOW,
     )
