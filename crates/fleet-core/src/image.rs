@@ -166,24 +166,21 @@ pub fn requests_insecure_tls(content: &str) -> bool {
     let Ok(template) = serde_json::from_str::<serde_json::Value>(content) else {
         return content.to_ascii_lowercase().contains(KEY);
     };
-    template
-        .as_object()
-        .and_then(|object| {
-            object
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case("builders"))
-        })
-        .and_then(|(_, builders)| builders.as_array())
-        .is_some_and(|builders| {
-            builders
-                .iter()
-                .filter_map(serde_json::Value::as_object)
-                .any(|builder| {
-                    builder.iter().any(|(key, value)| {
-                        key.eq_ignore_ascii_case(KEY) && *value != serde_json::Value::Bool(false)
-                    })
+    // Every case-insensitive `builders` key counts: which one a decoder
+    // keeps is not Fleet's to guess.
+    template.as_object().is_some_and(|object| {
+        object
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("builders"))
+            .filter_map(|(_, builders)| builders.as_array())
+            .flatten()
+            .filter_map(serde_json::Value::as_object)
+            .any(|builder| {
+                builder.iter().any(|(key, value)| {
+                    key.eq_ignore_ascii_case(KEY) && *value != serde_json::Value::Bool(false)
                 })
-        })
+            })
+    })
 }
 
 /// A published recipe version: immutable, identified by its digest.
@@ -274,6 +271,8 @@ mod tests {
             r#"{"builders":[{"type":"proxmox-clone","insecure_skip_tls_verify":"{{user `skip`}}"}]}"#,
             r#"{"builders":[{"type":"proxmox-clone"},{"INSECURE_SKIP_TLS_VERIFY":1}]}"#,
             r#"{"Builders":[{"Insecure_Skip_Tls_Verify":true}]}"#,
+            r#"{"Builders":[{"type":"proxmox-clone"}],"builders":[{"insecure_skip_tls_verify":true}]}"#,
+            r#"{"builders":[{"type":"proxmox-clone"}],"BUILDERS":[{"insecure_skip_tls_verify":true}]}"#,
             "source \"proxmox-clone\" \"x\" { insecure_skip_tls_verify = true }",
         ] {
             assert!(requests_insecure_tls(content), "{content}");

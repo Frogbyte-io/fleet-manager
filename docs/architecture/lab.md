@@ -37,13 +37,16 @@ Promotion pins the build record that justified it (issue #281). The gate reads t
 
 ### Build credentials and TLS trust
 
-A build gets its target account's API token in Packer's child environment only (#272). The token goes only to the certificate the operator confirmed for that account (FM-600, issue #284). The Proxmox plugin does its own TLS: it builds a `tls.Config` without `RootCAs` ([`client.go`, v1.2.4](https://github.com/hashicorp/packer-plugin-proxmox/blob/v1.2.4/builder/proxmox/common/client.go)), so Go verifies against the system root pool. On Linux that pool is the file named by `SSL_CERT_FILE` plus every directory in `SSL_CERT_DIR`. When `SSL_CERT_DIR` is unset, the system directories are still loaded ([`root_unix.go`](https://github.com/golang/go/blob/go1.26.0/src/crypto/x509/root_unix.go)). A certificate that is itself in the pool verifies as a chain of one, and Go still checks the host name, validity, and key usage ([`verify.go`](https://github.com/golang/go/blob/go1.26.0/src/crypto/x509/verify.go)).
+A build gets its target account's API token in Packer's child environment only (#272). Unless the version opted out of verification (below), the token goes only to the certificate the operator confirmed for that account (FM-600, issue #284). The Proxmox plugin does its own TLS: it builds a `tls.Config` without `RootCAs` ([`client.go`, v1.2.4](https://github.com/hashicorp/packer-plugin-proxmox/blob/v1.2.4/builder/proxmox/common/client.go)), so Go verifies against the system root pool. On Linux that pool is the file named by `SSL_CERT_FILE` plus every directory in `SSL_CERT_DIR`. When `SSL_CERT_DIR` is unset, the system directories are still loaded ([`root_unix.go`](https://github.com/golang/go/blob/go1.26.0/src/crypto/x509/root_unix.go)). A certificate that is itself in the pool verifies as a chain of one, and Go still checks the host name, validity, and key usage ([`verify.go`](https://github.com/golang/go/blob/go1.26.0/src/crypto/x509/verify.go)).
 
-For each build, before any credential is resolved, the executor:
+For each build, after the uncredentialed Packer version probes and before any secret is resolved (neither the account token nor recipe secret variables, which travel separately in the private `-var-file`), the executor:
 
 1. Requires the account's confirmed fingerprint (`target_account_untrusted`).
 2. Captures the host's leaf certificate without credentials. It uses the same observe-only transport as the trust probe, and the request carries no `Authorization` header. If the host can't be reached, the build fails with `target_certificate_unobservable`.
-3. Refuses the leaf unless its SHA-256 equals the confirmed pin (`target_certificate_changed`). Packer never starts, so no process ever holds the token.
+3. Refuses the leaf unless its SHA-256 equals the confirmed pin (`target_certificate_changed`). No credentialed `validate` or `build` child starts, so no process ever holds the token.
+
+For a version without the opt-in, the executor also:
+
 4. Refuses the leaf unless it names the account host in its SANs, by the same rules Go applies (`target_certificate_name_mismatch`). Fleet never falls back to skipping verification.
 5. Writes the leaf as `tls/pinned.pem`, next to an empty `tls/roots.d/`, inside the operation's private work directory. Both are removed with that directory.
 6. Sets `SSL_CERT_FILE` and `SSL_CERT_DIR` to those paths, alongside the token, on the `packer validate` and `packer build` children only. The controller's own environment and the version probes never see them.
@@ -59,7 +62,7 @@ If the certificate changes between step 3 and the plugin's connection, Go's hand
 - It is shown on the version as `allowInsecureTls`.
 - It is part of the version digest, so it can never be added to an existing version. Without the opt-in the digest is unchanged, so existing versions keep their identities.
 
-Opted-in builds still pass steps 1–3, so even they hand the token out only while the host presents the confirmed certificate. A version published before migration 0042 has no opt-in. If its recipe skips verification, drop the field and publish again (the build then pins), or publish again with the opt-in. Either way you get a new version.
+Opted-in builds still pass steps 1–3, so they never hand the token out while the host presents another certificate. That is the only check: Packer itself then skips verification, so an endpoint that changes after the check receives the token. This is why the opt-in is an explicit, audited exception. A version published before migration 0042 has no opt-in. If its recipe skips verification, drop the field and publish again (the build then pins), or publish again with the opt-in. Either way you get a new version.
 
 A future catalog/marketplace distributes recipes, manifests, provisioning assets, compatibility constraints, and signatures/provenance. It never distributes VM disk images or licensed OS media; operators provide the required installation media and build locally.
 

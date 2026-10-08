@@ -123,12 +123,23 @@ async fn serve(
                     return;
                 };
                 seen.handshakes.fetch_add(1, Ordering::SeqCst);
+                // Read the whole request head: one read can return a part.
                 let mut buffer = vec![0_u8; 8192];
-                let Ok(read) = tls.read(&mut buffer).await else {
-                    return;
-                };
-                seen.request_bytes.fetch_add(read, Ordering::SeqCst);
-                if String::from_utf8_lossy(&buffer[..read]).contains("PVEAPIToken=") {
+                let mut request = Vec::new();
+                loop {
+                    let Ok(read) = tls.read(&mut buffer).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    seen.request_bytes.fetch_add(read, Ordering::SeqCst);
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if String::from_utf8_lossy(&request).contains("PVEAPIToken=") {
                     seen.token_headers.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = tls

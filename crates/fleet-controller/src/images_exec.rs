@@ -478,13 +478,15 @@ impl ImagesExecutor {
             .write_recipe(&operation.id, &version.content)
             .map_err(|_| "recipe_write_failed")?;
         let work_dir = recipe_path.parent().ok_or("recipe_write_failed")?;
+        // The certificate check comes first: a build refused for trust
+        // resolves no secret at all, neither the token nor recipe variables.
+        let env = self
+            .account_env(record.account_id.as_deref(), work_dir, insecure_tls)
+            .await?;
         let var_file = self
             .write_var_file(&operation.id, &payload.secret_vars)
             .await
             .map_err(|_| "secret_resolution_failed")?;
-        let env = self
-            .account_env(record.account_id.as_deref(), work_dir, insecure_tls)
-            .await?;
         operations
             .record_progress(
                 &operation.id,
