@@ -479,3 +479,93 @@ fn a_sink_failure_ends_the_copy_at_once() {
     );
     assert_eq!(limiter.held(), 0, "the copy releases its permit");
 }
+
+/// Installs a throwaway `~/.ssh/id_ecdsa` for the length of one test and
+/// removes it on drop. OpenSSH resolves `~` from the passwd entry, so the
+/// default identity files cannot be redirected to a temporary directory.
+/// `id_ecdsa` is a default identity file that is rarely present, and the
+/// guard refuses to touch one that exists.
+struct DefaultKey {
+    private: std::path::PathBuf,
+    public_text: String,
+    _lock: std::fs::File,
+}
+
+impl DefaultKey {
+    fn install() -> Option<Self> {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+        let ssh_dir = home.join(".ssh");
+        let lock_path = std::env::temp_dir().join("fleet-test-default-key.lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .ok()?;
+        lock.lock().ok()?;
+        let private = ssh_dir.join("id_ecdsa");
+        if private.exists() {
+            return None;
+        }
+        std::fs::create_dir_all(&ssh_dir).ok()?;
+        let generated = Command::new("ssh-keygen")
+            .args(["-t", "ecdsa", "-N", "", "-q", "-f"])
+            .arg(&private)
+            .output()
+            .ok()?;
+        if !generated.status.success() {
+            return None;
+        }
+        let public_text = std::fs::read_to_string(format!("{}.pub", private.display())).ok()?;
+        Some(Self {
+            private,
+            public_text,
+            _lock: lock,
+        })
+    }
+}
+
+impl Drop for DefaultKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.private);
+        let _ = std::fs::remove_file(format!("{}.pub", self.private.display()));
+    }
+}
+
+/// #362: agent authentication falls back to the controller user's default
+/// identity file, as plain OpenSSH does. The sshd authorizes only that file's
+/// key, so a login proves it was offered whatever agent the test runs under.
+#[test]
+fn agent_auth_falls_back_to_the_default_identity_file() {
+    let Some(key) = DefaultKey::install() else {
+        eprintln!("skipped: ~/.ssh/id_ecdsa is in use or HOME is unusable");
+        return;
+    };
+    let sshd = start_sshd();
+    std::fs::write(
+        sshd.keys_dir.path().join("authorized_keys"),
+        &key.public_text,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
+    let observation = provider
+        .probe_host_key("127.0.0.1", sshd.port, Duration::from_secs(10))
+        .unwrap();
+    provider.pin(&observation).unwrap();
+    let agent_spec = SshConnectionSpec {
+        auth: SshAuth::Agent,
+        ..spec(&sshd)
+    };
+    let result = execute_script(
+        &provider,
+        &ExecutionLimiter::new(1),
+        &agent_spec,
+        "echo reached",
+        &ScriptMetadata::default(),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(result.stdout.contains("reached"), "{result:?}");
+}

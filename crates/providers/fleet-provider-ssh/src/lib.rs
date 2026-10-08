@@ -353,12 +353,11 @@ impl SshProvider {
     ///
     /// - [`SshAuth::IdentityFile`]: `IdentitiesOnly yes` (with `-i` on the
     ///   command line), so the configured file is the only identity offered.
-    /// - [`SshAuth::Agent`]: `IdentitiesOnly no` offers every key the agent
-    ///   holds, because with `yes` and no identity file OpenSSH offers only
-    ///   agent keys that match a default `~/.ssh/id_*` file. `IdentityFile
-    ///   none` keeps those default files out of the offer, so a key lying in
-    ///   `~/.ssh` is never offered unless the operator loaded it into the
-    ///   agent.
+    /// - [`SshAuth::Agent`]: `IdentitiesOnly no` is OpenSSH's own default: it
+    ///   offers every key the agent holds, then the controller user's default
+    ///   identity files (`~/.ssh/id_*`). A controller with no agent therefore
+    ///   still authenticates with its default key. Offering a key reveals only
+    ///   its public half; `MaxAuthTries` on the target bounds the attempts.
     fn write_config(&self, auth: &SshAuth) -> Result<PathBuf, SshProviderError> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let (name, identity) = match auth {
@@ -399,8 +398,8 @@ impl SshProvider {
     }
 }
 
-/// Offers every key the agent holds and none of the default key files.
-const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\nIdentityFile none\n";
+/// OpenSSH's default: agent keys first, then the default identity files.
+const AGENT_IDENTITY_POLICY: &str = "IdentitiesOnly no\n";
 /// Offers only the identity file passed with `-i`.
 const IDENTITY_FILE_POLICY: &str = "IdentitiesOnly yes\n";
 
@@ -523,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_auth_offers_agent_keys_but_no_default_files() {
+    fn agent_auth_offers_agent_keys_and_default_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let provider = SshProvider::new(dir.path().to_path_buf()).expect("provider");
         let config = provider.write_config(&SshAuth::Agent).expect("config");
@@ -539,7 +538,14 @@ mod tests {
             .iter()
             .filter(|line| line.starts_with("identityfile "))
             .collect();
-        assert_eq!(identities, ["identityfile none"], "no default key file");
+        assert!(
+            identities.contains(&&"identityfile ~/.ssh/id_ed25519".to_owned()),
+            "the default identity files stay in the offer: {identities:?}"
+        );
+        assert!(
+            !identities.contains(&&"identityfile none".to_owned()),
+            "{identities:?}"
+        );
     }
 
     #[test]
