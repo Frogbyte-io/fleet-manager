@@ -689,7 +689,8 @@ fn first_lines(stderr: &str, stdout: &str) -> String {
     // Scrub before choosing and cutting the line, so a credential that
     // straddles the 300-byte cut is redacted, never half kept.
     let pick = |text: &str| -> Option<String> {
-        let (scrubbed, _) = crate::exec::scrub_and_bound_with(text, false, str::to_owned);
+        let (scrubbed, _) =
+            crate::exec::scrub_and_bound_with(text.trim_start(), false, str::to_owned);
         scrubbed
             .lines()
             .map(str::trim)
@@ -758,6 +759,12 @@ mod first_lines_tests {
             assert!(!out.contains("hunter2"), "pad {pad}: {out}");
             assert!(!out.contains("user:"), "pad {pad}: {out}");
         }
+    }
+
+    #[test]
+    fn leading_blank_output_does_not_hide_the_first_line() {
+        let out = first_lines(&format!("{}\nreal failure", " \n".repeat(3_000)), "");
+        assert_eq!(out, "real failure");
     }
 
     #[test]

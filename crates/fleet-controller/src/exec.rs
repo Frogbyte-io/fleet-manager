@@ -513,11 +513,17 @@ pub(crate) fn scrub_and_bound_with(
     // split by it, and the dropped remainder counts as truncation.
     let (window, windowed) = scrub_window(text);
     let scrubbed = extra(&fleet_core::redact_credentials(window));
-    let (bounded, cut) = trim_to_bound(&scrubbed);
+    let (mut bounded, cut) = trim_to_bound(&scrubbed);
+    if windowed && !cut {
+        // The window dropped the rest; say so in the text as well as the flag.
+        bounded.push('…');
+    }
     (bounded, provider_truncated || windowed || cut)
 }
 
-/// The prefix of `text` that is scrubbed, and whether text was left out.
+/// The prefix of `text` that is scrubbed, and whether text was left out. A
+/// cut window always ends at whitespace, so no token (and no credential) is
+/// split by it; a window with no whitespace at all keeps nothing.
 fn scrub_window(text: &str) -> (&str, bool) {
     if text.len() <= SCRUB_WINDOW {
         return (text, false);
@@ -526,14 +532,7 @@ fn scrub_window(text: &str) -> (&str, bool) {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let end = text[..end]
-        .rfind(char::is_whitespace)
-        .filter(|&space| space >= RESULT_STRING_BOUND)
-        .unwrap_or(RESULT_STRING_BOUND);
-    let mut end = end;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text[..end].rfind(char::is_whitespace).unwrap_or(0);
     (&text[..end], true)
 }
 
@@ -552,6 +551,23 @@ fn trim_to_bound(text: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::{RESULT_STRING_BOUND, scrub_and_bound};
+
+    #[test]
+    fn a_credential_at_the_bound_of_a_huge_stream_is_never_half_kept() {
+        for tail in ["y".repeat(20_000), format!(" {}", "y".repeat(20_000))] {
+            for secret in [
+                "https://user:hunter2pw@host.invalid/r",
+                "user:hunter2pw@host.invalid",
+            ] {
+                let text = format!("{} {secret}{tail}", "x".repeat(2_990));
+                let (out, truncated) = scrub_and_bound(&text, false);
+                assert!(!out.contains("hunter2"), "{out}");
+                assert!(!out.contains("user:"), "{out}");
+                assert!(truncated);
+                assert!(out.ends_with('…'), "the cut is visible in the text");
+            }
+        }
+    }
 
     #[test]
     fn output_is_scrubbed_before_it_is_stored() {
