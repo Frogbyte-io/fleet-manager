@@ -826,6 +826,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         );
         // FM-717: the pool use cases, authorized and audited in the
         // application.
+        let lab = lab.with_reservations(std::sync::Arc::new(
+            fleet_storage_sqlite::CapacityRepository::new(store.pool().clone()),
+        ));
         let lab = lab.with_pools(std::sync::Arc::new(
             fleet_application::lab_pool::LabPools::new(
                 std::sync::Arc::new(fleet_storage_sqlite::LabPoolRepository::new(

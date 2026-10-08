@@ -2250,6 +2250,143 @@ async fn lab_cleanup_retry_rearms_a_cleanup_failed_lease_and_queues_its_cleanup(
     assert_eq!(parts.status, StatusCode::NOT_FOUND, "{body}");
 }
 
+#[derive(Debug, Default)]
+struct FakeReservations(
+    std::collections::HashMap<String, fleet_application::lab_placement::CapacityReservation>,
+);
+
+#[async_trait::async_trait]
+impl fleet_application::lab_placement::CapacityReservationPort for FakeReservations {
+    async fn record_observation(
+        &self,
+        _account_id: &str,
+        _observation: &fleet_application::proxmox::ProxmoxNodeCapacity,
+    ) -> Result<(), String> {
+        unreachable!("the detail read never records observations")
+    }
+
+    async fn reserve(
+        &self,
+        _request: &fleet_application::lab_placement::ReservationRequest,
+        _policy: &fleet_application::lab_placement::PlacementPolicy,
+        _now: i64,
+    ) -> Result<fleet_application::lab_placement::ReserveOutcome, String> {
+        unreachable!("the detail read never reserves")
+    }
+
+    async fn release_for_lease(&self, _lease_id: &str, _now: i64) -> Result<bool, String> {
+        unreachable!("the detail read never releases")
+    }
+
+    async fn for_lease(
+        &self,
+        lease_id: &str,
+    ) -> Result<Option<fleet_application::lab_placement::CapacityReservation>, String> {
+        Ok(self.0.get(lease_id).cloned())
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn lab_lease_detail_reports_its_capacity_reservation_when_it_has_one() {
+    use fleet_application::lab::{Lab, LeasePort, NewLease};
+    use fleet_application::lab_placement::{CapacityDemand, CapacityReservation, ReservationState};
+    use fleet_core::CleanupStrategy;
+    use fleet_storage_sqlite::{LabRepository, LeaseRepository, ProjectRepository, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+    let repository = Arc::new(LabRepository::new(store.pool().clone()));
+    let leases = Arc::new(LeaseRepository::new(store.pool().clone()));
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let lease = leases
+            .create(
+                &NewLease {
+                    template_version_id: "template-1@digest".to_owned(),
+                    purpose: "the test".to_owned(),
+                    project_id: None,
+                    cleanup: CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                "anonymous-lan-admin",
+                now,
+            )
+            .await
+            .unwrap();
+        ids.push(lease.id);
+    }
+    let reservation = |lease_id: &str, state, released_at| CapacityReservation {
+        id: format!("res-{lease_id}"),
+        lease_id: lease_id.to_owned(),
+        account_id: "acct-1".to_owned(),
+        node: "pve-a".to_owned(),
+        demand: CapacityDemand {
+            cores: 4,
+            memory_mib: 2048,
+            disk_gib: 20,
+            storage: "local-lvm".to_owned(),
+        },
+        state,
+        created_at: now,
+        released_at,
+    };
+    let mut reservations = FakeReservations::default();
+    reservations.0.insert(
+        ids[0].clone(),
+        reservation(&ids[0], ReservationState::Held, None),
+    );
+    reservations.0.insert(
+        ids[1].clone(),
+        reservation(&ids[1], ReservationState::Released, Some(now + 1)),
+    );
+    let lab = Arc::new(
+        Lab::new(
+            repository.clone(),
+            repository,
+            leases.clone(),
+            Arc::new(NoPromotedVersions),
+            Arc::new(ProjectRepository::new(store.pool().clone())),
+            Arc::new(FakeAudit),
+        )
+        .with_reservations(Arc::new(reservations)),
+    );
+    let mut state = (*test_state().0).clone();
+    state.lab = Some(lab);
+    let router = principal_router(Arc::new(state));
+    let detail = |id: &str| get(&format!("{API_BASE_PATH}/lab/leases/{id}"));
+
+    let (parts, body) = call_via(&router, detail(&ids[0])).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["data"]["reservation"],
+        serde_json::json!({
+            "node": "pve-a",
+            "accountId": "acct-1",
+            "storagePool": "local-lvm",
+            "cores": 4,
+            "memoryBytes": 2048u64 * 1024 * 1024,
+            "diskBytes": 20u64 * 1024 * 1024 * 1024,
+            "state": "held",
+        })
+    );
+    // The lease's own fields are unchanged beside it.
+    assert_eq!(body["data"]["id"], ids[0]);
+
+    let (parts, body) = call_via(&router, detail(&ids[1])).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["reservation"]["state"], "released");
+    assert_eq!(body["data"]["reservation"]["cores"], 4);
+
+    let (parts, body) = call_via(&router, detail(&ids[2])).await;
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    assert!(
+        body["data"]["reservation"].is_null(),
+        "a lease without one reports null: {body}"
+    );
+}
+
 #[tokio::test]
 async fn image_build_history_routes_and_schema_are_registered() {
     let (router, _, _) = test_router();

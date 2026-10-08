@@ -1251,6 +1251,49 @@ pub struct LeaseDetailDto {
     /// The lease's last failed artifact collection, when any (FM-721).
     /// Collection never changes the lease or holds up its cleanup.
     pub collection_failure: Option<crate::lab_artifacts::CollectionFailureDto>,
+    /// The capacity Fleet reserved for the lease (FM-715), when it has one.
+    /// Null for a lease that reserved nothing, such as a pooled lease.
+    pub reservation: Option<LeaseReservationDto>,
+}
+
+/// A lease's capacity reservation: what it holds on a node.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseReservationDto {
+    /// The PVE node the capacity is reserved on.
+    pub node: String,
+    /// The Proxmox account the guest is cloned through.
+    pub account_id: String,
+    /// The storage pool the disk is allocated on.
+    pub storage_pool: String,
+    /// Reserved vCPU cores.
+    pub cores: u32,
+    /// Reserved memory, in bytes.
+    pub memory_bytes: u64,
+    /// Reserved disk, in bytes.
+    pub disk_bytes: u64,
+    /// The reservation record's state: `held` until it is released.
+    pub state: String,
+}
+
+impl From<fleet_application::lab_placement::CapacityReservation> for LeaseReservationDto {
+    fn from(reservation: fleet_application::lab_placement::CapacityReservation) -> Self {
+        use fleet_application::lab_placement::ReservationState;
+        let demand = reservation.demand;
+        Self {
+            node: reservation.node,
+            account_id: reservation.account_id,
+            storage_pool: demand.storage,
+            cores: demand.cores,
+            memory_bytes: u64::from(demand.memory_mib) * 1024 * 1024,
+            disk_bytes: u64::from(demand.disk_gib) * 1024 * 1024 * 1024,
+            state: match reservation.state {
+                ReservationState::Held => "held",
+                ReservationState::Released => "released",
+            }
+            .to_owned(),
+        }
+    }
 }
 
 /// Reads one lease with its guest's connection details.
@@ -1298,6 +1341,11 @@ pub async fn get_lab_lease(
         correlation_id,
     )
     .await?;
+    let reservation = lab
+        .lease_reservation(state.authorizer.as_ref(), &principal, &lease_id)
+        .await
+        .map_err(|error| map_lab_error(&error, correlation_id))?
+        .map(Into::into);
     Ok(Json(Resource::new(LeaseDetailDto {
         lease: lease.into(),
         provision_state: record.as_ref().map(|record| record.state.id().to_owned()),
@@ -1310,6 +1358,7 @@ pub async fn get_lab_lease(
             .and_then(|record| record.endpoint_id.clone()),
         failed_step: record.and_then(|record| record.failed_step),
         collection_failure,
+        reservation,
     })))
 }
 

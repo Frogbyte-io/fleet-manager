@@ -3837,6 +3837,9 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
     // The detail carries the field, empty while nothing failed.
     assert!(detail.get("collectionFailure").is_some(), "{detail}");
     assert!(detail["collectionFailure"].is_null());
+    // `lab status` prints the reservation too (FM-715): null when none.
+    assert!(detail.get("reservation").is_some(), "{detail}");
+    assert!(detail["reservation"].is_null());
 }
 
 #[test]
