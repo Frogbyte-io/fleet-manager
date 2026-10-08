@@ -27,6 +27,17 @@ function tone(state: string): Tone {
   }
 }
 
+/** The guest's fate (API `guest`): saga state alone does not say it still exists. */
+function guestTone(guest: string): Tone {
+  switch (guest) {
+    case 'present': return 'ok'
+    case 'kept':
+    case 'returned_to_pool': return 'info'
+    case 'quarantined_in_pool': return 'warn'
+    default: return 'faint'
+  }
+}
+
 const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em] text-fc-faint'
 </script>
 
@@ -56,6 +67,9 @@ const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em
           State
         </TableHead>
         <TableHead :class="headClass">
+          Fate
+        </TableHead>
+        <TableHead :class="headClass">
           Template
         </TableHead>
         <TableHead :class="headClass">
@@ -79,9 +93,23 @@ const headClass = 'font-mono text-[10px] font-semibold uppercase tracking-[.14em
         </TableCell>
         <TableCell>
           <StatusChip
-            :label="record.state.replace('_', ' ')"
+            :label="record.state.replaceAll('_', ' ')"
             :tone="tone(record.state)"
           />
+        </TableCell>
+        <TableCell>
+          <StatusChip
+            :label="record.guest.replaceAll('_', ' ')"
+            :tone="guestTone(record.guest)"
+            data-testid="guest-fate"
+          />
+          <div
+            v-if="record.leaseState"
+            class="mt-1 font-mono text-[10px] uppercase tracking-[.14em] text-fc-faint"
+            data-testid="lease-state"
+          >
+            lease {{ record.leaseState.replaceAll('_', ' ') }}
+          </div>
         </TableCell>
         <TableCell class="text-xs">
           {{ byVersion.get(record.templateVersionId)?.name ?? `version ${shortId(record.templateVersionId)}` }}
