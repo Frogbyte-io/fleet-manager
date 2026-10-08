@@ -381,6 +381,16 @@ impl LeasePort for SweeperLeases {
     ) -> Result<bool, String> {
         self.inner.transition(id, observed, provision_id, to).await
     }
+    async fn rearm_cleanup(
+        &self,
+        id: &str,
+        observed_attempts: u32,
+        attempts: u32,
+    ) -> Result<bool, String> {
+        self.inner
+            .rearm_cleanup(id, observed_attempts, attempts)
+            .await
+    }
 }
 
 /// The scripted SSH trust and bootstrap project. The project child is the
