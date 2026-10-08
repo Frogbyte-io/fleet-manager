@@ -12,6 +12,7 @@ fleet-config = { path = "../fleet-config" }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10"
 uuid = { version = "1.26.0", features = ["v7"] }
 
 [lints]
@@ -21,6 +22,7 @@ workspace = true
 fleetd = { path = "../fleetd" }
 axum = "0.8.9"
 fleet-application = { path = "../fleet-application" }
+fleet-auth = { path = "../fleet-auth" }
 fleet-controller = { path = "../fleet-controller" }
 fleet-core = { path = "../fleet-core" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }

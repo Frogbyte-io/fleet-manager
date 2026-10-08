@@ -21,6 +21,7 @@ mod error;
 pub mod frogenv;
 pub mod images;
 pub mod lab;
+pub mod lab_artifacts;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -387,6 +388,10 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::get_lab_lease))
                 .routes(routes!(lab::exec_lab_lease))
                 .routes(routes!(lab::sweep_lab_leases))
+                .routes(routes!(lab_artifacts::collect_lab_artifacts))
+                .routes(routes!(lab_artifacts::list_lab_artifacts))
+                .routes(routes!(lab_artifacts::get_lab_artifact))
+                .routes(routes!(lab_artifacts::download_lab_artifact))
                 .routes(routes!(proxmox::start_reviewed_proxmox_operation))
                 .with_state(state),
         )

@@ -22,7 +22,7 @@ use crate::error::{ApiError, ApiErrorResponse};
 
 /// Extracts the Lab use cases from the API state, or answers with the
 /// standard envelope when the controller was composed without one.
-fn lab_or_error(
+pub(crate) fn lab_or_error(
     state: &crate::operations::ApiState,
     correlation_id: CorrelationId,
 ) -> Result<Arc<fleet_application::lab::Lab>, ApiErrorResponse> {
@@ -38,7 +38,10 @@ fn lab_or_error(
 }
 
 /// Maps a Lab use-case outcome onto the public error envelope, once.
-fn map_lab_error(error: &LabUseCaseError, correlation_id: CorrelationId) -> ApiErrorResponse {
+pub(crate) fn map_lab_error(
+    error: &LabUseCaseError,
+    correlation_id: CorrelationId,
+) -> ApiErrorResponse {
     let (status, code, retry): (StatusCode, &str, RetryClass) = match error {
         LabUseCaseError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         LabUseCaseError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", RetryClass::Never),
@@ -1245,6 +1248,9 @@ pub struct LeaseDetailDto {
     pub endpoint_id: Option<String>,
     /// The saga step that failed, when provisioning failed.
     pub failed_step: Option<String>,
+    /// The lease's last failed artifact collection, when any (FM-721).
+    /// Collection never changes the lease or holds up its cleanup.
+    pub collection_failure: Option<crate::lab_artifacts::CollectionFailureDto>,
 }
 
 /// Reads one lease with its guest's connection details.
@@ -1285,6 +1291,13 @@ pub async fn get_lab_lease(
         ),
         None => None,
     };
+    let collection_failure = crate::lab_artifacts::lease_collection_failure(
+        &state,
+        &principal,
+        &lease_id,
+        correlation_id,
+    )
+    .await?;
     Ok(Json(Resource::new(LeaseDetailDto {
         lease: lease.into(),
         provision_state: record.as_ref().map(|record| record.state.id().to_owned()),
@@ -1296,6 +1309,7 @@ pub async fn get_lab_lease(
             .as_ref()
             .and_then(|record| record.endpoint_id.clone()),
         failed_step: record.and_then(|record| record.failed_step),
+        collection_failure,
     })))
 }
 

@@ -3504,3 +3504,338 @@ fn lab_cleanup_retry_wait_follows_the_attempt_and_reports_the_lease() {
         );
     }
 }
+
+#[test]
+fn the_lab_artifact_commands_parse() {
+    assert_eq!(
+        lab_parse(&["lab", "artifacts"]).unwrap(),
+        fleetctl::Command::LabArtifacts {
+            lease: None,
+            project: None,
+            cursor: None,
+            limit: None,
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "artifacts",
+            "--project",
+            "p1",
+            "--lease",
+            "l1",
+            "--limit",
+            "5",
+            "--cursor",
+            "a9",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabArtifacts {
+            lease: Some("l1".to_owned()),
+            project: Some("p1".to_owned()),
+            cursor: Some("a9".to_owned()),
+            limit: Some(5),
+        }
+    );
+    assert_eq!(
+        lab_parse(&[
+            "lab",
+            "collect",
+            "lease-1",
+            "/var/log/syslog",
+            "/tmp/report.xml",
+            "--wait",
+            "--timeout",
+            "120",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabCollect {
+            lease_id: "lease-1".to_owned(),
+            paths: vec!["/var/log/syslog".to_owned(), "/tmp/report.xml".to_owned()],
+            wait: true,
+            timeout: Some(120),
+        }
+    );
+    assert_eq!(
+        lab_parse(&["lab", "artifact-get", "a1", "--out", "out.log"]).unwrap(),
+        fleetctl::Command::LabArtifactGet {
+            artifact_id: "a1".to_owned(),
+            out: "out.log".to_owned(),
+        }
+    );
+    for refused in [
+        &["lab", "collect", "lease-1"][..],
+        &["lab", "collect", "lease-1", "/x", "--force"],
+        &["lab", "artifacts", "--lease"],
+        &["lab", "artifacts", "--machine", "m1"],
+        &["lab", "artifacts", "--lease", "--project", "p1"],
+        &["lab", "artifacts", "--limit", "many"],
+        &["lab", "artifact-get", "a1"],
+        &["lab", "artifact-get", "a1", "--out"],
+    ] {
+        assert!(lab_parse(refused).is_err(), "{refused:?}");
+    }
+}
+
+/// FM-721 end to end: the artifact routes over a real controller router
+/// and the CLI's verified download.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
+    use fleet_application::lab::{
+        LabTemplatePort, LabTemplateVersion, LeasePort, NewLabTemplate, NewLease,
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_path_buf();
+    let (addr, lease_id, artifact_id, blob) = runtime.block_on(async {
+        let dist = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&data.join("fleet.db"))
+            .await
+            .unwrap();
+        let pool = store.pool().clone();
+        let labs = std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(pool.clone()));
+        let leases = std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(pool.clone()));
+        let content = fleet_core::LabTemplateContent {
+            name: "lab-base".to_owned(),
+            description: String::new(),
+            image_version_id: "image-version-1".to_owned(),
+            cores: 2,
+            memory_mib: 2048,
+            disk_gib: 20,
+            bootstrap_project_id: None,
+            readiness_probe: fleet_core::ReadinessProbe::GuestAgent,
+            readiness_command: None,
+            ssh_user: "root".to_owned(),
+            ssh_port: 22,
+            ssh_trust_mode: "tofu".to_owned(),
+            ssh_fingerprint: None,
+            readiness_deadline_seconds: 0,
+            ttl_seconds: 3_600,
+            cleanup: fleet_core::CleanupStrategy::Destroy,
+        };
+        let template = LabTemplatePort::create(
+            labs.as_ref(),
+            &NewLabTemplate {
+                content: content.clone(),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+        let version = labs
+            .publish(
+                &template.id,
+                &LabTemplateVersion {
+                    id: "template-version-1".to_owned(),
+                    template_id: template.id.clone(),
+                    name: content.name.clone(),
+                    content,
+                    image_digest: "sha256:abc".to_owned(),
+                    published_by: "tester".to_owned(),
+                    published_at: 1,
+                },
+            )
+            .await
+            .unwrap();
+        // A lease that never became ready: collection is refused.
+        let lease = leases
+            .create(
+                &NewLease {
+                    template_version_id: version.id.clone(),
+                    purpose: "artifacts".to_owned(),
+                    project_id: None,
+                    cleanup: fleet_core::CleanupStrategy::Destroy,
+                    ttl_seconds: 3_600,
+                },
+                "tester",
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        let blobs = std::sync::Arc::new(
+            fleet_controller::lab_artifacts_store::FsArtifactStore::open(
+                &data.join("lab-artifacts"),
+                1024 * 1024,
+            )
+            .unwrap(),
+        );
+        let artifacts = std::sync::Arc::new(fleet_application::lab_artifacts::LabArtifacts::new(
+            std::sync::Arc::new(fleet_storage_sqlite::LabArtifactRepository::new(
+                pool.clone(),
+            )),
+            blobs.clone(),
+            leases.clone(),
+            labs.clone(),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            fleet_application::lab_artifacts::ArtifactPolicy::default(),
+        ));
+        let artifact = artifacts
+            .record_exec_log(
+                &fleet_auth::LanAllowAllAuthorizer,
+                &fleet_application::authz::ActingPrincipal {
+                    id: "anonymous-lan-admin".to_owned(),
+                },
+                &lease.id,
+                "op-1",
+                "# lab exec op-1\n--- stdout ---\nhello\n",
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        let lab = std::sync::Arc::new(
+            fleet_application::lab::Lab::new(
+                labs.clone(),
+                labs.clone(),
+                leases.clone(),
+                std::sync::Arc::new(
+                    fleet_controller::proxmox_store::RecipeImagePinValidator::new(
+                        std::sync::Arc::new(fleet_storage_sqlite::RecipeRepository::new(
+                            pool.clone(),
+                        )),
+                    ),
+                ),
+                std::sync::Arc::new(fleet_storage_sqlite::ProjectRepository::new(pool.clone())),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            )
+            .with_artifacts(artifacts),
+        );
+        let settings = fleet_controller::Settings {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            web_dist: dist.path().to_path_buf(),
+            artifacts_dir: None,
+            tailscale_serve_listen: None,
+        };
+        let router = fleet_controller::build_router(
+            &settings,
+            Some(pool.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&lab),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        );
+        // The server task owns the web dist and the store for as long as it
+        // serves; the runtime ends with the test.
+        tokio::spawn(async move {
+            let _keep = (dist, store);
+            let _ = server.await;
+        });
+        (
+            address,
+            lease.id,
+            artifact.id,
+            blobs.root().join(&artifact.location),
+        )
+    });
+    let url = format!("http://{addr}");
+    let run = |words: &[&str]| {
+        let mut args = vec!["--url", url.as_str(), "--output", "json"];
+        args.extend_from_slice(words);
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let invocation = fleetctl::parse(&args).unwrap();
+        std::thread::spawn(move || fleetctl::run(&invocation).map_err(|error| error.to_string()))
+            .join()
+            .unwrap()
+    };
+
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&["lab", "artifacts", "--lease", &lease_id]).unwrap()).unwrap();
+    assert_eq!(listed["items"][0]["id"], artifact_id.as_str());
+    assert_eq!(listed["items"][0]["kind"], "exec-log");
+    let sha256 = listed["items"][0]["sha256"].as_str().unwrap().to_owned();
+    let none: serde_json::Value =
+        serde_json::from_str(&run(&["lab", "artifacts", "--project", "nope"]).unwrap()).unwrap();
+    assert_eq!(none["items"].as_array().unwrap().len(), 0);
+
+    let out = dir.path().join("downloaded.log");
+    let got: serde_json::Value = serde_json::from_str(
+        &run(&[
+            "lab",
+            "artifact-get",
+            &artifact_id,
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(got["verified"], true);
+    assert_eq!(got["sha256"], sha256.as_str());
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "# lab exec op-1\n--- stdout ---\nhello\n"
+    );
+
+    // The raw route carries the digest headers.
+    let response =
+        reqwest::blocking::get(format!("{url}/api/v1/lab/artifacts/{artifact_id}/content"))
+            .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["etag"].to_str().unwrap(),
+        format!("\"sha256:{sha256}\"")
+    );
+    assert!(
+        response.headers()["repr-digest"]
+            .to_str()
+            .unwrap()
+            .starts_with("sha-256=:")
+    );
+
+    // A tampered blob is refused by the controller, and nothing is written.
+    std::fs::write(&blob, "# lab exec op-1\n--- stdout ---\nHELLO\n").unwrap();
+    let tampered = dir.path().join("tampered.log");
+    let refused = run(&[
+        "lab",
+        "artifact-get",
+        &artifact_id,
+        "--out",
+        tampered.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(refused.contains("409"), "{refused}");
+    assert!(!tampered.exists());
+
+    // Collection needs a ready lease.
+    let refused = run(&["lab", "collect", &lease_id, "/var/log/syslog"]).unwrap_err();
+    assert!(refused.contains("400"), "{refused}");
+    let detail: serde_json::Value =
+        serde_json::from_str(&run(&["lab", "status", &lease_id]).unwrap()).unwrap();
+    // The detail carries the field, empty while nothing failed.
+    assert!(detail.get("collectionFailure").is_some(), "{detail}");
+    assert!(detail["collectionFailure"].is_null());
+}
+
+#[test]
+fn text_output_renders_lab_artifacts() {
+    let page = json!({
+        "items": [{
+            "id": "a1", "kind": "file", "sizeBytes": 42,
+            "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "name": "/var/log/syslog"
+        }],
+        "page": { "nextCursor": "a1", "limit": 1 }
+    });
+    let text = fleetctl::render_lab_artifacts(&page);
+    assert!(text.contains("/var/log/syslog"), "{text}");
+    assert!(text.contains("9f86d081884c7d65"), "{text}");
+    assert!(text.contains("42"), "{text}");
+    assert!(text.contains("--cursor a1"), "{text}");
+    assert!(
+        fleetctl::render_lab_artifacts(&json!({ "items": [], "page": {} }))
+            .contains("(no Lab artifacts)")
+    );
+}

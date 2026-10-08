@@ -175,6 +175,10 @@ pub enum Permission {
     /// Run a command on a ready Lab lease's guest (FM-720). A privileged
     /// mutation: it executes on a machine, like machine exec.
     LabExec,
+    /// Collect files from a ready Lab lease's guest, download stored Lab
+    /// artifacts, and record or expire them (FM-721). A privileged action:
+    /// it copies data off a machine and serves it.
+    LabArtifacts,
 }
 
 impl Permission {
@@ -234,6 +238,7 @@ impl Permission {
         Permission::LabExtend,
         Permission::LabKeep,
         Permission::LabExec,
+        Permission::LabArtifacts,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -292,6 +297,7 @@ impl Permission {
             Permission::LabExtend => "lab.extend",
             Permission::LabKeep => "lab.keep",
             Permission::LabExec => "lab.exec",
+            Permission::LabArtifacts => "lab.artifacts",
         }
     }
 
@@ -352,7 +358,8 @@ impl Permission {
             | Permission::LabLease
             | Permission::LabExtend
             | Permission::LabKeep
-            | Permission::LabExec => true,
+            | Permission::LabExec
+            | Permission::LabArtifacts => true,
         }
     }
 
@@ -413,7 +420,8 @@ impl Permission {
             | Permission::LabProvision
             | Permission::LabExtend
             | Permission::LabKeep
-            | Permission::LabExec => true,
+            | Permission::LabExec
+            | Permission::LabArtifacts => true,
         }
     }
 }

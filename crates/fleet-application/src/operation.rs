@@ -55,7 +55,7 @@ enum CreateRoute {
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 61] = [
+pub const CREATABLE_KINDS: [&str; 62] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -117,6 +117,7 @@ pub const CREATABLE_KINDS: [&str; 61] = [
     "lab.provision",
     "lab.cleanup",
     "lab.exec",
+    "lab.collect",
 ];
 
 /// The machine-scoped permission a kind's creation requires, when any.
@@ -684,7 +685,10 @@ impl Operations {
                 "agentless.inventory" | "node.inventory" | "machine.install-fleetd" => {
                     Some(crate::events::EventKind::MachineChanged)
                 }
-                "lab.provision" | "lab.cleanup" => Some(crate::events::EventKind::LeaseChanged),
+                // A collection records its failure on the lease detail.
+                "lab.provision" | "lab.cleanup" | "lab.collect" => {
+                    Some(crate::events::EventKind::LeaseChanged)
+                }
                 kind if kind.starts_with("proxmox.") => {
                     Some(crate::events::EventKind::ProxmoxChanged)
                 }
@@ -804,6 +808,31 @@ impl Operations {
             new,
             "lab.exec",
             Permission::LabExec,
+        )
+        .await
+    }
+
+    /// Queues a `lab.collect` that `LabArtifacts::request_collect`
+    /// validated (FM-721), by a caller allowed to collect artifacts from
+    /// that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_collect(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.collect",
+            Permission::LabArtifacts,
         )
         .await
     }
@@ -1064,6 +1093,13 @@ impl Operations {
             if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.exec runs through the lease exec route".to_owned(),
+                });
+            }
+        } else if new.kind == "lab.collect" {
+            // Authorized by `create_lab_collect` against its lease.
+            if route == CreateRoute::Generic {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.collect runs through the lease artifacts route".to_owned(),
                 });
             }
         } else if new.kind == "lab.cleanup" {

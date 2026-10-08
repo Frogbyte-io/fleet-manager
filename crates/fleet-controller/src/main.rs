@@ -149,10 +149,48 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 events.clone(),
             ));
         let (worker_shutdown, worker_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        // FM-721: Lab artifact bytes live in the configured directory; the
+        // database keeps their metadata. Without the directory the Lab
+        // still runs, without artifacts.
+        let lab_artifact_store = match fleet_controller::lab_artifacts_store::FsArtifactStore::open(
+            &config.lab_artifacts_dir,
+            config.lab_artifact_max_bytes,
+        ) {
+            Ok(artifact_store) => Some(std::sync::Arc::new(artifact_store)),
+            Err(error) => {
+                eprintln!(
+                    "warning: Lab artifacts unavailable: {} cannot be prepared: {error}",
+                    config.lab_artifacts_dir.display()
+                );
+                None
+            }
+        };
+        let lab_artifacts = lab_artifact_store.as_ref().map(|blobs| {
+            std::sync::Arc::new(fleet_application::lab_artifacts::LabArtifacts::new(
+                std::sync::Arc::new(fleet_storage_sqlite::LabArtifactRepository::new(
+                    store.pool().clone(),
+                )),
+                blobs.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+                fleet_application::lab_artifacts::ArtifactPolicy {
+                    retention_seconds: config.lab_artifact_retention_seconds,
+                    max_bytes: config.lab_artifact_max_bytes,
+                },
+            ))
+        });
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
         let executor = {
+            // SSH exec (machine and Lab) and Lab file collection share one
+            // session pool.
+            let exec_limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
             let ssh: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
@@ -161,7 +199,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(ScriptExecutor::new(
                     machines,
                     config.data_dir.join("ssh"),
-                    fleet_provider_ssh::ExecutionLimiter::new(4),
+                    exec_limiter.clone(),
                 ))
             };
             let limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
@@ -558,6 +596,49 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                     .with_cleanup(lab_cleanup, lab_leases, lab_provisions),
                 )
             };
+            // FM-721: every lab.exec keeps its log, and lab.collect copies
+            // guest files, through the artifact store.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match (&lab_artifacts, &lab_artifact_store) {
+                    (Some(artifacts), Some(artifact_store)) => {
+                        // Without the SSH work directory, collections fail
+                        // honestly; exec logs are still recorded.
+                        let files: std::sync::Arc<
+                            dyn fleet_controller::lab_artifacts_store::GuestFiles,
+                        > = match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            config.data_dir.join("ssh"),
+                            exec_limiter.clone(),
+                        ) {
+                            Ok(files) => std::sync::Arc::new(files),
+                            Err(error) => {
+                                eprintln!("warning: Lab artifact collection unavailable: {error}");
+                                std::sync::Arc::new(
+                                    fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                        reason: error,
+                                    },
+                                )
+                            }
+                        };
+                        std::sync::Arc::new(
+                            fleet_controller::lab_artifacts_store::LabArtifactDispatch::new(
+                                with_lab,
+                                artifacts.clone(),
+                                artifact_store.clone(),
+                                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                    store.pool().clone(),
+                                )),
+                                files,
+                            ),
+                        )
+                    }
+                    _ => with_lab,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -640,7 +721,7 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
         // validator: a template cannot pin an unpromoted image version.
         // Lease creation validates an explicit project against the same
         // repository the project surface serves.
-        let lab = std::sync::Arc::new(fleet_application::lab::Lab::new(
+        let lab = fleet_application::lab::Lab::new(
             std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                 store.pool().clone(),
             )),
@@ -657,7 +738,11 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 store.pool().clone(),
             )),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
-        ));
+        );
+        let lab = std::sync::Arc::new(match &lab_artifacts {
+            Some(artifacts) => lab.with_artifacts(artifacts.clone()),
+            None => lab,
+        });
         // The Proxmox surface composes over the store, the secret store,
         // and the provider's pinned-fingerprint transport. Without a secret
         // store it serves the standard "unavailable" envelope.
@@ -691,6 +776,9 @@ fn run_serve(config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             )
             .with_events(events.clone());
+            if let Some(artifacts) = &lab_artifacts {
+                sweeper = sweeper.with_artifacts(artifacts.clone());
+            }
             if let Some(secrets) = &secrets {
                 sweeper = sweeper.with_inventory(std::sync::Arc::new(
                     fleet_controller::lab_sweeper::ProxmoxLabGuests::new(

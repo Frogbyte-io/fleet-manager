@@ -372,9 +372,29 @@ Refusals fail the provision operation with a reason:
 
 ### Artifacts and storage sizing
 
-**Pending (FM-721, [#261](https://github.com/Frogbyte-io/fleet-manager/issues/261)).** Lab artifacts and exec logs, and their retention, do not exist yet. This section will describe retention and the controller volume they need when FM-721 merges.
+Lab artifacts are exec logs and guest files you collect. They outlive the lease. The controller stores their bytes in `FLEET_LAB_ARTIFACTS_DIR` (default `<FLEET_DATA_DIR>/lab-artifacts`) and their metadata in the database.
 
-What uses space today:
+- **Exec logs.** Every `lab exec` that ran keeps its exit code and bounded output (at most 3,000 bytes per stream, credentials in URLs scrubbed) as an `exec-log` artifact.
+- **Collected files.** Copy files off a ready lease before you release it:
+
+  ```sh
+  fleetctl --output json lab collect <lease-id> /var/log/syslog /tmp/report.xml --wait
+  ```
+
+  Name 1 to 16 absolute paths of regular files. A path with `.`, `..`, or empty components is refused. Each file must fit `FLEET_LAB_ARTIFACT_MAX_BYTES` (default 64 MiB). The controller copies over the lease machine's verified SSH endpoint. A path that fails (`missing`, `not_a_file`, `unreadable`, `too_large`, `deadline_exceeded`, `copy_failed`, `transfer_failed`, `store_failed`) fails the operation. The paths that did copy are kept, and the lease detail shows the failure as `collectionFailure`. Collection never changes the lease and never holds up its release or cleanup. Collect before you release: a collection that runs after release fails with `lease_not_ready`.
+- **Listing and download.**
+
+  ```sh
+  fleetctl --output json lab artifacts --lease <lease-id>     # or --project <project-id>
+  fleetctl --output json lab artifact-get <artifact-id> --out ./syslog
+  ```
+
+  `artifact-get` writes the file only after its size and sha256 match the artifact's record. The controller also re-hashes the bytes before it sends them, and refuses (409) bytes that changed on disk.
+- **Retention.** The Lab sweeper deletes artifacts older than `FLEET_LAB_ARTIFACT_RETENTION_SECONDS` (default 7 days). Expiry needs the background sweeper: with `FLEET_LAB_SWEEP_INTERVAL_SECONDS=0`, artifacts stay until it runs. The audit event is `lab_artifact_expired`. Identical content is stored once, and its bytes go when the last artifact that uses them expires.
+- **Sizing.** Size the volume that holds `FLEET_LAB_ARTIFACTS_DIR` for one retention window of collected files, plus one size cap of headroom for each collection in progress: a file is staged under the directory's `tmp/` before it is committed, and leftover staging files are removed at startup. Exec logs are small (two bounded streams and a header). For example, 20 files of 5 MiB a day kept for the default 7 days need about 700 MiB, plus 64 MiB of staging headroom. When the volume is full, collection fails with `store_failed` and the lease is not affected. Each artifact's deletion deadline is fixed when it is stored, so a shorter retention or a lower size cap (both need a controller restart) only applies to artifacts stored afterwards; free space now by growing the volume.
+- **Permissions.** Collecting and downloading need `lab.artifacts`. Listing needs `lab.read`.
+
+What else uses space:
 
 - **Image templates.** Each successful build leaves a template on PVE. Fleet never deletes one: its destroy refuses templates. Remove superseded, unpromoted templates in PVE yourself. Keep the promoted version's template; Lab clones from it.
 - **Lab guests.** One full copy of the image template per live guest, on the template's storage.

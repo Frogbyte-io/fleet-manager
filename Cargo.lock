@@ -560,6 +560,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "fleet-application",
  "fleet-auth",
  "fleet-core",
@@ -844,6 +845,7 @@ dependencies = [
  "axum",
  "fleet-api",
  "fleet-application",
+ "fleet-auth",
  "fleet-config",
  "fleet-controller",
  "fleet-core",
@@ -852,6 +854,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "uuid",
