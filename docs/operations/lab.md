@@ -228,7 +228,7 @@ fleetctl --output json lab exec <lease-id> --wait --timeout 120 -- uname -a
 - The words after `--` are shell-quoted and run as one command over SSH on the lease's Lab machine, through the controller's SSH agent. Output has the same size limits and redaction as machine exec.
 - The lease must be `ready` and unexpired, both when you ask and when the command runs. The command is at most 64 KiB. `--timeout` is the command's deadline, 1 to 900 seconds (default 60).
 - With `--wait`, `fleetctl` prints `exitCode`, `stdout`, `stderr`, and whether either was truncated, and exits with the remote command's exit code (1 if the command did not run; `reason` and `detail` say why). Without `--wait`, it prints the queued `lab.exec` operation; read it with `fleetctl --output json operations get <operation-id>`.
-- It needs the `lab.exec` permission. The request is audited (`lab_exec_requested`), but the command text is not recorded, because it may carry secrets. Still, do not put secrets on the command line.
+- It needs the `lab.exec` permission. The request is audited (`lab_exec_requested`) without the command text. The queued `lab.exec` operation does store the command in its payload, in the controller's database, though `operations get` does not show the payload. Do not put secrets on the command line.
 
 The TTL starts at `ready`. Extend it, up to 30 days after the lease was created:
 
@@ -253,7 +253,7 @@ fleetctl --output json lab destroy <lease-id> --wait
 The controller runs a sweeper every `FLEET_LAB_SWEEP_INTERVAL_SECONDS` seconds (TOML `lab_sweep_interval_seconds`; default 60; `0` disables it). Each tick:
 
 1. releases expired `ready` leases;
-2. compensates leases stuck in `provisioning`, `booting`, or `bootstrapping` more than 10 minutes past their readiness deadline, or past their maximum lifetime: to `releasing` if a guest was allocated, otherwise to `failed`. A `failed` lease whose provision still holds a guest moves to `releasing` at once. Each compensation is audited as `lab_lease_stuck_compensated`;
+2. compensates leases stuck in `provisioning`, `booting`, or `bootstrapping` once 10 minutes have passed since their readiness deadline, or once their maximum lifetime is reached: to `releasing` if a guest was allocated, otherwise to `failed`. A `failed` lease whose provision still holds a guest moves to `releasing` at once. Each compensation is audited as `lab_lease_stuck_compensated`;
 3. queues the `lab.cleanup` of every `releasing` lease whose next attempt is due. That covers retries after a failed attempt, and a release whose cleanup was never queued;
 4. reports orphan guests (see [Orphans](#orphans)).
 
