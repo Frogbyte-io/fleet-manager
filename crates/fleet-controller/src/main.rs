@@ -227,10 +227,34 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
+        // SSH exec (machine and Lab), Lab file collection, and detached
+        // exec status reads share one session pool.
+        let exec_limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
+        // #394: detached Lab commands. The records are durable, so a
+        // restarted controller still knows every handle; the guest reader
+        // answers status over the verified SSH endpoint.
+        let detached_records: std::sync::Arc<
+            dyn fleet_application::lab_exec_detach::DetachedExecPort,
+        > = std::sync::Arc::new(fleet_storage_sqlite::DetachedExecRepository::new(
+            store.pool().clone(),
+        ));
+        let detached_guest: std::sync::Arc<dyn fleet_application::lab_exec_detach::GuestExecPort> =
+            match fleet_controller::lab_detach_store::SshGuestExec::new(
+                std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                    store.pool().clone(),
+                )),
+                config.data_dir.join("ssh"),
+                exec_limiter.clone(),
+            ) {
+                Ok(guest) => std::sync::Arc::new(guest),
+                Err(error) => {
+                    eprintln!("warning: detached exec status unavailable: {error}");
+                    std::sync::Arc::new(fleet_controller::lab_detach_store::UnavailableGuestExec {
+                        reason: error,
+                    })
+                }
+            };
         let executor = {
-            // SSH exec (machine and Lab) and Lab file collection share one
-            // session pool.
-            let exec_limiter = fleet_provider_ssh::ExecutionLimiter::new(4);
             let ssh: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> = {
                 let machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
                     std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
@@ -840,6 +864,19 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     }
                     None => with_lab,
                 };
+            // #394: `lab.exec_detach` starts a command that outlives the
+            // SSH session; its status is read directly from the guest.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                std::sync::Arc::new(fleet_controller::lab_detach_store::LabDetachDispatch::new(
+                    with_lab,
+                    detached_records.clone(),
+                    std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                        store.pool().clone(),
+                    )),
+                ));
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -971,6 +1008,19 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
             Some(puts) => lab.with_puts(puts.clone()),
             None => lab,
         };
+        let lab = lab.with_detached(std::sync::Arc::new(
+            fleet_application::lab_exec_detach::LabExecDetach::new(
+                detached_records.clone(),
+                detached_guest.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ),
+        ));
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,

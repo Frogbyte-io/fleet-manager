@@ -689,10 +689,11 @@ mod live {
     pub const LIVE_GATE: &str = "FLEET_LAB_LIVE";
     /// The scenarios, in report order. Kept in step with
     /// `xtask/src/lab_acceptance.rs`.
-    pub const SCENARIOS: [&str; 3] = [
+    pub const SCENARIOS: [&str; 4] = [
         "lease-exec-destroy",
         "ttl-expiry-restart",
         "put-collect-roundtrip",
+        "detached-exec",
     ];
     /// The SSH user the fixture's template accepts the controller's agent
     /// key for; `root` when unset.
@@ -1420,6 +1421,240 @@ mod live {
         Ok(Outcome::Pass)
     }
 
+    /// How long the detached command sleeps: past the 900-second bound of a
+    /// synchronous exec by default, and the issue's literal 30 minutes with
+    /// `FLEET_LAB_DETACH_SECONDS=1800`.
+    fn detach_seconds() -> Result<u64, String> {
+        match std::env::var("FLEET_LAB_DETACH_SECONDS") {
+            Err(_) => Ok(960),
+            Ok(value) => value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| (30..=7_200).contains(seconds))
+                .ok_or_else(|| {
+                    "FLEET_LAB_DETACH_SECONDS must be a number from 30 to 7200".to_owned()
+                }),
+        }
+    }
+
+    /// `fleetctl lab exec-status <handle>`: the answer's JSON.
+    async fn detached_status(run: &TargetRun, handle: &str) -> Result<Value, String> {
+        let status = run
+            .controller
+            .fleetctl(&args(&["lab", "exec-status", handle]), None)
+            .await?;
+        check!(
+            status.success,
+            "lab exec-status failed: {} {}",
+            status.json,
+            status.stderr
+        );
+        Ok(status.json)
+    }
+
+    /// A command longer than the exec bound runs detached and ends with its
+    /// exit code and output, a controller restart while it runs loses no
+    /// handle, and a release while another command runs ends it with the
+    /// guest and answers `lease_ended` (#394).
+    #[allow(clippy::too_many_lines)]
+    pub async fn detached_exec(run: &TargetRun, lab: &Lab) -> Result<Outcome, String> {
+        let seconds = detach_seconds()?;
+        // The TTL must outlast the command, whose bound is the TTL left.
+        let (account, version) = lab.prepare(run, seconds + 1_200).await?;
+        let lease = ready_lease(run, &account, &version).await?;
+        let id = lease["id"].as_str().unwrap_or_default().to_owned();
+        let started = Instant::now();
+        let script = format!("echo begin; sleep {seconds}; echo finished-ok");
+        let detach = async |script: &str, key: &str| {
+            run.controller
+                .fleetctl(
+                    &args(&[
+                        "lab",
+                        "exec",
+                        &id,
+                        "--detach",
+                        "--idempotency-key",
+                        key,
+                        "--",
+                        "sh",
+                        "-c",
+                        script,
+                    ]),
+                    None,
+                )
+                .await
+        };
+        let long = detach(&script, "acceptance-long").await?;
+        check!(
+            long.success && long.json["handle"].is_string(),
+            "lab exec --detach did not return a handle: {} {}",
+            long.json,
+            long.stderr
+        );
+        let handle = long.json["handle"].as_str().unwrap_or_default().to_owned();
+        check!(
+            started.elapsed() < Duration::from_secs(120),
+            "lab exec --detach held the call open for {:?}",
+            started.elapsed()
+        );
+        check!(
+            long.json["timeoutSeconds"].as_u64().unwrap_or(0) >= seconds,
+            "the bound {} is below the command's {seconds} seconds",
+            long.json["timeoutSeconds"]
+        );
+        let again = detach(&script, "acceptance-long").await?;
+        check!(
+            again.json["handle"] == handle.as_str(),
+            "a retry with the same key did not return the same handle: {}",
+            again.json
+        );
+        // It is running (the start operation is queued for a moment).
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let running = loop {
+            let status = detached_status(run, &handle).await?;
+            if status["state"] == "running" {
+                break status;
+            }
+            check!(
+                status["state"] == "starting" && Instant::now() < deadline,
+                "the detached command is {}: {status}",
+                status["state"]
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+        check!(
+            running["terminal"] == false && running["stdout"] == "begin\n",
+            "a running command's status is wrong: {running}"
+        );
+        run.log(&format!("detached command {handle} is running"));
+
+        // A second, short command with a known code, polled without --wait.
+        let quick = detach(
+            "echo quick-out; echo quick-err >&2; exit 7",
+            "acceptance-quick",
+        )
+        .await?;
+        let quick = quick.json["handle"].as_str().unwrap_or_default().to_owned();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let exited = loop {
+            let status = detached_status(run, &quick).await?;
+            if status["state"] == "exited" {
+                break status;
+            }
+            check!(
+                matches!(status["state"].as_str(), Some("starting" | "running"))
+                    && Instant::now() < deadline,
+                "the quick command is {}: {status}",
+                status["state"]
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+        check!(
+            exited["exitCode"] == 7
+                && exited["terminal"] == true
+                && exited["stdout"] == "quick-out\n"
+                && exited["stderr"] == "quick-err\n",
+            "the quick command's exit code or output is wrong: {exited}"
+        );
+
+        // A command that would outlive the lease is capped by it, and one
+        // that runs when the lease is released ends with the guest.
+        let forever = detach("sleep 100000", "acceptance-forever").await?;
+        let forever_handle = forever.json["handle"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        check!(
+            forever.json["timeoutSeconds"].as_u64().unwrap_or(u64::MAX) <= seconds + 1_200,
+            "the detached bound exceeds the lease's TTL: {}",
+            forever.json
+        );
+
+        // The controller restarts while both commands run: no handle is lost.
+        run.controller
+            .with_store(async |_| {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(())
+            })
+            .await?;
+        run.log("controller restarted while detached commands ran");
+        let after = detached_status(run, &handle).await?;
+        check!(
+            matches!(after["state"].as_str(), Some("running")),
+            "the handle did not survive the controller restart: {after}"
+        );
+
+        // Wait for the long command: exit 0 and the last of its output.
+        let wait_bound = (seconds + 600).to_string();
+        let waited = run
+            .controller
+            .fleetctl(
+                &args(&[
+                    "lab",
+                    "exec-status",
+                    &handle,
+                    "--wait",
+                    "--timeout",
+                    &wait_bound,
+                ]),
+                None,
+            )
+            .await?;
+        check!(
+            waited.success
+                && waited.json["state"] == "exited"
+                && waited.json["exitCode"] == 0
+                && waited.json["stdout"]
+                    .as_str()
+                    .is_some_and(|out| out.contains("begin") && out.contains("finished-ok")),
+            "the long command did not end 0 with its output: {} {}",
+            waited.json,
+            waited.stderr
+        );
+        check!(
+            started.elapsed() >= Duration::from_secs(seconds),
+            "the command finished in {:?}, before its {seconds} seconds",
+            started.elapsed()
+        );
+        run.log(&format!(
+            "a {seconds}-second detached command ended with its exit code after {:?}",
+            started.elapsed()
+        ));
+
+        // Release while `sleep 100000` runs: a terminal answer, no SSH error.
+        let still = detached_status(run, &forever_handle).await?;
+        check!(
+            still["state"] == "running",
+            "the second command should still run: {still}"
+        );
+        let bound = LEASE_BOUND.as_secs().to_string();
+        let destroyed = run
+            .controller
+            .fleetctl(
+                &args(&["lab", "destroy", &id, "--wait", "--timeout", &bound]),
+                None,
+            )
+            .await?;
+        check!(
+            destroyed.success && destroyed.json["state"] == "released",
+            "lab destroy --wait ended {}: {}",
+            destroyed.json["state"],
+            destroyed.stderr
+        );
+        guest_gone(run, &lease).await?;
+        for handle in [&forever_handle, &handle] {
+            let ended = detached_status(run, handle).await?;
+            check!(
+                ended["state"] == "lease_ended"
+                    && ended["terminal"] == true
+                    && ended["leaseState"] == "released",
+                "status after release is not a terminal lease_ended: {ended}"
+            );
+        }
+        Ok(Outcome::Pass)
+    }
+
     /// A ready lease expires while the controller is down; the restarted
     /// controller's sweeper releases it and destroys its guest.
     pub async fn ttl_expiry_restart(run: &TargetRun, lab: &Lab) -> Result<Outcome, String> {
@@ -1478,4 +1713,9 @@ async fn live_ttl_expiry_restart() {
 #[tokio::test]
 async fn live_put_collect_roundtrip() {
     live::scenario(live::SCENARIOS[2], live::put_collect_roundtrip).await;
+}
+
+#[tokio::test]
+async fn live_detached_exec() {
+    live::scenario(live::SCENARIOS[3], live::detached_exec).await;
 }

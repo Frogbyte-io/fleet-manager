@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+pub mod detached;
 pub mod discovery;
 pub mod exec;
 pub mod fetch;

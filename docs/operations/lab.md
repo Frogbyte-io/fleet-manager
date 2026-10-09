@@ -378,6 +378,40 @@ fleetctl --output json lab exec <lease-id> --wait --timeout 120 -- uname -a
 - With `--wait`, `fleetctl` prints `exitCode`, `stdout`, `stderr`, and whether either was truncated, and exits with the remote command's exit code (1 if the command did not run; `reason` and `detail` say why). It waits at most `--timeout` plus 60 seconds. If the operation has not finished by then, `fleetctl` prints an error naming the operation and exits 1 like any other CLI error, so an exit code of 1 does not always come from the remote command. Read the result later with `fleetctl --output json operations get <operation-id>`. Without `--wait`, it prints the queued `lab.exec` operation; read it with `fleetctl --output json operations get <operation-id>`.
 - It needs the `lab.exec` permission. The request is audited (`lab_exec_requested`) without the command text. The queued `lab.exec` operation does store the command in its payload, in the controller's database, though `operations get` does not show the payload. Do not put secrets on the command line.
 
+#### Commands longer than 15 minutes: detached exec
+
+`lab exec` is bounded at 900 seconds and keeps its SSH session open. A suite that takes longer runs detached:
+
+```sh
+fleetctl --output json lab exec <lease-id> --detach --idempotency-key <key> -- ./run-suite.sh
+# {"handle": "...", "leaseId": "...", "timeoutSeconds": 3480, "operation": {...}}
+fleetctl --output json lab exec-status <handle>
+fleetctl --output json lab exec-status <handle> --wait --timeout 3600
+```
+
+- `--detach` queues a `lab.exec_detach` operation and returns its `handle` (the operation's id) at once. The operation ends when the guest has started the command, not when the command ends. The same `--idempotency-key` on a retry returns the same handle and starts nothing twice, and so does a retry after a controller restart: the guest refuses to start a handle's directory twice.
+- The command runs in the guest, outside the SSH session, in its own session (`setsid`), under `/var/lib/fleet-lab/exec/<handle>/` (`$HOME/.local/state/fleet-lab/exec/<handle>/` when the template's SSH user is not root), mode `0700`. It holds `cmd.sh`, `stdout`, `stderr`, `pid`, `boot_id`, and, once the command ends, `exit`. The guest needs only bash, coreutils, and util-linux (`setsid`, `timeout`); the Debian 12 template has them. The directory is Fleet's: `lab collect` the whole output from there (an absolute guest path) before the lease ends, because `exec-status` returns only the last 3,000 bytes of each stream. A command that writes a lot fills the guest's disk, like any command.
+- `exec-status` is a synchronous read of that directory over SSH, not an operation. It changes nothing, is meant to be polled, and its answer is not worth storing; an operation per poll would fill the operations table. It still needs a permission (`lab.exec.read`) on the handle, is limited to the owner of the handle's lease for a scoped credential (another owner's handle is `not_found`), and writes an audit event (`lab_exec_status_read`). `--wait` polls every 2 seconds until the state is terminal (default `--timeout` 3,600 seconds) and exits with the command's exit code, or 1 for any other terminal state.
+- Each answer has `state`, `terminal`, `exitCode`, `reason`, `startedAt` and `finishedAt` (the guest's clock, epoch seconds), `stdoutBytes` and `stderrBytes` (full sizes), and the last 3,000 bytes of `stdout` and `stderr`. Output passes the same scrubber as `lab exec` and is bounded the same way, but keeps the end of the stream rather than the start. The guest returns the last 16 KiB; if that cut the front of a stream, the text up to the first whitespace is dropped before scrubbing so a credential cut in two never leaves a fragment, and `truncatedStdout` or `truncatedStderr` is true. The same warning applies as for `lab exec`: scrubbing is pattern-based, so do not print secrets.
+
+| `state` | terminal | Meaning |
+| --- | --- | --- |
+| `starting` | no | The start operation is queued or running. |
+| `running` | no | The process is alive (its pid and start time match, and the guest has not rebooted). |
+| `unreachable` | no | The guest could not be read right now (`reason`: `guest_unreachable`). Poll again. |
+| `exited` | yes | The command ended; `exitCode` is its exit status. `124` means the time bound ended it. |
+| `lost` | yes | The command is gone and left no exit code. `reason`: `guest_rebooted` (a different boot id), `process_gone` (the wrapper was killed before it wrote the exit code), `never_started`, or `guest_has_no_record` (the guest has no directory for a handle that started, as after a revert). |
+| `failed_to_start` | yes | The start operation failed before the command ran; its error is in `operations get <handle>`. Start again. |
+| `lease_ended` | yes | The lease is released, expired, or otherwise not `ready` (`leaseState` names it). The guest and the command are gone or going. Fleet does not dial the guest. |
+
+Lifecycle and limits:
+
+- **A detached command cannot outlive its lease or extend it.** Release and TTL expiry destroy the guest (or revert a pooled one), which ends the process; nothing keeps a lease alive, and the command is never a reason to extend it. The command's time bound is set when it starts: the `--timeout` you pass, never more than the lease's TTL left at that moment (`--timeout` omitted means all of it), and the wrapper ends it at the bound with exit 124. A later `lab extend` does not lengthen a running command's bound. A lease with less than 5 seconds left refuses to start one. A `ready` lease that has passed its expiry but is not yet swept already answers `lease_ended`.
+- **Read the result before releasing.** After release, `exec-status` answers `lease_ended`, a terminal answer rather than an SSH error, and the exit code and output are gone with the guest. `lab release --keep` leaves the guest running, but the lease is then no longer `ready`, so Fleet stops reporting on the command.
+- **A controller restart loses nothing.** The handle is a row in the controller's database and the process state is in the guest. Poll the same handle from a restarted controller. A start operation interrupted by the restart is retried by the worker; the guest's directory makes the retry idempotent.
+- **The command text is not stored by Fleet's record or audit.** The record keeps the handle, the lease, the owner, the command's SHA-256 and size, the bound, and when it was made. The audit event (`lab_exec_detach_requested`) carries the same digest, size, and bound. Like `lab exec`, the queued operation's payload holds the command in the controller's database, and `operations get` does not show it; the command also sits in `cmd.sh` in the guest. Do not put secrets on the command line.
+- **Authorization.** Start needs `lab.exec` on the lease, status needs `lab.exec.read`. A scoped credential has both rows and `lab.exec_detach` as a queueable operation, limited to its own owner's leases.
+
 The TTL starts at `ready`. Extend it, up to 30 days after the lease was created:
 
 ```sh

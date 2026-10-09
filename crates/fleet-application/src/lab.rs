@@ -1041,6 +1041,7 @@ pub struct Lab {
     audit: Arc<dyn AuditPort>,
     artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
     puts: Option<Arc<crate::lab_put::LabPuts>>,
+    detached: Option<Arc<crate::lab_exec_detach::LabExecDetach>>,
     pools: Option<Arc<crate::lab_pool::LabPools>>,
     reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
 }
@@ -1065,6 +1066,7 @@ impl Lab {
             audit,
             artifacts: None,
             puts: None,
+            detached: None,
             pools: None,
             reservations: None,
         }
@@ -1163,6 +1165,19 @@ impl Lab {
     #[must_use]
     pub fn puts(&self) -> Option<&Arc<crate::lab_put::LabPuts>> {
         self.puts.as_ref()
+    }
+
+    /// Serves the detached-exec use cases (#394) beside the Lab surface.
+    #[must_use]
+    pub fn with_detached(mut self, detached: Arc<crate::lab_exec_detach::LabExecDetach>) -> Self {
+        self.detached = Some(detached);
+        self
+    }
+
+    /// The detached-exec use cases, when the controller composed them.
+    #[must_use]
+    pub fn detached(&self) -> Option<&Arc<crate::lab_exec_detach::LabExecDetach>> {
+        self.detached.as_ref()
     }
 
     /// The Lab artifact use cases, when the controller composed them.

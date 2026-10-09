@@ -205,6 +205,11 @@ pub enum Permission {
     /// mutation: it writes to a machine over SSH. Scoped CI identities that
     /// run Release QA need it beside `lab.exec` and `lab.artifacts`.
     LabPut,
+    /// Read the state, exit code, and bounded output tails of a detached Lab
+    /// command (#394). A read, but it exposes guest command output, so it is
+    /// risky like [`Permission::LabArtifacts`]. A delegated credential reads
+    /// its own owner's handles only.
+    LabExecRead,
 }
 
 impl Permission {
@@ -273,6 +278,7 @@ impl Permission {
         Permission::LabArtifactRead,
         Permission::LabLeaseProvision,
         Permission::LabPut,
+        Permission::LabExecRead,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -340,6 +346,7 @@ impl Permission {
             Permission::LabArtifactRead => "lab.artifacts.read",
             Permission::LabLeaseProvision => "lab.lease.provision",
             Permission::LabPut => "lab.put",
+            Permission::LabExecRead => "lab.exec.read",
         }
     }
 
@@ -409,7 +416,8 @@ impl Permission {
             | Permission::CredentialRevoke
             | Permission::LabTemplateUse
             | Permission::LabLeaseProvision
-            | Permission::LabPut => true,
+            | Permission::LabPut
+            | Permission::LabExecRead => true,
         }
     }
 
@@ -479,7 +487,8 @@ impl Permission {
             | Permission::CredentialRevoke
             | Permission::LabTemplateUse
             | Permission::LabLeaseProvision
-            | Permission::LabPut => true,
+            | Permission::LabPut
+            | Permission::LabExecRead => true,
         }
     }
 }

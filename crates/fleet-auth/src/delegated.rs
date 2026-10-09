@@ -158,8 +158,16 @@ pub const DELEGATED_LAB_LOOP: &[DelegatedAction] = &[
         action: Permission::LabExtend,
         resource: ResourceRule::Named,
     },
+    // lab exec, including --detach: the use case and the operation creator
+    // apply owner scope.
     DelegatedAction {
         action: Permission::LabExec,
+        resource: ResourceRule::Named,
+    },
+    // lab exec-status: the handle's owner must be the credential's owner;
+    // another owner's handle reads as not found.
+    DelegatedAction {
+        action: Permission::LabExecRead,
         resource: ResourceRule::Named,
     },
     // lab collect and artifact-get (download).
@@ -184,6 +192,7 @@ pub const DELEGATED_LAB_LOOP: &[DelegatedAction] = &[
         resource: ResourceRule::OneOf(&[
             "lab.provision",
             "lab.exec",
+            "lab.exec_detach",
             "lab.collect",
             "lab.put",
             "lab.cleanup",
