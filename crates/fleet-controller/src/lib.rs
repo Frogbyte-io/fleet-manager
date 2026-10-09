@@ -226,8 +226,12 @@ fn api_state(
     git_credentials: Option<Arc<dyn fleet_application::source::GitCredentialStore>>,
     events: Arc<fleet_application::events::EventHub>,
 ) -> fleet_api::operations::ApiState {
+    // One grant book joins the credential resolver (which registers the
+    // allow-list a request authenticated with) and the authorizer (which
+    // decides a delegated principal on it).
+    let grants = std::sync::Arc::new(fleet_application::credentials::GrantBook::new());
     let authorizer: std::sync::Arc<dyn fleet_application::authz::Authorizer> =
-        std::sync::Arc::new(fleet_auth::LanAllowAllAuthorizer);
+        std::sync::Arc::new(fleet_auth::ScopedAuthorizer::new(grants.clone()));
     if let Some(pool) = db {
         let operations =
             fleet_application::operation::Operations::new_with_events_and_catalog_rollout_targets(
@@ -240,7 +244,18 @@ fn api_state(
                 fleet_application::operation::PoolMembership(std::sync::Arc::new(
                     fleet_storage_sqlite::LabPoolRepository::new(pool.clone()),
                 )),
+            ))
+            .with_lease_owners(std::sync::Arc::new(
+                fleet_storage_sqlite::LeaseRepository::new(pool.clone()),
             ));
+        let credentials = fleet_application::credentials::Credentials::new(
+            std::sync::Arc::new(fleet_storage_sqlite::CredentialRepository::new(
+                pool.clone(),
+            )),
+            std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
+            std::sync::Arc::new(fleet_auth::DelegatedTokenCrypto::new()),
+            grants,
+        );
         let machines = fleet_application::machine::Machines::new(
             std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(pool.clone())),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
@@ -288,6 +303,7 @@ fn api_state(
                 }
             })),
             planning: Some(std::sync::Arc::new(compose_planning(&pool))),
+            credentials: Some(std::sync::Arc::new(credentials)),
         };
     }
     // Without a store there is nothing to serve: the state's backends answer
@@ -312,6 +328,7 @@ fn api_state(
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
     }
 }
 
@@ -503,6 +520,7 @@ fn build_router_for_caller(
         services.and_then(|services| services.git_credentials.clone()),
         events,
     ));
+    let credentials = api_state.credentials.clone();
     let api_router = fleet_api::router(api_state.clone());
     let shell = shell(settings).fallback(api_router);
     let web_index = std::fs::read(settings.web_dist.join("index.html"))
@@ -531,6 +549,13 @@ fn build_router_for_caller(
         router = router.nest("/api/node/v1", node_routes);
     }
     router = router.layer(middleware::from_fn_with_state(web_index, spa_fallback));
+    // A delegated credential (ADR 0011) is resolved before the listener's own
+    // caller: a valid token narrows the request to its principal, an invalid
+    // one is refused, and a request without one is decided as before.
+    let delegated = credentials.map(|credentials| fleet_auth::DelegatedCallerResolver {
+        credentials,
+        require_loopback_peer: tailscale_identity,
+    });
     if tailscale_identity {
         router = fleet_api::tailscale_serve_guard(router, fleet_auth::TailscaleServePeer);
     } else {
@@ -538,7 +563,17 @@ fn build_router_for_caller(
         // static, health, downloads, and the node surface. Public API
         // correlation stays scoped to its router; the node protocol has its
         // own correlation contract.
-        router = router.layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+        router = router
+            .layer(middleware::from_fn(
+                fleet_api::auth::reject_unauthenticated_caller,
+            ))
+            .layer(middleware::from_fn(fleet_auth::resolve_lan_caller));
+    }
+    if let Some(resolver) = delegated {
+        router = router.layer(middleware::from_fn_with_state(
+            resolver,
+            fleet_auth::resolve_delegated_caller,
+        ));
     }
     // Keep headers outside the identity gate so its early 401 responses keep
     // the controller's browser protections.
@@ -1046,6 +1081,115 @@ mod tailscale_identity_tests {
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn identity_listener_takes_a_delegated_bearer_from_the_trusted_peer_only() {
+        let web_dist = tempfile::tempdir().unwrap();
+        std::fs::write(web_dist.path().join("index.html"), "<html>fleet</html>").unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = fleet_storage_sqlite::Store::open(&store_dir.path().join("fleet.db"))
+            .await
+            .unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            tailscale_serve_listen: Some("127.0.0.1:8081".parse().unwrap()),
+            web_dist: web_dist.path().to_path_buf(),
+            artifacts_dir: None,
+        };
+        let router = build_tailscale_serve_router(
+            &settings,
+            Some(store.pool().clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(fleet_application::events::EventHub::new(8)),
+        );
+        let credentials = fleet_application::credentials::Credentials::new(
+            Arc::new(fleet_storage_sqlite::CredentialRepository::new(
+                store.pool().clone(),
+            )),
+            Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            Arc::new(fleet_auth::DelegatedTokenCrypto::new()),
+            Arc::new(fleet_application::credentials::GrantBook::new()),
+        );
+        let issued = credentials
+            .issue(
+                &fleet_auth::LanAllowAllAuthorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                fleet_application::credentials::IssueCredential {
+                    owner: "release-qa".to_owned(),
+                    ttl_seconds: 600,
+                    templates: vec!["template-1".to_owned()],
+                    versions: vec![],
+                    label: String::new(),
+                },
+                fleet_core::SystemClock::now_unix_millis(),
+            )
+            .await
+            .unwrap();
+        let call = |peer: [u8; 4], token: Option<&str>, login: Option<&str>| {
+            let router = router.clone();
+            let token = token.map(str::to_owned);
+            let login = login.map(str::to_owned);
+            async move {
+                let mut builder = Request::builder().uri("/api/v1/credentials");
+                if let Some(token) = token {
+                    builder = builder.header("authorization", format!("Bearer {token}"));
+                }
+                if let Some(login) = login {
+                    builder = builder.header("tailscale-user-login", login);
+                }
+                let mut request = builder.body(Body::empty()).unwrap();
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(SocketAddr::from((peer, 5000))));
+                router.oneshot(request).await.unwrap().status()
+            }
+        };
+        // Resolved as the credential (and so refused the credential
+        // surface), with no login: tagged devices have none.
+        assert_eq!(
+            call([127, 0, 0, 1], Some(&issued.token), None).await,
+            StatusCode::FORBIDDEN
+        );
+        // A Tailscale login beside the token does not widen it.
+        assert_eq!(
+            call(
+                [127, 0, 0, 1],
+                Some(&issued.token),
+                Some("alice@example.com")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // Without the token that login is the administrator.
+        assert_eq!(
+            call([127, 0, 0, 1], None, Some("alice@example.com")).await,
+            StatusCode::OK
+        );
+        // Not from the trusted peer, a wrong token, or no identity at all.
+        assert_eq!(
+            call([10, 20, 30, 40], Some(&issued.token), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                [127, 0, 0, 1],
+                Some(&format!("fmdc1.{}", "cd".repeat(32))),
+                Some("alice@example.com")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call([127, 0, 0, 1], None, None).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

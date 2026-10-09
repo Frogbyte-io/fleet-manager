@@ -19,7 +19,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
+use crate::authz::{
+    AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, ReasonId, authorize,
+};
 use crate::operation::{AuditPort, PortFailure};
 use crate::project::ProjectPort;
 pub use fleet_core::{
@@ -619,6 +621,18 @@ pub trait ImageArtifactPort: fmt::Debug + Send + Sync {
     async fn promoted_template_vmids(&self) -> Result<Vec<u32>, String>;
 }
 
+/// A lease the principal may not see is reported as not found, so a
+/// delegated credential cannot probe another owner's lease ids.
+fn scope_lease(principal: &ActingPrincipal, lease: &Lease) -> Result<(), LabUseCaseError> {
+    if crate::authz::owner_scope_permits(&principal.id, &lease.owner) {
+        Ok(())
+    } else {
+        Err(LabUseCaseError::NotFound {
+            what: format!("lease {}", lease.id),
+        })
+    }
+}
+
 /// The Lab cleanup guard (issue #220): a VMID that is a template, or that
 /// matches a protected image build artifact, is never destroyed by Lab
 /// cleanup, whatever a provision record claims. The protected artifacts are
@@ -722,12 +736,11 @@ fn lease_idempotency_scope(
     .to_string();
     // The principal id is length-prefixed, so no (principal, key) pair can
     // spell another's scope, whatever characters either contains.
+    // A delegated credential's scope is its owner, so a retry with a rotated
+    // token of the same owner replays, and another owner never can.
+    let scope = crate::authz::resource_owner(&principal.id);
     Ok((
-        format!(
-            "lab-lease-create:{}:{}:{key}",
-            principal.id.len(),
-            principal.id
-        ),
+        format!("lab-lease-create:{}:{scope}:{key}", scope.len()),
         fingerprint,
     ))
 }
@@ -1052,11 +1065,28 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: Some(lease_id),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        if crate::authz::is_delegated_principal(&principal.id) {
+            // Administrators read any reservation; a delegated credential
+            // reads those of its own owner's leases.
+            let lease = self.leases.get(lease_id).await.map_err(|detail| {
+                if detail.contains("not found") {
+                    LabUseCaseError::NotFound {
+                        what: format!("lease {lease_id}"),
+                    }
+                } else {
+                    LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    }
+                }
+            })?;
+            scope_lease(principal, &lease)?;
+        }
         match &self.reservations {
             Some(reservations) => {
                 reservations
@@ -1169,14 +1199,21 @@ impl Lab {
         {
             return replayed_lease(lease, &stored, fingerprint);
         }
+        let delegated = crate::authz::is_delegated_principal(&principal.id);
         let version = self
             .templates
             .get_version(&new.template_version_id)
             .await
             .map_err(|detail| {
                 if detail.contains("not found") {
-                    LabUseCaseError::NotFound {
-                        what: format!("version {}", new.template_version_id),
+                    // A delegated credential gets the same refusal for an
+                    // unknown version as for one outside its allow-list.
+                    if delegated {
+                        LabUseCaseError::Denied(Decision::deny(ReasonId::OutOfScope))
+                    } else {
+                        LabUseCaseError::NotFound {
+                            what: format!("version {}", new.template_version_id),
+                        }
                     }
                 } else {
                     LabUseCaseError::Backend {
@@ -1185,6 +1222,30 @@ impl Lab {
                     }
                 }
             })?;
+        // The template allow-list is a catalog decision on the template
+        // use, taken once the version names its template.
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabTemplateUse,
+                resource: Some(&crate::credentials::template_use_resource(
+                    &version.template_id,
+                    &version.id,
+                )),
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if delegated
+            && (new.project_id.is_some() || version.content.cleanup == CleanupStrategy::Keep)
+        {
+            // A delegated credential leases the template as published: it
+            // names no project of its own, and cannot lease a template that
+            // retains its VM.
+            return Err(LabUseCaseError::Denied(Decision::deny(
+                ReasonId::OutOfScope,
+            )));
+        }
         if new.purpose.is_empty() || new.purpose.chars().count() > 512 {
             return Err(LabUseCaseError::Invalid {
                 detail: "the purpose must be 1..=512 characters".to_owned(),
@@ -1225,14 +1286,20 @@ impl Lab {
         let Some((key, fingerprint)) = keyed else {
             let lease = self
                 .leases
-                .create(&inherited, &principal.id, now)
+                .create(&inherited, crate::authz::resource_owner(&principal.id), now)
                 .await
                 .map_err(backend)?;
             return Ok((lease, true));
         };
         match self
             .leases
-            .create_keyed(&inherited, &principal.id, now, &key, &fingerprint)
+            .create_keyed(
+                &inherited,
+                crate::authz::resource_owner(&principal.id),
+                now,
+                &key,
+                &fingerprint,
+            )
             .await
             .map_err(backend)?
         {
@@ -1308,18 +1375,22 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: None,
             },
         )
         .map_err(LabUseCaseError::Denied)?;
-        self.leases
-            .list(project_id)
-            .await
-            .map_err(|detail| LabUseCaseError::Backend {
-                context: "leases",
-                detail,
-            })
+        let mut leases =
+            self.leases
+                .list(project_id)
+                .await
+                .map_err(|detail| LabUseCaseError::Backend {
+                    context: "leases",
+                    detail,
+                })?;
+        // A delegated credential lists its own owner's leases only.
+        leases.retain(|lease| crate::authz::owner_scope_permits(&principal.id, &lease.owner));
+        Ok(leases)
     }
 
     /// Lists the leases passing the filter, newest first. `owner_scope`
@@ -1341,11 +1412,14 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: None,
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        // A delegated credential is always scoped to its own owner, whatever
+        // the caller passed.
+        let owner_scope = crate::authz::delegated_owner_identity(&principal.id).or(owner_scope);
         if let Some(scope) = owner_scope {
             if filter.owner.as_deref().is_some_and(|owner| owner != scope) {
                 return Ok(Vec::new());
@@ -1376,12 +1450,12 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: Some(id),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
-        self.leases.get(id).await.map_err(|detail| {
+        let lease = self.leases.get(id).await.map_err(|detail| {
             if detail.contains("not found") {
                 LabUseCaseError::NotFound {
                     what: format!("lease {id}"),
@@ -1392,7 +1466,9 @@ impl Lab {
                     detail,
                 }
             }
-        })
+        })?;
+        scope_lease(principal, &lease)?;
+        Ok(lease)
     }
 
     /// Validates a command for a ready lease's guest and answers the
@@ -1448,6 +1524,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let record = match &lease.provision_id {
             Some(provision) => Some(self.provisions.get(provision).await.map_err(|detail| {
@@ -1538,6 +1615,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         if lease.state.is_terminal() {
             return Err(LabUseCaseError::Invalid {
                 detail: format!("the lease {id} is already {}", lease.state.id()),
@@ -1614,6 +1692,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         if lease.state != LeaseState::CleanupFailed {
             return Err(LabUseCaseError::Invalid {
                 detail: format!(
@@ -1702,6 +1781,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         let observed_expires_at = lease.expires_at.ok_or_else(|| LabUseCaseError::Invalid {
             detail: "only ready leases with a TTL deadline can be extended".to_owned(),
         })?;
@@ -2146,11 +2226,18 @@ impl Lab {
         now: i64,
     ) -> Result<(ProvisionRecord, bool), LabUseCaseError> {
         let authorization_resource = lease_id.unwrap_or(version_id);
+        // A lease-bound provision is its own catalog action: provisioning
+        // without a lease would leave a VM no lease owns.
+        let provision_action = if lease_id.is_some() {
+            Permission::LabLeaseProvision
+        } else {
+            Permission::LabProvision
+        };
         authorize(
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabProvision,
+                action: provision_action,
                 resource: Some(authorization_resource),
             },
         )
@@ -2168,6 +2255,7 @@ impl Lab {
                     }
                 }
             })?;
+            scope_lease(principal, &lease)?;
             if lease.template_version_id != version_id {
                 return Err(LabUseCaseError::Invalid {
                     detail: "the lease uses a different template version".to_owned(),
@@ -2206,6 +2294,7 @@ impl Lab {
                 }
             })?;
         self.validate_pin(&version.content.image_version_id).await?;
+        // The audit trail keeps the established `lab.provision` action id.
         self.audit_event(
             principal,
             Permission::LabProvision,
@@ -2293,7 +2382,7 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabProvision,
+                action: Permission::LabLeaseProvision,
                 resource: Some(lease_id),
             },
         )
@@ -2310,6 +2399,7 @@ impl Lab {
                 }
             }
         })?;
+        scope_lease(principal, &lease)?;
         self.start_provision_with_outcome(
             authorizer,
             principal,
@@ -2445,12 +2535,12 @@ impl Lab {
             authorizer,
             AccessRequest {
                 principal_id: &principal.id,
-                action: Permission::LabRead,
+                action: Permission::LabLeaseRead,
                 resource: Some(id),
             },
         )
         .map_err(LabUseCaseError::Denied)?;
-        self.provisions.get(id).await.map_err(|detail| {
+        let record = self.provisions.get(id).await.map_err(|detail| {
             if detail.contains("not found") {
                 LabUseCaseError::NotFound {
                     what: format!("provision {id}"),
@@ -2461,7 +2551,30 @@ impl Lab {
                     detail,
                 }
             }
-        })
+        })?;
+        if crate::authz::is_delegated_principal(&principal.id) {
+            // A provision belongs to its lease's owner; one without a
+            // lease belongs to no credential.
+            let Some(lease_id) = record.lease_id.as_deref() else {
+                return Err(LabUseCaseError::NotFound {
+                    what: format!("provision {id}"),
+                });
+            };
+            let lease =
+                self.leases
+                    .get(lease_id)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    })?;
+            if !crate::authz::owner_scope_permits(&principal.id, &lease.owner) {
+                return Err(LabUseCaseError::NotFound {
+                    what: format!("provision {id}"),
+                });
+            }
+        }
+        Ok(record)
     }
 
     async fn validate_pin(&self, version_id: &str) -> Result<RecipeVersion, LabUseCaseError> {

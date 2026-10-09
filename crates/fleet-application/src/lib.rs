@@ -9,6 +9,7 @@ pub mod audit;
 pub mod authz;
 pub mod catalog_installs;
 pub mod composition;
+pub mod credentials;
 pub mod events;
 pub mod images;
 pub mod lab;

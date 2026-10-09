@@ -15,6 +15,7 @@ pub mod apply;
 pub mod audit;
 pub mod auth;
 mod correlation;
+pub mod credentials;
 pub mod desired;
 mod envelope;
 mod error;
@@ -220,6 +221,7 @@ pub const API_BASE_PATH: &str = "/api/v1";
         (name = "audit", description = "Authorized, metadata-only audit event queries."),
         (name = "desired", description = "The active desired-state revision and its validated, non-secret resources. Read-only; activation is an operation."),
         (name = "operations", description = "Durable operations: accepted remote work."),
+        (name = "credentials", description = "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."),
         (
             name = "machines",
             description = "The operational machine view: identity, endpoints, capability facts, \
@@ -382,6 +384,11 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(images::get_image_version))
                 .routes(routes!(images::list_image_build_addresses))
                 .routes(routes!(images::clear_image_build_address))
+                .routes(routes!(
+                    credentials::list_credentials,
+                    credentials::issue_credential
+                ))
+                .routes(routes!(credentials::revoke_credential))
                 .routes(routes!(lab::list_lab_templates, lab::create_lab_template))
                 .routes(routes!(lab::get_lab_template))
                 .routes(routes!(lab::update_lab_template))
@@ -451,9 +458,7 @@ pub fn tailscale_serve_router(
 /// its separate correlation contract.
 pub fn tailscale_serve_guard(router: Router, peer: fleet_auth::TailscaleServePeer) -> Router {
     router
-        .layer(middleware::from_fn(
-            auth::reject_unauthenticated_tailscale_caller,
-        ))
+        .layer(middleware::from_fn(auth::reject_unauthenticated_caller))
         .layer(middleware::from_fn_with_state(
             peer,
             fleet_auth::resolve_tailscale_serve_caller,

@@ -110,6 +110,34 @@ impl LabArtifactPort for LabArtifactRepository {
         .collect()
     }
 
+    async fn list_for_owner(
+        &self,
+        owner: &str,
+        lease_id: Option<&str>,
+        project_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<LabArtifact>, String> {
+        sqlx::query(
+            "SELECT * FROM lab_artifacts \
+             WHERE owner = ?5 AND (?1 IS NULL OR lease_id = ?1) AND (?2 IS NULL OR project_id = ?2) \
+             AND (?3 IS NULL OR (created_at, id) < \
+                  (SELECT created_at, id FROM lab_artifacts WHERE id = ?3)) \
+             ORDER BY created_at DESC, id DESC LIMIT ?4",
+        )
+        .bind(lease_id)
+        .bind(project_id)
+        .bind(cursor)
+        .bind(i64::from(limit))
+        .bind(owner)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("artifact list failed: {error}"))?
+        .iter()
+        .map(Self::row_to_artifact)
+        .collect()
+    }
+
     async fn expired(&self, now: i64, limit: u32) -> Result<Vec<LabArtifact>, String> {
         sqlx::query(
             "SELECT * FROM lab_artifacts WHERE retain_until <= ?1 \

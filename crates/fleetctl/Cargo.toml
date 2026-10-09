@@ -20,12 +20,15 @@ workspace = true
 
 [dev-dependencies]
 fleetd = { path = "../fleetd" }
+async-trait = "0.1.92"
 axum = "0.8.9"
 fleet-application = { path = "../fleet-application" }
 fleet-auth = { path = "../fleet-auth" }
 fleet-controller = { path = "../fleet-controller" }
 fleet-core = { path = "../fleet-core" }
+fleet-provider-ssh = { path = "../providers/fleet-provider-ssh" }
 fleet-storage-sqlite = { path = "../fleet-storage-sqlite" }
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "time"] }
 

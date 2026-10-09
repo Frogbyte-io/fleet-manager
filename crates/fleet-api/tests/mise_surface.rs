@@ -357,6 +357,7 @@ fn state_for(
             lab: None,
             desired: None,
             planning: None,
+            credentials: None,
         }),
         handle,
     )

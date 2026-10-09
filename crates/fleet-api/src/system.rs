@@ -90,6 +90,11 @@ pub struct SystemInfo {
             body = SystemInfo
         ),
         (
+            status = 403,
+            description = "The caller may not read the system view.",
+            body = crate::error::ApiError
+        ),
+        (
             status = 500,
             description = "A dependency could not be reached.",
             body = crate::error::ApiError
@@ -101,6 +106,26 @@ pub async fn get_system_info(
     Extension(correlation_id): Extension<CorrelationId>,
     principal: Option<Extension<fleet_application::authz::ActingPrincipal>>,
 ) -> Result<Json<SystemInfo>, ApiErrorResponse> {
+    // The system view is a catalog action like any other read; a delegated
+    // credential may not read it.
+    if let Some(Extension(acting)) = &principal {
+        fleet_application::authz::authorize(
+            state.authorizer.as_ref(),
+            fleet_application::authz::AccessRequest {
+                principal_id: &acting.id,
+                action: fleet_application::authz::Permission::SystemRead,
+                resource: None,
+            },
+        )
+        .map_err(|decision| {
+            let public = PublicError::new(
+                ErrorCode::from_str("denied").expect("the literal is valid error code syntax"),
+                format!("denied: {decision}"),
+                RetryClass::Never,
+            );
+            ApiError::new(&public, correlation_id).with_status(StatusCode::FORBIDDEN)
+        })?;
+    }
     let mut info = state.system.info().await.map_err(|_detail| {
         let public = PublicError::new(
             ErrorCode::from_str("system_unavailable")

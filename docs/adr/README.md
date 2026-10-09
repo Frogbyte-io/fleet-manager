@@ -17,9 +17,10 @@ The [2026-08-27 master-plan scope revision](../PLAN.md#confirmed-2026-08-27-prod
 | [0007](0007-sqlite-single-controller.md) | SQLite and one active controller initially | Accepted | 2026-08-25 | — |
 | [0008](0008-durable-operations-and-lab-leases.md) | Durable operations and explicit Lab lease/reservation state machines | Accepted | 2026-08-25 | FM-S03 |
 | [0010](0010-tailscale-serve-identity.md) | Optional Tailscale Serve request principal | Accepted | 2026-09-25 | — |
+| [0011](0011-delegated-lab-credentials.md) | Delegated, scoped credentials for the Lab lease loop | Proposed | — | — |
 | [0012](0012-builtin-skills.md) | Built-in skills ship with the controller and are assigned by default | Proposed | — | — |
 | [0013](0013-server-side-planning.md) | The controller computes plans; apply executes by plan identity | Proposed | — | — |
 | [0014](0014-machine-bindings.md) | Machines bind to profiles and projects by name in desired state | Proposed | — | — |
 | [0015](0015-windows-lab-guest-transport.md) | Windows Lab guests use OpenSSH Server in the image; the guest agent stays observation-only | Proposed | — | — |
 
-FM-S02 (authenticated authorization engine) is not scoped by an existing ADR. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. FM-S02 is expected to produce ADR-0011 before that engine lands.
+FM-S02 (authenticated authorization engine) is only partly scoped: [ADR 0011](0011-delegated-lab-credentials.md) proposes the delegated Lab credential slice. The trusted-LAN release needs the authorization port and explicit `anonymous-lan-admin` policy, but an embedded policy engine is deferred until authenticated deployment. The rest of FM-S02 (sessions, bootstrap, roles) still needs its own ADR before that engine lands.

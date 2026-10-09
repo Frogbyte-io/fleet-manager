@@ -974,6 +974,26 @@ pub enum Command {
     },
     /// Run the expiry sweeper.
     LabSweep,
+    /// Issue a delegated credential (ADR 0011). The token is printed once.
+    CredentialsIssue {
+        /// The owner label of the leases it creates.
+        owner: String,
+        /// The lifetime in seconds.
+        ttl_seconds: u64,
+        /// Allowed Lab template ids.
+        templates: Vec<String>,
+        /// Allowed Lab template version ids.
+        versions: Vec<String>,
+        /// A free-text label.
+        label: String,
+    },
+    /// List the delegated credentials' metadata. Tokens are never listed.
+    CredentialsList,
+    /// Revoke a delegated credential.
+    CredentialsRevoke {
+        /// The credential's identity.
+        credential_id: String,
+    },
     /// List stored Lab artifacts, narrowed by lease and/or project (FM-721).
     LabArtifacts {
         /// Only artifacts from this lease.
@@ -1282,6 +1302,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         ["proxmox", verb, rest @ ..] => parse_proxmox_command(verb, rest)?,
         ["images", verb, rest @ ..] => parse_images_command(verb, rest)?,
         ["lab", verb, rest @ ..] => parse_lab_command(verb, rest)?,
+        ["credentials", verb, rest @ ..] => parse_credentials_command(verb, rest)?,
         ["projects", verb, rest @ ..] => parse_projects_command(verb, rest)?,
         _ => return Err(CliError { message: usage() }),
     };
@@ -1292,6 +1313,57 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         output,
         command,
     })
+}
+
+/// Parses `credentials issue|list|revoke` (ADR 0011).
+fn parse_credentials_command(verb: &str, rest: &[&str]) -> Result<Command, CliError> {
+    match (verb, rest) {
+        ("list", []) => Ok(Command::CredentialsList),
+        ("revoke", [credential_id]) if !credential_id.starts_with('-') => {
+            Ok(Command::CredentialsRevoke {
+                credential_id: (*credential_id).to_owned(),
+            })
+        }
+        ("issue", flags) => {
+            let (mut owner, mut ttl_seconds, mut label) = (None, None, String::new());
+            let (mut templates, mut versions) = (Vec::new(), Vec::new());
+            let mut words = flags.iter().copied();
+            while let Some(flag) = words.next() {
+                let mut value = |name: &str| -> Result<String, CliError> {
+                    words.next().map(str::to_owned).ok_or_else(|| CliError {
+                        message: format!("{name} requires a value"),
+                    })
+                };
+                match flag {
+                    "--owner" => owner = Some(value("--owner")?),
+                    "--ttl" => {
+                        let raw = value("--ttl")?;
+                        ttl_seconds = Some(raw.parse::<u64>().map_err(|_| CliError {
+                            message: format!("--ttl must be a number of seconds, not {raw:?}"),
+                        })?);
+                    }
+                    "--template" => templates.push(value("--template")?),
+                    "--version" => versions.push(value("--version")?),
+                    "--label" => label = value("--label")?,
+                    other => return Err(unknown_lab_flag(other)),
+                }
+            }
+            let owner = owner.ok_or_else(|| CliError {
+                message: format!("credentials issue requires --owner\n\n{}", usage()),
+            })?;
+            let ttl_seconds = ttl_seconds.ok_or_else(|| CliError {
+                message: format!("credentials issue requires --ttl\n\n{}", usage()),
+            })?;
+            Ok(Command::CredentialsIssue {
+                owner,
+                ttl_seconds,
+                templates,
+                versions,
+                label,
+            })
+        }
+        _ => Err(CliError { message: usage() }),
+    }
 }
 
 /// Parses `desired fetch|activate|rollback`: the revision arguments and
@@ -3143,7 +3215,7 @@ fn reject_flag_as_id(words: &[&str]) -> Result<(), CliError> {
 
 fn usage() -> String {
     format!(
-        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id> [--allow-insecure-tls]\n  images versions <recipe-id>\n  images addresses\n  images address-clear <ipv4>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--idempotency-key <key>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--timeout <s>] [--wait] -- <command> [args...]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab cleanup-retry <lease-id> [--wait] [--timeout <s>]\n  lab pool list\n  lab pool show <pool-id>\n  lab pool create --template-version <version-id> --account <account-id> --baseline <snapshot> --size <n>\n  lab pool delete <pool-id>\n  lab pool fill <pool-id> --vmid <vmid>... [--wait] [--timeout <s>]\n  lab pool drain <pool-id> --vmid <vmid>...|--all\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> [--account <account-id>]\n  lab artifacts [--lease <lease-id>] [--project <id>] [--cursor <id>] [--limit <n>]\n  lab collect <lease-id> <absolute-guest-path>... [--wait] [--timeout <s>]\n  lab artifact-get <artifact-id> --out <file>\n  lab provisions\n  lab leases [--project <id>] [--purpose <text>] [--purpose-prefix <text>] [--state <state>[,<state>]]... [--owner <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>] [--idempotency-key <key>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
+        "Usage: fleetctl [--url <controller>] [--socket <path>] [--output json|text] <command>\n\nCommands:\n  status\n  system\n  events [--output json|text]\n  operations list [--limit <n>]\n  operations get <id>\n  operations cancel <id>\n  audit list [--actor <id>] [--action <id>] [--resource <id>] [--outcome <id>] [--from <epoch-ms>] [--to <epoch-ms>] [--cursor <seq>] [--limit <n>] [--output json|text]\n  machines list [--tag <tag>] [--group <group>] [--capability <ns:name>] [--status <state>] [--cursor <id>] [--limit <n>]\n  machines get <id>\n  machines link-guest <id> --account <account-id> --kind qemu|lxc --vmid <vmid>\n  machines unlink-guest <id>\n  machines onboard create --user <user> --host <host> [--port <n>] [--name <name>] [--description <text>] [--tag <tag>]... [--group <group>]... --auth agent|identity-file [--identity <path>]\n  machines onboard list [--limit <n>]\n  machines onboard get <draft-id>\n  machines onboard test <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard discover <draft-id> [--wait] [--timeout <seconds>]\n  machines onboard confirm <draft-id> --fingerprint <SHA256:...>\n  machines onboard add <draft-id>\n  machines onboard cancel <draft-id>\n  projects list [--remote-prefix <p>] [--name-substring <s>] [--limit <n>]\n  projects get <id>\n  projects create --remote <url> --name <name> [--description <text>]\n  projects update <id> --name <name> [--description <text>]\n  projects delete <id>\n  projects discover <id> <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects record <id> <machine-id> (the discovery result is read from stdin)\n  projects ready <id> <machine-id> --root <path> [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects clone <id> <machine-id> --root <path> [--branch <name>] --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects pull <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects status <id> <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  projects write-config <id> <machine-id> --root <path> --file <name> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (contents from stdin)\n  skills list <machine-id>\n  skills matrix\n  plan <machine-id>\n  apply-plan <machine-id> --plan-id <id> [--approve <order>:<kind>]... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  desired status\n  desired source [set <remote> [--credential <ref>]]\n  desired source credential (the Git token or private key is read from stdin; prints the reference)\n  desired history\n  desired fetch <commit-sha> [--wait] [--timeout <s>]\n  desired activate|rollback <commit-sha> <content-digest> [--wait] [--timeout <s>]\n  desired resources [--kind <kind>] [--cursor <id>] [--limit <n>]\n  skills catalog list|get <id>|create --content-json <json>|update <id> --content-json <json>|publish <id>|versions <id>|plan --request-json <json>|rollout --request-json <json>\n  skills probe <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--wait] [--timeout <s>]\n  skills deploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills undeploy <machine-id> --skill <id> --agent <id>... --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--skills-root <path>] [--dry-run] [--wait] [--timeout <s>]\n  skills install <machine-id> --reference <ref> [--local|--git] [--name <name>] [--sync|--sync-preset <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills update|check <machine-id> [--reference <ref>] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] (omitting --reference means --all)\n  skills remove <machine-id> --reference <ref>|--reference-batch <ref>... --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>]\n  skills adopt <machine-id> --path <path> [--path-batch <path>]... [--source-url <url>] [--git-subpath <path>] [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills set-source <machine-id> --reference <ref> --source-url <url> [--path <subpath>] [--branch <branch>] [--force] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-create <machine-id> --reference <name> [--description <text>] [--icon <id>] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-update <machine-id> --reference <preset> (--name <name>|--description <text>|--icon <id>) --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-delete <machine-id> --reference <preset> --yes [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-add-skill|preset-remove-skill <machine-id> --reference <preset> --path <skill> --endpoint <endpoint-id> --auth agent|identity-file\n  skills preset-deploy|preset-undeploy <machine-id> --reference <preset> [--agent <id>]... [--dry-run] --endpoint <endpoint-id> --auth agent|identity-file\n  frogenv status|setup|login|request|sync <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  frogenv run <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] -- <command> [args...]\n  mise inventory|status <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise install <machine-id> --tool <name> --version <pin> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>]\n  mise exec <machine-id> --root <path> --endpoint <endpoint-id> --auth agent|identity-file [--wait] [--timeout <s>] -- <command> [args...]\n  apply <machine-id> --plan-id <id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--wait] [--timeout <s>] (the plan JSON is read from stdin)\n  tailnet status\n  tailnet configure --client-id <id> (the client secret is read from stdin)\n  tailnet clear\n  tailnet devices [--limit <n>]\n  tailnet import <node-id> --user <user> [--port <n>]\n  proxmox accounts\n  proxmox create --name <name> --host <host> [--port <n>] --token-id <id> (the token secret is read from stdin)\n  proxmox delete <account-id>\n  proxmox observe <account-id>\n  proxmox confirm <account-id> --fingerprint <SHA256>\n  proxmox discover <account-id>\n  proxmox nodes <account-id>\n  proxmox privileges <account-id> [--output json|text]\n  proxmox guests <account-id>\n  proxmox tasks <account-id> [--node <node>] [--vmid <vmid>] [--status running|ok|error|unknown] [--cursor <upid>] [--limit <n>] [--output json|text]\n  proxmox observe-guest <account-id> <vmid> --machine <machine-id>\n  proxmox start|stop|shutdown|reboot --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>]\n  proxmox destroy <account> <node> <vmid> [--purge] [--wait] [--timeout <s>]\n  proxmox snapshot|snapshot-revert|snapshot-delete|clone|template|task-cancel --account <account-id> --node <node> --vmid <vmid> [--wait] [--timeout <s>] (the action parameters are read as JSON from stdin)\n  images builds [--version <id>] [--limit <n>] [--cursor <id>]\n  images build-show <id>\n  images recipes\n  images create --name <name> --description <text> --node <node> --storage-pool <pool> --source iso|clone (the recipe content is read as JSON from stdin)\n  images publish <recipe-id> [--allow-insecure-tls]\n  images versions <recipe-id>\n  images addresses\n  images address-clear <ipv4>\n  images build <version-id> [--account <account-id>] [--wait] [--timeout <s>]\n  images version <version-id>\n  images promote <version-id>\n  lab templates\n  lab create <template-version-id> --purpose <text> [--project <id>] [--account <id>] [--idempotency-key <key>] [--wait] [--timeout <s>]\n  lab status <lease-id>\n  lab exec <lease-id> [--timeout <s>] [--wait] -- <command> [args...]\n  lab destroy <lease-id> [--keep] [--wait] [--timeout <s>]\n  lab cleanup-retry <lease-id> [--wait] [--timeout <s>]\n  lab pool list\n  lab pool show <pool-id>\n  lab pool create --template-version <version-id> --account <account-id> --baseline <snapshot> --size <n>\n  lab pool delete <pool-id>\n  lab pool fill <pool-id> --vmid <vmid>... [--wait] [--timeout <s>]\n  lab pool drain <pool-id> --vmid <vmid>...|--all\n  lab template-create --name <name> --description <text> --image-version <version-id> --cores <n> --memory <mib> --disk <gib> --probe guest_agent|ssh_exec|project_ready --readiness-deadline <s> --ttl <s> --cleanup destroy|revert|keep\n  lab publish <template-id>\n  lab provision <template-version-id>\n  lab provision-lease <lease-id> [--account <account-id>]\n  lab artifacts [--lease <lease-id>] [--project <id>] [--cursor <id>] [--limit <n>]\n  lab collect <lease-id> <absolute-guest-path>... [--wait] [--timeout <s>]\n  lab artifact-get <artifact-id> --out <file>\n  lab provisions\n  lab leases [--project <id>] [--purpose <text>] [--purpose-prefix <text>] [--state <state>[,<state>]]... [--owner <id>]\n  lab lease <template-version-id> --purpose <text> [--project <id>] [--idempotency-key <key>]\n  lab release <lease-id> [--keep]\n  lab extend <lease-id> --seconds <n>\n  lab sweep\n  credentials issue --owner <label> --ttl <seconds> [--template <id>]... [--version <id>]... [--label <text>] (the token is printed once; use it as FLEET_TOKEN)\n  credentials list\n  credentials revoke <credential-id>\n  images version <version-id>\n  images promote <version-id>\n  machines install-node <machine-id> --endpoint <endpoint-id> --auth agent|identity-file [--identity <path>] [--artifact-url <url> --artifact-sha256 <digest>] [--controller-url <url>] [--install-timeout <s>] [--connect-timeout <s>] [--wait] [--timeout <s>]\n\nSet FLEET_TOKEN to a delegated credential token to act as that credential; the token is never printed.\n\n`status` prefers the node's local socket (default {DEFAULT_SOCKET}); `--url` selects the controller endpoint for other commands. `events` uses the selected listener's configured caller resolver; in identity mode, set `--url` to the authenticated Tailscale Serve endpoint. The default controller URL is {DEFAULT_URL}."
     )
 }
 
@@ -3444,6 +3516,9 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
     if let Command::Help { text } = &invocation.command {
         return Ok((text.clone(), 0));
     }
+    // A malformed FLEET_TOKEN fails before any request, naming the variable
+    // and never its value.
+    bearer_token()?;
     if invocation.command == Command::Events {
         stream_events(invocation)?;
         return Ok((String::new(), 0));
@@ -3465,13 +3540,15 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
     if invocation.command == Command::Status {
         // The explicit direct-controller override.
         let client = http_client()?;
-        let response = client
-            .get(format!("{}{SYSTEM_PATH}", invocation.url))
-            .header("x-correlation-id", uuid::Uuid::now_v7().to_string())
-            .send()
-            .map_err(|error| CliError {
-                message: format!("the controller did not answer: {error}"),
-            })?;
+        let response = with_credential(
+            client
+                .get(format!("{}{SYSTEM_PATH}", invocation.url))
+                .header("x-correlation-id", uuid::Uuid::now_v7().to_string()),
+        )?
+        .send()
+        .map_err(|error| CliError {
+            message: format!("the controller did not answer: {error}"),
+        })?;
         let status = reqwest::StatusCode::as_u16(&response.status());
         let body: Value = response.json().map_err(|error| CliError {
             message: format!("the controller's answer was not JSON: {error}"),
@@ -3496,7 +3573,10 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
 
     // `lab create` without --account resolves the account before the
     // lease exists, so a refusal leaves no orphaned requested lease.
+    // A delegated credential cannot list Proxmox accounts, so with one the
+    // controller's placement selects the account.
     let lab_account = match &invocation.command {
+        Command::LabNew { account: None, .. } if bearer_token()?.is_some() => None,
         Command::LabNew { account: None, .. } => Some(only_trusted_account(&client, invocation)?),
         Command::LabNew {
             account: Some(account),
@@ -3609,7 +3689,10 @@ fn follow_lab(
     match &invocation.command {
         Command::LabNew { wait, timeout, .. } => {
             let lease_id = body["data"]["id"].as_str().unwrap_or_default().to_owned();
-            let account = account.unwrap_or_default();
+            let provision_body = account.map_or_else(
+                || serde_json::json!({}),
+                |account| serde_json::json!({ "accountId": account }),
+            );
             // A keyed retry may find a lease an earlier attempt already
             // provisioned: only a still-`requested` lease is provisioned.
             if !keyed || body["data"]["state"] == "requested" {
@@ -3619,7 +3702,7 @@ fn follow_lab(
                     reqwest::Method::POST,
                     &format!("/api/v1/lab/leases/{lease_id}/provision"),
                     &[],
-                    Some(&serde_json::json!({ "accountId": account })),
+                    Some(&provision_body),
                     uuid::Uuid::now_v7().to_string(),
                 )?;
             }
@@ -3908,6 +3991,11 @@ fn event_stream_request(
         .header("x-correlation-id", uuid::Uuid::now_v7().to_string());
     if let Some(cursor) = last_event_id {
         request = request.header("last-event-id", cursor);
+    }
+    // The token was validated before any request; an unusable one adds no
+    // header rather than failing mid-stream.
+    if let Ok(Some(token)) = bearer_token() {
+        request = request.header(reqwest::header::AUTHORIZATION, token);
     }
     request.send()
 }
@@ -5247,12 +5335,59 @@ fn render(invocation: &Invocation, payload: &Value) -> String {
             Command::ProxmoxTasks { .. } => proxmox_tasks::render(payload),
             Command::ProxmoxPrivileges { .. } => proxmox_privileges::render(payload),
             Command::LabArtifacts { .. } => render_lab_artifacts(payload),
+            Command::CredentialsIssue { .. }
+            | Command::CredentialsList
+            | Command::CredentialsRevoke { .. } => render_credentials(payload),
             Command::LabPools | Command::LabPoolShow { .. } | Command::LabPoolCreate { .. } => {
                 render_lab_pools(payload)
             }
             _ => render_text(Some(payload)),
         },
     }
+}
+
+fn render_credentials(payload: &Value) -> String {
+    use std::fmt::Write as _;
+    let line = |output: &mut String, item: &Value| {
+        let _ = writeln!(
+            output,
+            "{}  {}  {}  expires {}  templates [{}]  versions [{}]",
+            item["id"].as_str().unwrap_or("?"),
+            item["owner"].as_str().unwrap_or("?"),
+            item["status"].as_str().unwrap_or("?"),
+            item["expiresAt"],
+            join_strings(&item["templates"]),
+            join_strings(&item["versions"]),
+        );
+    };
+    let mut output = String::new();
+    if let Some(items) = payload["items"].as_array() {
+        if items.is_empty() {
+            return "No delegated credentials.\n".to_owned();
+        }
+        for item in items {
+            line(&mut output, item);
+        }
+        return output;
+    }
+    line(&mut output, payload);
+    if let Some(token) = payload["token"].as_str() {
+        let _ = writeln!(
+            output,
+            "Token (shown once; store it now, it cannot be read again):\n{token}"
+        );
+    }
+    output
+}
+
+fn join_strings(value: &Value) -> String {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_desired_status(payload: &Value) -> String {
@@ -6600,6 +6735,36 @@ fn request_for(command: &Command) -> Result<RequestShape, CliError> {
             Vec::new(),
             None,
         ),
+        Command::CredentialsIssue {
+            owner,
+            ttl_seconds,
+            templates,
+            versions,
+            label,
+        } => (
+            reqwest::Method::POST,
+            "/api/v1/credentials".to_owned(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "owner": owner,
+                "ttlSeconds": ttl_seconds,
+                "templates": templates,
+                "versions": versions,
+                "label": label,
+            })),
+        ),
+        Command::CredentialsList => (
+            reqwest::Method::GET,
+            "/api/v1/credentials".to_owned(),
+            Vec::new(),
+            None,
+        ),
+        Command::CredentialsRevoke { credential_id } => (
+            reqwest::Method::POST,
+            format!("/api/v1/credentials/{credential_id}/revoke"),
+            Vec::new(),
+            None,
+        ),
         Command::LabArtifacts {
             lease,
             project,
@@ -7023,9 +7188,11 @@ fn send_with_key(
     correlation_id: String,
     idempotency_key: Option<&str>,
 ) -> Result<Value, CliError> {
-    let mut request = client
-        .request(method, format!("{}{}", invocation.url, path))
-        .header("x-correlation-id", correlation_id);
+    let mut request = with_credential(
+        client
+            .request(method, format!("{}{}", invocation.url, path))
+            .header("x-correlation-id", correlation_id),
+    )?;
     if let Some(key) = idempotency_key {
         request = request.header("idempotency-key", key);
     }
@@ -7139,21 +7306,23 @@ fn download_artifact(
         .ok_or_else(|| CliError {
             message: format!("the artifact {artifact_id} has no recorded size"),
         })?;
-    let mut response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3_600))
-        .build()
-        .map_err(|error| CliError {
-            message: format!("cannot build an HTTP client: {error}"),
-        })?
-        .get(format!(
-            "{}/api/v1/lab/artifacts/{artifact_id}/content",
-            invocation.url
-        ))
-        .header("x-correlation-id", uuid::Uuid::now_v7().to_string())
-        .send()
-        .map_err(|error| CliError {
-            message: format!("the controller did not answer: {error}"),
-        })?;
+    let mut response = with_credential(
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(3_600))
+            .build()
+            .map_err(|error| CliError {
+                message: format!("cannot build an HTTP client: {error}"),
+            })?
+            .get(format!(
+                "{}/api/v1/lab/artifacts/{artifact_id}/content",
+                invocation.url
+            ))
+            .header("x-correlation-id", uuid::Uuid::now_v7().to_string()),
+    )?
+    .send()
+    .map_err(|error| CliError {
+        message: format!("the controller did not answer: {error}"),
+    })?;
     let status = reqwest::StatusCode::as_u16(&response.status());
     if !(200..300).contains(&status) {
         let body: Value = response.json().unwrap_or(Value::Null);
@@ -7267,6 +7436,47 @@ fn write_verified(
     std::fs::rename(&partial, target)
         .map_err(|error| fail(format!("cannot move the download to {out}: {error}")))?;
     Ok((size, actual))
+}
+
+/// The environment variable that carries a delegated credential token.
+pub const TOKEN_ENV: &str = "FLEET_TOKEN";
+
+/// The bearer token from [`TOKEN_ENV`], when set and non-empty. It is read
+/// when a request is built and goes nowhere else: it is not stored in the
+/// invocation, printed, or put in an error message.
+fn bearer_token() -> Result<Option<reqwest::header::HeaderValue>, CliError> {
+    let Ok(raw) = std::env::var(TOKEN_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let shaped = raw.strip_prefix("fmdc1.").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if !shaped {
+        return Err(CliError {
+            message: format!("{TOKEN_ENV} is not a Fleet delegated credential token"),
+        });
+    }
+    let mut value =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {raw}")).map_err(|_| CliError {
+            message: format!("{TOKEN_ENV} is not a Fleet delegated credential token"),
+        })?;
+    // Keeps the value out of any debug output of the request.
+    value.set_sensitive(true);
+    Ok(Some(value))
+}
+
+/// Adds the delegated credential to a request when one is configured.
+fn with_credential(
+    request: reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::RequestBuilder, CliError> {
+    Ok(match bearer_token()? {
+        Some(value) => request.header(reqwest::header::AUTHORIZATION, value),
+        None => request,
+    })
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, CliError> {

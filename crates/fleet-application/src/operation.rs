@@ -569,6 +569,7 @@ pub struct Operations {
     audit: Arc<dyn AuditPort>,
     catalog_rollout_targets: Option<Arc<dyn CatalogRolloutTargetPort>>,
     pool_members: Option<Arc<dyn PoolMemberLookup>>,
+    lease_owners: Option<Arc<dyn LeaseOwnerLookup>>,
     pub(crate) events: Option<Arc<crate::events::EventHub>>,
 }
 
@@ -586,6 +587,19 @@ pub trait PoolMemberLookup: fmt::Debug + Send + Sync {
     ///
     /// Fails when membership cannot be read; the caller refuses then.
     async fn pool_of(&self, account_id: &str, vmid: u32) -> Result<Option<String>, String>;
+}
+
+/// The narrow view of Lab leases operation reads need: who owns a lease.
+/// A delegated credential may read only the operations of its own owner's
+/// leases.
+#[async_trait]
+pub trait LeaseOwnerLookup: fmt::Debug + Send + Sync {
+    /// The owner recorded on a lease, when the lease exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lease store cannot be read; the caller refuses then.
+    async fn owner_of(&self, lease_id: &str) -> Result<Option<String>, String>;
 }
 
 /// [`PoolMemberLookup`] over the Lab pool storage port.
@@ -669,6 +683,7 @@ impl Operations {
             audit,
             catalog_rollout_targets: None,
             pool_members: None,
+            lease_owners: None,
             events: None,
         }
     }
@@ -685,6 +700,7 @@ impl Operations {
             audit,
             catalog_rollout_targets: None,
             pool_members: None,
+            lease_owners: None,
             events: Some(events),
         }
     }
@@ -701,6 +717,7 @@ impl Operations {
             audit,
             catalog_rollout_targets: Some(targets),
             pool_members: None,
+            lease_owners: None,
             events: None,
         }
     }
@@ -718,6 +735,7 @@ impl Operations {
             audit,
             catalog_rollout_targets: Some(targets),
             pool_members: None,
+            lease_owners: None,
             events: Some(events),
         }
     }
@@ -727,6 +745,14 @@ impl Operations {
     #[must_use]
     pub fn with_pool_members(mut self, pool_members: Arc<dyn PoolMemberLookup>) -> Self {
         self.pool_members = Some(pool_members);
+        self
+    }
+
+    /// Supplies the lease owner lookup. Without it a delegated credential
+    /// can read no operation (fail closed).
+    #[must_use]
+    pub fn with_lease_owners(mut self, lease_owners: Arc<dyn LeaseOwnerLookup>) -> Self {
+        self.lease_owners = Some(lease_owners);
         self
     }
 
@@ -913,7 +939,7 @@ impl Operations {
         lease_id: Option<&str>,
     ) -> Result<(), OperationUseCaseError> {
         for (action, resource) in [
-            (Permission::OperationCreate, None),
+            (Permission::OperationCreate, Some("lab.cleanup")),
             (Permission::LabLease, lease_id),
         ] {
             authorize(
@@ -1081,12 +1107,14 @@ impl Operations {
         new: &NewOperation,
         route: CreateRoute,
     ) -> Result<Operation, OperationUseCaseError> {
+        // The kind is the resource, so a policy can allow a principal to
+        // queue the Lab kinds its routes queue without the generic surface.
         authorize(
             authorizer,
             AccessRequest {
                 principal_id,
                 action: Permission::OperationCreate,
-                resource: None,
+                resource: Some(&new.kind),
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
@@ -1314,7 +1342,7 @@ impl Operations {
                 authorizer,
                 AccessRequest {
                     principal_id,
-                    action: Permission::LabProvision,
+                    action: Permission::LabLeaseProvision,
                     resource: Some(&lease_id),
                 },
             )
@@ -1515,7 +1543,56 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
-        self.port.get(id).await.map_err(map_port_failure("get"))
+        let operation = self.port.get(id).await.map_err(map_port_failure("get"))?;
+        if crate::authz::is_delegated_principal(principal_id) {
+            self.require_own_lab_operation(principal_id, &operation)
+                .await?;
+        }
+        Ok(operation)
+    }
+
+    /// A delegated credential reads only the operations a Lab route queued
+    /// for one of its owner's leases; any other operation is not found.
+    async fn require_own_lab_operation(
+        &self,
+        principal_id: &str,
+        operation: &Operation,
+    ) -> Result<(), OperationUseCaseError> {
+        let not_found = || OperationUseCaseError::NotFound {
+            what: format!("operation {}", operation.id),
+        };
+        let lease_id = operation
+            .kind
+            .starts_with("lab.")
+            .then(|| {
+                operation
+                    .payload_json
+                    .as_deref()
+                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+                    .and_then(|payload| payload["leaseId"].as_str().map(str::to_owned))
+            })
+            .flatten()
+            .ok_or_else(not_found)?;
+        let lookup = self
+            .lease_owners
+            .as_ref()
+            .ok_or(OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail: "no lease owner lookup is wired".to_owned(),
+            })?;
+        let owner = lookup
+            .owner_of(&lease_id)
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail,
+            })?
+            .ok_or_else(not_found)?;
+        if crate::authz::owner_scope_permits(principal_id, &owner) {
+            Ok(())
+        } else {
+            Err(not_found())
+        }
     }
 
     /// Lists operations, newest first.

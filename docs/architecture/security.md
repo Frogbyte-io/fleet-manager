@@ -42,6 +42,16 @@ When authenticated deployment is added, first-class principals are user, node, a
 
 Bootstrap credentials and durable human/agent sessions belong to the later authenticated-deployment milestone, not the trusted-LAN release.
 
+## Delegated Lab credentials (proposed, ADR 0011)
+
+A delegated credential is an opaque bearer token with an owner, a TTL of at most 24 hours, and an allow-list of Lab templates or template versions. An operator issues, lists, and revokes it (`fleetctl credentials issue|list|revoke`; `credential.issue`, `credential.read`, `credential.revoke`, administrators only). The token (`fmdc1.<64 hex>`, 32 CSPRNG bytes) is shown once at issue time and stored only as its SHA-256; it is never logged, audited, put in a payload, or listed. Setting `FLEET_TOKEN` makes `fleetctl` present it as `Authorization: Bearer`; `fleetctl` never prints it.
+
+A presented token is checked against the store on every request, so expiry and revocation apply to the next request. It resolves to the principal `credential:<owner>:<credentialId>` beside the LAN and Tailscale principals; an unknown, expired, or revoked token is a 401 and never falls back to administrator. Every use appends a `credential.use` audit event under that principal.
+
+The `fleet-auth` authorizer decides a credential principal from a deny-by-default catalog table, `DELEGATED_LAB_LOOP`: `lab.template.use` (the allow-list), `lab.lease` (create, release), `lab.lease.read`, `lab.lease.provision`, `lab.extend`, `lab.exec`, `lab.artifacts`, `lab.artifacts.read`, and `operation.create` / `operation.read` for the Lab kinds only. Everything else, including `lab.keep`, standalone `lab.provision`, template, image, pool, Proxmox, secret, machine, audit, and settings actions, is refused with `policy.action_not_delegated`. Adding an action is one table row and one test. Leases record the owner `credential:<owner>`, artifacts copy it, and the Lab use cases report another owner's lease, artifact, or operation as not found.
+
+The credential narrows a caller that presents it; it is not a perimeter. Anonymous callers of the trusted-LAN listener stay administrators until the rest of M8 (sessions, bootstrap, refusing anonymous administration) lands.
+
 ## Authorization
 
 Authorization is centralized in the application layer and answers principal/action/resource/context. The trusted-LAN policy explicitly permits the full vocabulary to `anonymous-lan-admin`; authenticated mode later becomes deny-by-default with explicit forbids overriding permits. HTTP route checks and hidden UI controls are defense-in-depth, not the decision point.

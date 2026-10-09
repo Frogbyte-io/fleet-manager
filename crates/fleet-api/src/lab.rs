@@ -713,7 +713,7 @@ pub async fn start_lab_lease_provision(
         fleet_application::authz::AccessRequest {
             principal_id: &principal.id,
             action: fleet_application::authz::Permission::OperationCreate,
-            resource: None,
+            resource: Some("lab.provision"),
         },
     )
     .map_err(|decision| {
@@ -1017,7 +1017,13 @@ pub async fn list_lab_leases(
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
     // No owner scope yet: #392 passes the scoped CI identity's own id here.
     let leases = lab
-        .search_leases(state.authorizer.as_ref(), &principal, filter, None)
+        .search_leases(
+            state.authorizer.as_ref(),
+            &principal,
+            filter,
+            // A delegated credential sees only its own owner's leases.
+            fleet_application::authz::delegated_owner_identity(&principal.id),
+        )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     let items: Vec<LeaseDto> = leases.into_iter().map(Into::into).collect();

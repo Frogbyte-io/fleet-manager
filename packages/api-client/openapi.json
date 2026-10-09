@@ -150,6 +150,171 @@
         }
       }
     },
+    "/api/v1/credentials": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Lists the delegated credentials' metadata, newest first.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
+        "operationId": "listCredentials",
+        "responses": {
+          "200": {
+            "description": "The credentials, newest first. Tokens are never listed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_CredentialDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Issues a delegated credential. The response carries the token exactly\nonce.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or a malformed request.",
+        "operationId": "issueCredential",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The credential was issued; the token is in this response only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_IssuedCredentialDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not issue credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/credentials/{credentialId}/revoke": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Revokes a credential. Its next request is refused.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown credential.",
+        "operationId": "revokeCredential",
+        "parameters": [
+          {
+            "name": "credentialId",
+            "in": "path",
+            "description": "The credential's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The credential is revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_CredentialDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not revoke credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The credential does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/desired/activate": {
       "post": {
         "tags": [
@@ -7401,6 +7566,16 @@
               }
             }
           },
+          "403": {
+            "description": "The caller may not read the system view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "500": {
             "description": "A dependency could not be reached.",
             "content": {
@@ -9014,6 +9189,75 @@
           }
         }
       },
+      "CredentialDto": {
+        "type": "object",
+        "description": "A credential's metadata. The token and its hash are never part of it.",
+        "required": [
+          "id",
+          "owner",
+          "label",
+          "templates",
+          "versions",
+          "issuedBy",
+          "issuedAt",
+          "expiresAt",
+          "status"
+        ],
+        "properties": {
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it expires (epoch millis)."
+          },
+          "id": {
+            "type": "string",
+            "description": "The credential's identity."
+          },
+          "issuedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was issued (epoch millis)."
+          },
+          "issuedBy": {
+            "type": "string",
+            "description": "The administrator that issued it."
+          },
+          "label": {
+            "type": "string",
+            "description": "An operator's free-text label."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The owner label: the ownership identity of the leases it creates."
+          },
+          "revokedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it was revoked (epoch millis), when it was."
+          },
+          "status": {
+            "type": "string",
+            "description": "`active`, `expired`, or `revoked`."
+          },
+          "templates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed Lab template ids."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed Lab template version ids."
+          }
+        }
+      },
       "DesiredHistoryEntryDto": {
         "type": "object",
         "description": "One recorded desired revision.",
@@ -9808,6 +10052,65 @@
             "description": "What observed it, e.g. `agentless/1` or `fleetd/1.2.3`."
           }
         }
+      },
+      "IssueCredentialRequest": {
+        "type": "object",
+        "description": "What to issue.",
+        "required": [
+          "owner",
+          "ttlSeconds"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "A free-text label."
+          },
+          "owner": {
+            "type": "string",
+            "description": "The owner label (`a-z`, `0-9`, `.`, `_`, `-`; at most 63)."
+          },
+          "templates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed Lab template ids."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The lifetime in seconds (60 to 86400).",
+            "minimum": 0
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed Lab template version ids."
+          }
+        }
+      },
+      "IssuedCredentialDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CredentialDto",
+            "description": "The credential's metadata."
+          },
+          {
+            "type": "object",
+            "required": [
+              "token"
+            ],
+            "properties": {
+              "token": {
+                "type": "string",
+                "description": "The bearer token. It is returned only by this response and cannot be\nread again; present it as `Authorization: Bearer <token>` (or set\n`FLEET_TOKEN` for `fleetctl`)."
+              }
+            }
+          }
+        ],
+        "description": "A freshly issued credential: its metadata and the token, shown once."
       },
       "LabArtifactDto": {
         "type": "object",
@@ -11887,6 +12190,93 @@
                 "user": {
                   "type": "string",
                   "description": "The registering user."
+                }
+              }
+            },
+            "description": "The items on this page, in the endpoint's documented order."
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the result set."
+          }
+        }
+      },
+      "Page_CredentialDto": {
+        "type": "object",
+        "description": "A page of resources.\n\nThe concrete schema for a list endpoint appears when that endpoint does;\n[`PageInfo`] is the part of the shape that is fixed for every one of them.",
+        "required": [
+          "items",
+          "page"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A credential's metadata. The token and its hash are never part of it.",
+              "required": [
+                "id",
+                "owner",
+                "label",
+                "templates",
+                "versions",
+                "issuedBy",
+                "issuedAt",
+                "expiresAt",
+                "status"
+              ],
+              "properties": {
+                "expiresAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When it expires (epoch millis)."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "The credential's identity."
+                },
+                "issuedAt": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "When it was issued (epoch millis)."
+                },
+                "issuedBy": {
+                  "type": "string",
+                  "description": "The administrator that issued it."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "An operator's free-text label."
+                },
+                "owner": {
+                  "type": "string",
+                  "description": "The owner label: the ownership identity of the leases it creates."
+                },
+                "revokedAt": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "When it was revoked (epoch millis), when it was."
+                },
+                "status": {
+                  "type": "string",
+                  "description": "`active`, `expired`, or `revoked`."
+                },
+                "templates": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Allowed Lab template ids."
+                },
+                "versions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Allowed Lab template version ids."
                 }
               }
             },
@@ -14987,6 +15377,84 @@
           }
         }
       },
+      "Resource_CredentialDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A credential's metadata. The token and its hash are never part of it.",
+            "required": [
+              "id",
+              "owner",
+              "label",
+              "templates",
+              "versions",
+              "issuedBy",
+              "issuedAt",
+              "expiresAt",
+              "status"
+            ],
+            "properties": {
+              "expiresAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it expires (epoch millis)."
+              },
+              "id": {
+                "type": "string",
+                "description": "The credential's identity."
+              },
+              "issuedAt": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it was issued (epoch millis)."
+              },
+              "issuedBy": {
+                "type": "string",
+                "description": "The administrator that issued it."
+              },
+              "label": {
+                "type": "string",
+                "description": "An operator's free-text label."
+              },
+              "owner": {
+                "type": "string",
+                "description": "The owner label: the ownership identity of the leases it creates."
+              },
+              "revokedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When it was revoked (epoch millis), when it was."
+              },
+              "status": {
+                "type": "string",
+                "description": "`active`, `expired`, or `revoked`."
+              },
+              "templates": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Allowed Lab template ids."
+              },
+              "versions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Allowed Lab template version ids."
+              }
+            }
+          }
+        }
+      },
       "Resource_DesiredSourceDto": {
         "type": "object",
         "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
@@ -15195,6 +15663,36 @@
                 "description": "Immutable version identity."
               }
             }
+          }
+        }
+      },
+      "Resource_IssuedCredentialDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CredentialDto",
+                "description": "The credential's metadata."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "token"
+                ],
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "description": "The bearer token. It is returned only by this response and cannot be\nread again; present it as `Authorization: Bearer <token>` (or set\n`FLEET_TOKEN` for `fleetctl`)."
+                  }
+                }
+              }
+            ],
+            "description": "A freshly issued credential: its metadata and the token, shown once."
           }
         }
       },
@@ -18337,6 +18835,10 @@
     {
       "name": "operations",
       "description": "Durable operations: accepted remote work."
+    },
+    {
+      "name": "credentials",
+      "description": "Delegated, scoped, short-lived credentials for CI and agents (ADR 0011). The token is returned once at issue time and is never listed or audited."
     },
     {
       "name": "machines",
