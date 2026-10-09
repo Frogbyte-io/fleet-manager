@@ -732,7 +732,8 @@ impl Onboarding {
             },
         )
         .map_err(OnboardingUseCaseError::Denied)?;
-        let scoped = format!("{}:{key}", principal.id);
+        let scoped =
+            crate::idempotency::scoped_key(crate::idempotency::CALLER_KEY, &principal.id, &[key]);
         let Some(draft) = self
             .drafts
             .find_by_idempotency_key(&scoped)

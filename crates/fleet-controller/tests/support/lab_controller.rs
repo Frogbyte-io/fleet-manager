@@ -775,7 +775,11 @@ impl Controller {
                 &lease.id,
                 &NewOperation {
                     kind: "lab.provision".to_owned(),
-                    idempotency_key: Some(format!("{PRINCIPAL}:lab-lease-provision:{}", lease.id)),
+                    idempotency_key: Some(fleet_application::idempotency::scoped_key(
+                        "lab-lease-provision",
+                        PRINCIPAL,
+                        &[lease.id.as_str()],
+                    )),
                     deadline_at: None,
                     correlation_id: None,
                     payload_json: Some(

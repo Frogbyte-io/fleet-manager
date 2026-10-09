@@ -274,7 +274,7 @@ pub async fn create_project(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(str::to_owned);
     let project = projects
         .register(
             state.authorizer.as_ref(),

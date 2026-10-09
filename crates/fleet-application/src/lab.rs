@@ -740,7 +740,7 @@ fn lease_idempotency_scope(
     // token of the same owner replays, and another owner never can.
     let scope = crate::authz::resource_owner(&principal.id);
     Ok((
-        format!("lab-lease-create:{}:{scope}:{key}", scope.len()),
+        crate::idempotency::scoped_key("lab-lease-create", scope, &[key]),
         fingerprint,
     ))
 }
@@ -1575,7 +1575,7 @@ impl Lab {
         Ok(crate::operation::NewOperation {
             kind: "lab.exec".to_owned(),
             idempotency_key: idempotency_key
-                .map(|key| format!("{}:lab-exec:{id}:{key}", principal.id)),
+                .map(|key| crate::idempotency::scoped_key("lab-exec", &principal.id, &[id, key])),
             deadline_at: None,
             correlation_id: None,
             payload_json: Some(
@@ -2328,12 +2328,17 @@ impl Lab {
         // record instead of creating a second guest saga.
         let scoped_key = lease_id
             .map(|id| {
-                format!(
-                    "{}:lab-lease:{id}",
-                    crate::authz::resource_owner(&principal.id)
+                crate::idempotency::scoped_key(
+                    "lab-lease-record",
+                    crate::authz::resource_owner(&principal.id),
+                    &[id],
                 )
             })
-            .or_else(|| idempotency_key.map(|key| format!("{}:{key}", principal.id)));
+            .or_else(|| {
+                idempotency_key.map(|key| {
+                    crate::idempotency::scoped_key("lab-provision", &principal.id, &[key])
+                })
+            });
         if let Some(key) = &scoped_key
             && let Some(existing) =
                 self.provisions

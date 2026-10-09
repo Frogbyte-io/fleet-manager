@@ -181,7 +181,11 @@ async fn queue_put(
     new.idempotency_key = idempotency_key.map(|key| {
         let binding =
             sha256_hex(format!("{guest_path}\0{overwrite}\0{}", staged.sha256).as_bytes());
-        format!("{}:lab-put:{lease_id}:{binding}:{key}", principal.id)
+        fleet_application::idempotency::scoped_key(
+            "lab-put",
+            &principal.id,
+            &[&lease_id, &binding, &key],
+        )
     });
     let operation = match state
         .operations

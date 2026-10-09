@@ -839,6 +839,60 @@ async fn the_readiness_deadline_is_written_with_the_record() {
     assert_eq!(stored[0].readiness_deadline_at, deadline);
 }
 
+/// #433: a provision key joined to its principal with a bare ':' let two
+/// different (principal, key) pairs spell one scope and replay each other's
+/// provision.
+#[tokio::test]
+async fn provision_keys_of_colliding_principal_and_key_pairs_stay_distinct() {
+    let templates = Arc::new(FakeTemplates::default());
+    let leases = Arc::new(FakeLeases::default());
+    let provisions = Arc::new(FakeProvisions::with_leases(leases.leases.clone()));
+    let lab = Lab::new(
+        templates,
+        provisions.clone(),
+        leases,
+        FakePins::with_promoted("rcp-1@abc"),
+        Arc::new(FakeProjects::default()),
+        Arc::new(FakeAudit::default()),
+    );
+    let template = lab
+        .create_template(
+            &AllowAll,
+            &principal(),
+            NewLabTemplate {
+                content: content("ubuntu-lab", "rcp-1@abc"),
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+    let version = lab
+        .publish_template(&AllowAll, &principal(), &template.id, NOW + 1)
+        .await
+        .unwrap();
+    let start = |who: &'static str, key: &'static str| {
+        let lab = &lab;
+        let version_id = version.id.clone();
+        async move {
+            lab.start_provision(
+                &AllowAll,
+                &ActingPrincipal { id: who.to_owned() },
+                &version_id,
+                None,
+                Some(key),
+                NOW + 2,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let first = start("tailscale:a", "b:c").await;
+    let other = start("tailscale:a:b", "c").await;
+    assert_ne!(first.id, other.id);
+    assert_eq!(start("tailscale:a", "b:c").await.id, first.id);
+    assert_eq!(provisions.records.lock().unwrap().len(), 2);
+}
+
 #[tokio::test]
 async fn templates_walk_create_publish_with_provenance() {
     let (lab, _templates, audit) = service(FakePins::with_promoted("rcp-1@abc"));
@@ -1888,10 +1942,43 @@ async fn exec_runs_only_on_a_ready_unexpired_lease_with_a_lab_machine() {
     let first = keyed("anonymous-lan-admin", NOW + 5).await;
     assert_eq!(
         first.as_deref(),
-        Some(format!("anonymous-lan-admin:lab-exec:{}:k1", lease.id).as_str())
+        Some(
+            fleet_application::idempotency::scoped_key(
+                "lab-exec",
+                "anonymous-lan-admin",
+                &[lease.id.as_str(), "k1"]
+            )
+            .as_str()
+        )
     );
     assert_eq!(keyed("anonymous-lan-admin", NOW + 6).await, first);
     assert_ne!(keyed("someone-else", NOW + 6).await, first);
+
+    // #433: the old `{principal}:lab-exec:{lease}:{key}` join let ("a", a
+    // key spelling `b:lab-exec:{lease}:c`) and ("a:b", "c") share a scope.
+    let spoofed_key = format!("b:lab-exec:{}:c", lease.id);
+    let exec_key = |who: &'static str, key: String, now: i64| {
+        let lab = &lab;
+        let id = lease.id.clone();
+        async move {
+            lab.exec_lease(
+                &AllowAll,
+                &ActingPrincipal { id: who.to_owned() },
+                &id,
+                "true",
+                60,
+                Some(key.as_str()),
+                now,
+            )
+            .await
+            .unwrap()
+            .idempotency_key
+        }
+    };
+    assert_ne!(
+        exec_key("a", spoofed_key, NOW + 7).await,
+        exec_key("a:b", "c".to_owned(), NOW + 7).await
+    );
 
     // The 64 KiB bound.
     let oversized = "x".repeat(fleet_application::lab::MAX_LAB_EXEC_SCRIPT_BYTES + 1);

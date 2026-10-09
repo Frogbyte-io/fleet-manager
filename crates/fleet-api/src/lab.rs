@@ -638,7 +638,7 @@ pub async fn start_lab_provision(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(str::to_owned);
     let record = lab
         .start_provision(
             state.authorizer.as_ref(),
@@ -758,9 +758,10 @@ pub async fn start_lab_lease_provision(
             &lease_id,
             &fleet_application::operation::NewOperation {
                 kind: "lab.provision".to_owned(),
-                idempotency_key: Some(format!(
-                    "{}:lab-lease-provision:{lease_id}",
-                    fleet_application::authz::resource_owner(&principal.id)
+                idempotency_key: Some(fleet_application::idempotency::scoped_key(
+                    "lab-lease-provision",
+                    fleet_application::authz::resource_owner(&principal.id),
+                    &[&lease_id],
                 )),
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
