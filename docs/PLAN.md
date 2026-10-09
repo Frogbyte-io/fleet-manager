@@ -288,6 +288,8 @@ M6 can start after M2 and the M1 operation/security kernel, but Lab waits for M3
 
 ### M7 — Fleet Lab
 
+Status: complete (2026-10-09 — FM-700–FM-743 closed; the [FM-742 exit-gate evidence](https://github.com/Frogbyte-io/fleet-manager/issues/266) is recorded in [`docs/planning/m7-acceptance.md`](planning/m7-acceptance.md#evidence)). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) and Windows in-guest support remain later sub-epics.
+
 Outcome: humans and agents can obtain, use, and release disposable Linux development/test environments without leaked VMs.
 
 Operator runbook: [`docs/operations/lab.md`](operations/lab.md).

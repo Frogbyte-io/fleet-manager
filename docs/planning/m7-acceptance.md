@@ -1,6 +1,6 @@
 # M7 acceptance — closing the Fleet Lab exit gate
 
-Status: planned (2026-10-05)
+Status: complete (2026-10-09)
 
 M7's image pipeline (FM-700/701) and Lab core (FM-710/711), plus the M9 Lab and Images pages (FM-930/931/932), have merged. The milestone is still open because a code survey on 2026-10-05 found that the **exit gate** cannot pass yet:
 
