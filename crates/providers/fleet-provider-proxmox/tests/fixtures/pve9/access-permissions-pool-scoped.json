@@ -80,6 +80,9 @@
       "VM.Allocate": 1,
       "VM.Audit": 1,
       "VM.Clone": 1,
+      "VM.Config.CPU": 1,
+      "VM.Config.Disk": 1,
+      "VM.Config.Memory": 1,
       "VM.Config.Options": 1,
       "VM.GuestAgent.Audit": 1,
       "VM.PowerMgmt": 1

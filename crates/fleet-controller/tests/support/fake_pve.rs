@@ -435,7 +435,17 @@ impl FakePve {
                     Some(guest) if guest.template => {
                         Self::ok(&serde_json::json!({"name": guest.name, "template": 1}))
                     }
-                    Some(guest) => Self::ok(&serde_json::json!({"name": guest.name})),
+                    // A clone has the suite's template hardware (2 cores, 2048
+                    // MiB, a 20 GiB boot disk), so applying it changes nothing
+                    // (#372).
+                    Some(guest) => Self::ok(&serde_json::json!({
+                        "name": guest.name,
+                        "cores": 2,
+                        "memory": "2048",
+                        "boot": "order=scsi0",
+                        "scsi0": format!("local-lvm:vm-{vmid}-disk-0,size=20G"),
+                        "digest": "0123456789abcdef0123456789abcdef01234567",
+                    })),
                     None => Self::absent(node, vmid),
                 }
             }
