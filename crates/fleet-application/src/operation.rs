@@ -1621,10 +1621,12 @@ impl Operations {
     ) -> Result<Operation, OperationUseCaseError> {
         // The one chokepoint every executor's failure text passes through:
         // an executor helper that forgets to scrub still cannot store a
-        // credential. A failed operation's result is failure data too.
+        // credential. Any terminal state but success carries failure data
+        // (a timed-out or cancelled node result holds node text too); a
+        // succeeded result is the executor's own data.
         let error_json = error_json.map(scrub_stored_json);
         let result_json = match (result_json, state) {
-            (Some(result), "failed") => Some(scrub_stored_json(result)),
+            (Some(result), state) if state != "succeeded" => Some(scrub_stored_json(result)),
             (result, _) => result.map(str::to_owned),
         };
         let operation = self
@@ -2014,6 +2016,15 @@ mod catalog_rollout_authorization_tests {
             assert!(!stored.contains(secret), "{stored}");
             assert!(stored.contains("connection_failed"), "{stored}");
             assert!(stored.contains("***@host.invalid"), "{stored}");
+        }
+        // A timed-out or cancelled result is failure data as well.
+        for state in ["timed_out", "cancelled", "rejected"] {
+            let done = operations
+                .complete("operation-1", state, Some(&error), None)
+                .await
+                .unwrap();
+            let stored = done.result_json.unwrap();
+            assert!(!stored.contains(secret), "{state}: {stored}");
         }
         // A non-JSON failure document is scrubbed as one string, and a
         // succeeded result is the executor's own data, left alone.
