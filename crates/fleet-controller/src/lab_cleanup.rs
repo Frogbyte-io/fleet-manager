@@ -229,6 +229,10 @@ impl LabCleanupExecutor {
         reason: &str,
         guest: Option<(String, u32)>,
     ) -> Result<(), String> {
+        // The reason carries provider, Proxmox and node text, and is stored
+        // in the audit trail and the operation error: scrub it once here.
+        let reason = fleet_core::scrub_failure_detail(reason);
+        let reason = reason.as_str();
         record_cleanup_failure(&mut lease, fleet_core::SystemClock::now_unix_millis());
         self.leases.update(&lease).await?;
         let exhausted = lease.state == LeaseState::CleanupFailed;
@@ -340,6 +344,7 @@ impl LabCleanupExecutor {
                     .await;
             }
             Err(crate::lab_pool::RevertFailure::Refused(detail)) => {
+                let detail = fleet_core::scrub_failure_detail(&detail);
                 // Quarantined at once: the member never returns unverified,
                 // and stays bound so the lease still owes its revert.
                 if pools

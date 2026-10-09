@@ -814,6 +814,8 @@ impl LabArtifactDispatch {
                 Some("store_failed")
             }
             Err(error) => {
+                // The transport's error can carry node or tool text.
+                let error = fleet_core::scrub_failure_detail(&error.to_string());
                 eprintln!("lab artifacts: copying from lease {lease_id} failed: {error}");
                 Some("transfer_failed")
             }
@@ -867,6 +869,8 @@ impl LabArtifactDispatch {
     /// Records a failed collection beside the lease. The lease itself is
     /// never touched, so its cleanup proceeds whatever happens here.
     async fn record_failure(&self, lease_id: &str, operation_id: &str, reason: &str, detail: &str) {
+        let detail = fleet_core::scrub_failure_detail(detail);
+        let detail = detail.as_str();
         if let Err(error) = self
             .artifacts
             .record_collection_failure(
@@ -905,6 +909,7 @@ impl OperationExecutor for LabArtifactDispatch {
 /// Logs a store failure's raw detail and answers the fixed message that is
 /// recorded and served instead: backend text never reaches `lab.read`.
 fn logged(lease_id: &str, what: &str, detail: &str) -> String {
+    let detail = fleet_core::scrub_failure_detail(detail);
     eprintln!("lab artifacts: collecting from lease {lease_id}: reading {what} failed: {detail}");
     format!("{what} could not be read; the detail is in the controller log")
 }
