@@ -233,6 +233,7 @@ impl InstallExecutor {
                         &operation.id,
                         "invalid_request",
                         "supply artifactUrl and artifactSha256 together, or neither for the orchestrated install",
+                        &[],
                     )
                     .await;
             }
@@ -309,6 +310,7 @@ impl InstallExecutor {
             }
         };
 
+        let secrets = known_secrets(token.as_deref(), &payload.installer_env);
         let script = install_script(token.as_deref(), enrollment == Enrollment::Forced);
         operations
             .record_progress(
@@ -327,12 +329,19 @@ impl InstallExecutor {
                 &script,
                 (&artifact_url, &artifact_sha256),
                 &payload,
-                &known_secrets(token.as_deref(), &payload.installer_env),
+                &secrets,
                 deadline,
             )
             .await
         {
-            return fail_operation(operations, &operation.id, "install_failed", &detail).await;
+            return fail_operation(
+                operations,
+                &operation.id,
+                "install_failed",
+                &detail,
+                &secrets,
+            )
+            .await;
         }
 
         let wait_seconds = payload
@@ -354,8 +363,14 @@ impl InstallExecutor {
             .wait_until_connected(&payload.machine_id, wait_seconds)
             .await
         {
-            return fail_operation(operations, &operation.id, "node_did_not_connect", &detail)
-                .await;
+            return fail_operation(
+                operations,
+                &operation.id,
+                "node_did_not_connect",
+                &detail,
+                &secrets,
+            )
+            .await;
         }
 
         // FM-212's verification: a connected node must also report facts.
@@ -388,7 +403,16 @@ impl InstallExecutor {
                     .map_err(|error| error.to_string())
             }
             Err(detail) => {
-                fail_operation(operations, &operation.id, "inventory_unverified", &detail).await
+                // The detail can carry the node's own payload; fail_operation
+                // scrubs and bounds it like every other stored output.
+                fail_operation(
+                    operations,
+                    &operation.id,
+                    "inventory_unverified",
+                    &detail,
+                    &secrets,
+                )
+                .await
             }
         }
     }
@@ -515,9 +539,12 @@ impl InstallExecutor {
             .map(|status| status == fleet_protocol::wire::ResultStatus::Succeeded)
             .unwrap_or(false);
         if !succeeded {
+            // Cut the body to a small bound first: a compact payload with no
+            // whitespace would otherwise lose everything to the scrub window.
+            let body = String::from_utf8_lossy(&result.payload);
             return Err(format!(
                 "the node refused the inventory request: {}",
-                String::from_utf8_lossy(&result.payload)
+                cut_at_char_boundary(&body, REFUSAL_BODY_BYTES)
             ));
         }
         let facts = crate::gateway::ingest_inventory_report(
@@ -592,7 +619,7 @@ impl InstallExecutor {
                 detail: format!("the install thread failed: {join_error}"),
             })
         });
-        let result = outcome.map_err(|error| scrub_known(&error.to_string(), secrets))?;
+        let result = outcome.map_err(|error| error.to_string())?;
         if result.killed_by_deadline {
             return Err(
                 "the local ssh process was killed at the deadline; the remote install's fate is unknown"
@@ -756,13 +783,31 @@ fn first_lines(stderr: &str, stdout: &str, secrets: &[String]) -> String {
         .unwrap_or_else(|| "no remote output".to_owned())
 }
 
+/// How much of a node's refusal body is kept before scrubbing.
+const REFUSAL_BODY_BYTES: usize = 4096;
+
+/// The prefix of `text` of at most `max` bytes, cut at a char boundary.
+fn cut_at_char_boundary(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Completes an operation as a failed step with a bounded, honest reason.
 async fn fail_operation(
     operations: &Operations,
     operation_id: &str,
     reason: &str,
     detail: &str,
+    secrets: &[String],
 ) -> Result<(), String> {
+    // Whatever the detail quotes (a node's payload, a transport error), it is
+    // scrubbed of credentials and known secrets and bounded before storing.
+    let detail =
+        crate::exec::scrub_and_bound_with(detail.trim(), false, |text| scrub_known(text, secrets))
+            .0;
     let error_json = serde_json::json!({ "reason": reason, "detail": detail }).to_string();
     operations
         .complete(operation_id, "failed", None, Some(&error_json))
@@ -845,5 +890,68 @@ mod first_lines_tests {
         let out = first_lines("mkdir /var/lib/fleetd/state: denied", "", &secrets);
         assert!(out.contains("/var/lib/fleetd"), "{out}");
         assert_eq!(scrub_known("a tok_AbC123xyz b", &secrets), "a [redacted] b");
+    }
+}
+
+#[cfg(test)]
+mod inventory_detail_tests {
+    use super::{REFUSAL_BODY_BYTES, cut_at_char_boundary, known_secrets, scrub_known};
+
+    fn scrub(detail: &str, secrets: &[String]) -> String {
+        crate::exec::scrub_and_bound_with(detail.trim(), false, |t| scrub_known(t, secrets)).0
+    }
+
+    /// #406: a node's refusal payload carrying a credential-shaped string is
+    /// scrubbed, and a long one is bounded, before it is stored.
+    #[test]
+    fn the_failure_detail_is_scrubbed_and_bounded() {
+        let payload =
+            r#"{"remote":"https://user:secret@host.invalid/","proxy":"user:secret@proxy.invalid"}"#;
+        let out = scrub(
+            &format!("the node refused the inventory request: {payload}"),
+            &[],
+        );
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.contains("the node refused"), "{out}");
+        let long = format!(
+            "refused: {} https://user:secret@host.invalid/",
+            "x ".repeat(5_000)
+        );
+        let out = scrub(&long, &[]);
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.len() <= 3_000 + "…".len(), "{}", out.len());
+    }
+
+    /// A known secret is removed literally even when it has no credential shape.
+    #[test]
+    fn a_known_secret_is_scrubbed_literally() {
+        let secrets = known_secrets(Some("tok_FakeValue12345"), &[]);
+        let out = scrub("refused: tok_FakeValue12345 was seen", &secrets);
+        assert!(!out.contains("tok_FakeValue12345"), "{out}");
+    }
+
+    /// A 20 KiB compact refusal body (no whitespace) keeps a bounded, scrubbed
+    /// prefix instead of collapsing to an ellipsis.
+    #[test]
+    fn a_large_compact_refusal_keeps_a_bounded_prefix() {
+        let body = format!(
+            r#"{{"remote":"https://user:secret@host.invalid/","pad":"{}"}}"#,
+            "a".repeat(20 * 1024)
+        );
+        let cut = cut_at_char_boundary(&body, REFUSAL_BODY_BYTES);
+        assert!(cut.len() <= REFUSAL_BODY_BYTES);
+        let out = scrub(
+            &format!("the node refused the inventory request: {cut}"),
+            &[],
+        );
+        assert!(out.contains("the node refused"), "{out}");
+        assert!(out.contains("remote"), "{out}");
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.len() > 100, "{}", out.len());
+    }
+
+    #[test]
+    fn the_cut_respects_char_boundaries() {
+        assert_eq!(cut_at_char_boundary("aé", 2), "a");
     }
 }
