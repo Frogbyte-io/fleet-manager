@@ -438,6 +438,7 @@ impl OperationExecutor for LabPoolFillExecutor {
             let (result, event, facts) = match outcome {
                 Err(RevertFailure::Unavailable(detail)) => {
                     // Undecided: the member stays filling for a re-fill.
+                    let detail = fleet_core::scrub_failure_detail(&detail);
                     pending.push(serde_json::json!({ "vmid": member.vmid, "detail": detail }));
                     continue;
                 }
@@ -453,6 +454,7 @@ impl OperationExecutor for LabPoolFillExecutor {
                     )
                 }
                 Err(RevertFailure::Refused(detail)) => {
+                    let detail = fleet_core::scrub_failure_detail(&detail);
                     quarantined.push(member.vmid);
                     (
                         FillResult::Quarantined {

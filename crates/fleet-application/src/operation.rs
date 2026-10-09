@@ -1619,9 +1619,17 @@ impl Operations {
         result_json: Option<&str>,
         error_json: Option<&str>,
     ) -> Result<Operation, OperationUseCaseError> {
+        // The one chokepoint every executor's failure text passes through:
+        // an executor helper that forgets to scrub still cannot store a
+        // credential. A failed operation's result is failure data too.
+        let error_json = error_json.map(scrub_stored_json);
+        let result_json = match (result_json, state) {
+            (Some(result), "failed") => Some(scrub_stored_json(result)),
+            (result, _) => result.map(str::to_owned),
+        };
         let operation = self
             .port
-            .complete(id, state, result_json, error_json)
+            .complete(id, state, result_json.as_deref(), error_json.as_deref())
             .await
             .map_err(map_port_failure("complete"))?;
         self.publish_operation(&operation, true);
@@ -1639,6 +1647,18 @@ impl Operations {
                 detail,
             })?;
         Ok(operation)
+    }
+}
+
+/// Scrubs and bounds every string in a stored failure document. A document
+/// that is not JSON is scrubbed as one string.
+fn scrub_stored_json(document: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(document) {
+        Ok(mut value) => {
+            fleet_core::redact_json_strings(&mut value);
+            value.to_string()
+        }
+        Err(_) => fleet_core::scrub_failure_detail(document),
     }
 }
 
@@ -1848,12 +1868,31 @@ mod catalog_rollout_authorization_tests {
         }
         async fn complete(
             &self,
-            _: &str,
-            _: &str,
-            _: Option<&str>,
-            _: Option<&str>,
+            id: &str,
+            state: &str,
+            result_json: Option<&str>,
+            error_json: Option<&str>,
         ) -> Result<Operation, PortFailure> {
-            Err(missing())
+            // Echoes what the port was handed, so a test sees what is stored.
+            Ok(Operation {
+                id: id.to_owned(),
+                kind: "test".to_owned(),
+                state: state.to_owned(),
+                idempotency_key: None,
+                progress_current: None,
+                progress_total: None,
+                progress_message: None,
+                deadline_at: None,
+                cancel_requested: false,
+                payload_json: None,
+                result_json: result_json.map(str::to_owned),
+                error_json: error_json.map(str::to_owned),
+                correlation_id: None,
+                created_at: 0,
+                updated_at: 0,
+                claimed_at: None,
+                worker_id: None,
+            })
         }
         async fn record_progress(
             &self,
@@ -1954,6 +1993,46 @@ mod catalog_rollout_authorization_tests {
             payload_json: Some(payload.to_string()),
             ..NewOperation::default()
         }
+    }
+
+    #[tokio::test]
+    async fn completing_an_operation_scrubs_the_stored_failure_text() {
+        let operations =
+            Operations::new(Arc::new(RecordingPort::default()), Arc::new(RecordingAudit));
+        let secret = "hunter2-not-a-real-secret";
+        let error = serde_json::json!({
+            "reason": "connection_failed",
+            "detail": format!("cannot reach https://user:{secret}@host.invalid/repo.git"),
+            "nested": { "note": format!("{{\"password\": \"{secret}\"}}") },
+        })
+        .to_string();
+        let done = operations
+            .complete("operation-1", "failed", Some(&error), Some(&error))
+            .await
+            .unwrap();
+        for stored in [done.error_json.unwrap(), done.result_json.unwrap()] {
+            assert!(!stored.contains(secret), "{stored}");
+            assert!(stored.contains("connection_failed"), "{stored}");
+            assert!(stored.contains("***@host.invalid"), "{stored}");
+        }
+        // A non-JSON failure document is scrubbed as one string, and a
+        // succeeded result is the executor's own data, left alone.
+        let done = operations
+            .complete(
+                "operation-1",
+                "failed",
+                None,
+                Some("token=abcdefgh12345678"),
+            )
+            .await
+            .unwrap();
+        assert!(!done.error_json.unwrap().contains("abcdefgh12345678"));
+        let ok = serde_json::json!({ "detail": "kept as is" }).to_string();
+        let done = operations
+            .complete("operation-1", "succeeded", Some(&ok), None)
+            .await
+            .unwrap();
+        assert_eq!(done.result_json.as_deref(), Some(ok.as_str()));
     }
 
     #[tokio::test]
