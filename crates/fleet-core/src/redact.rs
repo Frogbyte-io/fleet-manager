@@ -327,6 +327,42 @@ pub fn scrub_failure_detail(detail: &str) -> String {
     scrub_and_bound_with(detail, false, str::to_owned).0
 }
 
+/// How deep a JSON document may nest before [`redact_json_strings`] drops the
+/// rest. Node-supplied documents are untrusted.
+const MAX_JSON_DEPTH: usize = 16;
+
+/// Scrubs and bounds every string (and object key) in a JSON document, in
+/// place: credential shapes are masked, control characters flattened, each
+/// string cut to [`RESULT_STRING_BOUND`]. Nesting beyond a fixed depth is
+/// replaced by `null`. Used for node-supplied reports stored as data.
+pub fn redact_json_strings(value: &mut serde_json::Value) {
+    redact_json_at(value, 0);
+}
+
+fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
+    use serde_json::Value;
+    if depth > MAX_JSON_DEPTH {
+        *value = Value::Null;
+        return;
+    }
+    match value {
+        Value::String(text) => *text = scrub_failure_detail(text),
+        Value::Array(items) => {
+            for item in items {
+                redact_json_at(item, depth + 1);
+            }
+        }
+        Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (key, mut item) in entries {
+                redact_json_at(&mut item, depth + 1);
+                map.insert(scrub_failure_detail(&key), item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The prefix of `text` that is scrubbed, and whether text was left out. A
 /// cut window always ends at whitespace, so no token (and no credential) is
 /// split by it; a window with no whitespace at all keeps nothing.
@@ -570,5 +606,30 @@ mod tests {
     fn secret_pair_scrub_is_linear_on_pathological_input() {
         let text = "=a".repeat(100_000) + &"token=".repeat(50_000);
         let _ = redact_credentials(&text);
+    }
+
+    #[test]
+    fn json_strings_are_scrubbed_bounded_and_depth_limited() {
+        let mut value = serde_json::json!({
+            "remote": "https://user:hunter2pw@host.invalid/r",
+            "token=fakekeyvalue": ["Bearer fakebearer9", {"big": "x".repeat(10_000)}],
+            "n": 7,
+        });
+        redact_json_strings(&mut value);
+        let text = value.to_string();
+        assert!(
+            !text.contains("hunter2") && !text.contains("fakebearer9"),
+            "{text}"
+        );
+        assert!(!text.contains("fakekeyvalue"), "{text}");
+        assert!(text.len() < 4_000, "{}", text.len());
+        assert_eq!(value["n"], 7);
+
+        let mut deep = serde_json::json!("leaf");
+        for _ in 0..40 {
+            deep = serde_json::json!([deep]);
+        }
+        redact_json_strings(&mut deep);
+        assert!(deep.to_string().len() < 100);
     }
 }

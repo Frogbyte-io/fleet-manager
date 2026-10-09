@@ -100,6 +100,18 @@ impl CapabilityFact {
         Ok(())
     }
 
+    /// A copy whose node-supplied text is safe to store: `value` and `source`
+    /// are scrubbed of credential shapes, flattened and bounded. Everything
+    /// that records facts from a node or a probe runs them through this.
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        Self {
+            value: self.value.as_deref().map(crate::scrub_failure_detail),
+            source: crate::scrub_failure_detail(&self.source),
+            ..self.clone()
+        }
+    }
+
     /// The displayed status: a recorded `known` fact ages into `stale` once
     /// its observation is older than the threshold; every other status is
     /// what was recorded. This is the rule that keeps "we do not know

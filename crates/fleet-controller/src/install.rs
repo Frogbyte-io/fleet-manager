@@ -554,7 +554,8 @@ impl InstallExecutor {
             machine_id,
             &result.payload,
         )
-        .await?;
+        .await?
+        .facts;
         if facts == 0 {
             return Err(
                 "the node reported an empty inventory; check the service's journal".to_owned(),

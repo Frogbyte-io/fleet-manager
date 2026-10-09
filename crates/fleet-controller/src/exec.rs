@@ -68,6 +68,31 @@ enum SshExecAuth {
 /// operations, which survive controller restarts.
 pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 
+/// The most facts, and the most snapshot bytes, one agentless collection may
+/// store (the same limits as a node inventory report).
+const MAX_COLLECTED_FACTS: usize = 256;
+const MAX_COLLECTED_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+/// Probe output is node text: the facts are capped in count, redacted, and
+/// checked against the snapshot size before anything is stored. Shared by
+/// the agentless inventory and onboarding discovery.
+pub(crate) fn redact_collected_facts(
+    facts: &[fleet_core::CapabilityFact],
+) -> Result<Vec<fleet_core::CapabilityFact>, String> {
+    if facts.len() > MAX_COLLECTED_FACTS {
+        return Err("the collection carries too many facts".to_owned());
+    }
+    let redacted: Vec<fleet_core::CapabilityFact> = facts
+        .iter()
+        .map(fleet_core::CapabilityFact::redacted)
+        .collect();
+    let size = serde_json::to_string(&redacted).map_or(usize::MAX, |json| json.len());
+    if size > MAX_COLLECTED_SNAPSHOT_BYTES {
+        return Err("the collected fact set is too large to store".to_owned());
+    }
+    Ok(redacted)
+}
+
 /// The kind-dispatching executor.
 #[derive(Debug)]
 pub struct ScriptExecutor {
@@ -208,13 +233,15 @@ impl ScriptExecutor {
 
         match (collected, detail) {
             (Some(facts), _) => {
+                let facts = redact_collected_facts(&facts)?;
                 let count = facts.len();
+                let snapshot = serde_json::to_string(&facts)
+                    .map_err(|error| format!("the fact set does not serialize: {error}"))?;
                 self.machines
                     .record_capabilities(&payload.machine_id, &facts)
                     .await
                     .map_err(|failure| failure.to_string())?;
-                let snapshot = serde_json::to_string(&facts)
-                    .map_err(|error| format!("the fact set does not serialize: {error}"))?;
+
                 self.machines
                     .record_snapshot(
                         &payload.machine_id,
@@ -500,7 +527,7 @@ pub(crate) use fleet_core::{scrub_and_bound_with, scrub_window};
 
 #[cfg(test)]
 mod tests {
-    use super::{scrub_and_bound, transport_failure_json};
+    use super::{redact_collected_facts, scrub_and_bound, transport_failure_json};
     use fleet_core::RESULT_STRING_BOUND;
 
     /// The transport error text for a failed connection or collection is
@@ -519,6 +546,28 @@ mod tests {
             let detail = value["detail"].as_str().unwrap();
             assert!(detail.len() <= RESULT_STRING_BOUND + 4, "{}", detail.len());
         }
+    }
+
+    fn probe_fact(value: &str) -> fleet_core::CapabilityFact {
+        fleet_core::CapabilityFact {
+            namespace: "git".to_owned(),
+            name: "remote".to_owned(),
+            value: Some(value.to_owned()),
+            status: fleet_core::CapabilityStatus::Known,
+            observed_at: fleet_core::Timestamp::from_unix_millis(0),
+            source: "agentless/1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn collected_facts_are_redacted_capped_and_size_checked() {
+        let facts =
+            redact_collected_facts(&[probe_fact("https://user:hunter2pw@host.invalid/r")]).unwrap();
+        assert!(!format!("{facts:?}").contains("hunter2"));
+        let many: Vec<_> = (0..300).map(|_| probe_fact("v")).collect();
+        assert!(redact_collected_facts(&many).is_err());
+        let bulky: Vec<_> = (0..40).map(|_| probe_fact(&"z".repeat(3_000))).collect();
+        assert!(redact_collected_facts(&bulky).is_err());
     }
 
     #[test]

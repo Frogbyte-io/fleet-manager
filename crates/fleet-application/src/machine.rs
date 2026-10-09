@@ -1134,8 +1134,21 @@ impl Machines {
                 detail: "the snapshot payload exceeds 64 KiB".to_owned(),
             });
         }
+        // The payload is observed data, often node-supplied: store it with
+        // every string scrubbed and bounded.
+        let mut document: serde_json::Value =
+            serde_json::from_str(payload_json).map_err(|_| MachineUseCaseError::Invalid {
+                detail: "the snapshot payload is not JSON".to_owned(),
+            })?;
+        fleet_core::redact_json_strings(&mut document);
+        let payload_json = document.to_string();
+        if payload_json.len() > 64 * 1024 {
+            return Err(MachineUseCaseError::Invalid {
+                detail: "the snapshot payload exceeds 64 KiB".to_owned(),
+            });
+        }
         self.port
-            .record_snapshot(id, source, payload_json, collected_at)
+            .record_snapshot(id, source, &payload_json, collected_at)
             .await
             .map_err(|failure| map_port("record_snapshot", failure))
     }
@@ -1166,8 +1179,16 @@ impl Machines {
             fact.validate()
                 .map_err(|detail| MachineUseCaseError::Invalid { detail })?;
         }
+        if facts.len() > 256 {
+            return Err(MachineUseCaseError::Invalid {
+                detail: "too many capability facts (at most 256)".to_owned(),
+            });
+        }
+        // Fact values are observed text, often node-supplied: store them
+        // scrubbed and bounded.
+        let redacted: Vec<CapabilityFact> = facts.iter().map(CapabilityFact::redacted).collect();
         self.port
-            .record_capabilities(id, facts)
+            .record_capabilities(id, &redacted)
             .await
             .map_err(|failure| map_port("record_capabilities", failure))
     }
