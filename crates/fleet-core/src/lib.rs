@@ -48,7 +48,7 @@ pub use lab::{
     CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState,
     MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe,
 };
-pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind};
+pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS};
 pub use operation::{
     InvalidTransitionError, OperationState, can_transition, deadline_passed, validate_transition,
 };

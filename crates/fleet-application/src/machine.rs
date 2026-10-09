@@ -1179,9 +1179,12 @@ impl Machines {
             fact.validate()
                 .map_err(|detail| MachineUseCaseError::Invalid { detail })?;
         }
-        if facts.len() > 256 {
+        if facts.len() > fleet_core::MAX_CAPABILITY_FACTS {
             return Err(MachineUseCaseError::Invalid {
-                detail: "too many capability facts (at most 256)".to_owned(),
+                detail: format!(
+                    "too many capability facts (at most {})",
+                    fleet_core::MAX_CAPABILITY_FACTS
+                ),
             });
         }
         // Fact values are observed text, often node-supplied: store them

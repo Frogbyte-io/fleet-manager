@@ -70,7 +70,7 @@ pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 
 /// The most facts, and the most snapshot bytes, one agentless collection may
 /// store (the same limits as a node inventory report).
-const MAX_COLLECTED_FACTS: usize = 256;
+const MAX_COLLECTED_FACTS: usize = fleet_core::MAX_CAPABILITY_FACTS;
 const MAX_COLLECTED_SNAPSHOT_BYTES: usize = 64 * 1024;
 
 /// Probe output is node text: the facts are capped in count, redacted, and
