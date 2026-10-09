@@ -388,6 +388,10 @@ impl InstallExecutor {
                     .map_err(|error| error.to_string())
             }
             Err(detail) => {
+                // The detail can carry the node's own payload (a refusal
+                // body, or a serde error quoting a fact), so scrub then
+                // bound it like every other stored command output.
+                let detail = scrub_inventory_detail(&detail);
                 fail_operation(operations, &operation.id, "inventory_unverified", &detail).await
             }
         }
@@ -727,6 +731,12 @@ fn scrub_known(text: &str, secrets: &[String]) -> String {
     })
 }
 
+/// The node-reported text of an inventory failure, scrubbed of credentials
+/// and then bounded, before it is stored in the failure detail.
+fn scrub_inventory_detail(detail: &str) -> String {
+    crate::exec::scrub_and_bound_with(detail.trim(), false, str::to_owned).0
+}
+
 /// The first informative line of remote output for a failure detail.
 fn first_lines(stderr: &str, stdout: &str, secrets: &[String]) -> String {
     // Scrub before choosing and cutting the line, so a credential that
@@ -845,5 +855,30 @@ mod first_lines_tests {
         let out = first_lines("mkdir /var/lib/fleetd/state: denied", "", &secrets);
         assert!(out.contains("/var/lib/fleetd"), "{out}");
         assert_eq!(scrub_known("a tok_AbC123xyz b", &secrets), "a [redacted] b");
+    }
+}
+
+#[cfg(test)]
+mod inventory_detail_tests {
+    use super::scrub_inventory_detail;
+
+    /// #406: a node's refusal payload carrying a credential-shaped string is
+    /// scrubbed, and a long one is bounded, before it is stored.
+    #[test]
+    fn the_inventory_failure_detail_is_scrubbed_and_bounded() {
+        let payload =
+            r#"{"remote":"https://user:secret@host.invalid/","proxy":"user:secret@proxy.invalid"}"#;
+        let out = scrub_inventory_detail(&format!(
+            "the node refused the inventory request: {payload}"
+        ));
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.contains("the node refused"), "{out}");
+        let long = format!(
+            "refused: {} https://user:secret@host.invalid/",
+            "x ".repeat(5_000)
+        );
+        let out = scrub_inventory_detail(&long);
+        assert!(!out.contains("secret"), "{out}");
+        assert!(out.len() <= 3_000 + "…".len(), "{}", out.len());
     }
 }
