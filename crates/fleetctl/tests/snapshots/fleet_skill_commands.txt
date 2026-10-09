@@ -42,6 +42,8 @@ fleetctl --output json lab provision-lease <lease-id>
   -> POST /api/v1/lab/leases/lease-id-example/provision body {}
 fleetctl --output json lab leases
   -> GET /api/v1/lab/leases
+fleetctl --output json lab leases --purpose-prefix "release-qa:v1.2:" --state ready,provisioning --owner <principal-id>
+  -> GET /api/v1/lab/leases?purposePrefix=release-qa:v1.2:&owner=principal-id-example&state=ready&state=provisioning
 fleetctl --output json lab provisions
   -> GET /api/v1/lab/provisions
 fleetctl --output json lab release <lease-id>

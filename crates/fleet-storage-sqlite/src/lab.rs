@@ -7,8 +7,9 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use fleet_application::lab::{
-    CloneTargetReservation, LabTemplate, LabTemplateContent, LabTemplatePort, LabTemplateVersion,
-    Lease, LeasePort, NewLabTemplate, NewLease, NewProvision, ProvisionPort, ProvisionRecord,
+    CloneTargetReservation, KeyedLeaseCreate, LabTemplate, LabTemplateContent, LabTemplatePort,
+    LabTemplateVersion, Lease, LeaseFilter, LeasePort, NewLabTemplate, NewLease, NewProvision,
+    ProvisionPort, ProvisionRecord,
 };
 use fleet_core::{CleanupStrategy, GuestState, LeaseState, ReadinessProbe};
 
@@ -693,6 +694,104 @@ impl LeasePort for LeaseRepository {
         .await
         .map_err(|error| format!("create failed: {error}"))?;
         <Self as fleet_application::lab::LeasePort>::get(self, &id).await
+    }
+
+    async fn create_keyed(
+        &self,
+        lease: &NewLease,
+        owner: &str,
+        now: i64,
+        key: &str,
+        fingerprint: &str,
+    ) -> Result<KeyedLeaseCreate, String> {
+        let id = Uuid::now_v7().to_string();
+        let max_lifetime_at = now
+            .checked_add(fleet_core::MAX_LAB_LEASE_LIFETIME_MILLIS)
+            .ok_or_else(|| {
+                "the lease creation time exceeds the maximum lifetime range".to_owned()
+            })?;
+        let result = sqlx::query(
+            "INSERT INTO lab_leases (id, template_version_id, owner, purpose, project_id, state, cleanup, created_at, max_lifetime_at, ttl_seconds, idempotency_key, idempotency_fingerprint) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'requested', ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(&id)
+        .bind(&lease.template_version_id)
+        .bind(owner)
+        .bind(&lease.purpose)
+        .bind(&lease.project_id)
+        .bind(lease.cleanup.id())
+        .bind(now)
+        .bind(max_lifetime_at)
+        .bind(i64::from(lease.ttl_seconds))
+        .bind(key)
+        .bind(fingerprint)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => <Self as LeasePort>::get(self, &id)
+                .await
+                .map(KeyedLeaseCreate::Created),
+            Err(error) if is_unique_violation(&error) => {
+                // A concurrent create with the same key won: its lease is
+                // the idempotent answer.
+                <Self as LeasePort>::find_by_idempotency_key(self, key)
+                    .await?
+                    .map(|(lease, fingerprint)| KeyedLeaseCreate::Replay { lease, fingerprint })
+                    .ok_or_else(|| format!("create failed: {error}"))
+            }
+            Err(error) => Err(format!("create failed: {error}")),
+        }
+    }
+
+    async fn find_by_idempotency_key(&self, key: &str) -> Result<Option<(Lease, String)>, String> {
+        let row = sqlx::query("SELECT * FROM lab_leases WHERE idempotency_key = ?1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("find failed: {error}"))?;
+        row.map(|row| {
+            let fingerprint: Option<String> = row.get("idempotency_fingerprint");
+            Self::row_to_lease(&row).map(|lease| (lease, fingerprint.unwrap_or_default()))
+        })
+        .transpose()
+    }
+
+    async fn search(&self, filter: &LeaseFilter) -> Result<Vec<Lease>, String> {
+        let mut query =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT * FROM lab_leases WHERE 1 = 1");
+        if let Some(project_id) = &filter.project_id {
+            query.push(" AND project_id = ").push_bind(project_id);
+        }
+        if let Some(purpose) = &filter.purpose {
+            query.push(" AND purpose = ").push_bind(purpose);
+        }
+        if let Some(prefix) = &filter.purpose_prefix {
+            // Case-sensitive and wildcard-free, unlike LIKE.
+            let chars = i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX);
+            query
+                .push(" AND substr(purpose, 1, ")
+                .push_bind(chars)
+                .push(") = ")
+                .push_bind(prefix);
+        }
+        if !filter.states.is_empty() {
+            query.push(" AND state IN (");
+            let mut separated = query.separated(", ");
+            for state in &filter.states {
+                separated.push_bind(state.id());
+            }
+            query.push(")");
+        }
+        if let Some(owner) = &filter.owner {
+            query.push(" AND owner = ").push_bind(owner);
+        }
+        query.push(" ORDER BY created_at DESC, id DESC");
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("search failed: {error}"))?;
+        rows.iter().map(Self::row_to_lease).collect()
     }
 
     async fn get(&self, id: &str) -> Result<Lease, String> {

@@ -1688,6 +1688,24 @@ async fn lease_listing_narrows_by_project() {
         .await
         .unwrap();
     assert_eq!(everything.len(), 3);
+    // The default port search applies the same filter in the application.
+    let filter = fleet_application::lab::LeaseFilter {
+        purpose_prefix: Some("unl".to_owned()),
+        states: vec![fleet_core::LeaseState::Requested],
+        ..Default::default()
+    };
+    let found = lab
+        .search_leases(&AllowAll, &principal(), filter.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].purpose, "unlinked");
+    assert!(
+        lab.search_leases(&AllowAll, &principal(), filter, Some("someone-else"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

@@ -880,11 +880,14 @@ pub struct CreateLeaseRequest {
     tag = "lab",
     operation_id = "createLabLease",
     request_body = CreateLeaseRequest,
+    params(("Idempotency-Key" = Option<String>, Header, description = "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200; the same key with a different request is a 409.")),
     responses(
         (status = 201, description = "The lease was created.", body = Resource<LeaseDto>),
-        (status = 400, description = "The request is malformed.", body = crate::error::ApiError),
+        (status = 200, description = "A replay: the lease this Idempotency-Key created earlier.", body = Resource<LeaseDto>),
+        (status = 400, description = "The request or the Idempotency-Key is malformed.", body = crate::error::ApiError),
         (status = 403, description = "The caller may not lease Lab guests.", body = crate::error::ApiError),
         (status = 404, description = "The version does not exist.", body = crate::error::ApiError),
+        (status = 409, description = "The Idempotency-Key was already used for a different request.", body = crate::error::ApiError),
         (status = 500, description = "A backend port failed.", body = crate::error::ApiError),
     )
 )]
@@ -892,12 +895,28 @@ pub async fn create_lab_lease(
     State(state): State<Arc<crate::operations::ApiState>>,
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<CreateLeaseRequest>,
 ) -> Result<(StatusCode, Json<Resource<LeaseDto>>), ApiErrorResponse> {
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    let lease = lab
-        .create_lease(
+    // A present key that is not text is refused, not ignored: ignoring it
+    // would create a second lease on the retry the key was sent to prevent.
+    let idempotency_key = headers
+        .get(crate::IDEMPOTENCY_KEY_HEADER)
+        .map(|value| {
+            value.to_str().map_err(|_| {
+                map_lab_error(
+                    &LabUseCaseError::Invalid {
+                        detail: "the Idempotency-Key header must be printable ASCII".to_owned(),
+                    },
+                    correlation_id,
+                )
+            })
+        })
+        .transpose()?;
+    let (lease, created) = lab
+        .create_lease_idempotent(
             state.authorizer.as_ref(),
             &principal,
             fleet_application::lab::NewLease {
@@ -907,25 +926,53 @@ pub async fn create_lab_lease(
                 cleanup: fleet_core::CleanupStrategy::Destroy,
                 ttl_seconds: 3_600,
             },
+            idempotency_key,
             fleet_core::SystemClock::now_unix_millis(),
         )
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
+    if !created {
+        return Ok((StatusCode::OK, Json(Resource::new(lease.into()))));
+    }
     state
         .events
         .publish(fleet_application::events::EventKind::LeaseChanged);
     Ok((StatusCode::CREATED, Json(Resource::new(lease.into()))))
 }
 
-/// The list-leases query parameters.
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ListLeasesParams {
-    /// Only leases serving this project.
-    pub project_id: Option<String>,
+/// Reads the list-leases query into a filter. `state` may repeat and each
+/// value may itself be a comma list; unknown states and repeated scalar
+/// parameters are refused.
+fn lease_filter(
+    pairs: Vec<(String, String)>,
+) -> Result<fleet_application::lab::LeaseFilter, String> {
+    let mut filter = fleet_application::lab::LeaseFilter::default();
+    for (name, value) in pairs {
+        let slot = match name.as_str() {
+            "projectId" => &mut filter.project_id,
+            "purpose" => &mut filter.purpose,
+            "purposePrefix" => &mut filter.purpose_prefix,
+            "owner" => &mut filter.owner,
+            "state" => {
+                for state in value.split(',') {
+                    let state = fleet_core::LeaseState::from_id(state.trim())
+                        .map_err(|_| format!("{state:?} is not a lease state"))?;
+                    if !filter.states.contains(&state) {
+                        filter.states.push(state);
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{name} may be given only once"));
+        }
+    }
+    Ok(filter)
 }
 
-/// Lists the leases, narrowed by the project when given.
+/// Lists the leases, narrowed by project, purpose, state, and owner.
 ///
 /// # Errors
 ///
@@ -935,7 +982,13 @@ pub struct ListLeasesParams {
     path = "/lab/leases",
     tag = "lab",
     operation_id = "listLabLeases",
-    params(("projectId" = Option<String>, Query, description = "Only leases serving this project.")),
+    params(
+        ("projectId" = Option<String>, Query, description = "Only leases serving this project."),
+        ("purpose" = Option<String>, Query, description = "Only leases whose purpose is exactly this."),
+        ("purposePrefix" = Option<String>, Query, description = "Only leases whose purpose starts with this (case-sensitive)."),
+        ("state" = Option<String>, Query, description = "Only leases in these states, comma-separated (for example `ready,provisioning`); an unknown state is a 400."),
+        ("owner" = Option<String>, Query, description = "Only leases owned by this principal."),
+    ),
     responses(
         (status = 200, description = "The leases, newest first.", body = Page<LeaseDto>),
         (status = 400, description = "The query parameters are malformed.", body = crate::error::ApiError),
@@ -948,24 +1001,23 @@ pub async fn list_lab_leases(
     principal: Option<Extension<crate::ActingPrincipal>>,
     Extension(correlation_id): Extension<CorrelationId>,
     params: Result<
-        axum::extract::Query<ListLeasesParams>,
+        axum::extract::Query<Vec<(String, String)>>,
         axum::extract::rejection::QueryRejection,
     >,
 ) -> Result<Json<Page<LeaseDto>>, ApiErrorResponse> {
-    let params = params.map_err(|rejection| {
+    let invalid = |detail: String| {
         crate::machines::invalid_request(
-            &format!("the leases list query is malformed: {rejection}"),
+            &format!("the leases list query is malformed: {detail}"),
             correlation_id,
         )
-    })?;
+    };
+    let axum::extract::Query(pairs) = params.map_err(|rejection| invalid(rejection.to_string()))?;
+    let filter = lease_filter(pairs).map_err(invalid)?;
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
+    // No owner scope yet: #392 passes the scoped CI identity's own id here.
     let leases = lab
-        .list_leases(
-            state.authorizer.as_ref(),
-            &principal,
-            params.project_id.as_deref(),
-        )
+        .search_leases(state.authorizer.as_ref(), &principal, filter, None)
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     let items: Vec<LeaseDto> = leases.into_iter().map(Into::into).collect();

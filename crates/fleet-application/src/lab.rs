@@ -665,9 +665,141 @@ pub struct NewLease {
     pub ttl_seconds: u32,
 }
 
+/// How `GET /lab/leases` narrows the leases. Every set field must match.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeaseFilter {
+    /// Only leases serving this project.
+    pub project_id: Option<String>,
+    /// Only leases whose purpose is exactly this.
+    pub purpose: Option<String>,
+    /// Only leases whose purpose starts with this (case-sensitive).
+    pub purpose_prefix: Option<String>,
+    /// Only leases in one of these states; empty means any.
+    pub states: Vec<LeaseState>,
+    /// Only leases owned by this principal.
+    pub owner: Option<String>,
+}
+
+impl LeaseFilter {
+    /// Whether the lease passes every set field.
+    #[must_use]
+    pub fn matches(&self, lease: &Lease) -> bool {
+        self.project_id
+            .as_deref()
+            .is_none_or(|id| lease.project_id.as_deref() == Some(id))
+            && self.purpose.as_deref().is_none_or(|p| lease.purpose == p)
+            && self
+                .purpose_prefix
+                .as_deref()
+                .is_none_or(|p| lease.purpose.starts_with(p))
+            && (self.states.is_empty() || self.states.contains(&lease.state))
+            && self.owner.as_deref().is_none_or(|o| lease.owner == o)
+    }
+}
+
+/// The caller-scoped key and canonical request fingerprint of a keyed
+/// lease creation. The scope is the principal id, as provision's is.
+fn lease_idempotency_scope(
+    principal: &ActingPrincipal,
+    key: &str,
+    new: &NewLease,
+) -> Result<(String, String), LabUseCaseError> {
+    let valid = !key.is_empty()
+        && key.chars().count() <= MAX_LEASE_IDEMPOTENCY_KEY_CHARS
+        && key.chars().all(|c| c.is_ascii_graphic());
+    if !valid {
+        return Err(LabUseCaseError::Invalid {
+            detail: format!(
+                "the idempotency key must be 1..={MAX_LEASE_IDEMPOTENCY_KEY_CHARS} printable ASCII characters"
+            ),
+        });
+    }
+    let fingerprint = serde_json::json!({
+        "templateVersionId": new.template_version_id,
+        "purpose": new.purpose,
+        "projectId": new.project_id,
+    })
+    .to_string();
+    Ok((
+        format!("{}:lab-lease-create:{key}", principal.id),
+        fingerprint,
+    ))
+}
+
+fn replayed_lease(
+    lease: Lease,
+    stored: &str,
+    fingerprint: &str,
+) -> Result<(Lease, bool), LabUseCaseError> {
+    if stored == fingerprint {
+        Ok((lease, false))
+    } else {
+        Err(LabUseCaseError::Conflict {
+            detail: "the idempotency key was already used for a different lease request".to_owned(),
+        })
+    }
+}
+
+/// The longest `Idempotency-Key` a lease creation accepts.
+pub const MAX_LEASE_IDEMPOTENCY_KEY_CHARS: usize = 128;
+
+/// The outcome of a keyed lease insert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyedLeaseCreate {
+    /// This call inserted the lease.
+    Created(Lease),
+    /// The key already named a lease (a retry, or a concurrent winner).
+    Replay {
+        /// The lease the key was first used for.
+        lease: Lease,
+        /// The canonical request fingerprint stored with it.
+        fingerprint: String,
+    },
+}
+
 /// The lease storage port.
 #[async_trait]
 pub trait LeasePort: fmt::Debug + Send + Sync {
+    /// Creates a lease carrying a caller-scoped idempotency key and the
+    /// canonical fingerprint of its request, atomically: when the key is
+    /// already taken, nothing is inserted and the holder is returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors or does not support keyed creation.
+    async fn create_keyed(
+        &self,
+        _lease: &NewLease,
+        _owner: &str,
+        _now: i64,
+        _key: &str,
+        _fingerprint: &str,
+    ) -> Result<KeyedLeaseCreate, String> {
+        Err("keyed lease creation is unavailable".to_owned())
+    }
+    /// The lease holding this caller-scoped idempotency key, with its
+    /// request fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors or does not support keyed creation.
+    async fn find_by_idempotency_key(&self, _key: &str) -> Result<Option<(Lease, String)>, String> {
+        Err("keyed lease creation is unavailable".to_owned())
+    }
+    /// Lists the leases passing the filter, newest first. Backends should
+    /// filter in the query; the default filters the full list.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn search(&self, filter: &LeaseFilter) -> Result<Vec<Lease>, String> {
+        Ok(self
+            .list(filter.project_id.as_deref())
+            .await?
+            .into_iter()
+            .filter(|lease| filter.matches(lease))
+            .collect())
+    }
     /// Creates a lease, minting its identity.
     ///
     /// # Errors
@@ -978,6 +1110,33 @@ impl Lab {
         new: NewLease,
         now: i64,
     ) -> Result<Lease, LabUseCaseError> {
+        self.create_lease_idempotent(authorizer, principal, new, None, now)
+            .await
+            .map(|(lease, _)| lease)
+    }
+
+    /// [`Self::create_lease`] with an optional caller-scoped idempotency
+    /// key. A replay with the same key and the same request returns the
+    /// lease the key was first used for (`false`: nothing was created, and
+    /// nothing is claimed, audited as a creation, or queued); the same key
+    /// with a different request is a `Conflict`. The request is the
+    /// template version, the purpose, and the explicit project id (absent
+    /// and null are the same); the cleanup strategy and TTL come from the
+    /// template.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create_lease`], plus `Invalid` for a malformed key and
+    /// `Conflict` for a key reused with a different request.
+    #[allow(clippy::too_many_lines)]
+    pub async fn create_lease_idempotent(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        new: NewLease,
+        idempotency_key: Option<&str>,
+        now: i64,
+    ) -> Result<(Lease, bool), LabUseCaseError> {
         // The authorization precedes the read: a denied caller cannot
         // probe lease existence through NotFound versus Denied.
         authorize(
@@ -989,6 +1148,21 @@ impl Lab {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
+        let keyed = idempotency_key
+            .map(|key| lease_idempotency_scope(principal, key, &new))
+            .transpose()?;
+        if let Some((key, fingerprint)) = &keyed
+            && let Some((lease, stored)) =
+                self.leases
+                    .find_by_idempotency_key(key)
+                    .await
+                    .map_err(|detail| LabUseCaseError::Backend {
+                        context: "leases",
+                        detail,
+                    })?
+        {
+            return replayed_lease(lease, &stored, fingerprint);
+        }
         let version = self
             .templates
             .get_version(&new.template_version_id)
@@ -1038,13 +1212,31 @@ impl Lab {
             audit_fact,
         )
         .await?;
-        self.leases
-            .create(&inherited, &principal.id, now)
+        let backend = |detail| LabUseCaseError::Backend {
+            context: "leases",
+            detail,
+        };
+        let Some((key, fingerprint)) = keyed else {
+            let lease = self
+                .leases
+                .create(&inherited, &principal.id, now)
+                .await
+                .map_err(backend)?;
+            return Ok((lease, true));
+        };
+        match self
+            .leases
+            .create_keyed(&inherited, &principal.id, now, &key, &fingerprint)
             .await
-            .map_err(|detail| LabUseCaseError::Backend {
-                context: "leases",
-                detail,
-            })
+            .map_err(backend)?
+        {
+            KeyedLeaseCreate::Created(lease) => Ok((lease, true)),
+            // A concurrent request with the same key won the insert.
+            KeyedLeaseCreate::Replay {
+                lease,
+                fingerprint: stored,
+            } => replayed_lease(lease, &stored, &fingerprint),
+        }
     }
 
     /// Resolves the lease's project linkage: an explicit id must exist,
@@ -1105,6 +1297,45 @@ impl Lab {
         .map_err(LabUseCaseError::Denied)?;
         self.leases
             .list(project_id)
+            .await
+            .map_err(|detail| LabUseCaseError::Backend {
+                context: "leases",
+                detail,
+            })
+    }
+
+    /// Lists the leases passing the filter, newest first. `owner_scope`
+    /// forces the owner: the filter's owner can only narrow within it (a
+    /// different owner matches nothing), so a caller restricted to its own
+    /// leases cannot see others by asking.
+    ///
+    /// # Errors
+    ///
+    /// Fails on denial or a backend failure.
+    pub async fn search_leases(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal: &ActingPrincipal,
+        mut filter: LeaseFilter,
+        owner_scope: Option<&str>,
+    ) -> Result<Vec<Lease>, LabUseCaseError> {
+        authorize(
+            authorizer,
+            AccessRequest {
+                principal_id: &principal.id,
+                action: Permission::LabRead,
+                resource: None,
+            },
+        )
+        .map_err(LabUseCaseError::Denied)?;
+        if let Some(scope) = owner_scope {
+            if filter.owner.as_deref().is_some_and(|owner| owner != scope) {
+                return Ok(Vec::new());
+            }
+            filter.owner = Some(scope.to_owned());
+        }
+        self.leases
+            .search(&filter)
             .await
             .map_err(|detail| LabUseCaseError::Backend {
                 context: "leases",
