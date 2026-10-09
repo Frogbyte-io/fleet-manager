@@ -5,8 +5,9 @@
 //! (Tailscale principal ids, free-form keys), so joining them with a bare
 //! separator is ambiguous: `("a:b", "c")` and `("a", "b:c")` would spell the
 //! same scope. Every part except the last is therefore length-prefixed. The
-//! last part is delimited by the end of the string, so the whole is
-//! decodable and no two distinct inputs share a scope.
+//! last part is delimited by the end of the string, so for one `kind` (each
+//! of which has a fixed number of parts in code) no two distinct inputs
+//! share a scope.
 //!
 //! Stored keys written before this construction used `{principal}:{key}`
 //! (and `{principal}:lab-exec:{id}:{key}` and the like). They are not
@@ -29,6 +30,10 @@ pub const CALLER_KEY: &str = "caller";
 #[must_use]
 pub fn scoped_key(kind: &str, principal: &str, parts: &[&str]) -> String {
     use std::fmt::Write as _;
+    debug_assert!(
+        !kind.contains(':'),
+        "an idempotency kind must not contain ':'"
+    );
     let (last, leading) = parts
         .split_last()
         .expect("a scoped idempotency key needs at least one part");
@@ -67,12 +72,7 @@ mod tests {
     /// The old joins, per scope: each pair below spelled one string.
     #[test]
     fn every_scope_kind_separates_colliding_pairs() {
-        for kind in [
-            super::CALLER_KEY,
-            "lab-provision",
-            "lab-lease-create",
-            "lab-lease-provision",
-        ] {
+        for kind in [super::CALLER_KEY, "lab-provision", "lab-lease-create"] {
             assert_ne!(
                 scoped_key(kind, "a", &["b:c"]),
                 scoped_key(kind, "a:b", &["c"]),

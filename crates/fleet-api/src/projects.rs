@@ -284,7 +284,7 @@ pub async fn create_project(
                 remote: request.remote,
                 name: request.name,
                 description: request.description.unwrap_or_default(),
-                idempotency_key: idempotency_key.clone(),
+                idempotency_key: None,
             },
             idempotency_key,
         )

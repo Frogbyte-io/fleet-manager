@@ -470,6 +470,35 @@ fn compose(machines: FakeMachines) -> Fixture {
     }
 }
 
+/// #433: a draft key is scoped to its principal, so another principal (or a
+/// key spelling a scoped form) never replays it, and the owner does.
+#[tokio::test]
+async fn draft_keys_are_scoped_to_the_principal() {
+    let fixture = compose(FakeMachines::default());
+    let create = |who: &str, key: &str| {
+        let onboarding = &fixture.onboarding;
+        let who = ActingPrincipal { id: who.to_owned() };
+        let mut draft = new_draft();
+        draft.idempotency_key = Some(key.to_owned());
+        async move {
+            onboarding
+                .create_draft_with_outcome(&AllowAll, &who, draft)
+                .await
+                .unwrap()
+        }
+    };
+    let (first, created) = create("tailscale:a", "b:c").await;
+    assert!(created);
+    let (replay, created) = create("tailscale:a", "b:c").await;
+    assert!(!created);
+    assert_eq!(replay.id, first.id);
+    for (who, key) in [("tailscale:a:b", "c"), ("someone-else", "b:c")] {
+        let (other, created) = create(who, key).await;
+        assert!(created, "{who} {key}");
+        assert_ne!(other.id, first.id);
+    }
+}
+
 #[tokio::test]
 async fn a_fresh_draft_is_untested_and_made_no_machine() {
     let fixture = compose(FakeMachines::default());

@@ -750,13 +750,7 @@ impl TailnetIntegration {
                     ),
                     tags: Vec::new(),
                     groups: Vec::new(),
-                    idempotency_key: idempotency_key.map(|key| {
-                        crate::idempotency::scoped_key(
-                            crate::idempotency::CALLER_KEY,
-                            &principal.id,
-                            &[key],
-                        )
-                    }),
+                    idempotency_key: idempotency_key.map(str::to_owned),
                 },
             )
             .await

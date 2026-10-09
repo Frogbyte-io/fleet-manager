@@ -758,10 +758,9 @@ pub async fn start_lab_lease_provision(
             &lease_id,
             &fleet_application::operation::NewOperation {
                 kind: "lab.provision".to_owned(),
-                idempotency_key: Some(fleet_application::idempotency::scoped_key(
-                    "lab-lease-provision",
-                    fleet_application::authz::resource_owner(&principal.id),
-                    &[&lease_id],
+                idempotency_key: Some(fleet_application::lab::lease_provision_operation_key(
+                    &principal.id,
+                    &lease_id,
                 )),
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),

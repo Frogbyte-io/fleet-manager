@@ -745,6 +745,29 @@ fn lease_idempotency_scope(
     ))
 }
 
+/// The provision-record key of a lease-bound provision, `{owner}:lab-lease:{id}`.
+///
+/// Unlike a caller's key, it is derived from the owner and a controller-minted
+/// lease id (a UUID, never containing ':'), and it ends in a fixed shape, so it
+/// reads back unambiguously from the right. It keeps its form so a lease that
+/// started provisioning before #433 still replays after the upgrade.
+fn lease_provision_record_key(principal_id: &str, lease_id: &str) -> String {
+    format!(
+        "{}:lab-lease:{lease_id}",
+        crate::authz::resource_owner(principal_id)
+    )
+}
+
+/// The operation key of a lease-bound provision, `{owner}:lab-lease-provision:{id}`,
+/// kept in its pre-#433 form for the reason [`lease_provision_record_key`] gives.
+#[must_use]
+pub fn lease_provision_operation_key(principal_id: &str, lease_id: &str) -> String {
+    format!(
+        "{}:lab-lease-provision:{lease_id}",
+        crate::authz::resource_owner(principal_id)
+    )
+}
+
 fn replayed_lease(
     lease: Lease,
     stored: &str,
@@ -2327,13 +2350,7 @@ impl Lab {
         // Idempotent replay: the caller-scoped key returns the in-flight
         // record instead of creating a second guest saga.
         let scoped_key = lease_id
-            .map(|id| {
-                crate::idempotency::scoped_key(
-                    "lab-lease-record",
-                    crate::authz::resource_owner(&principal.id),
-                    &[id],
-                )
-            })
+            .map(|id| lease_provision_record_key(&principal.id, id))
             .or_else(|| {
                 idempotency_key.map(|key| {
                     crate::idempotency::scoped_key("lab-provision", &principal.id, &[key])
