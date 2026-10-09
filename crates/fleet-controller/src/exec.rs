@@ -238,9 +238,7 @@ impl ScriptExecutor {
                     .map_err(|error| error.to_string())
             }
             (None, Some(detail)) => {
-                let error_json =
-                    serde_json::json!({ "reason": "collection_failed", "detail": detail })
-                        .to_string();
+                let error_json = transport_failure_json("collection_failed", &detail);
                 operations
                     .complete(&operation.id, "failed", None, Some(&error_json))
                     .await
@@ -362,9 +360,7 @@ impl ScriptExecutor {
                 }
             }
             (None, Some(detail)) => {
-                let error_json =
-                    serde_json::json!({ "reason": "connection_failed", "detail": detail })
-                        .to_string();
+                let error_json = transport_failure_json("connection_failed", &detail);
                 operations
                     .complete(&operation.id, "failed", None, Some(&error_json))
                     .await
@@ -491,6 +487,13 @@ pub fn noop_only_executor() -> impl OperationExecutor {
     fleet_application::worker::NoopExecutor
 }
 
+/// The stored error for a failure whose detail is transport or tool text
+/// (node- and network-supplied): scrubbed and bounded like command output.
+fn transport_failure_json(reason: &str, detail: &str) -> String {
+    let (detail, _) = scrub_and_bound(detail, false);
+    serde_json::json!({ "reason": reason, "detail": detail }).to_string()
+}
+
 /// Scrubs credential shapes from command output, then bounds it. Scrubbing
 /// first means a credential straddling the bound is never half kept. The
 /// returned flag is true when the provider already truncated the output or
@@ -561,7 +564,25 @@ fn trim_to_bound(text: &str) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RESULT_STRING_BOUND, scrub_and_bound};
+    use super::{RESULT_STRING_BOUND, scrub_and_bound, transport_failure_json};
+
+    /// The transport error text for a failed connection or collection is
+    /// node- and tool-supplied: a userinfo URL is masked and a huge detail cut.
+    #[test]
+    fn a_transport_failure_detail_is_scrubbed_and_bounded() {
+        for reason in ["connection_failed", "collection_failed"] {
+            let raw = format!(
+                "ssh: connect via https://user:hunter2pw@proxy.invalid/ failed {}",
+                "e".repeat(RESULT_STRING_BOUND * 2)
+            );
+            let json = transport_failure_json(reason, &raw);
+            assert!(!json.contains("hunter2"), "{json}");
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["reason"], reason);
+            let detail = value["detail"].as_str().unwrap();
+            assert!(detail.len() <= RESULT_STRING_BOUND + 4, "{}", detail.len());
+        }
+    }
 
     #[test]
     fn a_credential_at_the_bound_of_a_huge_stream_is_never_half_kept() {
