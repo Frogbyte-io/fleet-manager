@@ -562,6 +562,8 @@ pub struct RevertedConfig {
     pub parent: Option<String>,
     /// The guest's virtual audio device (`audio0`), when it has one.
     pub audio: Option<fleet_core::LabAudio>,
+    /// Whether the config has an `audio0` that could not be read.
+    pub audio_unreadable: bool,
 }
 
 /// Whether a member's audio device matches the template version's
@@ -578,6 +580,12 @@ pub fn verify_audio(
     let Some(wanted) = wanted else {
         return Ok(());
     };
+    if config.audio_unreadable {
+        return Err(format!(
+            "the guest's audio0 is unreadable, but the template declares {} with driver {}",
+            wanted.device, wanted.driver
+        ));
+    }
     match &config.audio {
         Some(audio) if audio == wanted => Ok(()),
         Some(audio) => Err(format!(
@@ -1188,6 +1196,7 @@ mod tests {
             lock: None,
             parent: parent.map(str::to_owned),
             audio: None,
+            audio_unreadable: false,
         };
         assert!(verify_reverted(&at(Some("baseline")), "baseline").is_ok());
         assert!(verify_reverted(&at(Some("other")), "baseline").is_err());
@@ -1217,6 +1226,12 @@ mod tests {
         let wanted = audio("ich9-intel-hda", "none");
         assert!(verify_audio(&with(Some(wanted.clone())), Some(&wanted)).is_ok());
         assert!(verify_audio(&with(None), Some(&wanted)).is_err());
+        let odd = RevertedConfig {
+            audio_unreadable: true,
+            ..RevertedConfig::default()
+        };
+        assert!(verify_audio(&odd, Some(&wanted)).is_err());
+        assert!(verify_audio(&odd, None).is_ok());
         assert!(verify_audio(&with(Some(audio("AC97", "none"))), Some(&wanted)).is_err());
         assert!(
             verify_audio(&with(Some(audio("ich9-intel-hda", "spice"))), Some(&wanted)).is_err()

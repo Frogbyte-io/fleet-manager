@@ -704,8 +704,8 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         scope: PrivilegeScope::NewGuest,
         privileges: &["VM.Config.HWType"],
         matching: PrivilegeMatch::All,
-        required: true,
-        note: "When the Lab template declares a virtual audio device and the clone's audio0 differs, the executor sets audio0 in the same config write as cores and memory, on its own new guest (issue #398). qemu-server lists audio0 among the hardware-type options, which need VM.Config.HWType. Nothing is written, and the privilege is not used, when the clone already matches or the template declares no audio.",
+        required: false,
+        note: "When the Lab template declares a virtual audio device and the clone's audio0 differs, the executor sets audio0 in the same config write as cores and memory, on its own new guest (issue #398). qemu-server lists audio0 among the hardware-type options, which need VM.Config.HWType. Opt-in: only templates that declare audio use it, so it never gates the Lab tier; without it a provision of such a template fails at the hardware step naming the privilege. Nothing is written, and the privilege is not used, when the clone already matches or the template declares no audio.",
     },
     PrivilegeRequirement {
         id: "lab.provision.hardware-resize",
@@ -1405,7 +1405,6 @@ mod tests {
             assert_eq!(config.matching, PrivilegeMatch::All);
             for id in [
                 "lab.provision.hardware-config",
-                "lab.provision.hardware-audio",
                 "lab.provision.hardware-resize",
             ] {
                 let row = requirements_for_major(major)
@@ -1419,6 +1418,10 @@ mod tests {
                 .find(|row| row.id == "lab.provision.hardware-audio")
                 .unwrap();
             assert_eq!(audio.privileges, &["VM.Config.HWType"]);
+            // Only templates with audio use it: it is reported, never a gate.
+            assert!(!audio.required);
+            assert_eq!(audio.tier, PrivilegeTier::Lab);
+            assert_eq!(audio.scope, PrivilegeScope::NewGuest);
             for privilege in [
                 "VM.Config.CPU",
                 "VM.Config.Memory",

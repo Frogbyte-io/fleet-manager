@@ -2068,6 +2068,7 @@ pub struct ProvisionExecutor {
     pools: Option<Arc<dyn fleet_application::lab_pool::LabPoolPort>>,
     /// The bound on one disk resize task (#372).
     hardware_task_timeout: Duration,
+    hardware_confirm_timeout: Duration,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2152,7 +2153,18 @@ impl ProvisionExecutor {
             placement: None,
             pools: None,
             hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
+            hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
         }
+    }
+
+    /// Bounds how long a written hardware value may stay unreported by the
+    /// config read before the step fails, instead of the default thirty
+    /// seconds. For tests, which cannot wait that long.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_hardware_confirm_timeout(mut self, timeout: Duration) -> Self {
+        self.hardware_confirm_timeout = timeout;
+        self
     }
 
     /// Bounds one disk resize task (#372) by `timeout` instead of the
@@ -3006,9 +3018,9 @@ impl ProvisionExecutor {
             let memory = (hardware.memory_mib != content.memory_mib).then_some(content.memory_mib);
             // The audio device rides the same config write. A template that
             // declares none leaves whatever the image has.
-            let audio = wanted_audio
-                .as_ref()
-                .filter(|wanted| hardware.audio.as_ref() != Some(*wanted));
+            let audio = wanted_audio.as_ref().filter(|wanted| {
+                hardware.audio_unreadable || hardware.audio.as_ref() != Some(*wanted)
+            });
             if memory.is_some() && hardware.memory_has_options {
                 return refuse(
                     "hardware_unsupported",
@@ -3073,7 +3085,7 @@ impl ProvisionExecutor {
             if let Some((kind, at)) = last_write
                 && kind == next
             {
-                if at.elapsed() >= HARDWARE_CONFIRM_TIMEOUT {
+                if at.elapsed() >= self.hardware_confirm_timeout {
                     return refuse(
                         "hardware_failed",
                         format!(
@@ -3127,12 +3139,19 @@ impl ProvisionExecutor {
                             .filter_map(|(needed, privilege)| needed.then_some(*privilege))
                             .collect::<Vec<_>>()
                             .join(" and ");
-                            let action = if audio.is_some() {
-                                "set its cores, memory and audio device"
-                            } else {
-                                "set its cores and memory"
-                            };
-                            return Ok(Err(failed(action, &privileges, &error)));
+                            let action = format!(
+                                "set its {}",
+                                [
+                                    (cores.is_some(), "cores"),
+                                    (memory.is_some(), "memory"),
+                                    (audio.is_some(), "audio device"),
+                                ]
+                                .iter()
+                                .filter_map(|(needed, what)| needed.then_some(*what))
+                                .collect::<Vec<_>>()
+                                .join(" and ")
+                            );
+                            return Ok(Err(failed(&action, &privileges, &error)));
                         }
                     }
                 }

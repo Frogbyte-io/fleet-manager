@@ -75,6 +75,8 @@ struct Cluster {
     config: Mutex<RevertedConfig>,
     /// The audio device a member reads back with, by VMID.
     audio: Mutex<BTreeMap<u32, fleet_core::LabAudio>>,
+    /// Whether the config read after a revert fails.
+    config_fails: Mutex<bool>,
     /// Whether every read fails, as an unreachable cluster does.
     unreachable: Mutex<bool>,
 }
@@ -93,8 +95,10 @@ impl Cluster {
                 lock: None,
                 parent: Some("baseline".to_owned()),
                 audio: None,
+                audio_unreadable: false,
             }),
             audio: Mutex::new(BTreeMap::new()),
+            config_fails: Mutex::new(false),
             unreachable: Mutex::new(false),
         })
     }
@@ -140,6 +144,9 @@ impl PoolGuestPort for Cluster {
         _node: &str,
         vmid: u32,
     ) -> Result<RevertedConfig, String> {
+        if *self.config_fails.lock().unwrap() {
+            return Err("the guest config is unreadable: timeout".to_owned());
+        }
         let mut config = self.config.lock().unwrap().clone();
         config.audio = self.audio.lock().unwrap().get(&vmid).cloned();
         Ok(config)
@@ -870,4 +877,115 @@ async fn fill_quarantines_a_member_whose_audio_differs_from_the_template() {
         .unwrap();
     assert!(detail.contains("audio"), "{detail}");
     assert_eq!(harness.audit_events("lab_pool_member_quarantined").await, 3);
+}
+
+/// Runs one fill over `vmids` (already registered and scripted by the
+/// caller's `prepare`) and answers the operation's final record.
+async fn fill_once(harness: &Harness) -> Operation {
+    let operation = harness
+        .operations
+        .create_lab_pool_fill(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &harness.pool_id,
+            &fill_operation(&harness.pool_id, None),
+        )
+        .await
+        .unwrap();
+    let fill = LabPoolFillExecutor::new(
+        harness.pools.clone(),
+        harness.labs.clone(),
+        harness.cluster.clone(),
+        harness.reverter.clone(),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+    );
+    harness
+        .operations
+        .claim_only_execute(&fill, &operation.id, "test")
+        .await
+        .unwrap();
+    harness.operation(&operation.id).await
+}
+
+#[tokio::test]
+async fn an_unreadable_config_after_the_revert_leaves_the_member_filling() {
+    let harness = Harness::with_audio(
+        &[],
+        Some(fleet_core::LabAudio {
+            device: "ich9-intel-hda".to_owned(),
+            driver: "none".to_owned(),
+        }),
+    )
+    .await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    harness
+        .pools
+        .add_members(&harness.pool_id, &[500], now)
+        .await
+        .unwrap();
+    harness.cluster.set(500, Cluster::guest("pool-500"));
+    *harness.cluster.config_fails.lock().unwrap() = true;
+    let done = fill_once(&harness).await;
+    assert_eq!(done.state, "failed");
+    let error: serde_json::Value =
+        serde_json::from_str(done.error_json.as_deref().unwrap()).unwrap();
+    assert_eq!(error["reason"], "fill_incomplete");
+    assert_eq!(
+        harness.member(500).await,
+        Some((MemberState::Filling, None))
+    );
+}
+
+#[tokio::test]
+async fn a_template_without_audio_ignores_the_members_audio() {
+    let harness = Harness::new(&[]).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    harness
+        .pools
+        .add_members(&harness.pool_id, &[510, 511], now)
+        .await
+        .unwrap();
+    for vmid in [510, 511] {
+        harness
+            .cluster
+            .set(vmid, Cluster::guest(&format!("pool-{vmid}")));
+    }
+    harness.cluster.audio.lock().unwrap().insert(
+        511,
+        fleet_core::LabAudio {
+            device: "AC97".to_owned(),
+            driver: "spice".to_owned(),
+        },
+    );
+    let done = fill_once(&harness).await;
+    assert_eq!(done.state, "succeeded");
+    for vmid in [510, 511] {
+        assert_eq!(
+            harness.member(vmid).await,
+            Some((MemberState::Available, None))
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_member_with_the_declared_audio_becomes_available() {
+    let wanted = fleet_core::LabAudio {
+        device: "intel-hda".to_owned(),
+        driver: "none".to_owned(),
+    };
+    let harness = Harness::with_audio(&[], Some(wanted.clone())).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    harness
+        .pools
+        .add_members(&harness.pool_id, &[520], now)
+        .await
+        .unwrap();
+    harness.cluster.set(520, Cluster::guest("pool-520"));
+    harness.cluster.audio.lock().unwrap().insert(520, wanted);
+    let done = fill_once(&harness).await;
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(
+        harness.member(520).await,
+        Some((MemberState::Available, None))
+    );
 }

@@ -1264,15 +1264,18 @@ impl PveAudio {
     }
 }
 
-/// Reads a config's optional `audio0`. An unreadable value is an error, not
-/// "no audio", so a caller never treats a guest as audio-less by mistake.
-fn parse_audio(config: &serde_json::Value) -> Result<Option<PveAudio>, String> {
+/// Reads a config's optional `audio0`, leniently: an odd value is reported
+/// as unreadable (`true`), never as an error, so a guest whose audio nobody
+/// asked about is still usable. A caller that needs audio treats an
+/// unreadable value as a difference.
+fn read_audio(config: &serde_json::Value) -> (Option<PveAudio>, bool) {
     match config.get("audio0") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(text)) => PveAudio::parse(text)
-            .map(Some)
-            .map_err(|detail| format!("the guest config's audio0 is unreadable: {detail}")),
-        Some(_) => Err("the guest config's audio0 is unreadable".to_owned()),
+        None | Some(serde_json::Value::Null) => (None, false),
+        Some(serde_json::Value::String(text)) => match PveAudio::parse(text) {
+            Ok(audio) => (Some(audio), false),
+            Err(_) => (None, true),
+        },
+        Some(_) => (None, true),
     }
 }
 
@@ -1296,6 +1299,8 @@ pub struct PveQemuConfigFlags {
     pub parent: Option<String>,
     /// The virtual audio device (`audio0`), when the guest has one.
     pub audio: Option<PveAudio>,
+    /// Whether the config has an `audio0` this crate cannot read.
+    pub audio_unreadable: bool,
 }
 
 /// The hardware facts of a QEMU guest's config that Lab applies from its
@@ -1328,6 +1333,8 @@ pub struct PveQemuHardware {
     pub boot_disk: Option<PveBootDisk>,
     /// The virtual audio device (`audio0`), when the guest has one.
     pub audio: Option<PveAudio>,
+    /// Whether the config has an `audio0` this crate cannot read.
+    pub audio_unreadable: bool,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
 }
@@ -2445,6 +2452,7 @@ impl ProxmoxClient {
             bounded_str(&config, key, limit)
                 .map_err(|detail| PveApiError::InvalidPayload { detail })
         };
+        let (audio, audio_unreadable) = read_audio(&config);
         Ok(PveQemuConfigFlags {
             name: text("name", MAX_ID_CHARS)?,
             template: flag("template")?,
@@ -2464,7 +2472,8 @@ impl ProxmoxClient {
             digest: text("digest", 64)?,
             // A PVE snapshot name is at most 40 characters.
             parent: text("parent", 40)?,
-            audio: parse_audio(&config).map_err(|detail| PveApiError::InvalidPayload { detail })?,
+            audio,
+            audio_unreadable,
         })
     }
 
@@ -2941,6 +2950,7 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
             key: key.to_owned(),
             size_mib: disk_size_mib(entry),
         });
+    let (audio, audio_unreadable) = read_audio(config);
     Ok(PveQemuHardware {
         name: bounded_str(config, "name", MAX_ID_CHARS)?,
         template: flag("template")?,
@@ -2951,7 +2961,8 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         memory_mib,
         memory_has_options,
         boot_disk,
-        audio: parse_audio(config)?,
+        audio,
+        audio_unreadable,
         digest: bounded_str(config, "digest", 64)?,
     })
 }

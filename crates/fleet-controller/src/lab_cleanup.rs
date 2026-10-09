@@ -335,7 +335,7 @@ impl LabCleanupExecutor {
         .await;
         let now = fleet_core::SystemClock::now_unix_millis();
         let node = match reverted {
-            Ok((node, _name)) => node,
+            Ok(reverted) => reverted.node,
             Err(crate::lab_pool::RevertFailure::Unavailable(detail)) => {
                 // Undecided: a failed attempt, but nothing condemns the
                 // member, which stays bound and out of rotation anyway.

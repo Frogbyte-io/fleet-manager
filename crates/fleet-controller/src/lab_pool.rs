@@ -151,6 +151,7 @@ impl PoolGuestPort for ProxmoxPoolGuests {
             template: flags.template,
             lock: flags.lock,
             parent: flags.parent,
+            audio_unreadable: flags.audio_unreadable,
             audio: flags.audio.map(|audio| fleet_core::LabAudio {
                 device: audio.device,
                 driver: audio.driver,
@@ -267,6 +268,18 @@ impl RevertFailure {
     }
 }
 
+/// A verified revert: where the guest is, its name, and the config the
+/// verification read.
+#[derive(Debug)]
+pub struct Reverted {
+    /// The node the guest is on.
+    pub node: String,
+    /// The guest's name.
+    pub name: String,
+    /// The config read after the rollback.
+    pub config: RevertedConfig,
+}
+
 /// Checks the guest's identity, reverts it to its baseline through the
 /// reviewed revert, and verifies the result. Answers the guest's node and
 /// name.
@@ -280,7 +293,7 @@ pub async fn revert_member(
     reverter: &dyn OperationExecutor,
     guests: &dyn PoolGuestPort,
     revert: Revert<'_>,
-) -> Result<(String, String), RevertFailure> {
+) -> Result<Reverted, RevertFailure> {
     let observed = guests
         .observe(revert.account_id, revert.vmid, revert.baseline)
         .await
@@ -328,7 +341,7 @@ pub async fn revert_member(
     verify_reverted(&config, revert.baseline).map_err(|detail| {
         RevertFailure::Refused(format!("the revert is not verified: {detail}"))
     })?;
-    Ok((node, name))
+    Ok(Reverted { node, name, config })
 }
 
 /// The `lab.pool.fill` payload.
@@ -451,25 +464,15 @@ impl OperationExecutor for LabPoolFillExecutor {
             )
             .await;
             // The member's config after the revert is what a lease gets.
-            let outcome = match outcome {
-                Ok((node, name)) if wanted_audio.is_some() => {
-                    match self
-                        .guests
-                        .reverted_config(&member.account_id, &node, member.vmid)
-                        .await
-                    {
-                        Err(detail) => Err(RevertFailure::Unavailable(detail)),
-                        Ok(config) => verify_audio(&config, wanted_audio.as_ref())
-                            .map(|()| (node, name))
-                            .map_err(|detail| {
-                                RevertFailure::Refused(format!(
-                                    "the member does not match the template's audio device: {detail}"
-                                ))
-                            }),
-                    }
-                }
-                other => other,
-            };
+            let outcome = outcome.and_then(|reverted| {
+                verify_audio(&reverted.config, wanted_audio.as_ref())
+                    .map(|()| (reverted.node.clone(), reverted.name.clone()))
+                    .map_err(|detail| {
+                        RevertFailure::Refused(format!(
+                            "the member does not match the template's audio device: {detail}"
+                        ))
+                    })
+            });
             let now = fleet_core::SystemClock::now_unix_millis();
             let (result, event, facts) = match outcome {
                 Err(RevertFailure::Unavailable(detail)) => {

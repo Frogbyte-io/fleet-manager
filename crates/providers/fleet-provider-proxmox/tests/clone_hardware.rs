@@ -107,6 +107,7 @@ async fn a_clone_config_reads_as_its_cores_memory_and_boot_disk() {
             memory_has_options: false,
             boot_disk: Some(boot_disk("scsi0", Some(20 * 1024))),
             audio: None,
+            audio_unreadable: false,
             digest: Some("3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0".to_owned()),
         }
     );
@@ -460,16 +461,16 @@ async fn audio0_is_read_as_a_model_and_a_driver_and_written_as_a_property_string
     }
     let (read, _) = hardware(json!({"data": {"cores": 2}})).await;
     assert_eq!(read.unwrap().audio, None);
+    // An odd audio0 never breaks the read: it is flagged, so only a caller
+    // that needs audio cares.
     for body in [
         json!({"data": {"audio0": ""}}),
         json!({"data": {"audio0": "driver=none"}}),
         json!({"data": {"audio0": 1}}),
     ] {
         let (read, _) = hardware(body.clone()).await;
-        assert!(
-            matches!(read, Err(PveApiError::InvalidPayload { .. })),
-            "{body}: {read:?}"
-        );
+        let read = read.unwrap_or_else(|error| panic!("{body}: {error:?}"));
+        assert_eq!((read.audio, read.audio_unreadable), (None, true), "{body}");
     }
     let transport = Transport::new(200, json!({"data": null}));
     let client = ProxmoxClient::new(transport.clone());

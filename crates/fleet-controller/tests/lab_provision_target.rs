@@ -117,6 +117,8 @@ struct CloneConfig {
     set_status: Option<u16>,
     /// #398: the clone's `audio0` as the image left it.
     audio: Option<String>,
+    /// PVE accepts an `audio0` write but never reports it.
+    audio_ignored: bool,
     /// PVE refuses an `audio0` write with this status (the hardware-type
     /// privilege is checked per option).
     audio_status: Option<u16>,
@@ -400,7 +402,9 @@ impl Pve {
         if let Some(memory) = body.get("memory") {
             hardware.memory_mib = u32::try_from(memory.as_u64().unwrap()).unwrap();
         }
-        if let Some(audio) = body.get("audio0") {
+        if let Some(audio) = body.get("audio0")
+            && !config.audio_ignored
+        {
             config.audio = audio.as_str().map(str::to_owned);
         }
         config.hardware = Some(hardware);
@@ -3850,4 +3854,81 @@ async fn a_server_error_on_the_audio_write_is_retried_once() {
     // The settle read, then one hardware read per try.
     assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
     assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn audio_cores_and_memory_share_one_write_and_the_resize_follows() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8);
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert_eq!(writes[0].0, "config");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({
+            "cores": 2,
+            "memory": 2048,
+            "audio0": "device=ich9-intel-hda,driver=none",
+            "digest": "0123abcd"
+        })
+    );
+    assert_eq!(writes[1].0, "resize");
+    assert_eq!(writes[1].1["size"], "20G");
+}
+
+#[tokio::test]
+async fn audio_that_pve_accepts_but_never_reports_fails_after_the_confirm_timeout() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_ignored = true);
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_hardware_confirm_timeout(std::time::Duration::from_secs(1));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(
+        detail.contains("audio device=ich9-intel-hda,driver=none"),
+        "{detail}"
+    );
+    // Written once, never again.
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert!(first(&pve, "/status/start").is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_audio0_on_the_clone_is_replaced_only_when_the_template_declares_audio() {
+    for (declared, writes) in [(Some(audio("ich9-intel-hda")), 1), (None, 0)] {
+        let harness = Harness::with_audio(declared).await;
+        let (lease_id, record) = harness.record().await;
+        let pve =
+            Pve::new(Vec::new()).configure(|config| config.audio = Some("driver=none".to_owned()));
+        harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(pve.hardware_writes().len(), writes, "{:?}", pve.paths());
+        assert!(first(&pve, "/status/start").is_some());
+    }
+}
+
+#[tokio::test]
+async fn a_403_on_audio_alone_names_only_the_audio_device_and_its_privilege() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_status = Some(403));
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (_, detail) = error.unwrap();
+    assert!(detail.contains("set its audio device"), "{detail}");
+    assert!(!detail.contains("cores"), "{detail}");
+    assert!(!detail.contains("VM.Config.CPU"), "{detail}");
 }

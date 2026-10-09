@@ -96,6 +96,7 @@ async fn a_fresh_clone_of_a_protected_template_reads_as_protected() {
             digest: Some("3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0".to_owned()),
             parent: None,
             audio: None,
+            audio_unreadable: false,
         }
     );
     let seen = transport.seen.lock().unwrap();
@@ -212,4 +213,19 @@ async fn the_config_parent_names_the_snapshot_a_rollback_restored() {
     // An over-long parent is a payload error, never truncated into a match.
     let (long, _) = flags(json!({"data": {"parent": "b".repeat(41)}})).await;
     assert!(long.is_err());
+}
+
+#[tokio::test]
+async fn an_odd_audio0_never_breaks_the_flags_read() {
+    let (flags, _) = flags(json!({"data": {
+        "name": "fm-lab-record-1",
+        "protection": 1,
+        "audio0": "driver=none",
+        "digest": "3c1f0a5d",
+    }}))
+    .await;
+    let flags = flags.unwrap();
+    assert!(flags.protection);
+    assert!(flags.audio_unreadable);
+    assert_eq!(flags.audio, None);
 }
