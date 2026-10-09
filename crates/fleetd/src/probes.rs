@@ -109,11 +109,12 @@ impl ProbeRunner {
                         }
                         fact.source = format!("fleetd/{name}/{schema_version}");
                         fact.observed_at = fleet_core::Timestamp::from_unix_millis(now_millis);
-                        facts.push(fact);
+                        // Reported only when a fact is actually dropped, so a
+                        // collection that lands exactly on the cap is clean.
                         if facts.len() >= MAX_FACTS_PER_REPORT {
                             probe_errors.push(ProbeError {
                                 probe: name.to_owned(),
-                                detail: "the fact bound was reached; later probes are skipped"
+                                detail: "the fact bound was reached; further facts are dropped"
                                     .to_owned(),
                             });
                             return Collected {
@@ -121,6 +122,7 @@ impl ProbeRunner {
                                 probe_errors,
                             };
                         }
+                        facts.push(fact);
                     }
                 }
                 // Three failure shapes, one entry: the probe returned an
@@ -808,5 +810,27 @@ mod tests {
         let collected = runner.collect(0);
         assert_eq!(collected.facts.len(), fleet_core::MAX_CAPABILITY_FACTS);
         assert!(!collected.probe_errors.is_empty());
+
+        // Exactly at the cap nothing is dropped, so nothing is reported.
+        let exact = ProbeRunner::new(
+            names[..4]
+                .iter()
+                .map(|name| Arc::new(ManyProbe(name)) as Arc<dyn Probe>)
+                .collect(),
+        )
+        .collect(0);
+        assert_eq!(exact.facts.len(), fleet_core::MAX_CAPABILITY_FACTS);
+        assert!(exact.probe_errors.is_empty(), "{:?}", exact.probe_errors);
+    }
+
+    #[test]
+    fn a_mixed_ascii_and_multibyte_value_is_cut_on_a_boundary() {
+        // One ASCII byte shifts every 3-byte character off the bound.
+        let text = format!("a{}", "\u{20ac}".repeat(MAX_FACT_VALUE_BYTES));
+        let cut = truncate_at_char_boundary(&text, MAX_FACT_VALUE_BYTES);
+        assert!(cut.len() <= MAX_FACT_VALUE_BYTES && cut.len() > MAX_FACT_VALUE_BYTES - 4);
+        assert!(text.starts_with(&cut));
+        assert_eq!(truncate_at_char_boundary("short", 100), "short");
+        assert_eq!(truncate_at_char_boundary("\u{20ac}", 2), "");
     }
 }

@@ -1140,12 +1140,14 @@ pub(crate) async fn ingest_inventory_report(
             .map_err(|detail| format!("the inventory report has a malformed fact: {detail}"))?;
     }
     // A node-supplied observation time is a claim, not a fact: one in the
-    // future would never age to stale, so it is clamped to the controller's
-    // clock, in both the recorded facts and the stored snapshot.
+    // future would never age to stale, and a zero, negative or absurd one
+    // would overflow the staleness arithmetic, so each is replaced by the
+    // controller's clock (the SSH provider's rule), in both the recorded
+    // facts and the stored snapshot.
     let now = fleet_core::SystemClock::now_unix_millis();
     let mut clamped = false;
     for fact in &mut facts {
-        if fact.observed_at.unix_millis() > now {
+        if fact.observed_at.unix_millis() <= 0 || fact.observed_at.unix_millis() > now {
             fact.observed_at = fleet_core::Timestamp::from_unix_millis(now);
             clamped = true;
         }
@@ -1416,6 +1418,28 @@ mod ingest_tests {
     }
 
     #[tokio::test]
+    async fn the_fact_cap_accepts_256_and_rejects_257() {
+        let (_dir, _pool, repository, id) = machine().await;
+        let at_cap: Vec<_> = (0..fleet_core::MAX_CAPABILITY_FACTS)
+            .map(|n| fact(&format!("f{n}"), "v"))
+            .collect();
+        let ingested =
+            ingest_inventory_report(&repository, &id, &report(&at_cap, serde_json::json!({})))
+                .await
+                .unwrap();
+        assert_eq!(ingested.facts, fleet_core::MAX_CAPABILITY_FACTS);
+        let over: Vec<_> = (0..=fleet_core::MAX_CAPABILITY_FACTS)
+            .map(|n| fact(&format!("f{n}"), "v"))
+            .collect();
+        let error =
+            ingest_inventory_report(&repository, &id, &report(&over, serde_json::json!({})))
+                .await
+                .map(|_| ())
+                .unwrap_err();
+        assert!(error.contains("too many"), "{error}");
+    }
+
+    #[tokio::test]
     async fn a_future_observation_time_is_clamped_to_the_controllers_clock() {
         let (_dir, pool, repository, id) = machine().await;
         let now = fleet_core::SystemClock::now_unix_millis();
@@ -1423,13 +1447,15 @@ mod ingest_tests {
         future["observedAt"] = serde_json::json!(now + 365 * 24 * 3_600_000);
         let mut past = fact("past", "v");
         past["observedAt"] = serde_json::json!(1_000_i64);
-        ingest_inventory_report(
-            &repository,
-            &id,
-            &report(&[future, past], serde_json::json!({})),
-        )
-        .await
-        .unwrap();
+        let mut facts = vec![future, past];
+        for (name, at) in [("zero", 0_i64), ("negative", -5), ("minimum", i64::MIN)] {
+            let mut bad = fact(name, "v");
+            bad["observedAt"] = serde_json::json!(at);
+            facts.push(bad);
+        }
+        ingest_inventory_report(&repository, &id, &report(&facts, serde_json::json!({})))
+            .await
+            .unwrap();
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT name, observed_at FROM machine_capabilities WHERE machine_id = ?1 ORDER BY name",
         )
@@ -1437,13 +1463,15 @@ mod ingest_tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(
-            rows[0].1 <= fleet_core::SystemClock::now_unix_millis(),
-            "{rows:?}"
-        );
-        assert!(rows[0].1 >= now, "{rows:?}");
-        assert_eq!(rows[1].1, 1_000, "a past time is left alone");
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        let after = fleet_core::SystemClock::now_unix_millis();
+        for (name, at) in &rows {
+            if name == "past" {
+                assert_eq!(*at, 1_000, "a positive past time is left alone");
+            } else {
+                assert!((now..=after).contains(at), "{name} not clamped: {rows:?}");
+            }
+        }
         let snapshot: String = sqlx::query_scalar(
             "SELECT payload_json FROM inventory_snapshots WHERE machine_id = ?1",
         )

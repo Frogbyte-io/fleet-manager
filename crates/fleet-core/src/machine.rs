@@ -127,7 +127,10 @@ impl CapabilityFact {
         freshness_threshold_ms: i64,
     ) -> CapabilityStatus {
         if self.status == CapabilityStatus::Known
-            && now.unix_millis() - self.observed_at.unix_millis() > freshness_threshold_ms
+            && now
+                .unix_millis()
+                .saturating_sub(self.observed_at.unix_millis())
+                > freshness_threshold_ms
         {
             CapabilityStatus::Stale
         } else {
@@ -216,6 +219,16 @@ mod tests {
             aged.effective_status(now, threshold),
             CapabilityStatus::Stale
         );
+
+        // Extreme observation times neither panic nor wrap: a minimum one
+        // is simply ancient, so the fact is stale.
+        for at in [i64::MIN, -1, 0] {
+            let odd = fact(CapabilityStatus::Known, at);
+            assert_eq!(
+                odd.effective_status(now, threshold),
+                CapabilityStatus::Stale
+            );
+        }
 
         // "The machine says it is missing" never quietly becomes "stale":
         // unavailable means something different from unknown and from aged.
