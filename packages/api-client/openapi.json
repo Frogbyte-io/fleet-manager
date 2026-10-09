@@ -1917,7 +1917,7 @@
         "tags": [
           "lab"
         ],
-        "summary": "Lists the leases, narrowed by the project when given.",
+        "summary": "Lists the leases, narrowed by project, purpose, state, and owner.",
         "description": "# Errors\n\nReturns the public error envelope on refusal or backend failure.",
         "operationId": "listLabLeases",
         "parameters": [
@@ -1925,6 +1925,42 @@
             "name": "projectId",
             "in": "query",
             "description": "Only leases serving this project.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "purpose",
+            "in": "query",
+            "description": "Only leases whose purpose is exactly this.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "purposePrefix",
+            "in": "query",
+            "description": "Only leases whose purpose starts with this (case-sensitive).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "description": "Only leases owned by this principal.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1981,6 +2017,20 @@
         "summary": "Creates a lease from a published template version.",
         "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown version.",
         "operationId": "createLabLease",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200, in whatever state it has since reached (a failed or released lease is returned as it is: use a new key for a new attempt); the same key with a different request is a 409.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1992,6 +2042,16 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "description": "A replay: the lease this Idempotency-Key created earlier.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_LeaseDto"
+                }
+              }
+            }
+          },
           "201": {
             "description": "The lease was created.",
             "content": {
@@ -2003,7 +2063,7 @@
             }
           },
           "400": {
-            "description": "The request is malformed.",
+            "description": "The request or the Idempotency-Key is malformed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2024,6 +2084,16 @@
           },
           "404": {
             "description": "The version does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The Idempotency-Key was already used for a different request.",
             "content": {
               "application/json": {
                 "schema": {

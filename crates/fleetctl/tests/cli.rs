@@ -2877,11 +2877,68 @@ fn text_output_renders_lab_leases() {
 }
 
 #[test]
+fn parsing_walks_the_lease_filters_and_the_idempotency_key() {
+    // Filters: exact purpose, prefix, repeatable/comma states, owner.
+    let args: Vec<String> = [
+        "lab",
+        "leases",
+        "--purpose-prefix",
+        "release-qa:v1.2",
+        "--state",
+        "ready,provisioning",
+        "--state",
+        "requested",
+        "--owner",
+        "ci",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeases {
+            project: None,
+            purpose: None,
+            purpose_prefix: Some("release-qa:v1.2".to_owned()),
+            states: vec![
+                "ready".to_owned(),
+                "provisioning".to_owned(),
+                "requested".to_owned()
+            ],
+            owner: Some("ci".to_owned()),
+        }
+    );
+    let args: Vec<String> = [
+        "lab",
+        "lease",
+        "tpl-1@abc",
+        "--purpose",
+        "p",
+        "--idempotency-key",
+        "k1",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert!(matches!(
+        fleetctl::parse(&args).unwrap().command,
+        fleetctl::Command::LabLeaseCreate { idempotency_key: Some(key), .. } if key == "k1"
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn parsing_walks_the_lease_forms() {
     let args: Vec<String> = ["lab", "leases"].iter().map(ToString::to_string).collect();
     assert_eq!(
         fleetctl::parse(&args).unwrap().command,
-        fleetctl::Command::LabLeases { project: None }
+        fleetctl::Command::LabLeases {
+            project: None,
+            purpose: None,
+            purpose_prefix: None,
+            states: Vec::new(),
+            owner: None,
+        }
     );
     let args: Vec<String> = ["lab", "leases", "--project", "proj-1"]
         .iter()
@@ -2890,7 +2947,11 @@ fn parsing_walks_the_lease_forms() {
     assert_eq!(
         fleetctl::parse(&args).unwrap().command,
         fleetctl::Command::LabLeases {
-            project: Some("proj-1".to_owned())
+            project: Some("proj-1".to_owned()),
+            purpose: None,
+            purpose_prefix: None,
+            states: Vec::new(),
+            owner: None,
         }
     );
     let args: Vec<String> = ["lab", "lease", "tpl-1@abc", "--purpose", "the demo"]
@@ -2921,6 +2982,7 @@ fn parsing_walks_the_lease_forms() {
             version_id,
             purpose,
             project,
+            ..
         } => {
             assert_eq!(version_id, "tpl-1@abc");
             assert_eq!(purpose, "the demo");
@@ -3241,6 +3303,7 @@ fn the_one_command_lab_flow_parses() {
             purpose: "flaky test".to_owned(),
             project: Some("p1".to_owned()),
             account: None,
+            idempotency_key: None,
             wait: true,
             timeout: Some(600),
         }

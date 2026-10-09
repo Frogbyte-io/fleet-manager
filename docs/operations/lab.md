@@ -329,6 +329,22 @@ fleetctl --output json lab status <lease-id>
 - `--wait` polls until the lease is `ready`, or ends in `failed`, `releasing`, `released`, or `cleanup_failed`. It exits non-zero unless the lease is `ready`. `--timeout` bounds the wait (default 900 s). Without `--wait`, the command prints the lease as it is right after the provision was queued.
 - `lab status` shows the lease with its guest: `provisionState`, `node`, `vmid`, `address` (for example `192.0.2.50`), `machineId`, `endpointId`, and `failedStep` when provisioning failed.
 
+#### Retrying a lease creation, and finding leases again
+
+`lab create` and `lab lease` take `--idempotency-key <key>` (the API's `Idempotency-Key` header on `POST /api/v1/lab/leases`; 1 to 128 printable ASCII characters). The key is scoped to the caller, as the key on provisioning is, and is stored with the lease. A retry with the same key returns the lease the first call created (HTTP 200; the first call answers 201) and creates nothing: no second lease, no pool member claimed (a pooled member is claimed when the lease is provisioned, never when it is created), no new creation audit event. A call that loses a concurrent race for the key returns the winner's lease the same way.
+
+"The same request" means the same `templateVersionId`, `purpose`, and `projectId`; an absent project and a `null` project are equal. The cleanup strategy and TTL come from the template, so they are not part of the request. The same key with a different request is refused with `409 conflict`, and the lease is not changed. A malformed key is a `400`. A replay returns the lease as it is now, whatever its state: if that lease has since ended `failed`, `released` or `cleanup_failed`, the retry gets it back and does not create a replacement, so use a new key for each new attempt. A race loser's audit trail has `lab_lease_creating` followed by `lab_lease_create_replayed` (with the winner's `leaseId`). `lab create --idempotency-key` after a first attempt that already provisioned the lease does not provision again.
+
+`GET /api/v1/lab/leases` and `fleetctl lab leases` filter, with every given filter applied together:
+
+- `--purpose <text>`: the purpose is exactly this.
+- `--purpose-prefix <text>`: the purpose starts with this (case-sensitive; `%` and `_` are literal). Put a run identity at the front of the purpose, for example `release-qa:<candidate>:<run>`, to find it by prefix.
+- `--state <state>`: one or more lease states, as repeated flags or a comma list (`--state ready,provisioning`). An unknown state is a `400`.
+- `--owner <principal-id>`: the owner.
+- `--project <id>`: as before.
+
+The controller can force the owner filter for a caller that may see only its own leases; the filter then only narrows within that owner. (The scoped CI identity that uses this arrives with #392.)
+
 The two-step form still works:
 
 ```sh

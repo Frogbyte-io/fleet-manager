@@ -6230,6 +6230,22 @@ export type ListLabLeasesParams = {
  * Only leases serving this project.
  */
 projectId?: string;
+/**
+ * Only leases whose purpose is exactly this.
+ */
+purpose?: string;
+/**
+ * Only leases whose purpose starts with this (case-sensitive).
+ */
+purposePrefix?: string;
+/**
+ * Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400.
+ */
+state?: string;
+/**
+ * Only leases owned by this principal.
+ */
+owner?: string;
 };
 
 export type ListMachinesParams = {
@@ -8288,7 +8304,7 @@ export const getListLabLeasesUrl = (params?: ListLabLeasesParams,) => {
  * # Errors
  *
  * Returns the public error envelope on refusal or backend failure.
- * @summary Lists the leases, narrowed by the project when given.
+ * @summary Lists the leases, narrowed by project, purpose, state, and owner.
  */
 export const listLabLeases = async (params?: ListLabLeasesParams, options?: RequestInit): Promise<listLabLeasesResponse> => {
 
@@ -8310,6 +8326,11 @@ export const listLabLeases = async (params?: ListLabLeasesParams, options?: Requ
 
 
 
+export type createLabLeaseResponse200 = {
+  data: ResourceLeaseDto
+  status: 200
+}
+
 export type createLabLeaseResponse201 = {
   data: ResourceLeaseDto
   status: 201
@@ -8330,15 +8351,20 @@ export type createLabLeaseResponse404 = {
   status: 404
 }
 
+export type createLabLeaseResponse409 = {
+  data: ApiError
+  status: 409
+}
+
 export type createLabLeaseResponse500 = {
   data: ApiError
   status: 500
 }
 
-export type createLabLeaseResponseSuccess = (createLabLeaseResponse201) & {
+export type createLabLeaseResponseSuccess = (createLabLeaseResponse200 | createLabLeaseResponse201) & {
   headers: Headers;
 };
-export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404 | createLabLeaseResponse500) & {
+export type createLabLeaseResponseError = (createLabLeaseResponse400 | createLabLeaseResponse403 | createLabLeaseResponse404 | createLabLeaseResponse409 | createLabLeaseResponse500) & {
   headers: Headers;
 };
 

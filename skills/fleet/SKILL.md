@@ -159,10 +159,18 @@ only when you need to control them separately.
 fleetctl --output json lab lease <template-version-id> --purpose "reproduce flaky test"
 fleetctl --output json lab provision-lease <lease-id>
 fleetctl --output json lab leases
+fleetctl --output json lab leases --purpose-prefix "release-qa:v1.2:" --state ready,provisioning --owner <principal-id>
 fleetctl --output json lab provisions
 fleetctl --output json lab release <lease-id>
 ```
 
+- Make creation safe to retry: add `--idempotency-key <key>` to `lab lease` or
+  `lab create`. A retry with the same key and the same template version, purpose
+  and project returns the lease already created (no second lease, no second pool
+  member); the same key with different values is refused (`conflict`). A replay returns the lease in whatever state it has reached, even `failed` or `released`, so use a new key for each new attempt. Put the run
+  identity in `--purpose` and find an unrecorded lease again with
+  `lab leases --purpose <text>` or `--purpose-prefix <text>`, optionally with
+  `--state` (repeatable or comma-separated) and `--owner`.
 - Poll `lab leases` until the lease `state` is `ready`; `lab provisions` shows
   where it landed (node, VMID, address).
 - Provisioning places the lease on the one Proxmox account whose cluster holds
