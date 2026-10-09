@@ -351,6 +351,37 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 **Context:** FM-602's lifecycle executor and UPID polling are the foundation; epic #12 adds the destructive-adjacent surface.
 **Status:** Done 2026-09-21 (issue #105, PR #106). See the M6 status line above for the delivery summary and the review history.
 
+## M7 — Fleet Lab
+
+**Status: Complete (as of 2026-10-09).** The exit gate passed; the evidence is recorded by [FM-742](https://github.com/Frogbyte-io/fleet-manager/issues/266) in [`m7-acceptance.md`](m7-acceptance.md#evidence). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) is deferred until a hardware host is available, and Windows in-guest support remains a later sub-epic.
+
+**M7 acceptance (2026-10-09): complete.** Each planned issue below is listed with the merged PR(s) into `dev` that delivered it; the many smaller bug-fix PRs from the live runs are not enumerated.
+
+- FM-S09 [#107](https://github.com/Frogbyte-io/fleet-manager/issues/107) — [PR #108](https://github.com/Frogbyte-io/fleet-manager/pull/108): Packer spike: operator-installed CLI, pinned version ranges, BUSL review.
+- FM-700 [#110](https://github.com/Frogbyte-io/fleet-manager/issues/110) — [PR #111](https://github.com/Frogbyte-io/fleet-manager/pull/111): image recipes and the Packer build operation.
+- FM-701 [#112](https://github.com/Frogbyte-io/fleet-manager/issues/112) — [PR #113](https://github.com/Frogbyte-io/fleet-manager/pull/113): image-version promotion and the structured recipe view.
+- FM-710 [#114](https://github.com/Frogbyte-io/fleet-manager/issues/114) — [PR #115](https://github.com/Frogbyte-io/fleet-manager/pull/115): Lab templates, provisioning records, and readiness states.
+- FM-711 [#116](https://github.com/Frogbyte-io/fleet-manager/issues/116) — [PR #117](https://github.com/Frogbyte-io/fleet-manager/pull/117): Lab leases, cleanup strategies, and the expiry sweeper.
+- FM-702 [#249](https://github.com/Frogbyte-io/fleet-manager/issues/249) — [PR #273](https://github.com/Frogbyte-io/fleet-manager/pull/273): immutable image build records.
+- FM-703 [#250](https://github.com/Frogbyte-io/fleet-manager/issues/250) — [PR #277](https://github.com/Frogbyte-io/fleet-manager/pull/277): recorded Packer CLI contract fixtures.
+- FM-712 [#251](https://github.com/Frogbyte-io/fleet-manager/issues/251) — [PR #269](https://github.com/Frogbyte-io/fleet-manager/pull/269): guarded Proxmox QEMU guest destroy primitive.
+- FM-714 [#252](https://github.com/Frogbyte-io/fleet-manager/issues/252) — [PR #275](https://github.com/Frogbyte-io/fleet-manager/pull/275), [PR #334](https://github.com/Frogbyte-io/fleet-manager/pull/334): readiness probes executed, guest registered as a machine, bootstrap project applied.
+- FM-718 [#253](https://github.com/Frogbyte-io/fleet-manager/issues/253) — [PR #276](https://github.com/Frogbyte-io/fleet-manager/pull/276): lease project linkage.
+- FM-713 [#254](https://github.com/Frogbyte-io/fleet-manager/issues/254) — [PR #282](https://github.com/Frogbyte-io/fleet-manager/pull/282): Lab cleanup executor and provision-failure compensation.
+- FM-704 [#255](https://github.com/Frogbyte-io/fleet-manager/issues/255) — [PR #274](https://github.com/Frogbyte-io/fleet-manager/pull/274): real-host image build acceptance suite.
+- FM-705 [#256](https://github.com/Frogbyte-io/fleet-manager/issues/256) — [PR #294](https://github.com/Frogbyte-io/fleet-manager/pull/294): Images console build history and provenance.
+- FM-715 [#257](https://github.com/Frogbyte-io/fleet-manager/issues/257) — [PR #296](https://github.com/Frogbyte-io/fleet-manager/pull/296), [PR #363](https://github.com/Frogbyte-io/fleet-manager/pull/363), [PR #369](https://github.com/Frogbyte-io/fleet-manager/pull/369): placement and transactional capacity reservation, shown in lease detail and the console.
+- FM-716 [#258](https://github.com/Frogbyte-io/fleet-manager/issues/258) — [PR #286](https://github.com/Frogbyte-io/fleet-manager/pull/286): sweeper loop and cleanup reconciler.
+- FM-720 [#259](https://github.com/Frogbyte-io/fleet-manager/issues/259) — [PR #287](https://github.com/Frogbyte-io/fleet-manager/pull/287), [PR #376](https://github.com/Frogbyte-io/fleet-manager/pull/376): one-command `fleetctl lab create/status/exec/destroy` and the lease exec API; template readiness, bootstrap and SSH flags.
+- FM-717 [#260](https://github.com/Frogbyte-io/fleet-manager/issues/260) — [PR #324](https://github.com/Frogbyte-io/fleet-manager/pull/324): pooled Lab guests and revert cleanup (off the exit-gate path).
+- FM-721 [#261](https://github.com/Frogbyte-io/fleet-manager/issues/261) — [PR #304](https://github.com/Frogbyte-io/fleet-manager/pull/304): Lab artifacts and exec log metadata.
+- FM-741 [#262](https://github.com/Frogbyte-io/fleet-manager/issues/262) — [PR #306](https://github.com/Frogbyte-io/fleet-manager/pull/306), [PR #311](https://github.com/Frogbyte-io/fleet-manager/pull/311): Lab failure-injection suite, simulated and live.
+- FM-728 [#263](https://github.com/Frogbyte-io/fleet-manager/issues/263) — [PR #288](https://github.com/Frogbyte-io/fleet-manager/pull/288), [PR #305](https://github.com/Frogbyte-io/fleet-manager/pull/305): Fleet Lab operator runbook, updated for the merged sweeper, CLI and credentials.
+- FM-722 [#264](https://github.com/Frogbyte-io/fleet-manager/issues/264) — [PR #317](https://github.com/Frogbyte-io/fleet-manager/pull/317), [PR #369](https://github.com/Frogbyte-io/fleet-manager/pull/369), [PR #388](https://github.com/Frogbyte-io/fleet-manager/pull/388): Lab console: cleanup, placement, project, exec, artifacts, reservation and provision fate.
+- FM-723 [#265](https://github.com/Frogbyte-io/fleet-manager/issues/265) — [PR #374](https://github.com/Frogbyte-io/fleet-manager/pull/374), [PR #425](https://github.com/Frogbyte-io/fleet-manager/pull/425): fleet skill drives the one-command Lab workflow; later covers accounts, terminal lease states and checkout path.
+- FM-742 [#266](https://github.com/Frogbyte-io/fleet-manager/issues/266) — [PR #331](https://github.com/Frogbyte-io/fleet-manager/pull/331): exit-gate evidence recorded; the gate passes ([evidence](m7-acceptance.md#evidence)).
+- FM-743 [#267](https://github.com/Frogbyte-io/fleet-manager/issues/267) — this close-out: M7 status, epics #13–#15 closed and #109's remaining boxes ticked, #16 deferred.
+
 ### FM-S09 — Spike: Packer/Proxmox-plugin version range and redistribution terms
 
 **Context:** The M7 image-recipe/build epic needs a pinned Packer version range and a recorded BUSL review before any build code lands.
