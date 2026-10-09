@@ -444,9 +444,16 @@ impl GatewayService {
                             if let Some(waiter) = waiter {
                                 let _ = waiter.send(result);
                             } else {
+                                // The id is node-supplied: only a scrubbed,
+                                // short prefix reaches the log.
+                                let operation_id: String =
+                                    fleet_core::scrub_failure_detail(&result.operation_id)
+                                        .chars()
+                                        .take(64)
+                                        .collect();
                                 eprintln!(
-                                    "node gateway: late result for operation {}                                      (no dispatch is waiting)",
-                                    result.operation_id
+                                    "node gateway: late result for operation {operation_id} \
+                                     (no dispatch is waiting)"
                                 );
                             }
                         }
@@ -871,7 +878,13 @@ impl NodeCommandExecutor {
 
         match outcome {
             Ok(result) => {
-                let payload_text = String::from_utf8_lossy(&result.payload).into_owned();
+                // Cut here (not only in the blanket scrub below) so the
+                // stored result says honestly that the output was cut.
+                let (payload_text, payload_cut) = fleet_core::scrub_and_bound_with(
+                    &String::from_utf8_lossy(&result.payload),
+                    false,
+                    str::to_owned,
+                );
                 // The node's payload and fault message are node-supplied
                 // text: scrub and bound every string before it is stored.
                 let mut result_value = serde_json::json!({
@@ -879,7 +892,7 @@ impl NodeCommandExecutor {
                         .map(fleet_result_status_name)
                         .unwrap_or_else(|_| "failed".to_owned()),
                     "exitCode": result.exit_code,
-                    "outputTruncated": result.output_truncated,
+                    "outputTruncated": result.output_truncated || payload_cut,
                     "durationMillis": result.duration_millis,
                     "stopped": result.stopped,
                     "fault": result.fault.as_ref().map(|fault| serde_json::json!({

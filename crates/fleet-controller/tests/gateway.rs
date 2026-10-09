@@ -1196,5 +1196,16 @@ async fn a_nodes_result_payload_and_fault_message_are_scrubbed_before_storage() 
     assert!(!stored.contains("fixture-not-a-real-secret"), "{stored}");
     assert!(stored.contains("***@host.invalid"), "{stored}");
     assert!(stored.len() < 8 * 1024, "bounded: {}", stored.len());
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(
+        stored["outputTruncated"], true,
+        "a payload cut by the bound says so"
+    );
+    assert!(
+        !stored["fault"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fixture-not")
+    );
     sink.close().await.unwrap();
 }
