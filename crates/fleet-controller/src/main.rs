@@ -197,6 +197,33 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 },
             ))
         });
+        // #393: `lab put` stages uploads beside the artifact store. Without
+        // the directory the Lab still runs, without puts.
+        let lab_put_store = match fleet_controller::lab_put_store::FsUploadStore::open(
+            &config.lab_artifacts_dir,
+            config.lab_put_max_bytes,
+        ) {
+            Ok(store) => Some(std::sync::Arc::new(store)),
+            Err(error) => {
+                eprintln!(
+                    "warning: Lab put unavailable: {} cannot be prepared: {error}",
+                    config.lab_artifacts_dir.display()
+                );
+                None
+            }
+        };
+        let lab_puts = lab_put_store.as_ref().map(|stage| {
+            std::sync::Arc::new(fleet_application::lab_put::LabPuts::new(
+                stage.clone(),
+                std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                    store.pool().clone(),
+                )),
+                std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
+            ))
+        });
         // The executor routes by kind: node kinds dispatch through the
         // gateway, onboarding kinds work against the draft record, and
         // everything else is SSH work.
@@ -773,6 +800,43 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     }
                     _ => with_lab,
                 };
+            // #393: `lab.put` copies a staged upload into a ready lease.
+            let with_lab: std::sync::Arc<dyn fleet_application::worker::OperationExecutor> =
+                match &lab_put_store {
+                    Some(stage) => {
+                        let files: std::sync::Arc<
+                            dyn fleet_controller::lab_artifacts_store::GuestFiles,
+                        > = match fleet_controller::lab_artifacts_store::SshGuestFiles::new(
+                            std::sync::Arc::new(fleet_storage_sqlite::MachineRepository::new(
+                                store.pool().clone(),
+                            )),
+                            config.data_dir.join("ssh"),
+                            exec_limiter.clone(),
+                        ) {
+                            Ok(files) => std::sync::Arc::new(files),
+                            Err(error) => {
+                                eprintln!("warning: Lab put unavailable: {error}");
+                                std::sync::Arc::new(
+                                    fleet_controller::lab_artifacts_store::UnavailableGuestFiles {
+                                        reason: error,
+                                    },
+                                )
+                            }
+                        };
+                        std::sync::Arc::new(fleet_controller::lab_put_store::LabPutDispatch::new(
+                            with_lab,
+                            stage.clone(),
+                            std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                                store.pool().clone(),
+                            )),
+                            std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                store.pool().clone(),
+                            )),
+                            files,
+                        ))
+                    }
+                    None => with_lab,
+                };
             match &services {
                 Some(services) => {
                     let node_machines: std::sync::Arc<dyn fleet_application::machine::MachinePort> =
@@ -900,6 +964,10 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(store.pool().clone())),
             ),
         ));
+        let lab = match &lab_puts {
+            Some(puts) => lab.with_puts(puts.clone()),
+            None => lab,
+        };
         let lab = std::sync::Arc::new(match &lab_artifacts {
             Some(artifacts) => lab.with_artifacts(artifacts.clone()),
             None => lab,

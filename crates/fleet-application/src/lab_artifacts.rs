@@ -160,6 +160,11 @@ pub enum BlobError {
         /// What did not match.
         detail: String,
     },
+    /// The staging area is full or has too many uploads in flight.
+    Busy {
+        /// Why.
+        detail: String,
+    },
     /// No bytes exist at the location.
     Missing,
     /// The location is not a store location.
@@ -175,6 +180,7 @@ impl fmt::Display for BlobError {
                 write!(f, "the artifact exceeds the {max_bytes}-byte cap")
             }
             Self::Corrupt { detail } => write!(f, "the stored artifact is corrupt: {detail}"),
+            Self::Busy { detail } => write!(f, "the upload staging area is busy: {detail}"),
             Self::Missing => f.write_str("the artifact's bytes are missing from the store"),
             Self::InvalidLocation => f.write_str("the location is not inside the artifact store"),
             Self::Io(detail) => write!(f, "the artifact store failed: {detail}"),
@@ -369,28 +375,39 @@ pub fn validate_collect_paths(paths: &[String]) -> Result<(), String> {
         ));
     }
     for (index, path) in paths.iter().enumerate() {
-        if path.len() > MAX_COLLECT_PATH_BYTES {
-            return Err(format!(
-                "guest path {index} is longer than {MAX_COLLECT_PATH_BYTES} bytes"
-            ));
-        }
-        if !path.starts_with('/') || path.len() < 2 {
-            return Err(format!("guest path {path:?} must be an absolute file path"));
-        }
-        if path.chars().any(char::is_control) {
-            return Err(format!("guest path {index} contains a control character"));
-        }
-        if path[1..]
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
-        {
-            return Err(format!(
-                "guest path {path:?} must not contain empty, `.`, or `..` components"
-            ));
-        }
+        validate_guest_path(path).map_err(|detail| format!("guest path {index}: {detail}"))?;
         if paths[..index].contains(path) {
             return Err(format!("guest path {path:?} is named twice"));
         }
+    }
+    Ok(())
+}
+
+/// Validates one guest file path: absolute, at most
+/// [`MAX_COLLECT_PATH_BYTES`] bytes, no `.` or `..` component, no empty
+/// component other than the root, and no control character. Shared by
+/// `lab.collect` and `lab.put`.
+///
+/// # Errors
+///
+/// Answers which rule the path broke.
+pub fn validate_guest_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_COLLECT_PATH_BYTES {
+        return Err(format!(
+            "the path is longer than {MAX_COLLECT_PATH_BYTES} bytes"
+        ));
+    }
+    if !path.starts_with('/') || path.len() < 2 {
+        return Err("the path must be an absolute file path".to_owned());
+    }
+    if path.chars().any(char::is_control) {
+        return Err("the path contains a control character".to_owned());
+    }
+    if path[1..]
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err("the path must not contain empty, `.`, or `..` components".to_owned());
     }
     Ok(())
 }
@@ -658,23 +675,15 @@ impl LabArtifacts {
             Some(lease_id),
         )?;
         validate_collect_paths(paths).map_err(|detail| LabUseCaseError::Invalid { detail })?;
-        let lease = self.lease(lease_id).await?;
-        scope_lease(principal, &lease)?;
-        lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
-        let record = match &lease.provision_id {
-            Some(id) => Some(self.provisions.get(id).await.map_err(backend)?),
-            None => None,
-        };
-        if record.as_ref().is_none_or(|record| {
-            record.lease_id.as_deref() != Some(lease.id.as_str())
-                || record.machine_id.is_none()
-                || record.endpoint_id.is_none()
-        }) {
-            return Err(LabUseCaseError::Invalid {
-                detail: "the lease's guest has no registered Lab machine to collect from"
-                    .to_owned(),
-            });
-        }
+        require_guest_machine(
+            self.leases.as_ref(),
+            self.provisions.as_ref(),
+            principal,
+            lease_id,
+            now,
+            "collect from",
+        )
+        .await?;
         self.audit_event(
             principal,
             lease_id,
@@ -1080,7 +1089,7 @@ fn scope_artifact(
 }
 
 /// A lease the principal may not see is reported as not found.
-fn scope_lease(
+pub(crate) fn scope_lease(
     principal: &ActingPrincipal,
     lease: &fleet_core::Lease,
 ) -> Result<(), LabUseCaseError> {
@@ -1091,6 +1100,49 @@ fn scope_lease(
             what: format!("lease {}", lease.id),
         })
     }
+}
+
+/// Requires a ready, unexpired lease whose guest has a registered Lab
+/// machine and endpoint; shared by the requests that act on that guest
+/// over SSH (`lab.collect`, `lab.put`). The executors re-check at run time.
+///
+/// # Errors
+///
+/// Fails on an unknown lease, a lease that cannot run commands, or a guest
+/// with no registered Lab machine.
+pub(crate) async fn require_guest_machine(
+    leases: &dyn LeasePort,
+    provisions: &dyn ProvisionPort,
+    principal: &ActingPrincipal,
+    lease_id: &str,
+    now: i64,
+    verb: &str,
+) -> Result<fleet_core::Lease, LabUseCaseError> {
+    let lease = leases.get(lease_id).await.map_err(|detail| {
+        if detail.contains("not found") {
+            LabUseCaseError::NotFound {
+                what: format!("lease {lease_id}"),
+            }
+        } else {
+            backend(detail)
+        }
+    })?;
+    scope_lease(principal, &lease)?;
+    lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
+    let record = match &lease.provision_id {
+        Some(id) => Some(provisions.get(id).await.map_err(backend)?),
+        None => None,
+    };
+    if record.as_ref().is_none_or(|record| {
+        record.lease_id.as_deref() != Some(lease.id.as_str())
+            || record.machine_id.is_none()
+            || record.endpoint_id.is_none()
+    }) {
+        return Err(LabUseCaseError::Invalid {
+            detail: format!("the lease's guest has no registered Lab machine to {verb}"),
+        });
+    }
+    Ok(lease)
 }
 
 fn allow(

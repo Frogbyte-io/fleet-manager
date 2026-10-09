@@ -46,6 +46,9 @@ pub(crate) fn map_lab_error(
         LabUseCaseError::Denied(_) => (StatusCode::FORBIDDEN, "denied", RetryClass::Never),
         LabUseCaseError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", RetryClass::Never),
         LabUseCaseError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", RetryClass::Never),
+        LabUseCaseError::Busy { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "busy", RetryClass::Backoff)
+        }
         LabUseCaseError::PinRefused { .. } => {
             (StatusCode::CONFLICT, "lab_pin_refused", RetryClass::Never)
         }

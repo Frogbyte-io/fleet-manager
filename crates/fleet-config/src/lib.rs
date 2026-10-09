@@ -16,7 +16,7 @@
 //!    `FLEET_LAB_SWEEP_INTERVAL_SECONDS`, `FLEET_LAB_MEMORY_OVERCOMMIT`,
 //!    `FLEET_LAB_CPU_OVERCOMMIT`, `FLEET_LAB_CAPACITY_MAX_AGE_SECONDS`,
 //!    `FLEET_LAB_ARTIFACTS_DIR`, `FLEET_LAB_ARTIFACT_RETENTION_SECONDS`,
-//!    `FLEET_LAB_ARTIFACT_MAX_BYTES`, `FLEET_IMAGE_BUILD_PROXY`,
+//!    `FLEET_LAB_ARTIFACT_MAX_BYTES`, `FLEET_LAB_PUT_MAX_BYTES`, `FLEET_IMAGE_BUILD_PROXY`,
 //!    `FLEET_IMAGE_BUILD_NO_PROXY`, `FLEET_IMAGE_BUILD_ADDRESS_POOL`,
 //!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_RANGE`,
 //!    `FLEET_IMAGE_BUILD_ADDRESS_POOL_GATEWAY`,
@@ -47,7 +47,8 @@
 //! `lab_artifact_retention_seconds`, default 7 days), and refuse any one
 //! artifact above `FLEET_LAB_ARTIFACT_MAX_BYTES` (TOML
 //! `lab_artifact_max_bytes`, default 64 MiB). Both numbers must be whole and
-//! positive.
+//! positive. `lab put` uploads are capped by `FLEET_LAB_PUT_MAX_BYTES` (TOML
+//! `lab_put_max_bytes`, default 2 GiB).
 //!
 //! `FLEET_TAILSCALE_SERVE_LISTEN` is optional. When set, it must be a valid,
 //! nonzero loopback socket address distinct from `FLEET_LISTEN`; invalid
@@ -104,6 +105,11 @@ pub const LAB_ARTIFACT_MAX_BYTES_VAR: &str = "FLEET_LAB_ARTIFACT_MAX_BYTES";
 pub const DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// The default Lab artifact size cap: 64 MiB.
 pub const DEFAULT_LAB_ARTIFACT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The environment variable that caps one file `lab put` uploads (#393).
+pub const LAB_PUT_MAX_BYTES_VAR: &str = "FLEET_LAB_PUT_MAX_BYTES";
+/// The default cap on one `lab put` upload: 2 GiB, enough for packaged
+/// desktop installers.
+pub const DEFAULT_LAB_PUT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// The Lab artifact directory's name under the data directory by default.
 pub const DEFAULT_LAB_ARTIFACTS_SUBDIR: &str = "lab-artifacts";
 
@@ -162,6 +168,8 @@ pub struct ControllerConfig {
     pub lab_artifact_retention_seconds: u64,
     /// The largest Lab artifact the store accepts, in bytes.
     pub lab_artifact_max_bytes: u64,
+    /// The largest file one `lab put` uploads, in bytes (#393).
+    pub lab_put_max_bytes: u64,
     /// The Lab placement policy (FM-715).
     pub lab_placement: LabPlacementConfig,
     /// The proxy image builds may use, when the operator opted in (#339).
@@ -333,6 +341,7 @@ struct ConfigFile {
     lab_artifacts_dir: Option<String>,
     lab_artifact_retention_seconds: Option<u64>,
     lab_artifact_max_bytes: Option<u64>,
+    lab_put_max_bytes: Option<u64>,
     image_build_proxy: Option<String>,
     image_build_no_proxy: Option<String>,
     image_build_address_pool: Option<String>,
@@ -575,6 +584,7 @@ pub fn load(
     let mut lab_artifacts_dir: Option<String> = None;
     let mut lab_artifact_retention_seconds: Option<u64> = None;
     let mut lab_artifact_max_bytes: Option<u64> = None;
+    let mut lab_put_max_bytes: Option<u64> = None;
     let mut image_build_proxy: Option<String> = None;
     let mut image_build_no_proxy: Option<String> = None;
     let mut address_pool = AddressPoolSettings::default();
@@ -611,6 +621,7 @@ pub fn load(
         lab_artifacts_dir = file.lab_artifacts_dir;
         lab_artifact_retention_seconds = file.lab_artifact_retention_seconds;
         lab_artifact_max_bytes = file.lab_artifact_max_bytes;
+        lab_put_max_bytes = file.lab_put_max_bytes;
         image_build_proxy = file.image_build_proxy;
         image_build_no_proxy = file.image_build_no_proxy;
         address_pool = AddressPoolSettings {
@@ -649,6 +660,12 @@ pub fn load(
         env(LAB_ARTIFACT_MAX_BYTES_VAR),
         DEFAULT_LAB_ARTIFACT_MAX_BYTES,
     )?;
+    let lab_put_max_bytes = positive_setting(
+        LAB_PUT_MAX_BYTES_VAR,
+        lab_put_max_bytes,
+        env(LAB_PUT_MAX_BYTES_VAR),
+        DEFAULT_LAB_PUT_MAX_BYTES,
+    )?;
 
     let image_build_proxy = layer_image_build_proxy(image_build_proxy, image_build_no_proxy, env)?;
     let image_build_address_pool = layer_address_pool(address_pool, env)?;
@@ -676,6 +693,7 @@ pub fn load(
         ),
         lab_artifact_retention_seconds,
         lab_artifact_max_bytes,
+        lab_put_max_bytes,
         data_dir,
         master_key_file: master_key_file.map(PathBuf::from),
         lab_sweep_interval_seconds: lab_sweep_interval_seconds
@@ -963,6 +981,7 @@ impl ControllerConfig {
                 self.lab_artifact_retention_seconds,
             ),
             (LAB_ARTIFACT_MAX_BYTES_VAR, self.lab_artifact_max_bytes),
+            (LAB_PUT_MAX_BYTES_VAR, self.lab_put_max_bytes),
         ] {
             if value == 0 {
                 return Err(ConfigError::LabArtifactSettingInvalid {
@@ -1030,6 +1049,7 @@ impl ControllerConfig {
                 self.lab_artifact_retention_seconds
             ),
             format!("lab_artifact_max_bytes = {}", self.lab_artifact_max_bytes),
+            format!("lab_put_max_bytes = {}", self.lab_put_max_bytes),
         ];
         if let Some(address) = self.tailscale_serve_listen {
             lines.push(format!("tailscale_serve_listen = {address}"));

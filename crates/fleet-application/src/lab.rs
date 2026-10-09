@@ -972,6 +972,11 @@ pub enum LabUseCaseError {
         /// The conflict detail.
         detail: String,
     },
+    /// The controller is at capacity for this request; retry later.
+    Busy {
+        /// Why.
+        detail: String,
+    },
     /// The image pin was refused: the version is unknown or unpromoted.
     PinRefused {
         /// The refusal detail.
@@ -993,6 +998,7 @@ impl fmt::Display for LabUseCaseError {
             Self::Invalid { detail } => write!(f, "invalid request: {detail}"),
             Self::NotFound { what } => write!(f, "not found: {what}"),
             Self::Conflict { detail } => write!(f, "conflict: {detail}"),
+            Self::Busy { detail } => write!(f, "busy: {detail}"),
             Self::PinRefused { detail } => write!(f, "the image pin was refused: {detail}"),
             Self::Backend { context, detail } => write!(f, "lab {context} failed: {detail}"),
         }
@@ -1011,6 +1017,7 @@ pub struct Lab {
     projects: Arc<dyn ProjectPort>,
     audit: Arc<dyn AuditPort>,
     artifacts: Option<Arc<crate::lab_artifacts::LabArtifacts>>,
+    puts: Option<Arc<crate::lab_put::LabPuts>>,
     pools: Option<Arc<crate::lab_pool::LabPools>>,
     reservations: Option<Arc<dyn crate::lab_placement::CapacityReservationPort>>,
 }
@@ -1034,6 +1041,7 @@ impl Lab {
             projects,
             audit,
             artifacts: None,
+            puts: None,
             pools: None,
             reservations: None,
         }
@@ -1119,6 +1127,19 @@ impl Lab {
     pub fn with_artifacts(mut self, artifacts: Arc<crate::lab_artifacts::LabArtifacts>) -> Self {
         self.artifacts = Some(artifacts);
         self
+    }
+
+    /// Serves the Lab put use cases (#393) beside the Lab surface.
+    #[must_use]
+    pub fn with_puts(mut self, puts: Arc<crate::lab_put::LabPuts>) -> Self {
+        self.puts = Some(puts);
+        self
+    }
+
+    /// The Lab put use cases, when the controller composed them.
+    #[must_use]
+    pub fn puts(&self) -> Option<&Arc<crate::lab_put::LabPuts>> {
+        self.puts.as_ref()
     }
 
     /// The Lab artifact use cases, when the controller composed them.

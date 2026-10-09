@@ -689,7 +689,11 @@ mod live {
     pub const LIVE_GATE: &str = "FLEET_LAB_LIVE";
     /// The scenarios, in report order. Kept in step with
     /// `xtask/src/lab_acceptance.rs`.
-    pub const SCENARIOS: [&str; 2] = ["lease-exec-destroy", "ttl-expiry-restart"];
+    pub const SCENARIOS: [&str; 3] = [
+        "lease-exec-destroy",
+        "ttl-expiry-restart",
+        "put-collect-roundtrip",
+    ];
     /// The SSH user the fixture's template accepts the controller's agent
     /// key for; `root` when unset.
     const SSH_USER_PREFIX: &str = "FLEET_LAB_TARGET_";
@@ -1245,6 +1249,177 @@ mod live {
         Ok(Outcome::Pass)
     }
 
+    /// A file larger than 2 MiB goes into a ready lease with `lab put`, is
+    /// verified in the guest, is refused when it would clobber, and comes
+    /// back byte for byte through `lab collect` and `lab artifact-get`
+    /// (#393).
+    #[allow(clippy::too_many_lines)]
+    pub async fn put_collect_roundtrip(run: &TargetRun, lab: &Lab) -> Result<Outcome, String> {
+        use sha2::Digest as _;
+        let (account, version) = lab.prepare(run, 3_600).await?;
+        let lease = ready_lease(run, &account, &version).await?;
+        let id = lease["id"].as_str().unwrap_or_default().to_owned();
+        // 3 MiB and 17 bytes of deterministic noise: past axum's 2 MiB body
+        // default, and not a multiple of any chunk size.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let content: Vec<u8> = (0..(3 * 1024 * 1024 + 17))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        let digest = sha2::Sha256::digest(&content)
+            .iter()
+            .fold(String::new(), |mut text, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(text, "{byte:02x}");
+                text
+            });
+        let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let local = scratch.path().join("candidate.bin");
+        std::fs::write(&local, &content).map_err(|error| error.to_string())?;
+        let local_text = local.to_string_lossy().into_owned();
+        let guest = "/tmp/fleet-put-roundtrip.bin";
+        let put = async |extra: &[&str], from: &str, to: &str| {
+            let mut words = vec!["lab", "put", id.as_str(), from, to];
+            words.extend_from_slice(extra);
+            words.extend(["--wait", "--timeout", "300"]);
+            run.controller.fleetctl(&args(&words), None).await
+        };
+
+        let first = put(&[], &local_text, guest).await?;
+        check!(
+            first.success && first.json["state"] == "succeeded",
+            "lab put did not succeed: {} {}",
+            first.json,
+            first.stderr
+        );
+        check!(
+            first.json["sha256"] == digest.as_str()
+                && first.json["sizeBytes"].as_u64() == Some(content.len() as u64),
+            "lab put recorded the wrong size or digest: {}",
+            first.json
+        );
+        // The guest's own view: the digest matches and no temporary file
+        // is left beside the target.
+        let check_guest = run
+            .controller
+            .fleetctl(
+                &args(&[
+                    "lab",
+                    "exec",
+                    &id,
+                    "--wait",
+                    "--timeout",
+                    "60",
+                    "--",
+                    "sh",
+                    "-c",
+                    &format!("sha256sum {guest}; ls -A /tmp"),
+                ]),
+                None,
+            )
+            .await?;
+        let seen = check_guest.json["stdout"].as_str().unwrap_or_default();
+        check!(
+            check_guest.success && seen.contains(&digest) && !seen.contains(".fleet-put."),
+            "the guest disagrees: {}",
+            check_guest.json
+        );
+
+        // An existing target is refused, and left alone.
+        let refused = put(&[], &local_text, guest).await?;
+        check!(
+            !refused.success && refused.json["reason"] == "target_exists",
+            "a second put without --overwrite was not refused: {}",
+            refused.json
+        );
+        // A missing directory is refused.
+        let nowhere = put(&[], &local_text, "/tmp/fleet-no-such-dir/x.bin").await?;
+        check!(
+            !nowhere.success && nowhere.json["reason"] == "no_directory",
+            "a put into a missing directory was not refused: {}",
+            nowhere.json
+        );
+        // --overwrite replaces the file.
+        let small = scratch.path().join("small.txt");
+        std::fs::write(&small, b"replacement\n").map_err(|error| error.to_string())?;
+        let replaced = put(&["--overwrite"], &small.to_string_lossy(), guest).await?;
+        check!(
+            replaced.success && replaced.json["state"] == "succeeded",
+            "--overwrite did not replace the file: {}",
+            replaced.json
+        );
+        let back = put(&["--overwrite"], &local_text, guest).await?;
+        check!(
+            back.success,
+            "restoring the candidate failed: {}",
+            back.json
+        );
+
+        // Round trip: collect the same file and compare every byte.
+        let collected = run
+            .controller
+            .fleetctl(
+                &args(&["lab", "collect", &id, guest, "--wait", "--timeout", "300"]),
+                None,
+            )
+            .await?;
+        check!(
+            collected.success && collected.json["state"] == "succeeded",
+            "lab collect did not succeed: {} {}",
+            collected.json,
+            collected.stderr
+        );
+        let artifact = collected.json["artifacts"][0]["artifactId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        check!(
+            collected.json["artifacts"][0]["sha256"] == digest.as_str(),
+            "the collected digest differs from the put one: {}",
+            collected.json
+        );
+        let out = scratch.path().join("roundtrip.bin");
+        let got = run
+            .controller
+            .fleetctl(
+                &args(&[
+                    "lab",
+                    "artifact-get",
+                    &artifact,
+                    "--out",
+                    &out.to_string_lossy(),
+                ]),
+                None,
+            )
+            .await?;
+        check!(got.success, "artifact-get failed: {}", got.stderr);
+        check!(
+            std::fs::read(&out).map_err(|error| error.to_string())? == content,
+            "the round-tripped file differs from the one that was put"
+        );
+
+        let bound = LEASE_BOUND.as_secs().to_string();
+        let destroyed = run
+            .controller
+            .fleetctl(
+                &args(&["lab", "destroy", &id, "--wait", "--timeout", &bound]),
+                None,
+            )
+            .await?;
+        check!(
+            destroyed.success && destroyed.json["state"] == "released",
+            "lab destroy --wait ended {}: {}",
+            destroyed.json["state"],
+            destroyed.stderr
+        );
+        guest_gone(run, &lease).await?;
+        Ok(Outcome::Pass)
+    }
+
     /// A ready lease expires while the controller is down; the restarted
     /// controller's sweeper releases it and destroys its guest.
     pub async fn ttl_expiry_restart(run: &TargetRun, lab: &Lab) -> Result<Outcome, String> {
@@ -1298,4 +1473,9 @@ async fn live_lease_exec_destroy() {
 #[tokio::test]
 async fn live_ttl_expiry_restart() {
     live::scenario(live::SCENARIOS[1], live::ttl_expiry_restart).await;
+}
+
+#[tokio::test]
+async fn live_put_collect_roundtrip() {
+    live::scenario(live::SCENARIOS[2], live::put_collect_roundtrip).await;
 }

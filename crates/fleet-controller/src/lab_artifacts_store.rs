@@ -421,6 +421,32 @@ pub trait GuestFiles: std::fmt::Debug + Send + Sync {
         deadline: Duration,
         sink: StagingFile,
     ) -> (Result<FetchOutcome, String>, StagingFile);
+
+    /// Copies `source` into the guest file `request.path`, verifying its
+    /// SHA-256 inside the guest, bounded by `deadline` (#393).
+    async fn put(
+        &self,
+        _machine_id: &str,
+        _endpoint_id: &str,
+        _request: GuestPut,
+        _deadline: Duration,
+        _source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        Err("guest file puts are unavailable".to_owned())
+    }
+}
+
+/// What to put into a guest.
+#[derive(Clone, Debug)]
+pub struct GuestPut {
+    /// The absolute guest path of the file to create.
+    pub path: String,
+    /// The exact size in bytes.
+    pub size: u64,
+    /// The expected lowercase hex SHA-256.
+    pub sha256: String,
+    /// Whether an existing regular file may be replaced.
+    pub overwrite: bool,
 }
 
 /// [`GuestFiles`] over the controller's OpenSSH trust store: the endpoint's
@@ -504,6 +530,43 @@ impl GuestFiles for SshGuestFiles {
             ),
         }
     }
+
+    async fn put(
+        &self,
+        machine_id: &str,
+        endpoint_id: &str,
+        request: GuestPut,
+        deadline: Duration,
+        mut source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        let (spec, _, _) = crate::exec::resolve_ssh_endpoint(
+            self.machines.as_ref(),
+            machine_id,
+            endpoint_id,
+            fleet_provider_ssh::SshAuth::Agent,
+        )
+        .await?;
+        let provider = self.provider.clone();
+        let limiter = self.limiter.clone();
+        tokio::task::spawn_blocking(move || {
+            fleet_provider_ssh::put_file(
+                &provider,
+                &limiter,
+                &spec,
+                &fleet_provider_ssh::PutRequest {
+                    path: &request.path,
+                    size: request.size,
+                    sha256: &request.sha256,
+                    overwrite: request.overwrite,
+                },
+                deadline,
+                &mut source,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("the copy thread failed: {error}"))?
+    }
 }
 
 /// [`GuestFiles`] when the controller could not prepare its SSH work
@@ -533,6 +596,20 @@ impl GuestFiles for UnavailableGuestFiles {
             )),
             sink,
         )
+    }
+
+    async fn put(
+        &self,
+        _machine_id: &str,
+        _endpoint_id: &str,
+        _request: GuestPut,
+        _deadline: Duration,
+        _source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        Err(format!(
+            "guest file copies are unavailable: {}",
+            self.reason
+        ))
     }
 }
 
@@ -631,58 +708,20 @@ impl LabArtifactDispatch {
                 .refuse(operations, operation, &lease_id, "invalid_paths", &detail)
                 .await;
         }
-        let now = fleet_core::SystemClock::now_unix_millis();
-        let lease = match self.leases.get(&lease_id).await {
-            Ok(lease) => lease,
-            Err(detail) => {
+        let (machine_id, endpoint_id) = match resolve_lab_machine(
+            self.leases.as_ref(),
+            self.provisions.as_ref(),
+            &lease_id,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        {
+            Ok(found) => found,
+            Err((reason, detail)) => {
                 return self
-                    .refuse(
-                        operations,
-                        operation,
-                        &lease_id,
-                        "lease_unavailable",
-                        &logged(&lease_id, "the lease", &detail),
-                    )
+                    .refuse(operations, operation, &lease_id, reason, &detail)
                     .await;
             }
-        };
-        if let Err(detail) = lease_exec_ready(&lease, now) {
-            return self
-                .refuse(operations, operation, &lease_id, "lease_not_ready", &detail)
-                .await;
-        }
-        let record = match &lease.provision_id {
-            Some(id) => match self.provisions.get(id).await {
-                Ok(record) => Some(record),
-                Err(detail) => {
-                    return self
-                        .refuse(
-                            operations,
-                            operation,
-                            &lease_id,
-                            "provision_unavailable",
-                            &logged(&lease_id, "the lease's provision record", &detail),
-                        )
-                        .await;
-                }
-            },
-            None => None,
-        };
-        // The record must link back to this lease: a stale link must never
-        // copy another lease's guest under this one.
-        let Some((machine_id, endpoint_id)) = record
-            .filter(|record| record.lease_id.as_deref() == Some(lease.id.as_str()))
-            .and_then(|record| record.machine_id.zip(record.endpoint_id))
-        else {
-            return self
-                .refuse(
-                    operations,
-                    operation,
-                    &lease_id,
-                    "no_lab_machine",
-                    "the lease's guest has no registered Lab machine",
-                )
-                .await;
         };
 
         let started = std::time::Instant::now();
@@ -906,6 +945,40 @@ impl OperationExecutor for LabArtifactDispatch {
     }
 }
 
+/// Finds the machine and endpoint of a ready lease's guest, for the
+/// executors that copy files over SSH (`lab.collect`, `lab.put`); answers a
+/// stable reason and a bounded detail when the lease cannot take the copy.
+/// The provision record must link back to this lease: a stale link must
+/// never copy to or from another lease's guest.
+pub(crate) async fn resolve_lab_machine(
+    leases: &dyn LeasePort,
+    provisions: &dyn ProvisionPort,
+    lease_id: &str,
+    now: i64,
+) -> Result<(String, String), (&'static str, String)> {
+    let lease = leases
+        .get(lease_id)
+        .await
+        .map_err(|detail| ("lease_unavailable", logged(lease_id, "the lease", &detail)))?;
+    lease_exec_ready(&lease, now).map_err(|detail| ("lease_not_ready", detail))?;
+    let record = match &lease.provision_id {
+        Some(id) => Some(provisions.get(id).await.map_err(|detail| {
+            (
+                "provision_unavailable",
+                logged(lease_id, "the lease's provision record", &detail),
+            )
+        })?),
+        None => None,
+    };
+    record
+        .filter(|record| record.lease_id.as_deref() == Some(lease.id.as_str()))
+        .and_then(|record| record.machine_id.zip(record.endpoint_id))
+        .ok_or((
+            "no_lab_machine",
+            "the lease's guest has no registered Lab machine".to_owned(),
+        ))
+}
+
 /// Logs a store failure's raw detail and answers the fixed message that is
 /// recorded and served instead: backend text never reaches `lab.read`.
 fn logged(lease_id: &str, what: &str, detail: &str) -> String {
@@ -914,7 +987,7 @@ fn logged(lease_id: &str, what: &str, detail: &str) -> String {
     format!("{what} could not be read; the detail is in the controller log")
 }
 
-fn payload_lease(operation: &Operation) -> String {
+pub(crate) fn payload_lease(operation: &Operation) -> String {
     operation
         .payload_json
         .as_deref()
@@ -923,7 +996,7 @@ fn payload_lease(operation: &Operation) -> String {
         .unwrap_or_default()
 }
 
-fn system_principal() -> ActingPrincipal {
+pub(crate) fn system_principal() -> ActingPrincipal {
     ActingPrincipal {
         id: fleet_auth::LAN_PRINCIPAL_ID.to_owned(),
     }

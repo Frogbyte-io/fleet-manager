@@ -64,7 +64,7 @@ exec head -c \"$((fleet_max + 1))\" -- \"$fleet_path\"\n";
 const READ_CHUNK: usize = 64 * 1024;
 
 /// How often the deadline is polled while the copy runs.
-const POLL: Duration = Duration::from_millis(50);
+pub(crate) const POLL: Duration = Duration::from_millis(50);
 
 /// The stderr kept from `ssh` itself, to explain a connection failure.
 const STDERR_CAP: usize = 4 * 1024;
@@ -196,11 +196,34 @@ fn spawn_copy(
     max_bytes: u64,
     deadline: Duration,
 ) -> Result<std::process::Child, SshProviderError> {
+    let mut child = spawn_script_session(
+        provider,
+        endpoint,
+        vec![path.to_owned(), max_bytes.to_string()],
+        FETCH_SCRIPT,
+        deadline,
+    )?;
+    // The script is all this session reads: close stdin.
+    drop(child.stdin.take());
+    Ok(child)
+}
+
+/// Starts an `ssh` session running `script` under the shell-inert metadata
+/// blob (`arguments` become `$1..`). The script has been written to the
+/// session's stdin, which stays open: a caller that streams a payload after
+/// the script keeps writing to it, and everyone else drops it.
+pub(crate) fn spawn_script_session(
+    provider: &SshProvider,
+    endpoint: &SshConnectionSpec,
+    arguments: Vec<String>,
+    script: &str,
+    deadline: Duration,
+) -> Result<std::process::Child, SshProviderError> {
     let config_path = provider.write_config(&endpoint.auth)?;
     let blob = encode_metadata(&ScriptMetadata {
         working_directory: String::new(),
         environment: Vec::new(),
-        arguments: vec![path.to_owned(), max_bytes.to_string()],
+        arguments,
     });
 
     let mut command = std::process::Command::new("ssh");
@@ -225,19 +248,18 @@ fn spawn_copy(
         tool: "ssh",
         detail: format!("cannot start: {error}"),
     })?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| SshProviderError::Tool {
-            tool: "ssh",
-            detail: "the ssh process has no stdin".to_owned(),
-        })?
-        .write_all(format!("{}{FETCH_SCRIPT}", remote_prologue()).as_bytes())
-        .map_err(|error| SshProviderError::Tool {
+    let stdin = child.stdin.as_mut().ok_or_else(|| SshProviderError::Tool {
+        tool: "ssh",
+        detail: "the ssh process has no stdin".to_owned(),
+    })?;
+    if let Err(error) = stdin.write_all(format!("{}{script}", remote_prologue()).as_bytes()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(SshProviderError::Tool {
             tool: "ssh",
             detail: format!("cannot send the script: {error}"),
-        })?;
-
+        });
+    }
     Ok(child)
 }
 
@@ -295,7 +317,7 @@ fn copy_bounded<R: Read>(
 }
 
 /// Drains `ssh`'s stderr, keeping the first [`STDERR_CAP`] bytes.
-fn drain_stderr<R: Read>(pipe: Option<R>) -> Vec<u8> {
+pub(crate) fn drain_stderr<R: Read>(pipe: Option<R>) -> Vec<u8> {
     let Some(mut pipe) = pipe else {
         return Vec::new();
     };

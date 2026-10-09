@@ -334,6 +334,7 @@ fn validation_creates_the_state_directory() {
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+        lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -359,6 +360,7 @@ fn an_uncreatable_state_directory_fails_validation() {
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+        lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -380,6 +382,7 @@ fn a_missing_master_key_file_fails_validation() {
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+        lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -401,6 +404,7 @@ fn a_directory_as_master_key_path_is_not_a_file() {
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+        lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -428,6 +432,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
             lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+            lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
@@ -453,6 +458,7 @@ fn a_group_or_world_readable_master_key_file_is_unsafe() {
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+        lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -487,6 +493,7 @@ fn no_diagnostic_surface_contains_secret_material() {
         lab_artifacts_dir: dir.path().join("lab-artifacts"),
         lab_artifact_retention_seconds: fleet_config::DEFAULT_LAB_ARTIFACT_RETENTION_SECONDS,
         lab_artifact_max_bytes: fleet_config::DEFAULT_LAB_ARTIFACT_MAX_BYTES,
+        lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
         tailscale_serve_listen: None,
         lab_placement: fleet_config::LabPlacementConfig::default(),
         image_build_proxy: None,
@@ -613,8 +620,31 @@ fn the_lab_artifact_settings_default_layer_and_refuse_zero() {
     assert_eq!(overridden.lab_artifact_retention_seconds, 60);
     assert_eq!(overridden.lab_artifact_max_bytes, 2048);
 
+    // The `lab put` cap defaults to 2 GiB and layers like the others.
+    assert_eq!(config.lab_put_max_bytes, 2 * 1024 * 1024 * 1024);
+    let put_file = write_config(
+        dir.path(),
+        &format!("{VALID_FILE}lab_put_max_bytes = 4096\n"),
+    );
+    assert_eq!(
+        fleet_config::load(Some(&put_file), &none_env)
+            .unwrap()
+            .lab_put_max_bytes,
+        4096
+    );
+    let put_env = fleet_config::load(
+        Some(&put_file),
+        &env_of(&[(fleet_config::LAB_PUT_MAX_BYTES_VAR, "8192")]),
+    )
+    .unwrap();
+    assert_eq!(put_env.lab_put_max_bytes, 8192);
+
     // The file layer refuses zero too.
-    for key in ["lab_artifact_retention_seconds", "lab_artifact_max_bytes"] {
+    for key in [
+        "lab_artifact_retention_seconds",
+        "lab_artifact_max_bytes",
+        "lab_put_max_bytes",
+    ] {
         let zero = write_config(dir.path(), &format!("{VALID_FILE}{key} = 0\n"));
         assert!(
             matches!(
@@ -653,6 +683,7 @@ fn validation_refuses_zero_lab_artifact_bounds() {
             lab_artifacts_dir: dir.path().join("lab-artifacts"),
             lab_artifact_retention_seconds: retention,
             lab_artifact_max_bytes: max_bytes,
+            lab_put_max_bytes: fleet_config::DEFAULT_LAB_PUT_MAX_BYTES,
             tailscale_serve_listen: None,
             lab_placement: fleet_config::LabPlacementConfig::default(),
             image_build_proxy: None,
