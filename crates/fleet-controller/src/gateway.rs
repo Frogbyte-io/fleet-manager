@@ -1020,20 +1020,39 @@ impl NodeCommandExecutor {
         let report = &ingested.report;
         let facts = ingested.facts;
 
-        let scalar = |key: &str| match &report[key] {
-            value @ (serde_json::Value::String(_)
-            | serde_json::Value::Number(_)
-            | serde_json::Value::Bool(_)) => value.clone(),
+        // The operation result is small and fixed-shape: the mode is one of
+        // two words, the revision a number, and a handful of probe errors
+        // with short redacted strings. The full report is in the snapshot.
+        let mode = match report["mode"].as_str() {
+            Some(mode @ ("full" | "delta")) => serde_json::json!(mode),
             _ => serde_json::Value::Null,
         };
-        // The echoed probe errors are the redacted ones, and at most a few.
-        let probe_errors: Vec<&serde_json::Value> = report["probeErrors"]
+        let short = |value: &serde_json::Value| -> serde_json::Value {
+            value.as_str().map_or(serde_json::Value::Null, |text| {
+                text.chars()
+                    .take(ECHOED_PROBE_ERROR_CHARS)
+                    .collect::<String>()
+                    .into()
+            })
+        };
+        let probe_errors: Vec<serde_json::Value> = report["probeErrors"]
             .as_array()
-            .map(|errors| errors.iter().take(MAX_ECHOED_PROBE_ERRORS).collect())
+            .map(|errors| {
+                errors
+                    .iter()
+                    .take(MAX_ECHOED_PROBE_ERRORS)
+                    .map(|error| {
+                        serde_json::json!({
+                            "probe": short(&error["probe"]),
+                            "detail": short(&error["detail"]),
+                        })
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         let result_json = serde_json::json!({
-            "mode": scalar("mode"),
-            "revision": scalar("revision"),
+            "mode": mode,
+            "revision": report["revision"].as_u64(),
             "facts": facts,
             "probeErrors": probe_errors,
         })
@@ -1055,7 +1074,9 @@ const MAX_REPORT_BYTES: usize = 256 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
 const MAX_REPORT_FACTS: usize = 256;
 /// How many of a report's probe errors the operation result echoes.
-const MAX_ECHOED_PROBE_ERRORS: usize = 16;
+const MAX_ECHOED_PROBE_ERRORS: usize = 8;
+/// How much of each echoed probe error string is kept.
+const ECHOED_PROBE_ERROR_CHARS: usize = 200;
 
 /// What one ingested report stores and may echo: its redacted form.
 pub(crate) struct IngestedReport {

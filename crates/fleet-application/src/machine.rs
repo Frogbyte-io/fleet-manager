@@ -1179,6 +1179,11 @@ impl Machines {
             fact.validate()
                 .map_err(|detail| MachineUseCaseError::Invalid { detail })?;
         }
+        if facts.len() > 256 {
+            return Err(MachineUseCaseError::Invalid {
+                detail: "too many capability facts (at most 256)".to_owned(),
+            });
+        }
         // Fact values are observed text, often node-supplied: store them
         // scrubbed and bounded.
         let redacted: Vec<CapabilityFact> = facts.iter().map(CapabilityFact::redacted).collect();
