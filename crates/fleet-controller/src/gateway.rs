@@ -378,8 +378,10 @@ impl GatewayService {
         self.audit_event(&machine_id, "gateway_connected");
         eprintln!(
             "node gateway: machine {machine_id} connected (boot session {boot_session}, \
-             protocol {}, flags {:?})",
-            negotiated, hello.feature_flags
+             protocol {}, {} feature flags offered)",
+            negotiated,
+            // Node-supplied strings stay out of the log: only the count.
+            hello.feature_flags.len()
         );
 
         // The session loop: heartbeats and command results in, dispatched
@@ -870,7 +872,9 @@ impl NodeCommandExecutor {
         match outcome {
             Ok(result) => {
                 let payload_text = String::from_utf8_lossy(&result.payload).into_owned();
-                let result_json = serde_json::json!({
+                // The node's payload and fault message are node-supplied
+                // text: scrub and bound every string before it is stored.
+                let mut result_value = serde_json::json!({
                     "status": wire::ResultStatus::try_from(result.status)
                         .map(fleet_result_status_name)
                         .unwrap_or_else(|_| "failed".to_owned()),
@@ -883,8 +887,9 @@ impl NodeCommandExecutor {
                         "message": fault.message,
                     })),
                     "payload": payload_text,
-                })
-                .to_string();
+                });
+                fleet_core::redact_json_strings(&mut result_value);
+                let result_json = result_value.to_string();
                 let state = match wire::ResultStatus::try_from(result.status) {
                     Ok(wire::ResultStatus::Succeeded) => "succeeded",
                     Ok(wire::ResultStatus::Cancelled) => "cancelled",
