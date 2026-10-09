@@ -287,7 +287,18 @@ impl Fixture {
     /// Opens the controller objects over the database in `dir`: a new
     /// controller instance when the database already exists.
     async fn open(dir: tempfile::TempDir, guest_base: PathBuf, lease_id: String) -> Self {
-        let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+        // The previous instance's lock may take a moment to release.
+        let mut attempts = 0;
+        let store = loop {
+            match Store::open(&dir.path().join("fleet.db")).await {
+                Ok(store) => break store,
+                Err(_) if attempts < 50 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("the store must reopen: {error}"),
+            }
+        };
         let pool = store.pool().clone();
         let labs = Arc::new(LabRepository::new(pool.clone()));
         let leases = Arc::new(LeaseRepository::new(pool.clone()));
