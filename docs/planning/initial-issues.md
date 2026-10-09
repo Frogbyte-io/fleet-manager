@@ -355,7 +355,7 @@ FM-105 moves to M8 with FM-S02. It evaluates Cedar only when authenticated human
 
 **Status: Complete (as of 2026-10-09).** The exit gate passed; the evidence is recorded by [FM-742](https://github.com/Frogbyte-io/fleet-manager/issues/266) in [`m7-acceptance.md`](m7-acceptance.md#evidence). The USB/hardware sub-epic ([#16](https://github.com/Frogbyte-io/fleet-manager/issues/16)) is deferred until a hardware host is available, and Windows in-guest support remains a later sub-epic.
 
-**M7 acceptance (2026-10-09): complete.** Each planned issue below is listed with the merged PR(s) into `dev` that delivered it; the many smaller bug-fix PRs from the live runs are not enumerated.
+**M7 acceptance (2026-10-09): complete.** Each planned issue below is listed with the merged PR(s) that delivered it; the many smaller bug-fix PRs from the live runs are not enumerated.
 
 - FM-S09 [#107](https://github.com/Frogbyte-io/fleet-manager/issues/107) — [PR #108](https://github.com/Frogbyte-io/fleet-manager/pull/108): Packer spike: operator-installed CLI, pinned version ranges, BUSL review.
 - FM-700 [#110](https://github.com/Frogbyte-io/fleet-manager/issues/110) — [PR #111](https://github.com/Frogbyte-io/fleet-manager/pull/111): image recipes and the Packer build operation.
