@@ -2077,6 +2077,69 @@
         }
       }
     },
+    "/api/v1/lab/detached-execs/{handle}": {
+      "get": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Reads a detached command's state, exit code, and bounded output tails.\nA read of the guest, not an operation. A handle whose lease has been\nreleased or has expired answers `lease_ended`, a terminal state, rather\nthan an error. A handle of another owner reads as not found.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal or an unknown handle.",
+        "operationId": "getDetachedExec",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "description": "The handle `exec-detached` returned.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The command's state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DetachedExecStatusDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not read detached commands.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The handle does not exist (or is another owner's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases": {
       "get": {
         "tags": [
@@ -2635,6 +2698,89 @@
           },
           "404": {
             "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lab/leases/{leaseId}/exec-detached": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Starts a command on a ready lease's guest and returns at once with a\nhandle. The command runs in the guest, outside the SSH session, until it\nexits, hits its bound, or the lease ends. Poll\n`GET /lab/detached-execs/{handle}`. A retry with the same\n`Idempotency-Key` returns the same handle and starts nothing twice.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease, a lease\nthat is not ready or about to expire, or an invalid command.",
+        "operationId": "execDetachedLabLease",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecDetachedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The command is being started as a `lab.exec_detach` operation; poll its handle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_DetachedExecStartedDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is not ready, has expired or is about to, its guest has no Lab machine, or the command is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not run commands on Lab leases.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist (or is another owner's).",
             "content": {
               "application/json": {
                 "schema": {
@@ -9547,6 +9693,143 @@
           }
         }
       },
+      "DetachedExecStartedDto": {
+        "type": "object",
+        "description": "A started detached command.",
+        "required": [
+          "handle",
+          "leaseId",
+          "timeoutSeconds",
+          "operation"
+        ],
+        "properties": {
+          "handle": {
+            "type": "string",
+            "description": "The handle to poll: the id of the start operation."
+          },
+          "leaseId": {
+            "type": "string",
+            "description": "The lease."
+          },
+          "operation": {
+            "$ref": "#/components/schemas/OperationDto",
+            "description": "The `lab.exec_detach` operation that starts the command. It ends\nwhen the guest has started the command, not when the command ends."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The bound the guest enforces, in seconds.",
+            "minimum": 0
+          }
+        }
+      },
+      "DetachedExecStatusDto": {
+        "type": "object",
+        "description": "The state of a detached command.",
+        "required": [
+          "handle",
+          "leaseId",
+          "state",
+          "terminal",
+          "timeoutSeconds",
+          "stdout",
+          "stderr",
+          "truncatedStdout",
+          "truncatedStderr",
+          "stdoutBytes",
+          "stderrBytes"
+        ],
+        "properties": {
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The exit code, once `exited`. `124` means the command's time bound\nended it."
+          },
+          "finishedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the command finished (the guest's clock, epoch seconds)."
+          },
+          "handle": {
+            "type": "string",
+            "description": "The handle."
+          },
+          "leaseId": {
+            "type": "string",
+            "description": "The lease."
+          },
+          "leaseState": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The lease's state, when `lease_ended`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable reason for `lost` (`guest_rebooted`, `process_gone`,\n`never_started`, `guest_has_no_record`), `failed_to_start`\n(`start_failed`; see the operation), `lease_ended`, and\n`unreachable` (`guest_unreachable`, `no_lab_machine`)."
+          },
+          "startedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the command started (the guest's clock, epoch seconds)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`starting`, `running`, `exited`, `lost`, `failed_to_start`,\n`lease_ended`, or `unreachable`."
+          },
+          "stderr": {
+            "type": "string",
+            "description": "The last of stderr, scrubbed and bounded likewise."
+          },
+          "stderrBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The size of stderr in the guest, in bytes.",
+            "minimum": 0
+          },
+          "stdout": {
+            "type": "string",
+            "description": "The last of stdout, scrubbed of credentials and bounded like `lab\nexec` output."
+          },
+          "stdoutBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The size of stdout in the guest, in bytes.",
+            "minimum": 0
+          },
+          "terminal": {
+            "type": "boolean",
+            "description": "Whether the answer will never change: `exited`, `lost`,\n`failed_to_start`, and `lease_ended`. `unreachable` and `starting`\nare not terminal; poll again."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The bound the guest enforces, in seconds.",
+            "minimum": 0
+          },
+          "truncatedStderr": {
+            "type": "boolean",
+            "description": "Whether output was dropped from the front of stderr."
+          },
+          "truncatedStdout": {
+            "type": "boolean",
+            "description": "Whether output was dropped from the front of stdout."
+          }
+        }
+      },
       "DiscoveredCheckoutDto": {
         "type": "object",
         "description": "One discovered checkout, as the discovery operation reported it.",
@@ -9820,6 +10103,28 @@
               "$ref": "#/components/schemas/EnrollmentTokenDto"
             },
             "description": "The machine's tokens, newest first."
+          }
+        }
+      },
+      "ExecDetachedRequest": {
+        "type": "object",
+        "description": "A command to start detached on a ready lease's guest.",
+        "required": [
+          "script"
+        ],
+        "properties": {
+          "script": {
+            "type": "string",
+            "description": "The shell script to run (at most 64 KiB). It is never audited and\nthe detached-exec record keeps only its SHA-256 and size. Like `lab\nexec`, the queued operation's payload holds it, and the guest keeps it\nin `cmd.sh`."
+          },
+          "timeoutSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The bound in seconds, enforced in the guest. It defaults to, and can\nnever exceed, what is left of the lease's TTL: a detached command\ncannot outlive its lease or extend it.",
+            "minimum": 0
           }
         }
       },
@@ -15717,6 +16022,161 @@
                     "description": "The active revision, when one has been activated."
                   }
                 ]
+              }
+            }
+          }
+        }
+      },
+      "Resource_DetachedExecStartedDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A started detached command.",
+            "required": [
+              "handle",
+              "leaseId",
+              "timeoutSeconds",
+              "operation"
+            ],
+            "properties": {
+              "handle": {
+                "type": "string",
+                "description": "The handle to poll: the id of the start operation."
+              },
+              "leaseId": {
+                "type": "string",
+                "description": "The lease."
+              },
+              "operation": {
+                "$ref": "#/components/schemas/OperationDto",
+                "description": "The `lab.exec_detach` operation that starts the command. It ends\nwhen the guest has started the command, not when the command ends."
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The bound the guest enforces, in seconds.",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "Resource_DetachedExecStatusDto": {
+        "type": "object",
+        "description": "A single resource.\n\nThe payload is nested under `data` so that later top-level fields are an\nadditive change rather than a breaking one.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The state of a detached command.",
+            "required": [
+              "handle",
+              "leaseId",
+              "state",
+              "terminal",
+              "timeoutSeconds",
+              "stdout",
+              "stderr",
+              "truncatedStdout",
+              "truncatedStderr",
+              "stdoutBytes",
+              "stderrBytes"
+            ],
+            "properties": {
+              "exitCode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "The exit code, once `exited`. `124` means the command's time bound\nended it."
+              },
+              "finishedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the command finished (the guest's clock, epoch seconds)."
+              },
+              "handle": {
+                "type": "string",
+                "description": "The handle."
+              },
+              "leaseId": {
+                "type": "string",
+                "description": "The lease."
+              },
+              "leaseState": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The lease's state, when `lease_ended`."
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A stable reason for `lost` (`guest_rebooted`, `process_gone`,\n`never_started`, `guest_has_no_record`), `failed_to_start`\n(`start_failed`; see the operation), `lease_ended`, and\n`unreachable` (`guest_unreachable`, `no_lab_machine`)."
+              },
+              "startedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When the command started (the guest's clock, epoch seconds)."
+              },
+              "state": {
+                "type": "string",
+                "description": "`starting`, `running`, `exited`, `lost`, `failed_to_start`,\n`lease_ended`, or `unreachable`."
+              },
+              "stderr": {
+                "type": "string",
+                "description": "The last of stderr, scrubbed and bounded likewise."
+              },
+              "stderrBytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The size of stderr in the guest, in bytes.",
+                "minimum": 0
+              },
+              "stdout": {
+                "type": "string",
+                "description": "The last of stdout, scrubbed of credentials and bounded like `lab\nexec` output."
+              },
+              "stdoutBytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The size of stdout in the guest, in bytes.",
+                "minimum": 0
+              },
+              "terminal": {
+                "type": "boolean",
+                "description": "Whether the answer will never change: `exited`, `lost`,\n`failed_to_start`, and `lease_ended`. `unreachable` and `starting`\nare not terminal; poll again."
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The bound the guest enforces, in seconds.",
+                "minimum": 0
+              },
+              "truncatedStderr": {
+                "type": "boolean",
+                "description": "Whether output was dropped from the front of stderr."
+              },
+              "truncatedStdout": {
+                "type": "boolean",
+                "description": "Whether output was dropped from the front of stdout."
               }
             }
           }

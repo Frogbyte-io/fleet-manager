@@ -1064,6 +1064,165 @@ export interface DesiredStatusDto {
 }
 
 /**
+ * The public operation resource. The application type is the transport
+ * truth; this type is the documented shape, kept one `From` away so the two
+ * cannot drift silently.
+ */
+export interface OperationDto {
+  /** Whether cancellation has been requested but not yet observed. */
+  cancelRequested: boolean;
+  /**
+     * The correlation identity joining this operation to the caller's flow.
+     * @nullable
+     */
+  correlationId?: string | null;
+  /** Creation time, in epoch milliseconds. */
+  createdAt: number;
+  /**
+     * The deadline, in epoch milliseconds, when one was set.
+     * @nullable
+     */
+  deadlineAt?: number | null;
+  /**
+     * The bounded public error, present when the operation failed.
+     * @nullable
+     */
+  errorJson?: string | null;
+  /** The operation's identity. */
+  id: string;
+  /**
+     * The caller's idempotency key, when one was supplied.
+     * @nullable
+     */
+  idempotencyKey?: string | null;
+  /** What kind of work this is. */
+  kind: string;
+  /**
+     * Progress numerator, when reported.
+     * @nullable
+     */
+  progressCurrent?: number | null;
+  /**
+     * Bounded progress message, when reported.
+     * @nullable
+     */
+  progressMessage?: string | null;
+  /**
+     * Progress denominator, when reported.
+     * @nullable
+     */
+  progressTotal?: number | null;
+  /**
+     * The bounded public result, present when the operation succeeded.
+     * @nullable
+     */
+  resultJson?: string | null;
+  /**
+     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
+     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
+     */
+  state: string;
+  /** Last update, in epoch milliseconds. */
+  updatedAt: number;
+}
+
+/**
+ * A started detached command.
+ */
+export interface DetachedExecStartedDto {
+  /** The handle to poll: the id of the start operation. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The `lab.exec_detach` operation that starts the command. It ends
+     * when the guest has started the command, not when the command ends.
+     */
+  operation: OperationDto;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+}
+
+/**
+ * The state of a detached command.
+ */
+export interface DetachedExecStatusDto {
+  /**
+     * The exit code, once `exited`. `124` means the command's time bound
+     * ended it.
+     * @nullable
+     */
+  exitCode?: number | null;
+  /**
+     * When the command finished (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  finishedAt?: number | null;
+  /** The handle. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The lease's state, when `lease_ended`.
+     * @nullable
+     */
+  leaseState?: string | null;
+  /**
+     * A stable reason for `lost` (`guest_rebooted`, `process_gone`,
+     * `never_started`, `guest_has_no_record`), `failed_to_start`
+     * (`start_failed`; see the operation), `lease_ended`, and
+     * `unreachable` (`guest_unreachable`, `no_lab_machine`).
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * When the command started (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  startedAt?: number | null;
+  /**
+     * `starting`, `running`, `exited`, `lost`, `failed_to_start`,
+     * `lease_ended`, or `unreachable`.
+     */
+  state: string;
+  /** The last of stderr, scrubbed and bounded likewise. */
+  stderr: string;
+  /**
+     * The size of stderr in the guest, in bytes.
+     * @minimum 0
+     */
+  stderrBytes: number;
+  /**
+     * The last of stdout, scrubbed of credentials and bounded like `lab
+     * exec` output.
+     */
+  stdout: string;
+  /**
+     * The size of stdout in the guest, in bytes.
+     * @minimum 0
+     */
+  stdoutBytes: number;
+  /**
+     * Whether the answer will never change: `exited`, `lost`,
+     * `failed_to_start`, and `lease_ended`. `unreachable` and `starting`
+     * are not terminal; poll again.
+     */
+  terminal: boolean;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /** Whether output was dropped from the front of stderr. */
+  truncatedStderr: boolean;
+  /** Whether output was dropped from the front of stdout. */
+  truncatedStdout: boolean;
+}
+
+/**
  * One discovered checkout, as the discovery operation reported it.
  */
 export interface DiscoveredCheckoutDto {
@@ -1203,6 +1362,27 @@ export interface EnrollmentTokenDto {
 export interface EnrollmentTokenListDto {
   /** The machine's tokens, newest first. */
   items: EnrollmentTokenDto[];
+}
+
+/**
+ * A command to start detached on a ready lease's guest.
+ */
+export interface ExecDetachedRequest {
+  /**
+     * The shell script to run (at most 64 KiB). It is never audited and
+     * the detached-exec record keeps only its SHA-256 and size. Like `lab
+     * exec`, the queued operation's payload holds it, and the guest keeps it
+     * in `cmd.sh`.
+     */
+  script: string;
+  /**
+     * The bound in seconds, enforced in the guest. It defaults to, and can
+     * never exceed, what is left of the lease's TTL: a detached command
+     * cannot outlive its lease or extend it.
+     * @minimum 0
+     * @nullable
+     */
+  timeoutSeconds?: number | null;
 }
 
 /**
@@ -2136,69 +2316,6 @@ export interface OperationAccepted {
   operationId: string;
   /** The operation's state at the time the response was written. */
   status: OperationStatus;
-}
-
-/**
- * The public operation resource. The application type is the transport
- * truth; this type is the documented shape, kept one `From` away so the two
- * cannot drift silently.
- */
-export interface OperationDto {
-  /** Whether cancellation has been requested but not yet observed. */
-  cancelRequested: boolean;
-  /**
-     * The correlation identity joining this operation to the caller's flow.
-     * @nullable
-     */
-  correlationId?: string | null;
-  /** Creation time, in epoch milliseconds. */
-  createdAt: number;
-  /**
-     * The deadline, in epoch milliseconds, when one was set.
-     * @nullable
-     */
-  deadlineAt?: number | null;
-  /**
-     * The bounded public error, present when the operation failed.
-     * @nullable
-     */
-  errorJson?: string | null;
-  /** The operation's identity. */
-  id: string;
-  /**
-     * The caller's idempotency key, when one was supplied.
-     * @nullable
-     */
-  idempotencyKey?: string | null;
-  /** What kind of work this is. */
-  kind: string;
-  /**
-     * Progress numerator, when reported.
-     * @nullable
-     */
-  progressCurrent?: number | null;
-  /**
-     * Bounded progress message, when reported.
-     * @nullable
-     */
-  progressMessage?: string | null;
-  /**
-     * Progress denominator, when reported.
-     * @nullable
-     */
-  progressTotal?: number | null;
-  /**
-     * The bounded public result, present when the operation succeeded.
-     * @nullable
-     */
-  resultJson?: string | null;
-  /**
-     * The current state: `pending`, `running`, `cancelling`, `succeeded`,
-     * `failed`, `cancelled`, `timed_out`, or `blocked_manual_approval`.
-     */
-  state: string;
-  /** Last update, in epoch milliseconds. */
-  updatedAt: number;
 }
 
 /**
@@ -4414,6 +4531,124 @@ export type ResourceDesiredStatusDtoData = {
 export interface ResourceDesiredStatusDto {
   /** The desired-state status: no revision is active until one is activated. */
   data: ResourceDesiredStatusDtoData;
+}
+
+/**
+ * A started detached command.
+ */
+export type ResourceDetachedExecStartedDtoData = {
+  /** The handle to poll: the id of the start operation. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The `lab.exec_detach` operation that starts the command. It ends
+     * when the guest has started the command, not when the command ends.
+     */
+  operation: OperationDto;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDetachedExecStartedDto {
+  /** A started detached command. */
+  data: ResourceDetachedExecStartedDtoData;
+}
+
+/**
+ * The state of a detached command.
+ */
+export type ResourceDetachedExecStatusDtoData = {
+  /**
+     * The exit code, once `exited`. `124` means the command's time bound
+     * ended it.
+     * @nullable
+     */
+  exitCode?: number | null;
+  /**
+     * When the command finished (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  finishedAt?: number | null;
+  /** The handle. */
+  handle: string;
+  /** The lease. */
+  leaseId: string;
+  /**
+     * The lease's state, when `lease_ended`.
+     * @nullable
+     */
+  leaseState?: string | null;
+  /**
+     * A stable reason for `lost` (`guest_rebooted`, `process_gone`,
+     * `never_started`, `guest_has_no_record`), `failed_to_start`
+     * (`start_failed`; see the operation), `lease_ended`, and
+     * `unreachable` (`guest_unreachable`, `no_lab_machine`).
+     * @nullable
+     */
+  reason?: string | null;
+  /**
+     * When the command started (the guest's clock, epoch seconds).
+     * @nullable
+     */
+  startedAt?: number | null;
+  /**
+     * `starting`, `running`, `exited`, `lost`, `failed_to_start`,
+     * `lease_ended`, or `unreachable`.
+     */
+  state: string;
+  /** The last of stderr, scrubbed and bounded likewise. */
+  stderr: string;
+  /**
+     * The size of stderr in the guest, in bytes.
+     * @minimum 0
+     */
+  stderrBytes: number;
+  /**
+     * The last of stdout, scrubbed of credentials and bounded like `lab
+     * exec` output.
+     */
+  stdout: string;
+  /**
+     * The size of stdout in the guest, in bytes.
+     * @minimum 0
+     */
+  stdoutBytes: number;
+  /**
+     * Whether the answer will never change: `exited`, `lost`,
+     * `failed_to_start`, and `lease_ended`. `unreachable` and `starting`
+     * are not terminal; poll again.
+     */
+  terminal: boolean;
+  /**
+     * The bound the guest enforces, in seconds.
+     * @minimum 0
+     */
+  timeoutSeconds: number;
+  /** Whether output was dropped from the front of stderr. */
+  truncatedStderr: boolean;
+  /** Whether output was dropped from the front of stdout. */
+  truncatedStdout: boolean;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceDetachedExecStatusDto {
+  /** The state of a detached command. */
+  data: ResourceDetachedExecStatusDtoData;
 }
 
 /**
@@ -8638,6 +8873,72 @@ export const downloadLabArtifact = async (artifactId: string, options?: RequestI
 
 
 
+export type getDetachedExecResponse200 = {
+  data: ResourceDetachedExecStatusDto
+  status: 200
+}
+
+export type getDetachedExecResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type getDetachedExecResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type getDetachedExecResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type getDetachedExecResponseSuccess = (getDetachedExecResponse200) & {
+  headers: Headers;
+};
+export type getDetachedExecResponseError = (getDetachedExecResponse403 | getDetachedExecResponse404 | getDetachedExecResponse500) & {
+  headers: Headers;
+};
+
+export type getDetachedExecResponse = (getDetachedExecResponseSuccess | getDetachedExecResponseError)
+
+export const getGetDetachedExecUrl = (handle: string,) => {
+
+
+
+
+  return `/api/v1/lab/detached-execs/${handle}`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown handle.
+ * @summary Reads a detached command's state, exit code, and bounded output tails.
+A read of the guest, not an operation. A handle whose lease has been
+released or has expired answers `lease_ended`, a terminal state, rather
+than an error. A handle of another owner reads as not found.
+ */
+export const getDetachedExec = async (handle: string, options?: RequestInit): Promise<getDetachedExecResponse> => {
+
+  const res = await fetch(getGetDetachedExecUrl(handle),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: getDetachedExecResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as getDetachedExecResponse
+}
+
+
+
 export type listLabLeasesResponse200 = {
   data: PageLeaseDto
   status: 200
@@ -9151,6 +9452,86 @@ const res = await fetch(getExecLabLeaseUrl(leaseId),
 
   const data: execLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as execLabLeaseResponse
+}
+
+
+
+export type execDetachedLabLeaseResponse202 = {
+  data: ResourceDetachedExecStartedDto
+  status: 202
+}
+
+export type execDetachedLabLeaseResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type execDetachedLabLeaseResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type execDetachedLabLeaseResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type execDetachedLabLeaseResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type execDetachedLabLeaseResponseSuccess = (execDetachedLabLeaseResponse202) & {
+  headers: Headers;
+};
+export type execDetachedLabLeaseResponseError = (execDetachedLabLeaseResponse400 | execDetachedLabLeaseResponse403 | execDetachedLabLeaseResponse404 | execDetachedLabLeaseResponse500) & {
+  headers: Headers;
+};
+
+export type execDetachedLabLeaseResponse = (execDetachedLabLeaseResponseSuccess | execDetachedLabLeaseResponseError)
+
+export const getExecDetachedLabLeaseUrl = (leaseId: string,) => {
+
+
+
+
+  return `/api/v1/lab/leases/${leaseId}/exec-detached`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready or about to expire, or an invalid command.
+ * @summary Starts a command on a ready lease's guest and returns at once with a
+handle. The command runs in the guest, outside the SSH session, until it
+exits, hits its bound, or the lease ends. Poll
+`GET /lab/detached-execs/{handle}`. A retry with the same
+`Idempotency-Key` returns the same handle and starts nothing twice.
+ */
+export const execDetachedLabLease = async (leaseId: string,
+    execDetachedRequest: ExecDetachedRequest, options?: RequestInit): Promise<execDetachedLabLeaseResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getExecDetachedLabLeaseUrl(leaseId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(execDetachedRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: execDetachedLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as execDetachedLabLeaseResponse
 }
 
 

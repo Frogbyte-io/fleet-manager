@@ -55,10 +55,11 @@ Allowed for a credential principal:
 | `lab.lease.read` | A lease, its guest details and reservation, and the lease search with its filters (#395); own leases only: the owner scope is forced to the credential's owner, so an `owner` filter can only narrow it |
 | `lab.lease.provision` | Provision of the caller's own requested lease |
 | `lab.extend` | Own lease, within the lease's maximum lifetime (existing use-case rule) |
-| `lab.exec` | Own lease |
+| `lab.exec` | Own lease, including `lab exec --detach` (#394) |
+| `lab.exec.read` | Status of a detached command whose lease the caller owns (#394); another owner's handle is not found |
 | `lab.artifacts` | Collect from own lease; download of own artifacts |
 | `lab.artifacts.read` | List and read metadata of own artifacts |
-| `operation.create` | Only for the kinds a Lab route queues for the caller: `lab.provision`, `lab.exec`, `lab.collect`, `lab.cleanup` |
+| `operation.create` | Only for the kinds a Lab route queues for the caller: `lab.provision`, `lab.exec`, `lab.exec_detach`, `lab.collect`, `lab.cleanup` |
 | `operation.read` | One operation, only when it belongs to the caller's own lease. Listing is refused |
 
 Everything else is refused, notably: `lab.keep`, standalone `lab.provision`, template, image, pool, Proxmox, tailnet, machine, project, skills, desired-state, settings, secret, node, audit, events, and system actions, `operation.cancel`, generic operation creation, and the credential actions. In addition the use cases refuse, for a credential principal, an explicit project on lease creation and a template whose cleanup strategy is `keep`, so the credential cannot retain a VM.

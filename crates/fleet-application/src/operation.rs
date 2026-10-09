@@ -55,7 +55,7 @@ enum CreateRoute {
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 64] = [
+pub const CREATABLE_KINDS: [&str; 65] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -117,6 +117,7 @@ pub const CREATABLE_KINDS: [&str; 64] = [
     "lab.provision",
     "lab.cleanup",
     "lab.exec",
+    "lab.exec_detach",
     "lab.collect",
     "lab.put",
     "lab.pool.fill",
@@ -981,6 +982,30 @@ impl Operations {
         .await
     }
 
+    /// Queues a `lab.exec_detach` that `LabExecDetach::prepare_start`
+    /// validated (#394), by a caller allowed to run commands on that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_exec_detach(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.exec_detach",
+            Permission::LabExec,
+        )
+        .await
+    }
+
     /// Queues a `lab.collect` that `LabArtifacts::request_collect`
     /// validated (FM-721), by a caller allowed to collect artifacts from
     /// that lease.
@@ -1360,6 +1385,13 @@ impl Operations {
             if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.exec runs through the lease exec route".to_owned(),
+                });
+            }
+        } else if new.kind == "lab.exec_detach" {
+            // Authorized by `create_lab_exec_detach` against its lease.
+            if route == CreateRoute::Generic {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.exec_detach runs through the lease detached exec route".to_owned(),
                 });
             }
         } else if new.kind == "lab.collect" {

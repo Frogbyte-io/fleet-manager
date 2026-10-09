@@ -23,6 +23,7 @@ pub mod frogenv;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
+pub mod lab_exec_detach;
 pub mod lab_pools;
 pub mod lab_put;
 pub mod machines;
@@ -405,6 +406,8 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::extend_lab_lease))
                 .routes(routes!(lab::get_lab_lease))
                 .routes(routes!(lab::exec_lab_lease))
+                .routes(routes!(lab_exec_detach::exec_detached_lab_lease))
+                .routes(routes!(lab_exec_detach::get_detached_exec))
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(lab_artifacts::collect_lab_artifacts))
                 .routes(routes!(lab_put::put_lab_file))

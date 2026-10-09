@@ -26,6 +26,12 @@ fleetctl --output json lab create <template-version-id> --project <project-id> -
   -> POST /api/v1/lab/leases body {"projectId":"project-id-example","purpose":"reproduce flaky test","templateVersionId":"template-version-id-example"}
 fleetctl --output json lab exec <lease-id> --wait -- cargo test
   -> POST /api/v1/lab/leases/lease-id-example/exec body {"script":"cargo test","timeoutSeconds":60}
+fleetctl --output json lab exec <lease-id> --detach --idempotency-key <key> -- ./run-suite.sh
+  -> POST /api/v1/lab/leases/lease-id-example/exec-detached body {"script":"./run-suite.sh"}
+fleetctl --output json lab exec-status <handle>
+  -> GET /api/v1/lab/detached-execs/handle-example
+fleetctl --output json lab exec-status <handle> --wait --timeout 3600
+  -> GET /api/v1/lab/detached-execs/handle-example
 fleetctl --output json lab status <lease-id>
   -> GET /api/v1/lab/leases/lease-id-example
 fleetctl --output json lab collect <lease-id> /home/lab/out/report.xml --wait

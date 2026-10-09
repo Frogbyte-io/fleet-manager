@@ -566,6 +566,50 @@ pub fn trim_to_bound(text: &str) -> (String, bool) {
     (text.to_owned(), false)
 }
 
+/// Scrubs the last bytes of a stream and keeps its tail, within the same
+/// escaped bound as [`trim_to_bound`]. `bytes` is the end of the stream;
+/// `cut_at_front` says earlier bytes were dropped before it.
+///
+/// A cut front may begin in the middle of a token, and a credential cut in
+/// two is no longer a credential shape, so when the front was cut the text
+/// up to the first whitespace is dropped before scrubbing. The whole
+/// remainder is then scrubbed and flattened, and only afterwards cut to its
+/// last bytes, so a credential straddling the final cut is already masked.
+/// Answers the text and whether anything was left out; an omitted front
+/// shows as a leading `…`.
+#[must_use]
+pub fn scrub_tail(bytes: &[u8], cut_at_front: bool) -> (String, bool) {
+    let lossy = String::from_utf8_lossy(bytes);
+    let mut text: &str = &lossy;
+    if cut_at_front {
+        text = text
+            .find(char::is_whitespace)
+            .map_or("", |index| &text[index..]);
+    }
+    let scrubbed = flatten_control_characters(&redact_credentials(text));
+    let mut escaped = 0;
+    let mut start = 0;
+    let mut cut = false;
+    for (index, c) in scrubbed.char_indices().rev() {
+        escaped += match c {
+            '"' | '\\' | '\n' => 2,
+            other => other.len_utf8(),
+        };
+        if escaped > RESULT_STRING_BOUND {
+            start = index + c.len_utf8();
+            cut = true;
+            break;
+        }
+    }
+    let kept = &scrubbed[start..];
+    let truncated = cut_at_front || cut;
+    if truncated {
+        (format!("…{kept}"), true)
+    } else {
+        (kept.to_owned(), false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +910,55 @@ mod tests {
         }
         redact_json_strings(&mut deep);
         assert!(deep.to_string().len() < 100);
+    }
+
+    #[test]
+    fn scrub_tail_keeps_the_end_and_never_half_keeps_a_credential() {
+        let small = scrub_tail(b"line one\nline two\n", false);
+        assert_eq!(small, ("line one\nline two\n".to_owned(), false));
+
+        let long = format!("{}\nthe end\n", "x ".repeat(5_000));
+        let (text, truncated) = scrub_tail(long.as_bytes(), false);
+        assert!(truncated);
+        assert!(
+            text.starts_with('…') && text.ends_with("the end\n"),
+            "{text:?}"
+        );
+        assert!(text.len() <= RESULT_STRING_BOUND + 4);
+
+        // A front cut inside a credential drops the fragment.
+        let front = b"ssword123@host.invalid/r tail text\n";
+        let (text, truncated) = scrub_tail(front, true);
+        assert!(truncated);
+        assert!(!text.contains("ssword123"), "{text:?}");
+        assert!(text.contains("tail text"));
+
+        // A credential that ends up straddling the final cut is scrubbed
+        // before the cut.
+        let secret = "https://user:hunter2pw@host.invalid/r";
+        let straddle = format!("{} {secret} {}", "a".repeat(2_000), "b ".repeat(1_400));
+        let (text, _) = scrub_tail(straddle.as_bytes(), false);
+        assert!(
+            !text.contains("hunter2") && !text.contains("user:"),
+            "{text:?}"
+        );
+
+        // Hostile terminal bytes are flattened; escapes cannot double the bound.
+        let (text, _) = scrub_tail(&b"\x1b[31m\"\\\n".repeat(2_000), false);
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+        let escaped: usize = text
+            .chars()
+            .map(|c| {
+                if matches!(c, '"' | '\\' | '\n') {
+                    2
+                } else {
+                    c.len_utf8()
+                }
+            })
+            .sum();
+        assert!(escaped <= RESULT_STRING_BOUND + 3, "{escaped}");
+
+        // No whitespace after a cut front: nothing is kept.
+        assert_eq!(scrub_tail(&[b'a'; 100], true), ("…".to_owned(), true));
     }
 }

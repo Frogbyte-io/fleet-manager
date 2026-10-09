@@ -30,10 +30,11 @@ pub const RESULT_MARKER: &str = "FLEET_LAB_ACCEPTANCE_RESULT";
 
 /// The scenarios, in report order. Kept in step with the suite's
 /// `live::SCENARIOS`.
-pub const SCENARIOS: [&str; 3] = [
+pub const SCENARIOS: [&str; 4] = [
     "lease-exec-destroy",
     "ttl-expiry-restart",
     "put-collect-roundtrip",
+    "detached-exec",
 ];
 
 /// The Lab live gate.
@@ -468,21 +469,22 @@ mod tests {
             row("lease-exec-destroy", None, Status::Skipped),
             row("ttl-expiry-restart", None, Status::Skipped),
             row("put-collect-roundtrip", None, Status::Skipped),
+            row("detached-exec", None, Status::Skipped),
         ];
         let summary = Summary::build(false, None, &[], &reported, true);
         assert_eq!(summary.results.len(), SCENARIOS.len());
         assert!(summary.ok());
         let json = summary.to_json();
         assert!(json.contains("\"suite\": \"lab-acceptance\""), "{json}");
-        assert!(json.contains("\"skipped\": 3"), "{json}");
+        assert!(json.contains("\"skipped\": 4"), "{json}");
     }
 
     #[test]
     fn a_pair_that_never_reported_fails_the_run() {
         let reported = [row("lease-exec-destroy", Some("PVE9"), Status::Pass)];
         let summary = Summary::build(true, None, &["PVE9".to_owned()], &reported, true);
-        assert_eq!(summary.results.len(), 3);
-        assert_eq!(summary.count(Status::Fail), 2);
+        assert_eq!(summary.results.len(), 4);
+        assert_eq!(summary.count(Status::Fail), 3);
         assert!(!summary.ok());
     }
 
@@ -492,12 +494,13 @@ mod tests {
             row("lease-exec-destroy", None, Status::Pass),
             row("ttl-expiry-restart", None, Status::Pass),
             row("put-collect-roundtrip", None, Status::Pass),
+            row("detached-exec", None, Status::Pass),
             row("new-scenario", None, Status::Pass),
         ];
         let summary = Summary::build(false, None, &[], &reported, true);
-        assert_eq!(summary.results.len(), 4);
+        assert_eq!(summary.results.len(), 5);
         assert_eq!(summary.count(Status::Fail), 1);
-        assert!(summary.results[3].reason.contains("SCENARIOS"));
+        assert!(summary.results[4].reason.contains("SCENARIOS"));
         assert!(!summary.ok());
     }
 

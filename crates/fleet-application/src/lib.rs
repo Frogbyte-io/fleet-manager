@@ -15,6 +15,7 @@ pub mod idempotency;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
+pub mod lab_exec_detach;
 pub mod lab_placement;
 pub mod lab_pool;
 pub mod lab_put;

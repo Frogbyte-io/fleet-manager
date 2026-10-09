@@ -22,6 +22,7 @@ pub mod images_exec;
 pub mod install;
 pub mod lab_artifacts_store;
 pub mod lab_cleanup;
+pub mod lab_detach_store;
 pub mod lab_pool;
 pub mod lab_put_store;
 pub mod lab_sweeper;

@@ -20,6 +20,9 @@ use fleet_application::lab::{
     NewLabTemplate, NewLease, NewProvision, ProvisionPort, RecipeVersion,
 };
 use fleet_application::lab_artifacts::{ArtifactPolicy, LabArtifacts};
+use fleet_application::lab_exec_detach::{
+    GuestExecPort, GuestProcess, GuestProcessState, LabExecDetach,
+};
 use fleet_application::lab_put::LabPuts;
 use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
 use fleet_application::operation::{Operation, Operations};
@@ -27,6 +30,7 @@ use fleet_application::worker::OperationExecutor;
 use fleet_controller::lab_artifacts_store::{
     FsArtifactStore, GuestFiles, LabArtifactDispatch, StagingFile,
 };
+use fleet_controller::lab_detach_store::LabDetachDispatch;
 use fleet_controller::lab_put_store::{FsUploadStore, LabPutDispatch};
 use fleet_core::{CleanupStrategy, LabTemplateContent, LeaseState, ReadinessProbe};
 use fleet_provider_ssh::FetchOutcome;
@@ -111,6 +115,39 @@ impl GuestFiles for Guest {
     }
 }
 
+/// The detached command's guest: the first read says running, every later
+/// one says it exited with code 0.
+#[derive(Debug, Default)]
+struct DetachedGuest {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl GuestExecPort for DetachedGuest {
+    async fn probe(&self, _: &str, _: &str, _: &str) -> Result<GuestProcess, String> {
+        let first = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        Ok(GuestProcess {
+            state: if first {
+                GuestProcessState::Running
+            } else {
+                GuestProcessState::Exited
+            },
+            reason: None,
+            exit_code: (!first).then_some(0),
+            started_at: Some(100),
+            finished_at: (!first).then_some(2_000),
+            stdout_bytes: 11,
+            stderr_bytes: 0,
+            stdout_tail: if first {
+                Vec::new()
+            } else {
+                b"suite done\n".to_vec()
+            },
+            stderr_tail: Vec::new(),
+        })
+    }
+}
+
 /// Stands in for the Proxmox, SSH, and cleanup executors.
 #[derive(Debug)]
 struct GuestWorld {
@@ -142,6 +179,8 @@ impl OperationExecutor for GuestWorld {
                 self.leases.update(&ready).await?;
                 json!({})
             }
+            // The detached start's SSH session: the guest started it.
+            "ssh.exec" => json!({ "exitCode": 0, "stdout": "started\n", "stderr": "" }),
             "lab.exec" => json!({
                 "exitCode": 0, "stdout": "hello from the guest\n", "stderr": "",
                 "truncatedStdout": false, "truncatedStderr": false
@@ -276,6 +315,16 @@ impl World {
             labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         ));
+        let detach_records = Arc::new(fleet_storage_sqlite::DetachedExecRepository::new(
+            pool.clone(),
+        ));
+        let detached = Arc::new(LabExecDetach::new(
+            detach_records.clone(),
+            Arc::new(DetachedGuest::default()),
+            leases.clone(),
+            labs.clone(),
+            Arc::new(AuditSink::new(pool.clone())),
+        ));
         let lab = Arc::new(
             Lab::new(
                 labs.clone(),
@@ -286,7 +335,8 @@ impl World {
                 Arc::new(AuditSink::new(pool.clone())),
             )
             .with_artifacts(artifacts.clone())
-            .with_puts(puts),
+            .with_puts(puts)
+            .with_detached(detached),
         );
         let settings = fleet_controller::Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -346,6 +396,12 @@ impl World {
             leases.clone(),
             labs.clone(),
             guest,
+        );
+        let dispatch = LabDetachDispatch::new(
+            Arc::new(dispatch),
+            detach_records,
+            leases.clone(),
+            labs.clone(),
         );
         let worker = tokio::spawn(async move {
             loop {
@@ -649,6 +705,59 @@ async fn a_scoped_credential_runs_the_whole_lab_loop_through_fleetctl_and_nothin
     assert_eq!(exec.code, 0, "{} {}", exec.stdout, exec.stderr);
     assert_eq!(exec.json()["stdout"], "hello from the guest\n");
 
+    // detach, then poll: the handle comes back at once, the first read finds
+    // the command running, and `--wait` ends with its exit code.
+    let detached = world
+        .cli(
+            Some(&token),
+            &[
+                "lab",
+                "exec",
+                &lease_id,
+                "--detach",
+                "--idempotency-key",
+                "run-1",
+                "--",
+                "./run-suite.sh",
+            ],
+        )
+        .await;
+    assert_eq!(detached.code, 0, "{} {}", detached.stdout, detached.stderr);
+    let handle = detached.json()["handle"].as_str().unwrap().to_owned();
+    assert_eq!(detached.json()["operation"]["kind"], "lab.exec_detach");
+    let retried = world
+        .cli(
+            Some(&token),
+            &[
+                "lab",
+                "exec",
+                &lease_id,
+                "--detach",
+                "--idempotency-key",
+                "run-1",
+                "--",
+                "./run-suite.sh",
+            ],
+        )
+        .await;
+    assert_eq!(retried.json()["handle"], handle.as_str());
+    let running = world
+        .cli(Some(&token), &["lab", "exec-status", &handle])
+        .await;
+    assert_eq!(running.code, 0, "{} {}", running.stdout, running.stderr);
+    assert_eq!(running.json()["state"], "running");
+    assert_eq!(running.json()["terminal"], false);
+    let finished = world
+        .cli(
+            Some(&token),
+            &["lab", "exec-status", &handle, "--wait", "--timeout", "60"],
+        )
+        .await;
+    assert_eq!(finished.code, 0, "{} {}", finished.stdout, finished.stderr);
+    assert_eq!(finished.json()["state"], "exited");
+    assert_eq!(finished.json()["exitCode"], 0);
+    assert_eq!(finished.json()["stdout"], "suite done\n");
+
     // collect
     let collect = world
         .cli(
@@ -812,7 +921,7 @@ async fn a_scoped_credential_runs_the_whole_lab_loop_through_fleetctl_and_nothin
     // The token is shown once and never again: not in any output, not in
     // the audit ledger, not in the database (only its hash is).
     let everything = [
-        &created, &status, &exec, &collect, &put, &got, &extended, &destroyed,
+        &created, &status, &exec, &detached, &finished, &collect, &put, &got, &extended, &destroyed,
     ]
     .iter()
     .fold(String::new(), |mut all, cli| {
@@ -832,6 +941,17 @@ async fn a_scoped_credential_runs_the_whole_lab_loop_through_fleetctl_and_nothin
         }),
         "{audit}"
     );
+    // The detached start and the status reads were audited under the
+    // credential, with no command text.
+    for action in ["lab.exec", "lab.exec.read"] {
+        assert!(
+            audit["items"].as_array().unwrap().iter().any(|item| {
+                item["action"] == action && item["actor"].to_string().contains("release-qa")
+            }),
+            "{action}: {audit}"
+        );
+    }
+    assert!(!audit.to_string().contains("run-suite.sh"));
     let rows = world.stored_text().await;
     assert!(!rows.contains(&token), "the token must not be stored");
     assert!(
@@ -1188,6 +1308,49 @@ async fn leases_artifacts_and_operations_are_scoped_to_their_owner() {
         .unwrap();
     assert_eq!(owner_put.status().as_u16(), 202);
 
+    // A detached command is the owner's: its handle reads as not found to
+    // another owner, exactly like a handle that does not exist.
+    let (status, started) = world
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/v1/lab/leases/{lease}/exec-detached"),
+            Some(&mine),
+            Some(json!({ "script": "id" })),
+        )
+        .await;
+    assert_eq!(status, 202, "{started}");
+    let handle = started["data"]["handle"].as_str().unwrap().to_owned();
+    let (status, own) = world
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/v1/lab/detached-execs/{handle}"),
+            Some(&rotated),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "the owner's rotated credential reads it: {own}"
+    );
+    let (foreign_status, foreign) = world
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/v1/lab/detached-execs/{handle}"),
+            Some(&theirs),
+            None,
+        )
+        .await;
+    let (unknown_status, unknown) = world
+        .call(
+            reqwest::Method::GET,
+            "/api/v1/lab/detached-execs/no-such-handle",
+            Some(&theirs),
+            None,
+        )
+        .await;
+    assert_eq!((foreign_status, unknown_status), (404, 404));
+    assert_eq!(foreign["code"], unknown["code"]);
+
     // Another owner sees none of it.
     let lease_path = format!("/api/v1/lab/leases/{lease}");
     for (method, path, body) in [
@@ -1196,6 +1359,16 @@ async fn leases_artifacts_and_operations_are_scoped_to_their_owner() {
             reqwest::Method::POST,
             format!("{lease_path}/exec"),
             Some(json!({ "script": "id" })),
+        ),
+        (
+            reqwest::Method::POST,
+            format!("{lease_path}/exec-detached"),
+            Some(json!({ "script": "id" })),
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/api/v1/lab/detached-execs/{handle}"),
+            None,
         ),
         (
             reqwest::Method::POST,
@@ -1305,6 +1478,8 @@ async fn every_route_is_allowed_refused_or_unreachable_for_the_credential() {
         ("POST", "/api/v1/lab/leases/{leaseId}/cleanup/retry"),
         ("POST", "/api/v1/lab/leases/{leaseId}/extend"),
         ("POST", "/api/v1/lab/leases/{leaseId}/exec"),
+        ("POST", "/api/v1/lab/leases/{leaseId}/exec-detached"),
+        ("GET", "/api/v1/lab/detached-execs/{handle}"),
         ("POST", "/api/v1/lab/leases/{leaseId}/artifacts/collect"),
         ("POST", "/api/v1/lab/leases/{leaseId}/files"),
         ("GET", "/api/v1/lab/artifacts"),
@@ -1377,6 +1552,7 @@ async fn every_route_is_allowed_refused_or_unreachable_for_the_credential() {
         let concrete = path
             .replace("{leaseId}", "unknown-id")
             .replace("{artifactId}", "unknown-id")
+            .replace("{handle}", "unknown-id")
             .replace("{operationId}", "unknown-id");
         let body = (*method != "GET").then(|| json!({}));
         let (status, response) = world
