@@ -1380,3 +1380,50 @@ async fn keyed_creation_and_lease_filters_stay_inside_the_owner() {
     assert_eq!(listed.code, 0, "{}", listed.stderr);
     assert_eq!(listed.json()["items"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_is_not_the_credentials_to_choose_and_odd_headers_are_refused() {
+    let world = World::start().await;
+    let (_, token) = world.issue("ci-a", &[&world.template_id], &[]).await;
+    let (status, lease) = world
+        .call(
+            reqwest::Method::POST,
+            "/api/v1/lab/leases",
+            Some(&token),
+            Some(json!({ "templateVersionId": world.version_id, "purpose": "acct" })),
+        )
+        .await;
+    assert_eq!(status, 201, "{lease}");
+    let id = lease["data"]["id"].as_str().unwrap();
+    let path = format!("/api/v1/lab/leases/{id}/provision");
+    let (status, body) = world
+        .call(
+            reqwest::Method::POST,
+            &path,
+            Some(&token),
+            Some(json!({ "accountId": "some-account" })),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    // Placement chooses: no account is fine.
+    let (status, body) = world
+        .call(reqwest::Method::POST, &path, Some(&token), Some(json!({})))
+        .await;
+    assert_eq!(status, 201, "{body}");
+
+    // A token in a shape the resolver cannot read is refused, never ignored
+    // (which would run the request as the listener's administrator).
+    let url = world.url("/api/v1/lab/leases");
+    for headers in [
+        vec![format!("Bearer {token}"), "Bearer other".to_owned()],
+        vec![format!("Bearer  {token}")],
+        vec![format!("Basic {token}")],
+    ] {
+        let mut request = world.http.get(&url);
+        for value in &headers {
+            request = request.header("authorization", value);
+        }
+        let status = request.send().await.unwrap().status().as_u16();
+        assert_eq!(status, 401, "{headers:?}");
+    }
+}

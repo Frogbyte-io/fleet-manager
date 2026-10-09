@@ -198,12 +198,21 @@ impl GrantBook {
 }
 
 /// A stored credential with the hash of its token.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StoredCredential {
     /// The credential.
     pub credential: DelegatedCredential,
     /// The lowercase hex SHA-256 of the token.
     pub token_hash: String,
+}
+
+impl fmt::Debug for StoredCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredCredential")
+            .field("credential", &self.credential)
+            .field("token_hash", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The credential persistence port.
@@ -411,6 +420,12 @@ fn validate_issue(request: &IssueCredential) -> Result<i64, CredentialError> {
             detail: format!(
                 "the allow-list takes at most {MAX_ALLOW_ENTRIES} ids of 1..={MAX_ENTRY_LEN} letters, digits, '.', '_', '-' or '@'"
             ),
+        });
+    }
+    // The audit metadata carries each list as one bounded value.
+    if request.templates.join(",").len() > 2000 || request.versions.join(",").len() > 2000 {
+        return Err(CredentialError::Invalid {
+            detail: "the allow-list is too long".to_owned(),
         });
     }
     if request.label.chars().count() > MAX_LABEL_LEN || request.label.chars().any(char::is_control)

@@ -708,6 +708,8 @@ pub async fn start_lab_lease_provision(
             correlation_id,
         ));
     }
+    lab.check_provision_account(&principal, request.account_id.as_deref())
+        .map_err(|error| map_lab_error(&error, correlation_id))?;
     fleet_application::authz::authorize(
         state.authorizer.as_ref(),
         fleet_application::authz::AccessRequest {
@@ -753,7 +755,10 @@ pub async fn start_lab_lease_provision(
             &lease_id,
             &fleet_application::operation::NewOperation {
                 kind: "lab.provision".to_owned(),
-                idempotency_key: Some(format!("{}:lab-lease-provision:{lease_id}", principal.id)),
+                idempotency_key: Some(format!(
+                    "{}:lab-lease-provision:{lease_id}",
+                    fleet_application::authz::resource_owner(&principal.id)
+                )),
                 deadline_at: None,
                 correlation_id: Some(correlation_id.to_string()),
                 payload_json: Some(payload),
@@ -1015,7 +1020,6 @@ pub async fn list_lab_leases(
     let filter = lease_filter(pairs).map_err(invalid)?;
     let lab = lab_or_error(&state, correlation_id)?;
     let principal = crate::operations::principal_or_error(principal, correlation_id)?;
-    // No owner scope yet: #392 passes the scoped CI identity's own id here.
     let leases = lab
         .search_leases(
             state.authorizer.as_ref(),

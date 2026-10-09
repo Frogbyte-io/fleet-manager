@@ -287,8 +287,15 @@ pub async fn resolve_delegated_caller(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(token) = presented_token(&request) else {
-        return next.run(request).await;
+    let token = match presented_token(&request) {
+        Presented::Nothing => return next.run(request).await,
+        Presented::Token(token) => token,
+        Presented::Malformed => {
+            request
+                .extensions_mut()
+                .insert(RejectedCredential(CredentialRejection::Malformed));
+            return next.run(request).await;
+        }
     };
     let remote_addr = request
         .extensions()
@@ -340,16 +347,41 @@ pub async fn resolve_delegated_caller(
     }
 }
 
-/// The bearer token of a request when it presents one of this scheme: the
-/// request has exactly one `Authorization` header, `Bearer`, whose token
-/// starts with the delegated tag. Anything else is not for this resolver.
-fn presented_token(request: &Request) -> Option<String> {
-    let mut values = request.headers().get_all(AUTHORIZATION).iter();
-    let value = values.next()?.to_str().ok()?;
-    if values.next().is_some() {
-        return None;
+/// What a request presents in `Authorization`.
+enum Presented {
+    /// Nothing of this scheme: the listener's own resolver decides.
+    Nothing,
+    /// One well-formed `Bearer fmdc1.…` header.
+    Token(String),
+    /// Something that mentions the delegated scheme but is not exactly one
+    /// bearer token (several headers, odd spacing, not text). Refused, so a
+    /// misconfigured job never silently runs as another principal.
+    Malformed,
+}
+
+fn presented_token(request: &Request) -> Presented {
+    let tag = format!("{TOKEN_PREFIX}.");
+    let values: Vec<&axum::http::HeaderValue> =
+        request.headers().get_all(AUTHORIZATION).iter().collect();
+    let mentions_tag = |value: &axum::http::HeaderValue| {
+        value
+            .as_bytes()
+            .windows(tag.len())
+            .any(|window| window == tag.as_bytes())
+    };
+    if !values.iter().any(|value| mentions_tag(value)) {
+        return Presented::Nothing;
     }
-    let (scheme, token) = value.split_once(' ')?;
-    (scheme.eq_ignore_ascii_case("bearer") && token.starts_with(&format!("{TOKEN_PREFIX}.")))
-        .then(|| token.trim().to_owned())
+    let [value] = values.as_slice() else {
+        return Presented::Malformed;
+    };
+    match value
+        .to_str()
+        .ok()
+        .and_then(|text| text.split_once(' '))
+        .filter(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer") && token.starts_with(&tag))
+    {
+        Some((_, token)) => Presented::Token(token.trim().to_owned()),
+        None => Presented::Malformed,
+    }
 }

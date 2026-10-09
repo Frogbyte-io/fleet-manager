@@ -2306,7 +2306,12 @@ impl Lab {
         // Idempotent replay: the caller-scoped key returns the in-flight
         // record instead of creating a second guest saga.
         let scoped_key = lease_id
-            .map(|id| format!("{}:lab-lease:{id}", principal.id))
+            .map(|id| {
+                format!(
+                    "{}:lab-lease:{id}",
+                    crate::authz::resource_owner(&principal.id)
+                )
+            })
             .or_else(|| idempotency_key.map(|key| format!("{}:{key}", principal.id)));
         if let Some(key) = &scoped_key
             && let Some(existing) =
@@ -2362,6 +2367,26 @@ impl Lab {
             .attach_lease_provision(lease.as_ref(), &provision)
             .await?;
         Ok((provision, changed))
+    }
+
+    /// Refuses an explicit Proxmox account for a delegated credential.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a denial when a delegated credential names an account.
+    pub fn check_provision_account(
+        &self,
+        principal: &ActingPrincipal,
+        account_id: Option<&str>,
+    ) -> Result<(), LabUseCaseError> {
+        // Placement picks the account for a delegated credential: naming
+        // one would reach Proxmox accounts the credential has no access to.
+        if account_id.is_some() && crate::authz::is_delegated_principal(&principal.id) {
+            return Err(LabUseCaseError::Denied(Decision::deny(
+                ReasonId::OutOfScope,
+            )));
+        }
+        Ok(())
     }
 
     /// Starts the provision saga attached to an existing lease.

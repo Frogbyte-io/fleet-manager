@@ -122,7 +122,7 @@ impl LabArtifactPort for LabArtifactRepository {
             "SELECT * FROM lab_artifacts \
              WHERE owner = ?5 AND (?1 IS NULL OR lease_id = ?1) AND (?2 IS NULL OR project_id = ?2) \
              AND (?3 IS NULL OR (created_at, id) < \
-                  (SELECT created_at, id FROM lab_artifacts WHERE id = ?3)) \
+                  (SELECT created_at, id FROM lab_artifacts WHERE id = ?3 AND owner = ?5)) \
              ORDER BY created_at DESC, id DESC LIMIT ?4",
         )
         .bind(lease_id)

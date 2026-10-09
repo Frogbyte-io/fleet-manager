@@ -7309,6 +7309,11 @@ fn download_artifact(
     let mut response = with_credential(
         reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(3_600))
+            .redirect(if bearer_token()?.is_some() {
+                reqwest::redirect::Policy::none()
+            } else {
+                reqwest::redirect::Policy::default()
+            })
             .build()
             .map_err(|error| CliError {
                 message: format!("cannot build an HTTP client: {error}"),
@@ -7480,12 +7485,15 @@ fn with_credential(
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, CliError> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|error| CliError {
-            message: format!("cannot build an HTTP client: {error}"),
-        })
+    let mut builder =
+        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30));
+    // A credential is never carried along a redirect.
+    if bearer_token()?.is_some() {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder.build().map_err(|error| CliError {
+        message: format!("cannot build an HTTP client: {error}"),
+    })
 }
 
 /// Reads the node's local status surface over the Unix socket, without any

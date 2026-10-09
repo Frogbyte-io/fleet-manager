@@ -71,6 +71,13 @@ A lease created by a credential principal records the owner identity `credential
 
 Web sessions, first-run bootstrap, user accounts, roles, OIDC, rate and concurrency limits, high-impact confirmation, policy administration, a policy engine, and refusing anonymous administration on a listener. The credential narrows a caller that presents it; it is not a perimeter. Anonymous callers that reach the trusted-LAN listener remain administrators until the rest of M8 lands, so a deployment that must not rely on LAN trust still needs that work. No new secrets manager, policy engine, or database is introduced; the credential table is a SQLite table next to the others.
 
+## Known limits
+
+- Credentials of one owner share its leases, so a newer credential with a narrower allow-list can still exec on, extend, and release leases an older one created from other templates. Issue a distinct owner label to separate them.
+- A credential names no Proxmox account (placement chooses), no project, and cannot lease a template whose cleanup is `keep`.
+- A response already streaming (an operation event stream, an artifact download) is not cut off at revocation; the next request is refused.
+- Unknown or malformed tokens identify no principal and are not audited.
+
 ## Consequences
 
 - A CI job gets a credential that is useless outside its owner's leases and the allowed templates, expires on its own, and can be revoked at once. A leaked token cannot administer Fleet, read secrets, exec outside Lab, or keep a VM.

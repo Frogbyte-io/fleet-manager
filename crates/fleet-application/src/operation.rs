@@ -921,6 +921,7 @@ impl Operations {
                 detail: "the lab.provision payload must match its dedicated lease route".to_owned(),
             });
         }
+        self.require_own_lease(principal_id, lease_id).await?;
         self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
             .await
     }
@@ -1095,8 +1096,44 @@ impl Operations {
             },
         )
         .map_err(OperationUseCaseError::Denied)?;
+        self.require_own_lease(principal_id, lease_id).await?;
         self.create_inner(authorizer, principal_id, new, CreateRoute::Dedicated)
             .await
+    }
+
+    /// A delegated credential queues work only for its own owner's leases,
+    /// whatever route calls here; an unknown or foreign lease is not found.
+    async fn require_own_lease(
+        &self,
+        principal_id: &str,
+        lease_id: &str,
+    ) -> Result<(), OperationUseCaseError> {
+        if !crate::authz::is_delegated_principal(principal_id) {
+            return Ok(());
+        }
+        let not_found = || OperationUseCaseError::NotFound {
+            what: format!("lease {lease_id}"),
+        };
+        let lookup = self
+            .lease_owners
+            .as_ref()
+            .ok_or(OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail: "no lease owner lookup is wired".to_owned(),
+            })?;
+        let owner = lookup
+            .owner_of(lease_id)
+            .await
+            .map_err(|detail| OperationUseCaseError::Backend {
+                context: "lease_owner",
+                detail,
+            })?
+            .ok_or_else(not_found)?;
+        if crate::authz::owner_scope_permits(principal_id, &owner) {
+            Ok(())
+        } else {
+            Err(not_found())
+        }
     }
 
     #[allow(clippy::too_many_lines)]
