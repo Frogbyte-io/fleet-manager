@@ -1134,3 +1134,78 @@ async fn an_executor_failure_detail_is_scrubbed_and_bounded_before_it_is_stored(
     assert_eq!(error["reason"], "step_failed");
     assert!(error["detail"].as_str().unwrap().len() <= 3_010);
 }
+
+#[tokio::test]
+async fn a_nodes_result_payload_and_fault_message_are_scrubbed_before_storage() {
+    let harness = harness().await;
+    let keys = NodeKeys::generate();
+    let (machine_id, credential) = harness.enroll_node("chatty", &keys).await;
+    let session = harness.prove_session(&credential, &keys).await;
+    let (stream, _) = connect_node(&harness, &session).await.unwrap();
+    let (mut sink, mut source) = stream.split();
+    send_frame(&mut sink, hello_frame(&machine_id, 1, 1)).await;
+    let _welcome = receive_frame(&mut source).await.expect("a Welcome");
+
+    let operation = harness
+        .create_node_operation("node.noop", &machine_id, None)
+        .await;
+    let tick = harness.tick();
+    let node = async {
+        let command = loop {
+            let frame = receive_frame(&mut source).await.expect("a command frame");
+            if let Some(wire::frame::Payload::Command(command)) = frame.payload {
+                break command;
+            }
+        };
+        // Obviously fake credential shapes, never real secrets.
+        let leaked = "fixture-not-a-real-secret";
+        let reply = wire::Frame {
+            message_id: uuid::Uuid::now_v7().to_string(),
+            correlation_id: String::new(),
+            sent_at_unix_millis: fleet_core::SystemClock::now_unix_millis(),
+            payload: Some(wire::frame::Payload::CommandResult(wire::CommandResult {
+                operation_id: command.operation_id,
+                status: wire::ResultStatus::Succeeded as i32,
+                exit_code: 0,
+                output_truncated: false,
+                duration_millis: 1,
+                stopped: false,
+                fault: Some(wire::Fault {
+                    code: wire::FaultCode::MalformedFrame as i32,
+                    message: format!("pull https://user:{leaked}@host.invalid/repo.git"),
+                    ..wire::Fault::default()
+                }),
+                payload: format!("{{\"password\": \"{leaked}\"}} {}", "x".repeat(20_000))
+                    .into_bytes(),
+            })),
+        };
+        send_frame(&mut sink, reply).await;
+    };
+    let (report, ()) = tokio::join!(tick, node);
+    assert!(report.completed, "{report:?}");
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &operation.id,
+        )
+        .await
+        .unwrap();
+    let stored = finished.result_json.expect("a stored result");
+    assert!(!stored.contains("fixture-not-a-real-secret"), "{stored}");
+    assert!(stored.contains("***@host.invalid"), "{stored}");
+    assert!(stored.len() < 8 * 1024, "bounded: {}", stored.len());
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(
+        stored["outputTruncated"], true,
+        "a payload cut by the bound says so"
+    );
+    assert!(
+        !stored["fault"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fixture-not")
+    );
+    sink.close().await.unwrap();
+}
