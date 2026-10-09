@@ -122,12 +122,14 @@ const SECRET_KEYS: [&str; 14] = [
 const MASK: &str = "***";
 
 /// Redacts header and pair shapes: `Authorization: <anything to end of
-/// line>`, `Bearer <token>`, and `token=<value>` style pairs for the names in
+/// line>`, `Bearer <token>`, `--password <value>` style flags, and
+/// `token=<value>` / `password: <value>` style pairs for the names in
 /// [`SECRET_KEYS`]. Matching is ASCII case-insensitive and linear.
 #[must_use]
 pub fn redact_secret_pairs(text: &str) -> String {
     let text = mask_authorization(text);
     let text = mask_bearer(&text);
+    let text = mask_secret_flags(&text);
     mask_key_values(&text)
 }
 
@@ -189,30 +191,64 @@ fn value_extent(text: &str, start: usize, to_line_end: bool) -> (usize, usize) {
     (start, end.map_or(text.len(), |end| start + end))
 }
 
-/// A shorter word after "bearer" is prose ("the bearer of news"), not a token.
+/// A shorter word after "bearer" is prose ("the bearer of news"), not a
+/// token, unless it looks like one: see [`bearer_token_is_secret`].
 const BEARER_MIN_TOKEN: usize = 8;
 
-/// `Bearer <token>`: the token runs to whitespace, a quote or a comma.
+/// Shortest token that is still masked when it is not a plain word.
+const BEARER_MIN_MIXED_TOKEN: usize = 4;
+
+/// Whether the word after "bearer" is a token: long enough, or a short word
+/// with a digit or symbol in it (a plain short word is prose).
+fn bearer_token_is_secret(token: &str) -> bool {
+    if token == MASK {
+        return false;
+    }
+    token.len() >= BEARER_MIN_TOKEN
+        || (token.len() >= BEARER_MIN_MIXED_TOKEN
+            && token.chars().any(|c| !c.is_ascii_alphabetic()))
+}
+
+/// Where the token after `Bearer` starts: past spaces and tabs and at most
+/// one line break, so a blank line ends the header rather than being crossed.
+fn after_bearer_gap(text: &str, name_end: usize) -> usize {
+    let blanks = |from: usize| {
+        from + (text.len() - from - text[from..].trim_start_matches([' ', '\t']).len())
+    };
+    let mut at = blanks(name_end);
+    if text[at..].starts_with("\r\n") {
+        at = blanks(at + 2);
+    } else if text[at..].starts_with('\n') {
+        at = blanks(at + 1);
+    }
+    at
+}
+
+/// `Bearer <token>`: the token runs to whitespace, a quote or a comma, and
+/// may follow the word after spaces, tabs and one line break.
 fn mask_bearer(text: &str) -> String {
-    const NAME: &str = "bearer ";
+    const NAME: &str = "bearer";
     let lower = text.to_ascii_lowercase();
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
     while let Some(offset) = lower[cursor..].find(NAME) {
         let start = cursor + offset;
-        let value_start = start + NAME.len();
+        let name_end = start + NAME.len();
+        let value_start = after_bearer_gap(text, name_end);
         let boundary = text[..start]
             .chars()
             .next_back()
             .is_none_or(|c| !is_word_char(c));
+        if !boundary || value_start == name_end {
+            result.push_str(&text[cursor..name_end]);
+            cursor = name_end;
+            continue;
+        }
         let value_end = text[value_start..]
             .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ')' | '}' | ';'))
             .map_or(text.len(), |end| value_start + end);
         result.push_str(&text[cursor..value_start]);
-        if boundary
-            && value_end - value_start >= BEARER_MIN_TOKEN
-            && &text[value_start..value_end] != MASK
-        {
+        if bearer_token_is_secret(&text[value_start..value_end]) {
             result.push_str(MASK);
         } else {
             result.push_str(&text[value_start..value_end]);
@@ -223,8 +259,59 @@ fn mask_bearer(text: &str) -> String {
     result
 }
 
-/// `name=value`, and the JSON form `"name": "value"`, where the word before
-/// the separator ends with a secret name.
+/// Whether a word names a secret: it ENDS with one of [`SECRET_KEYS`].
+fn names_a_secret(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    SECRET_KEYS.iter().any(|name| word.ends_with(name))
+}
+
+/// `--password value`, `--api-key value`: a long CLI flag whose name ends
+/// with a secret name masks the argument after it. (`--password=value` is
+/// the pair form.) A following word that starts with `-` is the next flag,
+/// so the flag was a switch, and a `<placeholder>` is usage text: neither is masked.
+fn mask_secret_flags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut search = 0;
+    while let Some(offset) = text[search..].find("--") {
+        let start = search + offset;
+        let name_start = start + 2;
+        let name_end = text[name_start..]
+            .find(|c: char| !is_word_char(c))
+            .map_or(text.len(), |end| name_start + end);
+        search = name_end.max(name_start);
+        let boundary = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        if !boundary
+            || !text[name_end..].starts_with([' ', '\t'])
+            || text[name_start..name_end]
+                .to_ascii_lowercase()
+                .starts_with("no-")
+            || !names_a_secret(&text[name_start..name_end])
+        {
+            continue;
+        }
+        let (value_start, value_end) = value_extent(text, name_end, false);
+        let value = &text[value_start..value_end];
+        if value.is_empty() || value.starts_with(['-', '<']) || value == MASK {
+            continue;
+        }
+        result.push_str(&text[cursor..value_start]);
+        result.push_str(MASK);
+        cursor = value_end;
+        search = value_end;
+    }
+    result.push_str(&text[cursor..]);
+    result
+}
+
+/// `name=value`, the JSON form `"name": "value"`, and the bare `name: value`
+/// form, where the word before the separator ends with a secret name. A bare
+/// colon is also prose ("invalid token: expired"), so it only masks a value
+/// that is quoted, sits on a line that starts with the key (YAML or env
+/// style), or reads like a credential rather than a plain word.
 fn mask_key_values(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
@@ -233,10 +320,13 @@ fn mask_key_values(text: &str) -> String {
         let separator = search + offset;
         search = separator + 1;
         let mut key_end = separator;
+        let mut bare = false;
         if text.as_bytes()[separator] == b':' {
-            // Only the quoted-key JSON form: a bare `name: value` is prose.
             match text[..separator].chars().next_back() {
                 Some(quote @ ('"' | '\'')) => key_end -= quote.len_utf8(),
+                Some(c) if is_word_char(c) && text[separator + 1..].starts_with([' ', '\t']) => {
+                    bare = true;
+                }
                 _ => continue,
             }
         }
@@ -246,14 +336,16 @@ fn mask_key_values(text: &str) -> String {
             .take_while(|(_, c)| is_word_char(*c))
             .last()
             .map_or(key_end, |(index, _)| index);
-        let key = text[key_start..key_end].to_ascii_lowercase();
         // The value is only scanned once the key names a secret, so a long
         // run of '=' with no secret name stays linear.
-        if !SECRET_KEYS.iter().any(|name| key.ends_with(name)) {
+        if !names_a_secret(&text[key_start..key_end]) {
             continue;
         }
         let (value_start, value_end) = value_extent(text, separator + 1, false);
-        if value_end > value_start && &text[value_start..value_end] != MASK {
+        if value_end > value_start
+            && &text[value_start..value_end] != MASK
+            && (!bare || bare_value_is_secret(text, key_start, value_start, value_end))
+        {
             result.push_str(&text[cursor..value_start]);
             result.push_str(MASK);
             cursor = value_end;
@@ -262,6 +354,51 @@ fn mask_key_values(text: &str) -> String {
     }
     result.push_str(&text[cursor..]);
     result
+}
+
+/// Plain status words: `Password: incorrect` is a message, not a credential,
+/// even at the start of a line. (A quoted value is always masked.)
+const STATUS_WORDS: [&str; 11] = [
+    "incorrect",
+    "invalid",
+    "expired",
+    "missing",
+    "required",
+    "not",
+    "none",
+    "null",
+    "empty",
+    "denied",
+    "unknown",
+];
+
+/// Whether the value of a bare `key: value` is a secret: quoted, on a line
+/// that starts with the key (an optional list dash aside), or a word of at
+/// least [`BEARER_MIN_TOKEN`] characters with a digit or symbol in it.
+fn bare_value_is_secret(
+    text: &str,
+    key_start: usize,
+    value_start: usize,
+    value_end: usize,
+) -> bool {
+    let quoted = text[..value_start]
+        .chars()
+        .next_back()
+        .is_some_and(|c| matches!(c, '"' | '\''));
+    // Walk back over indentation and a list dash only, so a long line of
+    // keys stays linear: the walk ends at the first other character.
+    let yaml_shape = text[..key_start]
+        .chars()
+        .rev()
+        .find(|c| *c != ' ' && *c != '\t' && *c != '-')
+        .is_none_or(|c| c == '\n');
+    let value = &text[value_start..value_end];
+    if !quoted && yaml_shape && STATUS_WORDS.contains(&value.to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    quoted
+        || yaml_shape
+        || (value.len() >= BEARER_MIN_TOKEN && value.chars().any(|c| !c.is_ascii_alphabetic()))
 }
 
 /// Redacts every credential shape this module knows: URL userinfo,
@@ -355,11 +492,42 @@ fn redact_json_at(value: &mut serde_json::Value, depth: usize) {
         Value::Object(map) => {
             let entries = std::mem::take(map);
             for (key, mut item) in entries {
-                redact_json_at(&mut item, depth + 1);
+                // A value under a secret-named key (`"password": "x"`) is
+                // masked whole: the string scrubber never sees key and value
+                // together, so the key's name is the only signal.
+                if names_a_secret(&key) {
+                    mask_json_values(&mut item, depth + 1);
+                } else {
+                    redact_json_at(&mut item, depth + 1);
+                }
                 map.insert(scrub_failure_detail(&key), item);
             }
         }
         _ => {}
+    }
+}
+
+/// Masks every string and number under a secret-named key; nesting beyond
+/// the depth limit is dropped like everywhere else in the document.
+fn mask_json_values(value: &mut serde_json::Value, depth: usize) {
+    use serde_json::Value;
+    if depth > MAX_JSON_DEPTH {
+        *value = Value::Null;
+        return;
+    }
+    match value {
+        Value::String(_) | Value::Number(_) => *value = Value::String(MASK.to_owned()),
+        Value::Array(items) => {
+            for item in items {
+                mask_json_values(item, depth + 1);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                mask_json_values(item, depth + 1);
+            }
+        }
+        Value::Bool(_) | Value::Null => {}
     }
 }
 
@@ -565,6 +733,26 @@ mod tests {
             ("AWS_SECRET_KEY=fakeaws ok", "AWS_SECRET_KEY=*** ok"),
             ("(Bearer fakebearer9)", "(Bearer ***)"),
             ("db api-key=fakekey;", "db api-key=***;"),
+            // Space-separated CLI flags.
+            (
+                "login --user bob --password fakepw1 --host h",
+                "login --user bob --password *** --host h",
+            ),
+            ("run --api-key 'fake key 2' now", "run --api-key '***' now"),
+            ("x --TOKEN\tfaketab3", "x --TOKEN\t***"),
+            // Bare `name: value`: quoted, YAML-shaped, or credential-like.
+            ("password: fakeyaml4\nuser: bob", "password: ***\nuser: bob"),
+            ("  - db_token: fake5 # c", "  - db_token: *** # c"),
+            (
+                "auth failed, secret: \"fake6\"",
+                "auth failed, secret: \"***\"",
+            ),
+            ("bad password: fake1234xyz", "bad password: ***"),
+            // `Bearer` across any whitespace, and short mixed tokens.
+            ("Bearer\tfaketab7", "Bearer\t***"),
+            ("Bearer\nfakenl0123", "Bearer\n***"),
+            ("Bearer ab12", "Bearer ***"),
+            ("Bearer a1-b", "Bearer ***"),
         ];
         for (input, expected) in cases {
             let out = redact_secret_pairs(input);
@@ -591,6 +779,18 @@ mod tests {
     fn secret_pair_scrub_leaves_ordinary_text_and_is_idempotent() {
         for text in [
             "the bearer of bad news, a=b, tokens=3, key=value",
+            "a bearer of news and Bearer abc",
+            "invalid token: expired",
+            "bad password: required",
+            "the secret: unknown, error: bad credentials: none",
+            "run --no-password --token-file /x --password --next",
+            "usage: tool --password <value>",
+            "password:",
+            "Password: incorrect",
+            "token: expired\nsecret: not found",
+            "run --no-password file.txt",
+            "token bearer\n\nSomething happened",
+            "Bearer\nof news",
             "no secrets here: a == b",
             "token=",
             "x=y=z",
@@ -606,6 +806,24 @@ mod tests {
     fn secret_pair_scrub_is_linear_on_pathological_input() {
         let text = "=a".repeat(100_000) + &"token=".repeat(50_000);
         let _ = redact_credentials(&text);
+        // One very long line of bare keys must not be quadratic.
+        let started = std::time::Instant::now();
+        let long = "x password: ab ".repeat(70_000);
+        let _ = redact_credentials(&long);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        for unit in [
+            "--password ",
+            "Bearer\n",
+            "password: ",
+            "--token ",
+            "bearer \t",
+        ] {
+            let _ = redact_credentials(&unit.repeat(100_000));
+        }
     }
 
     #[test]
@@ -624,6 +842,23 @@ mod tests {
         assert!(!text.contains("fakekeyvalue"), "{text}");
         assert!(text.len() < 4_000, "{}", text.len());
         assert_eq!(value["n"], 7);
+
+        // Structured secrets: the value is masked by its key's name, and a
+        // name that merely contains a secret word is left alone.
+        let mut structured = serde_json::json!({
+            "password": "fake-structured-pw",
+            "db": { "api_key": ["fake-key-1", 42], "tokens": 3, "ok": true },
+            "token": null,
+            "detail": "fine",
+        });
+        redact_json_strings(&mut structured);
+        let text = structured.to_string();
+        assert!(!text.contains("fake-"), "{text}");
+        assert!(!text.contains("42"), "{text}");
+        assert_eq!(structured["db"]["tokens"], 3);
+        assert_eq!(structured["db"]["ok"], true);
+        assert_eq!(structured["token"], serde_json::Value::Null);
+        assert_eq!(structured["detail"], "fine");
 
         let mut deep = serde_json::json!("leaf");
         for _ in 0..40 {
