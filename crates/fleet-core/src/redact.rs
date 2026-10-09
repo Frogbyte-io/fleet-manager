@@ -100,12 +100,149 @@ pub fn redact_schemeless_credentials(text: &str) -> String {
     result
 }
 
-/// Redacts every credential shape this module knows: URL userinfo, then
-/// schemeless `user:password@`. The single entry point for output that is
-/// stored or returned (command output, logs), so a fix lands once.
+/// Names whose `name=value` value is a secret. A word matches when it ENDS
+/// with one (so `GITHUB_TOKEN=` and `access_token=` match).
+const SECRET_KEYS: [&str; 9] = [
+    "token",
+    "password",
+    "passwd",
+    "secret",
+    "apikey",
+    "api_key",
+    "api-key",
+    "passphrase",
+    "credential",
+];
+
+const MASK: &str = "***";
+
+/// Redacts header and pair shapes: `Authorization: <anything to end of
+/// line>`, `Bearer <token>`, and `token=<value>` style pairs for the names in
+/// [`SECRET_KEYS`]. Matching is ASCII case-insensitive and linear.
+#[must_use]
+pub fn redact_secret_pairs(text: &str) -> String {
+    let text = mask_authorization(text);
+    let text = mask_bearer(&text);
+    mask_key_values(&text)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')
+}
+
+/// `Authorization: value` or `Authorization=value`: the value runs to the end
+/// of the line or the closing quote.
+fn mask_authorization(text: &str) -> String {
+    const NAME: &str = "authorization";
+    let lower = text.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(offset) = lower[cursor..].find(NAME) {
+        let name_end = cursor + offset + NAME.len();
+        let after = &text[name_end..];
+        let trimmed = after.trim_start_matches([' ', '\t', '"', '\'']);
+        let separator = after.len() - trimmed.len();
+        if let Some(value) = trimmed.strip_prefix([':', '=']) {
+            let value_start = name_end + separator + 1;
+            let value_end = value
+                .find(['\n', '"', '\''])
+                .map_or(text.len(), |end| value_start + end);
+            result.push_str(&text[cursor..value_start]);
+            result.push(' ');
+            result.push_str(MASK);
+            cursor = value_end;
+        } else {
+            result.push_str(&text[cursor..name_end]);
+            cursor = name_end;
+        }
+    }
+    result.push_str(&text[cursor..]);
+    result
+}
+
+/// A shorter word after "bearer" is prose ("the bearer of news"), not a token.
+const BEARER_MIN_TOKEN: usize = 8;
+
+/// `Bearer <token>`: the token runs to whitespace, a quote or a comma.
+fn mask_bearer(text: &str) -> String {
+    const NAME: &str = "bearer ";
+    let lower = text.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(offset) = lower[cursor..].find(NAME) {
+        let start = cursor + offset;
+        let value_start = start + NAME.len();
+        let boundary = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let value_end = text[value_start..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ','))
+            .map_or(text.len(), |end| value_start + end);
+        result.push_str(&text[cursor..value_start]);
+        if boundary
+            && value_end - value_start >= BEARER_MIN_TOKEN
+            && &text[value_start..value_end] != MASK
+        {
+            result.push_str(MASK);
+        } else {
+            result.push_str(&text[value_start..value_end]);
+        }
+        cursor = value_end;
+    }
+    result.push_str(&text[cursor..]);
+    result
+}
+
+/// `name=value` where the word before `=` ends with a secret name.
+fn mask_key_values(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut search = 0;
+    while let Some(offset) = text[search..].find('=') {
+        let equals = search + offset;
+        let key_start = text[..equals]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word_char(*c))
+            .last()
+            .map_or(equals, |(index, _)| index);
+        let key = text[key_start..equals].to_ascii_lowercase();
+        // The value is only scanned once the key names a secret, so a long
+        // run of '=' with no secret name stays linear.
+        if !SECRET_KEYS.iter().any(|name| key.ends_with(name)) {
+            search = equals + 1;
+            continue;
+        }
+        let mut value_start = equals + 1;
+        if text[value_start..].starts_with(['"', '\'']) {
+            value_start += 1;
+        }
+        let value_end = text[value_start..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '&' | ';' | ','))
+            .map_or(text.len(), |end| value_start + end);
+        if value_end > value_start && &text[value_start..value_end] != MASK {
+            result.push_str(&text[cursor..value_start]);
+            result.push_str(MASK);
+            cursor = value_end;
+            search = value_end;
+        } else {
+            search = equals + 1;
+        }
+    }
+    result.push_str(&text[cursor..]);
+    result
+}
+
+/// Redacts every credential shape this module knows: URL userinfo,
+/// schemeless `user:password@`, then `Authorization`, `Bearer` and
+/// `token=` style pairs. The single entry point for output that is stored or
+/// returned (command output, logs), so a fix lands once.
 #[must_use]
 pub fn redact_credentials(text: &str) -> String {
-    redact_schemeless_credentials(&redact_url_credentials(text))
+    redact_secret_pairs(&redact_schemeless_credentials(&redact_url_credentials(
+        text,
+    )))
 }
 
 /// Flattens control characters (except newlines) to spaces: hostile
@@ -115,6 +252,84 @@ pub fn flatten_control_characters(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect()
+}
+
+/// The bound for stored result and failure text; output is trimmed to fit.
+pub const RESULT_STRING_BOUND: usize = 3_000;
+
+/// How much of a stream is scrubbed before it is bounded.
+const SCRUB_WINDOW: usize = 16 * 1024;
+
+/// Scrubs credential shapes from stored text, then bounds it, with an extra,
+/// tool-specific scrub that runs after the shared one and still before the
+/// bound. Anything that stores command, node or tool text uses this so no
+/// credential straddling the bound is ever half kept. The pure home of the
+/// scrubber, so the application layer (worker failure details) and the
+/// controller executors share one implementation.
+#[must_use]
+pub fn scrub_and_bound_with(
+    text: &str,
+    provider_truncated: bool,
+    extra: impl FnOnce(&str) -> String,
+) -> (String, bool) {
+    // The transport allows up to 1 MiB per stream, so scrub only a window
+    // that is far larger than the bound (the shared scrubber is linear, but
+    // tool-specific ones need not be). A cut window ends at whitespace, so no credential is
+    // split by it, and the dropped remainder counts as truncation.
+    let (window, windowed) = scrub_window(text);
+    // Scrub credentials first (a credential wrapped in terminal colour codes
+    // is still one token then), then flatten control characters: terminal
+    // escapes are hostile as output, and each JSON-escapes to up to six
+    // bytes, which could push a result past its stored size limit.
+    let scrubbed = flatten_control_characters(&extra(&redact_credentials(window)));
+    let (mut bounded, cut) = trim_to_bound(&scrubbed);
+    if windowed && !cut {
+        // The window dropped the rest; say so in the text as well as the flag.
+        bounded.push('…');
+    }
+    (bounded, provider_truncated || windowed || cut)
+}
+
+/// A failure detail as it is stored: scrubbed, flattened and bounded. The
+/// one call every operation-failure writer uses for executor error text.
+#[must_use]
+pub fn scrub_failure_detail(detail: &str) -> String {
+    scrub_and_bound_with(detail, false, str::to_owned).0
+}
+
+/// The prefix of `text` that is scrubbed, and whether text was left out. A
+/// cut window always ends at whitespace, so no token (and no credential) is
+/// split by it; a window with no whitespace at all keeps nothing.
+#[must_use]
+pub fn scrub_window(text: &str) -> (&str, bool) {
+    if text.len() <= SCRUB_WINDOW {
+        return (text, false);
+    }
+    let mut end = SCRUB_WINDOW;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind(char::is_whitespace).unwrap_or(0);
+    (&text[..end], true)
+}
+
+/// Cuts `text` so its JSON-escaped form is within [`RESULT_STRING_BOUND`]
+/// bytes: `"`, `\` and newlines escape to two bytes, so a stream made of them
+/// would otherwise double. Two such streams then still fit the stored result
+/// limit.
+#[must_use]
+pub fn trim_to_bound(text: &str) -> (String, bool) {
+    let mut escaped = 0;
+    for (index, c) in text.char_indices() {
+        escaped += match c {
+            '"' | '\\' | '\n' => 2,
+            other => other.len_utf8(),
+        };
+        if escaped > RESULT_STRING_BOUND {
+            return (format!("{}…", &text[..index]), true);
+        }
+    }
+    (text.to_owned(), false)
 }
 
 #[cfg(test)]
@@ -254,5 +469,59 @@ mod tests {
         let flattened = flatten_control_characters("a\u{1b}[31mb\nc");
         assert!(!flattened.contains('\u{1b}'), "{flattened}");
         assert!(flattened.contains('\n'), "newlines survive");
+    }
+
+    #[test]
+    fn secret_pair_shapes_are_masked() {
+        let cases = [
+            (
+                "Authorization: Basic ZmFrZTpmYWtl\nnext",
+                "Authorization: ***\nnext",
+            ),
+            ("authorization=Token fakevalue", "authorization= ***"),
+            (
+                "curl -H 'Authorization: Bearer fake-abc' x",
+                "curl -H 'Authorization: ***' x",
+            ),
+            ("sent Bearer fake-abc.def, ok", "sent Bearer ***, ok"),
+            ("token=fake123 other=1", "token=*** other=1"),
+            ("GITHUB_TOKEN=fakegh&x=1", "GITHUB_TOKEN=***&x=1"),
+            ("url ?access_token=fake9&a=b", "url ?access_token=***&a=b"),
+            ("PASSWORD=\"fake pw\"", "PASSWORD=\"***pw\""),
+            ("db api-key=fakekey;", "db api-key=***;"),
+        ];
+        for (input, expected) in cases {
+            let out = redact_secret_pairs(input);
+            assert!(
+                !out.contains("fake-abc") && !out.contains("fake123"),
+                "{out}"
+            );
+            assert!(!out.contains("fakekey") && !out.contains("fakegh"), "{out}");
+            assert!(!out.contains("fake9") && !out.contains("ZmFrZ"), "{out}");
+            if !input.contains("fake pw") {
+                assert_eq!(out, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn secret_pair_scrub_leaves_ordinary_text_and_is_idempotent() {
+        for text in [
+            "the bearer of bad news, a=b, tokens=3, key=value",
+            "no secrets here: a == b",
+            "token=",
+            "x=y=z",
+        ] {
+            assert_eq!(redact_secret_pairs(text), text);
+        }
+        let once = redact_credentials("token=fake1 Bearer fakebearer2 Authorization: fake3");
+        assert_eq!(redact_credentials(&once), once);
+        assert!(!once.contains("fake"), "{once}");
+    }
+
+    #[test]
+    fn secret_pair_scrub_is_linear_on_pathological_input() {
+        let text = "=a".repeat(100_000) + &"token=".repeat(50_000);
+        let _ = redact_credentials(&text);
     }
 }

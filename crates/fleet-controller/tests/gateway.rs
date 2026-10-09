@@ -1078,3 +1078,59 @@ async fn an_inventory_operation_records_facts_and_the_snapshot() {
     assert_eq!(gap_report["mode"], "full", "{gap_report}");
     let _ = shutdown.send(());
 }
+
+/// An executor whose failure text carries credential shapes and bulk, as a
+/// node-supplied fact or a transport error can.
+#[derive(Debug)]
+struct LeakyFailure;
+
+#[async_trait::async_trait]
+impl fleet_application::worker::OperationExecutor for LeakyFailure {
+    async fn execute(
+        &self,
+        _operations: &fleet_application::operation::Operations,
+        _operation: &fleet_application::operation::Operation,
+    ) -> Result<(), String> {
+        Err(format!(
+            "the node reports remote https://user:hunter2pw@host.invalid/r and \
+             Authorization: Bearer fake-bearer-value token=fake-token-value {}",
+            "x".repeat(10_000)
+        ))
+    }
+}
+
+#[tokio::test]
+async fn an_executor_failure_detail_is_scrubbed_and_bounded_before_it_is_stored() {
+    let harness = harness().await;
+    let operation = harness
+        .create_node_operation("node.noop", "01990000-0000-7000-8000-000000000000", None)
+        .await;
+    let report = harness
+        .operations
+        .tick(
+            &LeakyFailure,
+            "test-worker",
+            fleet_core::SystemClock::now_unix_millis(),
+            60_000,
+        )
+        .await
+        .expect("the tick must run");
+    assert!(report.completed);
+    let finished = harness
+        .operations
+        .get(
+            &fleet_auth::LanAllowAllAuthorizer,
+            "anonymous-lan-admin",
+            &operation.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(finished.state, "failed");
+    let stored = finished.error_json.unwrap();
+    for leaked in ["hunter2", "fake-bearer", "fake-token"] {
+        assert!(!stored.contains(leaked), "{leaked} leaked: {stored}");
+    }
+    let error: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(error["reason"], "step_failed");
+    assert!(error["detail"].as_str().unwrap().len() <= 3_010);
+}

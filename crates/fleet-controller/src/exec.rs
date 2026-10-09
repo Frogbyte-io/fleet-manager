@@ -68,12 +68,6 @@ enum SshExecAuth {
 /// operations, which survive controller restarts.
 pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 
-/// The bound for the operation's public result; output is trimmed to fit.
-pub(crate) const RESULT_STRING_BOUND: usize = 3_000;
-
-/// How much of a stream is scrubbed before it is bounded.
-const SCRUB_WINDOW: usize = 16 * 1024;
-
 /// The kind-dispatching executor.
 #[derive(Debug)]
 pub struct ScriptExecutor {
@@ -502,69 +496,12 @@ fn scrub_and_bound(text: &str, provider_truncated: bool) -> (String, bool) {
     scrub_and_bound_with(text, provider_truncated, str::to_owned)
 }
 
-/// [`scrub_and_bound`] with an extra, tool-specific scrub that runs after the
-/// shared one and still before the bound. Executors that store command
-/// output use this so no credential straddling the bound is ever half kept.
-pub(crate) fn scrub_and_bound_with(
-    text: &str,
-    provider_truncated: bool,
-    extra: impl FnOnce(&str) -> String,
-) -> (String, bool) {
-    // The transport allows up to 1 MiB per stream, so scrub only a window
-    // that is far larger than the bound (the shared scrubber is linear, but
-    // tool-specific ones need not be). A cut window ends at whitespace, so no credential is
-    // split by it, and the dropped remainder counts as truncation.
-    let (window, windowed) = scrub_window(text);
-    // Scrub credentials first (a credential wrapped in terminal colour codes
-    // is still one token then), then flatten control characters: terminal
-    // escapes are hostile as output, and each JSON-escapes to up to six
-    // bytes, which could push a result past its stored size limit.
-    let scrubbed =
-        fleet_core::flatten_control_characters(&extra(&fleet_core::redact_credentials(window)));
-    let (mut bounded, cut) = trim_to_bound(&scrubbed);
-    if windowed && !cut {
-        // The window dropped the rest; say so in the text as well as the flag.
-        bounded.push('…');
-    }
-    (bounded, provider_truncated || windowed || cut)
-}
-
-/// The prefix of `text` that is scrubbed, and whether text was left out. A
-/// cut window always ends at whitespace, so no token (and no credential) is
-/// split by it; a window with no whitespace at all keeps nothing.
-pub(crate) fn scrub_window(text: &str) -> (&str, bool) {
-    if text.len() <= SCRUB_WINDOW {
-        return (text, false);
-    }
-    let mut end = SCRUB_WINDOW;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let end = text[..end].rfind(char::is_whitespace).unwrap_or(0);
-    (&text[..end], true)
-}
-
-/// Cuts `text` so its JSON-escaped form is within [`RESULT_STRING_BOUND`]
-/// bytes: `"`, `\` and newlines escape to two bytes, so a stream made of them
-/// would otherwise double. Two such streams then still fit the stored result
-/// limit.
-fn trim_to_bound(text: &str) -> (String, bool) {
-    let mut escaped = 0;
-    for (index, c) in text.char_indices() {
-        escaped += match c {
-            '"' | '\\' | '\n' => 2,
-            other => other.len_utf8(),
-        };
-        if escaped > RESULT_STRING_BOUND {
-            return (format!("{}…", &text[..index]), true);
-        }
-    }
-    (text.to_owned(), false)
-}
+pub(crate) use fleet_core::{scrub_and_bound_with, scrub_window};
 
 #[cfg(test)]
 mod tests {
-    use super::{RESULT_STRING_BOUND, scrub_and_bound, transport_failure_json};
+    use super::{scrub_and_bound, transport_failure_json};
+    use fleet_core::RESULT_STRING_BOUND;
 
     /// The transport error text for a failed connection or collection is
     /// node- and tool-supplied: a userinfo URL is masked and a huge detail cut.

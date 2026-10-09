@@ -452,8 +452,9 @@ impl InstallExecutor {
             .is_some_and(|family| family.eq_ignore_ascii_case("linux"))
         {
             return Err(format!(
-                "the automated install supports linux; this machine reports os.family = {family:?}. \
-                 Discover the machine again, or supply artifactUrl and artifactSha256 explicitly"
+                "the automated install supports linux; this machine reports os.family = {:?}. \
+                 Discover the machine again, or supply artifactUrl and artifactSha256 explicitly",
+                family.as_deref().map(echo_fact),
             ));
         }
         let Some(architecture) = fact("host", "architecture") else {
@@ -466,7 +467,8 @@ impl InstallExecutor {
             "aarch64" | "arm64" => "linux-aarch64",
             other => {
                 return Err(format!(
-                    "the automated install supports x86_64 and aarch64; this machine reports {other:?}.                      Supply artifactUrl and artifactSha256 explicitly"
+                    "the automated install supports x86_64 and aarch64; this machine reports {:?}.                      Supply artifactUrl and artifactSha256 explicitly",
+                    echo_fact(other)
                 ));
             }
         };
@@ -681,6 +683,14 @@ enum Enrollment {
 /// interpolated into the script text — stdin-delivered, never argv — and
 /// piped straight into `fleetd enroll --token-stdin` by install.sh. The
 /// download and its digest are verified before anything executes.
+/// A node-reported fact echoed into an error: node text is untrusted, so it
+/// is scrubbed, flattened and cut to a short prefix.
+fn echo_fact(value: &str) -> String {
+    const ECHO_LIMIT: usize = 64;
+    let (scrubbed, _) = fleet_core::scrub_and_bound_with(value, false, str::to_owned);
+    scrubbed.chars().take(ECHO_LIMIT).collect()
+}
+
 fn install_script(token: Option<&str>, force_enroll: bool) -> String {
     let token_line = token
         .map(|token| format!("export FLEET_ENROLL_TOKEN={token}\n"))

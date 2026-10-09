@@ -873,7 +873,7 @@ async fn complete_failed(
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
         "reason": "step_failed",
-        "detail": reason,
+        "detail": fleet_core::scrub_failure_detail(reason),
         "failedAt": action.difference.identity,
         "completed": completed,
         "compensations": compensations,

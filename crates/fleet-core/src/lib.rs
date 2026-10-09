@@ -54,8 +54,9 @@ pub use operation::{
 };
 pub use project::{CheckoutFact, FetchScheme, NormalizedRemote, Project, ProjectView, RemoteFetch};
 pub use redact::{
-    flatten_control_characters, redact_credentials, redact_schemeless_credentials,
-    redact_url_credentials,
+    RESULT_STRING_BOUND, flatten_control_characters, redact_credentials,
+    redact_schemeless_credentials, redact_secret_pairs, redact_url_credentials,
+    scrub_and_bound_with, scrub_failure_detail, scrub_window, trim_to_bound,
 };
 pub use sensitive::{SecretReference, SensitiveString};
 pub use skill_catalog::{
