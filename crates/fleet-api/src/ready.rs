@@ -258,7 +258,13 @@ pub async fn start_ready_workflow(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", principal.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &principal.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(

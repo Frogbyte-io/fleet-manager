@@ -438,7 +438,13 @@ async fn start(
     let idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:{key}", acting.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                fleet_application::idempotency::CALLER_KEY,
+                &acting.id,
+                &[key],
+            )
+        });
     let operation = state
         .operations
         .create(

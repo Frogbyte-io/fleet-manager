@@ -740,9 +740,32 @@ fn lease_idempotency_scope(
     // token of the same owner replays, and another owner never can.
     let scope = crate::authz::resource_owner(&principal.id);
     Ok((
-        format!("lab-lease-create:{}:{scope}:{key}", scope.len()),
+        crate::idempotency::scoped_key("lab-lease-create", scope, &[key]),
         fingerprint,
     ))
+}
+
+/// The provision-record key of a lease-bound provision, `{owner}:lab-lease:{id}`.
+///
+/// Unlike a caller's key, it is derived from the owner and a controller-minted
+/// lease id (a UUID, never containing ':'), and it ends in a fixed shape, so it
+/// reads back unambiguously from the right. It keeps its form so a lease that
+/// started provisioning before #433 still replays after the upgrade.
+fn lease_provision_record_key(principal_id: &str, lease_id: &str) -> String {
+    format!(
+        "{}:lab-lease:{lease_id}",
+        crate::authz::resource_owner(principal_id)
+    )
+}
+
+/// The operation key of a lease-bound provision, `{owner}:lab-lease-provision:{id}`,
+/// kept in its pre-#433 form for the reason [`lease_provision_record_key`] gives.
+#[must_use]
+pub fn lease_provision_operation_key(principal_id: &str, lease_id: &str) -> String {
+    format!(
+        "{}:lab-lease-provision:{lease_id}",
+        crate::authz::resource_owner(principal_id)
+    )
 }
 
 fn replayed_lease(
@@ -1575,7 +1598,7 @@ impl Lab {
         Ok(crate::operation::NewOperation {
             kind: "lab.exec".to_owned(),
             idempotency_key: idempotency_key
-                .map(|key| format!("{}:lab-exec:{id}:{key}", principal.id)),
+                .map(|key| crate::idempotency::scoped_key("lab-exec", &principal.id, &[id, key])),
             deadline_at: None,
             correlation_id: None,
             payload_json: Some(
@@ -2327,13 +2350,12 @@ impl Lab {
         // Idempotent replay: the caller-scoped key returns the in-flight
         // record instead of creating a second guest saga.
         let scoped_key = lease_id
-            .map(|id| {
-                format!(
-                    "{}:lab-lease:{id}",
-                    crate::authz::resource_owner(&principal.id)
-                )
-            })
-            .or_else(|| idempotency_key.map(|key| format!("{}:{key}", principal.id)));
+            .map(|id| lease_provision_record_key(&principal.id, id))
+            .or_else(|| {
+                idempotency_key.map(|key| {
+                    crate::idempotency::scoped_key("lab-provision", &principal.id, &[key])
+                })
+            });
         if let Some(key) = &scoped_key
             && let Some(existing) =
                 self.provisions

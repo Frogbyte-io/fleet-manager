@@ -214,7 +214,13 @@ pub async fn collect_lab_artifacts(
     new.idempotency_key = headers
         .get(crate::IDEMPOTENCY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
-        .map(|key| format!("{}:lab-collect:{lease_id}:{key}", principal.id));
+        .map(|key| {
+            fleet_application::idempotency::scoped_key(
+                "lab-collect",
+                &principal.id,
+                &[&lease_id, key],
+            )
+        });
     let operation = state
         .operations
         .create_lab_collect(state.authorizer.as_ref(), &principal.id, &lease_id, &new)

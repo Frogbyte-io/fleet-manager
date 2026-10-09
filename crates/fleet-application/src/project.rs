@@ -200,7 +200,9 @@ impl Projects {
 
         // Idempotent replay: the same caller key returns the original
         // project instead of a conflict. The key is scoped to the caller.
-        let scoped_key = idempotency_key.map(|key| format!("{}:{key}", principal.id));
+        let scoped_key = idempotency_key.as_deref().map(|key| {
+            crate::idempotency::scoped_key(crate::idempotency::CALLER_KEY, &principal.id, &[key])
+        });
         if let Some(key) = &scoped_key
             && let Some(existing) = self
                 .port

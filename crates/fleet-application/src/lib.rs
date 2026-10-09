@@ -11,6 +11,7 @@ pub mod catalog_installs;
 pub mod composition;
 pub mod credentials;
 pub mod events;
+pub mod idempotency;
 pub mod images;
 pub mod lab;
 pub mod lab_artifacts;

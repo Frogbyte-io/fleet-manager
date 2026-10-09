@@ -533,7 +533,12 @@ impl Onboarding {
         validate_new_draft(&new)?;
 
         // Idempotent replay: the same key returns the original draft rather
-        // than creating a second one.
+        // than creating a second one. The caller's key is scoped to the
+        // principal here, once, so no caller replays another's draft.
+        let mut new = new;
+        new.idempotency_key = new.idempotency_key.take().map(|key| {
+            crate::idempotency::scoped_key(crate::idempotency::CALLER_KEY, &principal.id, &[&key])
+        });
         if let Some(key) = &new.idempotency_key
             && let Some(existing) = self
                 .drafts
@@ -732,7 +737,8 @@ impl Onboarding {
             },
         )
         .map_err(OnboardingUseCaseError::Denied)?;
-        let scoped = format!("{}:{key}", principal.id);
+        let scoped =
+            crate::idempotency::scoped_key(crate::idempotency::CALLER_KEY, &principal.id, &[key]);
         let Some(draft) = self
             .drafts
             .find_by_idempotency_key(&scoped)
