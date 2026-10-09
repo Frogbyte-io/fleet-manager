@@ -167,6 +167,12 @@ pub const DELEGATED_LAB_LOOP: &[DelegatedAction] = &[
         action: Permission::LabArtifacts,
         resource: ResourceRule::NamedNot(&["retention"]),
     },
+    // lab put: one file into the caller's own ready lease (the use case and
+    // the operation creator apply owner scope).
+    DelegatedAction {
+        action: Permission::LabPut,
+        resource: ResourceRule::Named,
+    },
     // lab artifacts (list and metadata).
     DelegatedAction {
         action: Permission::LabArtifactRead,
@@ -175,7 +181,13 @@ pub const DELEGATED_LAB_LOOP: &[DelegatedAction] = &[
     // The operations a Lab route queues for the caller, and reading one.
     DelegatedAction {
         action: Permission::OperationCreate,
-        resource: ResourceRule::OneOf(&["lab.provision", "lab.exec", "lab.collect", "lab.cleanup"]),
+        resource: ResourceRule::OneOf(&[
+            "lab.provision",
+            "lab.exec",
+            "lab.collect",
+            "lab.put",
+            "lab.cleanup",
+        ]),
     },
     DelegatedAction {
         action: Permission::OperationRead,

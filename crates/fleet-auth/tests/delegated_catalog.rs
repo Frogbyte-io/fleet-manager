@@ -59,11 +59,13 @@ const ALLOWED: &[(Permission, Option<&str>)] = &[
     (Permission::LabExtend, Some("lease-1")),
     (Permission::LabExec, Some("lease-1")),
     (Permission::LabArtifacts, Some("lease-1")),
+    (Permission::LabPut, Some("lease-1")),
     (Permission::LabArtifactRead, None),
     (Permission::LabArtifactRead, Some("artifact-1")),
     (Permission::OperationCreate, Some("lab.provision")),
     (Permission::OperationCreate, Some("lab.exec")),
     (Permission::OperationCreate, Some("lab.collect")),
+    (Permission::OperationCreate, Some("lab.put")),
     (Permission::OperationCreate, Some("lab.cleanup")),
     (Permission::OperationRead, Some("op-1")),
 ];
@@ -220,6 +222,7 @@ fn resource_bound_rows_refuse_a_missing_or_wrong_resource() {
         Permission::LabExtend,
         Permission::LabExec,
         Permission::LabArtifacts,
+        Permission::LabPut,
         Permission::OperationRead,
     ] {
         assert_eq!(

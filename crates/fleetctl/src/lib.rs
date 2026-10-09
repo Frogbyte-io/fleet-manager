@@ -7500,8 +7500,14 @@ fn upload_lab_file(
             let _ = write!(text, "{byte:02x}");
             text
         });
+    // A delegated credential is never carried along a redirect.
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_hours(6))
+        .redirect(if bearer_token()?.is_some() {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::default()
+        })
         .build()
         .map_err(|error| CliError {
             message: format!("cannot build an HTTP client: {error}"),
@@ -7510,20 +7516,22 @@ fn upload_lab_file(
     if overwrite {
         query.push(("overwrite", "true".to_owned()));
     }
-    let response = client
-        .post(format!(
-            "{}/api/v1/lab/leases/{lease_id}/files",
-            invocation.url
-        ))
-        .query(&query)
-        .header("x-correlation-id", correlation_id)
-        .header("x-content-sha256", sha256)
-        .header("content-type", "application/octet-stream")
-        .body(reqwest::blocking::Body::sized(file, size))
-        .send()
-        .map_err(|error| CliError {
-            message: format!("the controller did not answer: {error}"),
-        })?;
+    let response = with_credential(
+        client
+            .post(format!(
+                "{}/api/v1/lab/leases/{lease_id}/files",
+                invocation.url
+            ))
+            .query(&query)
+            .header("x-correlation-id", correlation_id)
+            .header("x-content-sha256", sha256)
+            .header("content-type", "application/octet-stream")
+            .body(reqwest::blocking::Body::sized(file, size)),
+    )?
+    .send()
+    .map_err(|error| CliError {
+        message: format!("the controller did not answer: {error}"),
+    })?;
     let status = reqwest::StatusCode::as_u16(&response.status());
     let body: Value = response.json().map_err(|error| CliError {
         message: format!("the controller's answer was not JSON: {error}"),
