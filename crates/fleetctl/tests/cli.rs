@@ -3787,6 +3787,7 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
             readiness_deadline_seconds: 0,
             ttl_seconds: 3_600,
             cleanup: fleet_core::CleanupStrategy::Destroy,
+            audio: None,
         };
         let template = LabTemplatePort::create(
             labs.as_ref(),
@@ -4168,4 +4169,49 @@ fn fleetctl_lab_put_streams_the_file_with_its_digest() {
         .unwrap_err()
         .contains("cannot read")
     );
+
+#[test]
+fn lab_template_create_takes_an_optional_audio_device() {
+    let parse = |extra: &[&str]| {
+        let mut args: Vec<String> = [
+            "lab",
+            "template-create",
+            "--name",
+            "w",
+            "--description",
+            "d",
+            "--image-version",
+            "rcp-1@abc",
+            "--cores",
+            "2",
+            "--memory",
+            "2048",
+            "--disk",
+            "20",
+            "--probe",
+            "guest_agent",
+            "--readiness-deadline",
+            "300",
+            "--ttl",
+            "3600",
+            "--cleanup",
+            "destroy",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        args.extend(extra.iter().map(ToString::to_string));
+        fleetctl::parse(&args)
+    };
+    let fleetctl::Command::LabCreate { audio, .. } = parse(&[]).unwrap().command else {
+        panic!("a template create");
+    };
+    assert_eq!(audio, None);
+    let fleetctl::Command::LabCreate { audio, .. } =
+        parse(&["--audio", "ich9-intel-hda"]).unwrap().command
+    else {
+        panic!("a template create");
+    };
+    assert_eq!(audio.as_deref(), Some("ich9-intel-hda"));
+    assert!(parse(&["--audio"]).is_err());
 }

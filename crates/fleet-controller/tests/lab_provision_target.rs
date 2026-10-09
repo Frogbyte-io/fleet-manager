@@ -115,6 +115,11 @@ struct CloneConfig {
     no_disk_size: bool,
     /// PVE answers every cores/memory update with this status.
     set_status: Option<u16>,
+    /// #398: the clone's `audio0` as the image left it.
+    audio: Option<String>,
+    /// PVE refuses an `audio0` write with this status (the hardware-type
+    /// privilege is checked per option).
+    audio_status: Option<u16>,
     /// PVE answers every resize with this status (a permission refusal
     /// comes before the task starts).
     resize_status: Option<u16>,
@@ -345,8 +350,18 @@ impl Pve {
     ) -> (u16, String) {
         for key in body.as_object().unwrap().keys() {
             assert!(
-                ["cores", "memory", "digest"].contains(&key.as_str()),
-                "only cores and memory are set: {body}"
+                ["cores", "memory", "audio0", "digest"].contains(&key.as_str()),
+                "only cores, memory and audio0 are set: {body}"
+            );
+        }
+        if body.get("audio0").is_some()
+            && let Some(status) = config.audio_status
+        {
+            return (
+                status,
+                format!(
+                    r#"{{"data":null,"message":"Permission check failed (/vms/{vmid}, VM.Config.HWType)\n"}}"#
+                ),
             );
         }
         if body["digest"] != config.digest().as_str() {
@@ -384,6 +399,9 @@ impl Pve {
         }
         if let Some(memory) = body.get("memory") {
             hardware.memory_mib = u32::try_from(memory.as_u64().unwrap()).unwrap();
+        }
+        if let Some(audio) = body.get("audio0") {
+            config.audio = audio.as_str().map(str::to_owned);
         }
         config.hardware = Some(hardware);
         config.digest_moves += 1;
@@ -605,6 +623,9 @@ impl Pve {
             };
             answer["scsi0"] = serde_json::json!(format!("local-lvm:vm-{vmid}-disk-0{size}"));
             answer["boot"] = serde_json::json!("order=scsi0;net0");
+        }
+        if let Some(audio) = &config.audio {
+            answer["audio0"] = serde_json::json!(audio);
         }
         if config.protected {
             answer["protection"] = serde_json::json!(1);
@@ -908,6 +929,11 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_audio(None).await
+    }
+
+    /// As [`Self::new`], over a template that declares `audio` (#398).
+    async fn with_audio(audio: Option<fleet_core::LabAudio>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -945,6 +971,7 @@ impl Harness {
             readiness_deadline_seconds: 0,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -3699,4 +3726,128 @@ async fn a_stale_digest_on_the_config_write_is_reread_and_retried() {
     assert_eq!(writes.len(), 1, "{writes:?}");
     // The retry carries the digest of the config read again.
     assert_eq!(writes[0].1["digest"], "0123abcd1");
+}
+
+fn audio(device: &str) -> fleet_core::LabAudio {
+    fleet_core::LabAudio {
+        device: device.to_owned(),
+        driver: "none".to_owned(),
+    }
+}
+
+/// #398: the template's audio device is written in the same config update
+/// as cores and memory, before the start.
+#[tokio::test]
+async fn the_templates_audio_device_joins_the_hardware_config_write() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    // The image differs in cores too: one write carries both.
+    let pve = Pve::new(Vec::new()).imaged(1, 2048, 20);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "config");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({
+            "cores": 2,
+            "audio0": "device=ich9-intel-hda,driver=none",
+            "digest": "0123abcd"
+        })
+    );
+    let paths = pve.paths();
+    let write = paths
+        .iter()
+        .position(|path| path.ends_with("/config") && path.contains("qemu/9000"));
+    assert!(write.is_some(), "{paths:?}");
+    assert!(first(&pve, "/status/start").is_some());
+    // Only audio differs: only audio is written.
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new());
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(
+        writes[0].1,
+        serde_json::json!({"audio0": "device=ich9-intel-hda,driver=none", "digest": "0123abcd"})
+    );
+}
+
+#[tokio::test]
+async fn a_clone_that_already_has_the_declared_audio_is_not_changed() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    // PVE reports the property string in any key order.
+    let pve = Pve::new(Vec::new())
+        .configure(|config| config.audio = Some("driver=none,device=ich9-intel-hda".to_owned()));
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_some());
+}
+
+#[tokio::test]
+async fn a_template_without_audio_leaves_the_images_audio_device() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .configure(|config| config.audio = Some("device=AC97,driver=spice".to_owned()));
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+}
+
+#[tokio::test]
+async fn a_different_audio_device_on_the_clone_is_replaced() {
+    let harness = Harness::with_audio(Some(audio("intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .configure(|config| config.audio = Some("device=ich9-intel-hda,driver=spice".to_owned()));
+    harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(
+        writes[0].1["audio0"],
+        serde_json::json!("device=intel-hda,driver=none")
+    );
+}
+
+#[tokio::test]
+async fn a_token_without_the_hardware_type_privilege_fails_at_hardware_naming_it() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_status = Some(403));
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("VM.Config.HWType"), "{detail}");
+    assert!(first(&pve, "/status/start").is_none());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+}
+
+#[tokio::test]
+async fn a_server_error_on_the_audio_write_is_retried_once() {
+    let harness = Harness::with_audio(Some(audio("ich9-intel-hda"))).await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).configure(|config| config.audio_status = Some(500));
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "hardware_failed");
+    // The settle read, then one hardware read per try.
+    assert_eq!(pve.config_reads(), 3, "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
 }

@@ -688,6 +688,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                 let lab_pool_fill =
                     std::sync::Arc::new(fleet_controller::lab_pool::LabPoolFillExecutor::new(
                         lab_pools.clone(),
+                        std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                            store.pool().clone(),
+                        )),
                         lab_pool_guests,
                         lab_destructive,
                         std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(

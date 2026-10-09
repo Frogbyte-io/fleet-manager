@@ -70,6 +70,7 @@ struct World {
 }
 
 impl World {
+    #[allow(clippy::too_many_lines)]
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
@@ -92,6 +93,7 @@ impl World {
             readiness_deadline_seconds: 300,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

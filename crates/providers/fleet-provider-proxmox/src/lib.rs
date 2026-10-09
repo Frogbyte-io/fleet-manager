@@ -1215,6 +1215,67 @@ pub trait ProxmoxSource: fmt::Debug + Send + Sync {
     ) -> Result<Vec<PveSnapshot>, PveApiError>;
 }
 
+/// A guest's virtual audio device: the parsed `audio0` property string
+/// (`device=ich9-intel-hda,driver=none`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PveAudio {
+    /// The device model (`ich9-intel-hda`, `intel-hda`, `AC97`).
+    pub device: String,
+    /// The host backend (`spice`, `none`). PVE's default, `spice`, when the
+    /// property string names none.
+    pub driver: String,
+}
+
+impl PveAudio {
+    /// Parses an `audio0` property string. Values are kept as written, so a
+    /// model or driver PVE adds later compares unequal instead of failing.
+    /// A bare first segment is the device, as PVE's `default_key` allows.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the string names no device or is longer than 128
+    /// characters.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        if value.len() > 128 {
+            return Err("the audio0 value is too long".to_owned());
+        }
+        let (mut device, mut driver) = (None, None);
+        for (index, part) in value.split(',').enumerate() {
+            match part.split_once('=') {
+                Some(("device", rest)) => device = Some(rest.trim().to_owned()),
+                Some(("driver", rest)) => driver = Some(rest.trim().to_owned()),
+                None if index == 0 => device = Some(part.trim().to_owned()),
+                _ => {}
+            }
+        }
+        let device = device
+            .filter(|device| !device.is_empty())
+            .ok_or("the audio0 value names no device")?;
+        Ok(Self {
+            device,
+            driver: driver.unwrap_or_else(|| "spice".to_owned()),
+        })
+    }
+
+    /// The `audio0` property string to write.
+    #[must_use]
+    pub fn to_property(&self) -> String {
+        format!("device={},driver={}", self.device, self.driver)
+    }
+}
+
+/// Reads a config's optional `audio0`. An unreadable value is an error, not
+/// "no audio", so a caller never treats a guest as audio-less by mistake.
+fn parse_audio(config: &serde_json::Value) -> Result<Option<PveAudio>, String> {
+    match config.get("audio0") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => PveAudio::parse(text)
+            .map(Some)
+            .map_err(|detail| format!("the guest config's audio0 is unreadable: {detail}")),
+        Some(_) => Err("the guest config's audio0 is unreadable".to_owned()),
+    }
+}
+
 /// The config facts the Lab executor checks on a fresh clone before it
 /// clears the clone's inherited `protection` flag (issue #290).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1233,6 +1294,8 @@ pub struct PveQemuConfigFlags {
     /// rollback sets to the restored snapshot (FM-717 verifies a pool
     /// member's revert by it).
     pub parent: Option<String>,
+    /// The virtual audio device (`audio0`), when the guest has one.
+    pub audio: Option<PveAudio>,
 }
 
 /// The hardware facts of a QEMU guest's config that Lab applies from its
@@ -1263,6 +1326,8 @@ pub struct PveQemuHardware {
     pub memory_has_options: bool,
     /// The disk the guest boots from, when it can be identified.
     pub boot_disk: Option<PveBootDisk>,
+    /// The virtual audio device (`audio0`), when the guest has one.
+    pub audio: Option<PveAudio>,
     /// The config digest, for a conditional update.
     pub digest: Option<String>,
 }
@@ -2399,6 +2464,7 @@ impl ProxmoxClient {
             digest: text("digest", 64)?,
             // A PVE snapshot name is at most 40 characters.
             parent: text("parent", 40)?,
+            audio: parse_audio(&config).map_err(|detail| PveApiError::InvalidPayload { detail })?,
         })
     }
 
@@ -2461,17 +2527,18 @@ impl ProxmoxClient {
         parse_hardware(&config).map_err(|detail| PveApiError::InvalidPayload { detail })
     }
 
-    /// Sets a guest's cores and/or memory
+    /// Sets a guest's cores, memory and/or virtual audio device
     /// (`PUT /nodes/{node}/qemu/{vmid}/config`, synchronous). Needs
-    /// `VM.Config.CPU` for cores and `VM.Config.Memory` for memory on
-    /// `/vms/{vmid}`. Always conditional on `digest` (from
+    /// `VM.Config.CPU` for cores, `VM.Config.Memory` for memory and
+    /// `VM.Config.HWType` for `audio0` on `/vms/{vmid}`. Always conditional on `digest` (from
     /// [`Self::qemu_hardware`]). The caller decides which guest may be
     /// changed; Lab changes only its own fresh clones.
     ///
     /// # Errors
     ///
     /// Fails with [`PveApiError`], including PVE's refusal of a locked guest
-    /// or a stale digest, and `InvalidPayload` when neither value is given.
+    /// or a stale digest, and `InvalidPayload` when no value is given.
+    #[allow(clippy::too_many_arguments)]
     pub async fn qemu_set_hardware(
         &self,
         request: PveHttpRequest,
@@ -2479,9 +2546,10 @@ impl ProxmoxClient {
         vmid: u32,
         cores: Option<u32>,
         memory_mib: Option<u32>,
+        audio: Option<&PveAudio>,
         digest: &str,
     ) -> Result<(), PveApiError> {
-        if cores.is_none() && memory_mib.is_none() {
+        if cores.is_none() && memory_mib.is_none() && audio.is_none() {
             return Err(PveApiError::InvalidPayload {
                 detail: "there is no hardware value to set".to_owned(),
             });
@@ -2492,6 +2560,9 @@ impl ProxmoxClient {
         }
         if let Some(memory) = memory_mib {
             body["memory"] = serde_json::json!(memory);
+        }
+        if let Some(audio) = audio {
+            body["audio0"] = serde_json::json!(audio.to_property());
         }
         self.call_method_with_body(
             request,
@@ -2880,6 +2951,7 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         memory_mib,
         memory_has_options,
         boot_disk,
+        audio: parse_audio(config)?,
         digest: bounded_str(config, "digest", 64)?,
     })
 }

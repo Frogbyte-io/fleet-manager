@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fleet_application::lab::{
-    LeasePort, MAX_CLEANUP_ATTEMPTS, NewLease, NewProvision, ProvisionPort, cleanup_operation,
+    LabTemplatePort, LeasePort, MAX_CLEANUP_ATTEMPTS, NewLease, NewProvision, ProvisionPort,
+    cleanup_operation,
 };
 use fleet_application::lab_pool::{
     ClaimOutcome, FillResult, GuestObservation, LabPoolPort, MemberState, NewLabPool,
@@ -72,6 +73,8 @@ impl OperationExecutor for Scripted {
 struct Cluster {
     guests: Mutex<BTreeMap<u32, GuestObservation>>,
     config: Mutex<RevertedConfig>,
+    /// The audio device a member reads back with, by VMID.
+    audio: Mutex<BTreeMap<u32, fleet_core::LabAudio>>,
     /// Whether every read fails, as an unreachable cluster does.
     unreachable: Mutex<bool>,
 }
@@ -89,7 +92,9 @@ impl Cluster {
                 template: false,
                 lock: None,
                 parent: Some("baseline".to_owned()),
+                audio: None,
             }),
+            audio: Mutex::new(BTreeMap::new()),
             unreachable: Mutex::new(false),
         })
     }
@@ -133,9 +138,11 @@ impl PoolGuestPort for Cluster {
         &self,
         _account_id: &str,
         _node: &str,
-        _vmid: u32,
+        vmid: u32,
     ) -> Result<RevertedConfig, String> {
-        Ok(self.config.lock().unwrap().clone())
+        let mut config = self.config.lock().unwrap().clone();
+        config.audio = self.audio.lock().unwrap().get(&vmid).cloned();
+        Ok(config)
     }
 }
 
@@ -155,11 +162,53 @@ struct Harness {
 impl Harness {
     /// A pool over `vmids`, every member verified and available.
     async fn new(vmids: &[u32]) -> Self {
+        Self::with_audio(vmids, None).await
+    }
+
+    /// As [`Self::new`], over a template version that declares `audio`.
+    async fn with_audio(vmids: &[u32], audio: Option<fleet_core::LabAudio>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
         let pools = Arc::new(LabPoolRepository::new(pool.clone()));
         let now = fleet_core::SystemClock::now_unix_millis();
+        let labs = Arc::new(LabRepository::new(pool.clone()));
+        let content = fleet_core::LabTemplateContent {
+            name: "pool-template".to_owned(),
+            image_version_id: "image-version-1".to_owned(),
+            cores: 2,
+            memory_mib: 2048,
+            disk_gib: 20,
+            readiness_deadline_seconds: 300,
+            ttl_seconds: 3_600,
+            cleanup: CleanupStrategy::Revert,
+            audio,
+            ..fleet_core::LabTemplateContent::default()
+        };
+        let template = LabTemplatePort::create(
+            labs.as_ref(),
+            &fleet_application::lab::NewLabTemplate {
+                content: content.clone(),
+            },
+            now,
+        )
+        .await
+        .unwrap();
+        LabTemplatePort::publish(
+            labs.as_ref(),
+            &template.id,
+            &fleet_application::lab::LabTemplateVersion {
+                id: "template-version-1".to_owned(),
+                template_id: template.id.clone(),
+                name: "pool-template".to_owned(),
+                content,
+                image_digest: "sha256:fixture".to_owned(),
+                published_by: "tester".to_owned(),
+                published_at: now,
+            },
+        )
+        .await
+        .unwrap();
         let created = pools
             .create(
                 &NewLabPool {
@@ -188,7 +237,7 @@ impl Harness {
         }
         Self {
             _dir: dir,
-            labs: Arc::new(LabRepository::new(pool.clone())),
+            labs,
             leases: Arc::new(LeaseRepository::new(pool.clone())),
             pools,
             operations: Arc::new(Operations::new(
@@ -597,6 +646,7 @@ async fn fill_verifies_and_reverts_each_member_or_quarantines_it() {
         .unwrap();
     let fill = LabPoolFillExecutor::new(
         harness.pools.clone(),
+        harness.labs.clone(),
         harness.cluster.clone(),
         harness.reverter.clone(),
         Arc::new(AuditSink::new(harness.pool.clone())),
@@ -652,6 +702,7 @@ async fn a_failed_fill_revert_quarantines_and_the_generic_route_refuses_the_kind
         .unwrap();
     let fill = LabPoolFillExecutor::new(
         harness.pools.clone(),
+        harness.labs.clone(),
         harness.cluster.clone(),
         harness.reverter.clone(),
         Arc::new(AuditSink::new(harness.pool.clone())),
@@ -692,6 +743,7 @@ async fn an_undecided_fill_leaves_the_member_filling_for_a_refill() {
     *harness.cluster.unreachable.lock().unwrap() = true;
     let fill = LabPoolFillExecutor::new(
         harness.pools.clone(),
+        harness.labs.clone(),
         harness.cluster.clone(),
         harness.reverter.clone(),
         Arc::new(AuditSink::new(harness.pool.clone())),
@@ -729,4 +781,93 @@ async fn an_undecided_fill_leaves_the_member_filling_for_a_refill() {
         harness.member(300).await,
         Some((MemberState::Available, None))
     );
+}
+
+#[tokio::test]
+async fn fill_quarantines_a_member_whose_audio_differs_from_the_template() {
+    let wanted = fleet_core::LabAudio {
+        device: "ich9-intel-hda".to_owned(),
+        driver: "none".to_owned(),
+    };
+    let harness = Harness::with_audio(&[], Some(wanted.clone())).await;
+    let now = fleet_core::SystemClock::now_unix_millis();
+    // 400 matches; 401 has no audio; 402 has another model; 403 has the
+    // right model on the spice driver.
+    harness
+        .pools
+        .add_members(&harness.pool_id, &[400, 401, 402, 403], now)
+        .await
+        .unwrap();
+    for vmid in [400, 401, 402, 403] {
+        harness
+            .cluster
+            .set(vmid, Cluster::guest(&format!("pool-{vmid}")));
+    }
+    {
+        let mut audio = harness.cluster.audio.lock().unwrap();
+        audio.insert(400, wanted.clone());
+        audio.insert(
+            402,
+            fleet_core::LabAudio {
+                device: "AC97".to_owned(),
+                ..wanted.clone()
+            },
+        );
+        audio.insert(
+            403,
+            fleet_core::LabAudio {
+                driver: "spice".to_owned(),
+                ..wanted
+            },
+        );
+    }
+    let operation = harness
+        .operations
+        .create_lab_pool_fill(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &harness.pool_id,
+            &fill_operation(&harness.pool_id, None),
+        )
+        .await
+        .unwrap();
+    let fill = LabPoolFillExecutor::new(
+        harness.pools.clone(),
+        harness.labs.clone(),
+        harness.cluster.clone(),
+        harness.reverter.clone(),
+        Arc::new(AuditSink::new(harness.pool.clone())),
+    );
+    harness
+        .operations
+        .claim_only_execute(&fill, &operation.id, "test")
+        .await
+        .unwrap();
+    let done = harness.operation(&operation.id).await;
+    assert_eq!(done.state, "succeeded");
+    let result: serde_json::Value =
+        serde_json::from_str(done.result_json.as_deref().unwrap()).unwrap();
+    assert_eq!(result["available"], serde_json::json!([400]));
+    assert_eq!(result["quarantined"], serde_json::json!([401, 402, 403]));
+    assert_eq!(
+        harness.member(400).await,
+        Some((MemberState::Available, None))
+    );
+    for vmid in [401, 402, 403] {
+        assert_eq!(
+            harness.member(vmid).await,
+            Some((MemberState::Quarantined, None)),
+            "{vmid}"
+        );
+    }
+    let detail = harness
+        .pools
+        .member_by_vmid("account-1", 401)
+        .await
+        .unwrap()
+        .unwrap()
+        .detail
+        .unwrap();
+    assert!(detail.contains("audio"), "{detail}");
+    assert_eq!(harness.audit_events("lab_pool_member_quarantined").await, 3);
 }

@@ -257,6 +257,12 @@ read from qemu-server `src/PVE/API2/Qemu.pm` on
   newer PVE, a property string (`current=2048,max=65536`). A disk size in the
   config may carry no unit (bytes). These shapes are modeled on pve-manager's
   and qemu-server's `Qemu.pm`, not captured from a live host.
+- Audio (issue #398): `audio0` is a hardware-type option in qemu-server's
+  `$hwtypeoptions`, so `PUT …/config` with `audio0` checks `VM.Config.HWType`
+  (an HTTP 403, `Permission check failed (/vms/{vmid}, VM.Config.HWType)`).
+  The value is a property string (`device=ich9-intel-hda,driver=none`; device
+  `ich9-intel-hda|intel-hda|AC97`, driver `spice|none`, default `spice`) that
+  the config read answers as written. Checked live on PVE 8.4.0 and 9.2.2.
 - Flags in the config read are integers; the JSON formatter may answer them
   as strings, so both are accepted.
 

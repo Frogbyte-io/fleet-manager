@@ -13,10 +13,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fleet_application::lab::ImageArtifactPort;
+use fleet_application::lab::{ImageArtifactPort, LabTemplatePort};
 use fleet_application::lab_pool::{
     FILL_KIND, FillResult, GuestObservation, LabPoolPort, MemberState, PoolGuestPort,
-    RevertedConfig, member_audit, member_identity, verify_reverted,
+    RevertedConfig, member_audit, member_identity, verify_audio, verify_reverted,
 };
 use fleet_application::operation::{AuditPort, NewOperation, Operation, Operations};
 use fleet_application::proxmox::{ProxmoxAccountPort, ProxmoxCredentialStore};
@@ -151,6 +151,10 @@ impl PoolGuestPort for ProxmoxPoolGuests {
             template: flags.template,
             lock: flags.lock,
             parent: flags.parent,
+            audio: flags.audio.map(|audio| fleet_core::LabAudio {
+                device: audio.device,
+                driver: audio.driver,
+            }),
         })
     }
 }
@@ -341,6 +345,8 @@ struct FillPayload {
 #[derive(Debug)]
 pub struct LabPoolFillExecutor {
     pools: Arc<dyn LabPoolPort>,
+    /// Reads the template version whose audio declaration members must meet.
+    templates: Arc<dyn LabTemplatePort>,
     guests: Arc<dyn PoolGuestPort>,
     /// Executes the reviewed revert child (the destructive executor).
     reverter: Arc<dyn OperationExecutor>,
@@ -352,12 +358,14 @@ impl LabPoolFillExecutor {
     #[must_use]
     pub fn new(
         pools: Arc<dyn LabPoolPort>,
+        templates: Arc<dyn LabTemplatePort>,
         guests: Arc<dyn PoolGuestPort>,
         reverter: Arc<dyn OperationExecutor>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
             pools,
+            templates,
             guests,
             reverter,
             audit,
@@ -376,6 +384,14 @@ impl OperationExecutor for LabPoolFillExecutor {
         )
         .map_err(|error| format!("the payload is not a pool fill: {error}"))?;
         let pool = self.pools.get(&payload.pool_id).await?;
+        // A member must carry the audio device the template version
+        // declares (issue #398); a version without one asks nothing.
+        let wanted_audio = self
+            .templates
+            .get_version(&pool.template_version_id)
+            .await?
+            .content
+            .audio;
         let filling: Vec<_> = self
             .pools
             .members(&pool.id)
@@ -434,6 +450,26 @@ impl OperationExecutor for LabPoolFillExecutor {
                 },
             )
             .await;
+            // The member's config after the revert is what a lease gets.
+            let outcome = match outcome {
+                Ok((node, name)) if wanted_audio.is_some() => {
+                    match self
+                        .guests
+                        .reverted_config(&member.account_id, &node, member.vmid)
+                        .await
+                    {
+                        Err(detail) => Err(RevertFailure::Unavailable(detail)),
+                        Ok(config) => verify_audio(&config, wanted_audio.as_ref())
+                            .map(|()| (node, name))
+                            .map_err(|detail| {
+                                RevertFailure::Refused(format!(
+                                    "the member does not match the template's audio device: {detail}"
+                                ))
+                            }),
+                    }
+                }
+                other => other,
+            };
             let now = fleet_core::SystemClock::now_unix_millis();
             let (result, event, facts) = match outcome {
                 Err(RevertFailure::Unavailable(detail)) => {

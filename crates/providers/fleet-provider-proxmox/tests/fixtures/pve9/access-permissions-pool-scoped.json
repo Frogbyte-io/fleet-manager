@@ -82,6 +82,7 @@
       "VM.Clone": 1,
       "VM.Config.CPU": 1,
       "VM.Config.Disk": 1,
+      "VM.Config.HWType": 1,
       "VM.Config.Memory": 1,
       "VM.Config.Options": 1,
       "VM.GuestAgent.Audit": 1,

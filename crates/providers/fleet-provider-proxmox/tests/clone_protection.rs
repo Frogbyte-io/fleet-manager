@@ -95,6 +95,7 @@ async fn a_fresh_clone_of_a_protected_template_reads_as_protected() {
             lock: None,
             digest: Some("3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0".to_owned()),
             parent: None,
+            audio: None,
         }
     );
     let seen = transport.seen.lock().unwrap();

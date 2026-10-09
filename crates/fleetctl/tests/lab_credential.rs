@@ -202,6 +202,7 @@ async fn publish(labs: &LabRepository, name: &str, cleanup: CleanupStrategy) -> 
         readiness_deadline_seconds: 0,
         ttl_seconds: 3_600,
         cleanup,
+        audio: None,
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs,

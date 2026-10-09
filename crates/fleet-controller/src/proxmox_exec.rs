@@ -2917,6 +2917,17 @@ impl ProvisionExecutor {
         }
         let (node, vmid) = (target.node, target.vmid);
         let wanted_mib = u64::from(content.disk_gib) * 1024;
+        let wanted_audio = content
+            .audio
+            .as_ref()
+            .map(|audio| fleet_provider_proxmox::PveAudio {
+                device: audio.device.clone(),
+                driver: audio.driver.clone(),
+            });
+        let audio_label = wanted_audio.as_ref().map_or_else(
+            || "unchanged".to_owned(),
+            fleet_provider_proxmox::PveAudio::to_property,
+        );
         let where_ = format!("{node}/qemu/{vmid}");
         let name = format!("fm-lab-{}", target.record_id);
         let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
@@ -2960,8 +2971,8 @@ impl ProvisionExecutor {
                 return refuse(
                     "hardware_failed",
                     format!(
-                        "the clone {where_} did not settle on the template's hardware ({} cores, {} MiB, {} GiB disk) after {writes} writes; the guest is retained for cleanup",
-                        content.cores, content.memory_mib, content.disk_gib
+                        "the clone {where_} did not settle on the template's hardware ({} cores, {} MiB, {} GiB disk, audio {}) after {writes} writes; the guest is retained for cleanup",
+                        content.cores, content.memory_mib, content.disk_gib, audio_label
                     ),
                 );
             }
@@ -2993,6 +3004,11 @@ impl ProvisionExecutor {
                 .unwrap_or_else(|| hardware.sockets.saturating_mul(hardware.cores));
             let cores = (!multi && hardware.cores != content.cores).then_some(content.cores);
             let memory = (hardware.memory_mib != content.memory_mib).then_some(content.memory_mib);
+            // The audio device rides the same config write. A template that
+            // declares none leaves whatever the image has.
+            let audio = wanted_audio
+                .as_ref()
+                .filter(|wanted| hardware.audio.as_ref() != Some(*wanted));
             if memory.is_some() && hardware.memory_has_options {
                 return refuse(
                     "hardware_unsupported",
@@ -3044,12 +3060,12 @@ impl ProvisionExecutor {
                 );
             };
             let grow = size_mib < wanted_mib;
-            if cores.is_none() && memory.is_none() && !grow {
+            if cores.is_none() && memory.is_none() && audio.is_none() && !grow {
                 return Ok(Ok(()));
             }
             // What is still wrong right after the write that should have
             // fixed it is waited out, never written again, within a bound.
-            let next = if cores.is_some() || memory.is_some() {
+            let next = if cores.is_some() || memory.is_some() || audio.is_some() {
                 Write::Config
             } else {
                 Write::Resize
@@ -3061,8 +3077,8 @@ impl ProvisionExecutor {
                     return refuse(
                         "hardware_failed",
                         format!(
-                            "the clone {where_} does not report the template's hardware ({} cores, {} MiB, {} GiB disk) after the update; the guest is retained for cleanup",
-                            content.cores, content.memory_mib, content.disk_gib
+                            "the clone {where_} does not report the template's hardware ({} cores, {} MiB, {} GiB disk, audio {}) after the update; the guest is retained for cleanup",
+                            content.cores, content.memory_mib, content.disk_gib, audio_label
                         ),
                     );
                 }
@@ -3087,6 +3103,7 @@ impl ProvisionExecutor {
                             vmid,
                             cores,
                             memory,
+                            audio,
                             digest,
                         )
                         .await
@@ -3101,12 +3118,21 @@ impl ProvisionExecutor {
                             if (500..600).contains(&status)
                                 && !std::mem::replace(&mut retried[0], true) => {}
                         Err(error) => {
-                            let privileges = match (cores.is_some(), memory.is_some()) {
-                                (true, true) => "VM.Config.CPU and VM.Config.Memory",
-                                (true, false) => "VM.Config.CPU",
-                                _ => "VM.Config.Memory",
+                            let privileges = [
+                                (cores.is_some(), "VM.Config.CPU"),
+                                (memory.is_some(), "VM.Config.Memory"),
+                                (audio.is_some(), "VM.Config.HWType"),
+                            ]
+                            .iter()
+                            .filter_map(|(needed, privilege)| needed.then_some(*privilege))
+                            .collect::<Vec<_>>()
+                            .join(" and ");
+                            let action = if audio.is_some() {
+                                "set its cores, memory and audio device"
+                            } else {
+                                "set its cores and memory"
                             };
-                            return Ok(Err(failed("set its cores and memory", privileges, &error)));
+                            return Ok(Err(failed(action, &privileges, &error)));
                         }
                     }
                 }

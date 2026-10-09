@@ -57,6 +57,7 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
         readiness_deadline_seconds: 300,
         ttl_seconds: 3_600,
         cleanup: fleet_core::CleanupStrategy::Destroy,
+        audio: None,
     }
 }
 

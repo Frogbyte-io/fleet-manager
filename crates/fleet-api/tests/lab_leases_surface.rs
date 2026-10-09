@@ -108,6 +108,7 @@ impl World {
             readiness_deadline_seconds: 300,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
