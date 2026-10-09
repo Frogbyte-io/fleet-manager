@@ -141,6 +141,7 @@ impl World {
             readiness_deadline_seconds: readiness_seconds,
             ttl_seconds: TTL_SECONDS,
             cleanup: CleanupStrategy::Destroy,
+            audio: None,
         };
         let template = LabTemplatePort::create(
             &labs,

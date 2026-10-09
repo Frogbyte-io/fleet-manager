@@ -560,6 +560,43 @@ pub struct RevertedConfig {
     /// The snapshot the current state derives from (the config's `parent`,
     /// which PVE sets to the snapshot a rollback restored).
     pub parent: Option<String>,
+    /// The guest's virtual audio device (`audio0`), when it has one.
+    pub audio: Option<fleet_core::LabAudio>,
+    /// Whether the config has an `audio0` that could not be read.
+    pub audio_unreadable: bool,
+}
+
+/// Whether a member's audio device matches the template version's
+/// declaration (issue #398). A template that declares none requires
+/// nothing, as for a clone: it never asks a guest to drop its device.
+///
+/// # Errors
+///
+/// Answers how the member's `audio0` differs from the declaration.
+pub fn verify_audio(
+    config: &RevertedConfig,
+    wanted: Option<&fleet_core::LabAudio>,
+) -> Result<(), String> {
+    let Some(wanted) = wanted else {
+        return Ok(());
+    };
+    if config.audio_unreadable {
+        return Err(format!(
+            "the guest's audio0 is unreadable, but the template declares {} with driver {}",
+            wanted.device, wanted.driver
+        ));
+    }
+    match &config.audio {
+        Some(audio) if audio == wanted => Ok(()),
+        Some(audio) => Err(format!(
+            "the guest's audio device is {} with driver {}, not the template's {} with driver {}",
+            audio.device, audio.driver, wanted.device, wanted.driver
+        )),
+        None => Err(format!(
+            "the guest has no audio device, but the template declares {} with driver {}",
+            wanted.device, wanted.driver
+        )),
+    }
 }
 
 /// Whether a rollback left the guest at its baseline: not a template, no
@@ -1158,6 +1195,8 @@ mod tests {
             template: false,
             lock: None,
             parent: parent.map(str::to_owned),
+            audio: None,
+            audio_unreadable: false,
         };
         assert!(verify_reverted(&at(Some("baseline")), "baseline").is_ok());
         assert!(verify_reverted(&at(Some("other")), "baseline").is_err());
@@ -1172,6 +1211,34 @@ mod tests {
             ..at(Some("baseline"))
         };
         assert!(verify_reverted(&template, "baseline").is_err());
+    }
+
+    #[test]
+    fn a_member_must_carry_the_audio_device_the_template_declares() {
+        let audio = |device: &str, driver: &str| fleet_core::LabAudio {
+            device: device.to_owned(),
+            driver: driver.to_owned(),
+        };
+        let with = |audio: Option<fleet_core::LabAudio>| RevertedConfig {
+            audio,
+            ..RevertedConfig::default()
+        };
+        let wanted = audio("ich9-intel-hda", "none");
+        assert!(verify_audio(&with(Some(wanted.clone())), Some(&wanted)).is_ok());
+        assert!(verify_audio(&with(None), Some(&wanted)).is_err());
+        let odd = RevertedConfig {
+            audio_unreadable: true,
+            ..RevertedConfig::default()
+        };
+        assert!(verify_audio(&odd, Some(&wanted)).is_err());
+        assert!(verify_audio(&odd, None).is_ok());
+        assert!(verify_audio(&with(Some(audio("AC97", "none"))), Some(&wanted)).is_err());
+        assert!(
+            verify_audio(&with(Some(audio("ich9-intel-hda", "spice"))), Some(&wanted)).is_err()
+        );
+        // A template without audio asks nothing of the member.
+        assert!(verify_audio(&with(None), None).is_ok());
+        assert!(verify_audio(&with(Some(wanted)), None).is_ok());
     }
 
     #[test]

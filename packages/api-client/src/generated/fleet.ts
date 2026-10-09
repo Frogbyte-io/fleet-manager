@@ -1428,6 +1428,16 @@ export interface LabArtifactDto {
 }
 
 /**
+ * A virtual audio device (Proxmox `audio0`).
+ */
+export interface LabAudioDto {
+  /** The device model: `ich9-intel-hda`, `intel-hda`, or `AC97`. */
+  device: string;
+  /** The host backend: `none` (no host audio). */
+  driver: string;
+}
+
+/**
  * What a drain did.
  */
 export interface LabPoolDrainDto {
@@ -1512,6 +1522,7 @@ export interface LabPoolDto {
  * The frozen template content.
  */
 export interface LabTemplateContentDto {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -1577,6 +1588,7 @@ export interface LabTemplateContentDto {
  * One template draft.
  */
 export interface LabTemplateDto {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -2735,6 +2747,7 @@ export interface PageLabPoolDto {
  * One template draft.
  */
 export type PageLabTemplateDtoItemsItem = {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -4635,6 +4648,7 @@ export interface ResourceLabPoolDto {
  * One template draft.
  */
 export type ResourceLabTemplateDtoData = {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable
@@ -5786,6 +5800,7 @@ export interface SaveCatalogRequest {
  * The create/update request.
  */
 export interface SaveLabTemplateRequest {
+  audio?: null | LabAudioDto;
   /**
      * The bootstrap profile reference, when pinned.
      * @nullable

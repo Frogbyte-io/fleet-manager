@@ -50,6 +50,13 @@ impl LabRepository {
             .unwrap_or(1),
             ttl_seconds: u32::try_from(row.get::<i64, _>("ttl_seconds")).unwrap_or(1),
             cleanup: CleanupStrategy::from_id(&cleanup)?,
+            audio: match (
+                row.get::<Option<String>, _>("audio_device"),
+                row.get::<Option<String>, _>("audio_driver"),
+            ) {
+                (Some(device), Some(driver)) => Some(fleet_core::LabAudio { device, driver }),
+                _ => None,
+            },
         })
     }
 
@@ -109,8 +116,8 @@ impl LabTemplatePort for LabRepository {
         let id = Uuid::now_v7().to_string();
         let content = &template.content;
         let result = sqlx::query(
-            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO lab_templates (id, name, description, image_version_id, cores, memory_mib, disk_gib, bootstrap_project_id, readiness_probe, readiness_command, readiness_deadline_seconds, ttl_seconds, cleanup, published_from, created_at, updated_at, ssh_user, ssh_port, ssh_trust_mode, ssh_fingerprint, audio_device, audio_driver) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         )
         .bind(&id)
         .bind(&content.name)
@@ -128,6 +135,8 @@ impl LabTemplatePort for LabRepository {
         .bind(now)
         .bind(&content.ssh_user).bind(i64::from(content.ssh_port))
         .bind(&content.ssh_trust_mode).bind(&content.ssh_fingerprint)
+        .bind(content.audio.as_ref().map(|audio| audio.device.as_str()))
+        .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
         .execute(&self.pool)
         .await;
         match result {
@@ -166,7 +175,7 @@ impl LabTemplatePort for LabRepository {
         now: i64,
     ) -> Result<LabTemplate, String> {
         let updated = sqlx::query(
-            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18 WHERE id = ?1",
+            "UPDATE lab_templates SET name = ?2, description = ?3, image_version_id = ?4, cores = ?5, memory_mib = ?6, disk_gib = ?7, bootstrap_project_id = ?8, readiness_probe = ?9, readiness_command = ?10, readiness_deadline_seconds = ?11, ttl_seconds = ?12, cleanup = ?13, updated_at = ?14, ssh_user = ?15, ssh_port = ?16, ssh_trust_mode = ?17, ssh_fingerprint = ?18, audio_device = ?19, audio_driver = ?20 WHERE id = ?1",
         )
         .bind(id)
         .bind(&content.name)
@@ -184,6 +193,8 @@ impl LabTemplatePort for LabRepository {
         .bind(now)
         .bind(&content.ssh_user).bind(i64::from(content.ssh_port))
         .bind(&content.ssh_trust_mode).bind(&content.ssh_fingerprint)
+        .bind(content.audio.as_ref().map(|audio| audio.device.as_str()))
+        .bind(content.audio.as_ref().map(|audio| audio.driver.as_str()))
         .execute(&self.pool)
         .await
         .map_err(|error| format!("update failed: {error}"))?;

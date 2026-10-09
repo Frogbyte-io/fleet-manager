@@ -75,6 +75,7 @@ impl Harness {
             readiness_deadline_seconds: 0,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio: None,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

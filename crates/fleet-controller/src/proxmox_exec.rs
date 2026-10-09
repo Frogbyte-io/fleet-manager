@@ -2068,6 +2068,7 @@ pub struct ProvisionExecutor {
     pools: Option<Arc<dyn fleet_application::lab_pool::LabPoolPort>>,
     /// The bound on one disk resize task (#372).
     hardware_task_timeout: Duration,
+    hardware_confirm_timeout: Duration,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2152,7 +2153,18 @@ impl ProvisionExecutor {
             placement: None,
             pools: None,
             hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
+            hardware_confirm_timeout: HARDWARE_CONFIRM_TIMEOUT,
         }
+    }
+
+    /// Bounds how long a written hardware value may stay unreported by the
+    /// config read before the step fails, instead of the default thirty
+    /// seconds. For tests, which cannot wait that long.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_hardware_confirm_timeout(mut self, timeout: Duration) -> Self {
+        self.hardware_confirm_timeout = timeout;
+        self
     }
 
     /// Bounds one disk resize task (#372) by `timeout` instead of the
@@ -2917,6 +2929,17 @@ impl ProvisionExecutor {
         }
         let (node, vmid) = (target.node, target.vmid);
         let wanted_mib = u64::from(content.disk_gib) * 1024;
+        let wanted_audio = content
+            .audio
+            .as_ref()
+            .map(|audio| fleet_provider_proxmox::PveAudio {
+                device: audio.device.clone(),
+                driver: audio.driver.clone(),
+            });
+        let audio_label = wanted_audio.as_ref().map_or_else(
+            || "unchanged".to_owned(),
+            fleet_provider_proxmox::PveAudio::to_property,
+        );
         let where_ = format!("{node}/qemu/{vmid}");
         let name = format!("fm-lab-{}", target.record_id);
         let refuse = |reason: &'static str, detail: String| Ok(Err(Refusal::new(reason, detail)));
@@ -2960,8 +2983,8 @@ impl ProvisionExecutor {
                 return refuse(
                     "hardware_failed",
                     format!(
-                        "the clone {where_} did not settle on the template's hardware ({} cores, {} MiB, {} GiB disk) after {writes} writes; the guest is retained for cleanup",
-                        content.cores, content.memory_mib, content.disk_gib
+                        "the clone {where_} did not settle on the template's hardware ({} cores, {} MiB, {} GiB disk, audio {}) after {writes} writes; the guest is retained for cleanup",
+                        content.cores, content.memory_mib, content.disk_gib, audio_label
                     ),
                 );
             }
@@ -2993,6 +3016,11 @@ impl ProvisionExecutor {
                 .unwrap_or_else(|| hardware.sockets.saturating_mul(hardware.cores));
             let cores = (!multi && hardware.cores != content.cores).then_some(content.cores);
             let memory = (hardware.memory_mib != content.memory_mib).then_some(content.memory_mib);
+            // The audio device rides the same config write. A template that
+            // declares none leaves whatever the image has.
+            let audio = wanted_audio.as_ref().filter(|wanted| {
+                hardware.audio_unreadable || hardware.audio.as_ref() != Some(*wanted)
+            });
             if memory.is_some() && hardware.memory_has_options {
                 return refuse(
                     "hardware_unsupported",
@@ -3044,12 +3072,12 @@ impl ProvisionExecutor {
                 );
             };
             let grow = size_mib < wanted_mib;
-            if cores.is_none() && memory.is_none() && !grow {
+            if cores.is_none() && memory.is_none() && audio.is_none() && !grow {
                 return Ok(Ok(()));
             }
             // What is still wrong right after the write that should have
             // fixed it is waited out, never written again, within a bound.
-            let next = if cores.is_some() || memory.is_some() {
+            let next = if cores.is_some() || memory.is_some() || audio.is_some() {
                 Write::Config
             } else {
                 Write::Resize
@@ -3057,12 +3085,12 @@ impl ProvisionExecutor {
             if let Some((kind, at)) = last_write
                 && kind == next
             {
-                if at.elapsed() >= HARDWARE_CONFIRM_TIMEOUT {
+                if at.elapsed() >= self.hardware_confirm_timeout {
                     return refuse(
                         "hardware_failed",
                         format!(
-                            "the clone {where_} does not report the template's hardware ({} cores, {} MiB, {} GiB disk) after the update; the guest is retained for cleanup",
-                            content.cores, content.memory_mib, content.disk_gib
+                            "the clone {where_} does not report the template's hardware ({} cores, {} MiB, {} GiB disk, audio {}) after the update; the guest is retained for cleanup",
+                            content.cores, content.memory_mib, content.disk_gib, audio_label
                         ),
                     );
                 }
@@ -3087,6 +3115,7 @@ impl ProvisionExecutor {
                             vmid,
                             cores,
                             memory,
+                            audio,
                             digest,
                         )
                         .await
@@ -3101,12 +3130,28 @@ impl ProvisionExecutor {
                             if (500..600).contains(&status)
                                 && !std::mem::replace(&mut retried[0], true) => {}
                         Err(error) => {
-                            let privileges = match (cores.is_some(), memory.is_some()) {
-                                (true, true) => "VM.Config.CPU and VM.Config.Memory",
-                                (true, false) => "VM.Config.CPU",
-                                _ => "VM.Config.Memory",
-                            };
-                            return Ok(Err(failed("set its cores and memory", privileges, &error)));
+                            let privileges = [
+                                (cores.is_some(), "VM.Config.CPU"),
+                                (memory.is_some(), "VM.Config.Memory"),
+                                (audio.is_some(), "VM.Config.HWType"),
+                            ]
+                            .iter()
+                            .filter_map(|(needed, privilege)| needed.then_some(*privilege))
+                            .collect::<Vec<_>>()
+                            .join(" and ");
+                            let action = format!(
+                                "set its {}",
+                                [
+                                    (cores.is_some(), "cores"),
+                                    (memory.is_some(), "memory"),
+                                    (audio.is_some(), "audio device"),
+                                ]
+                                .iter()
+                                .filter_map(|(needed, what)| needed.then_some(*what))
+                                .collect::<Vec<_>>()
+                                .join(" and ")
+                            );
+                            return Ok(Err(failed(&action, &privileges, &error)));
                         }
                     }
                 }

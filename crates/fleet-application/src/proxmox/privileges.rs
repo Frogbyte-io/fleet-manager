@@ -696,6 +696,18 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         note: "A clone keeps the image template's cores and memory; when they differ from the Lab template's, the executor sets cores (VM.Config.CPU) and memory (VM.Config.Memory) on its own new guest, conditional on the config digest, so the guest matches what the capacity reservation held (issue #372). Nothing is written, and neither privilege is used, when they already match.",
     },
     PrivilegeRequirement {
+        id: "lab.provision.hardware-audio",
+        capability: "lab.provision",
+        tier: PrivilegeTier::Lab,
+        endpoint: "PUT /nodes/{node}/qemu/{vmid}/config",
+        majors: BOTH,
+        scope: PrivilegeScope::NewGuest,
+        privileges: &["VM.Config.HWType"],
+        matching: PrivilegeMatch::All,
+        required: false,
+        note: "When the Lab template declares a virtual audio device and the clone's audio0 differs, the executor sets audio0 in the same config write as cores and memory, on its own new guest (issue #398). qemu-server lists audio0 among the hardware-type options, which need VM.Config.HWType. Opt-in: only templates that declare audio use it, so it never gates the Lab tier; without it a provision of such a template fails at the hardware step naming the privilege. Nothing is written, and the privilege is not used, when the clone already matches or the template declares no audio.",
+    },
+    PrivilegeRequirement {
         id: "lab.provision.hardware-resize",
         capability: "lab.provision",
         tier: PrivilegeTier::Lab,
@@ -1402,7 +1414,20 @@ mod tests {
                 assert_eq!(row.scope, PrivilegeScope::NewGuest);
                 assert!(row.required);
             }
-            for privilege in ["VM.Config.CPU", "VM.Config.Memory", "VM.Config.Disk"] {
+            let audio = requirements_for_major(major)
+                .find(|row| row.id == "lab.provision.hardware-audio")
+                .unwrap();
+            assert_eq!(audio.privileges, &["VM.Config.HWType"]);
+            // Only templates with audio use it: it is reported, never a gate.
+            assert!(!audio.required);
+            assert_eq!(audio.tier, PrivilegeTier::Lab);
+            assert_eq!(audio.scope, PrivilegeScope::NewGuest);
+            for privilege in [
+                "VM.Config.CPU",
+                "VM.Config.Memory",
+                "VM.Config.Disk",
+                "VM.Config.HWType",
+            ] {
                 assert!(
                     requirements_for_major(major)
                         .filter(|row| row.scope != PrivilegeScope::NewGuest)

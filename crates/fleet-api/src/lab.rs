@@ -77,6 +77,25 @@ pub(crate) fn map_lab_error(
     ApiError::new(&public, correlation_id).with_status(status)
 }
 
+/// A virtual audio device (Proxmox `audio0`).
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LabAudioDto {
+    /// The device model: `ich9-intel-hda`, `intel-hda`, or `AC97`.
+    pub device: String,
+    /// The host backend: `none` (no host audio).
+    pub driver: String,
+}
+
+impl From<fleet_core::LabAudio> for LabAudioDto {
+    fn from(audio: fleet_core::LabAudio) -> Self {
+        Self {
+            device: audio.device,
+            driver: audio.driver,
+        }
+    }
+}
+
 /// One template draft.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +134,8 @@ pub struct LabTemplateDto {
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+    /// The virtual audio device every guest gets, when declared.
+    pub audio: Option<LabAudioDto>,
     /// The published version this draft descends from, when any.
     pub published_from: Option<String>,
     /// When the draft was created.
@@ -143,6 +164,7 @@ impl From<LabTemplate> for LabTemplateDto {
             readiness_deadline_seconds: template.content.readiness_deadline_seconds,
             ttl_seconds: template.content.ttl_seconds,
             cleanup: template.content.cleanup.id().to_owned(),
+            audio: template.content.audio.map(Into::into),
             published_from: template.published_from,
             created_at: template.created_at,
             updated_at: template.updated_at,
@@ -206,6 +228,8 @@ pub struct LabTemplateContentDto {
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+    /// The virtual audio device every guest gets, when declared.
+    pub audio: Option<LabAudioDto>,
 }
 
 impl From<LabTemplateVersion> for LabTemplateVersionDto {
@@ -231,6 +255,7 @@ impl From<LabTemplateVersion> for LabTemplateVersionDto {
                 readiness_deadline_seconds: version.content.readiness_deadline_seconds,
                 ttl_seconds: version.content.ttl_seconds,
                 cleanup: version.content.cleanup.id().to_owned(),
+                audio: version.content.audio.map(Into::into),
             },
             image_digest: version.image_digest,
             published_by: version.published_by,
@@ -337,6 +362,10 @@ pub struct SaveLabTemplateRequest {
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: String,
+    /// The virtual audio device every guest gets. Absent leaves the clone
+    /// as the image has it.
+    #[serde(default)]
+    pub audio: Option<LabAudioDto>,
 }
 
 fn default_lab_ssh_user() -> String {
@@ -375,6 +404,10 @@ impl SaveLabTemplateRequest {
             readiness_deadline_seconds: self.readiness_deadline_seconds,
             ttl_seconds: self.ttl_seconds,
             cleanup,
+            audio: self.audio.map(|audio| fleet_core::LabAudio {
+                device: audio.device,
+                driver: audio.driver,
+            }),
         })
     }
 }
@@ -1571,5 +1604,46 @@ mod template_mapping_tests {
             dto.ssh_fingerprint.as_deref(),
             Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         );
+    }
+
+    #[test]
+    fn template_audio_is_optional_and_round_trips() {
+        let base = serde_json::json!({
+            "name":"lab", "description":"", "imageVersionId":"image-1", "cores":2,
+            "memoryMib":2048, "diskGib":20, "readinessProbe":"guest_agent",
+            "readinessDeadlineSeconds":120, "ttlSeconds":3600, "cleanup":"destroy"
+        });
+        let id = || fleet_core::UuidV7Generator.next_correlation_id();
+        let request: SaveLabTemplateRequest = serde_json::from_value(base.clone()).unwrap();
+        let content = request.into_content(id()).unwrap();
+        assert!(content.audio.is_none());
+        assert!(content.validate().is_ok());
+        let mut with = base.clone();
+        with["audio"] = serde_json::json!({"device": "ich9-intel-hda", "driver": "none"});
+        let request: SaveLabTemplateRequest = serde_json::from_value(with).unwrap();
+        let content = request.into_content(id()).unwrap();
+        assert!(content.validate().is_ok());
+        let dto = LabTemplateVersionDto::from(LabTemplateVersion {
+            id: "version".to_owned(),
+            template_id: "template".to_owned(),
+            name: "lab".to_owned(),
+            content,
+            image_digest: "digest".to_owned(),
+            published_by: "tester".to_owned(),
+            published_at: 0,
+        })
+        .content;
+        let audio = dto.audio.unwrap();
+        assert_eq!(
+            (audio.device.as_str(), audio.driver.as_str()),
+            ("ich9-intel-hda", "none")
+        );
+        // A device or driver outside the allow-list is refused by validation.
+        for (device, driver) in [("sb16", "none"), ("ich9-intel-hda", "spice")] {
+            let mut bad = base.clone();
+            bad["audio"] = serde_json::json!({"device": device, "driver": driver});
+            let request: SaveLabTemplateRequest = serde_json::from_value(bad).unwrap();
+            assert!(request.into_content(id()).unwrap().validate().is_err());
+        }
     }
 }

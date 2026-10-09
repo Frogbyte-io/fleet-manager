@@ -2708,6 +2708,7 @@ async fn project_linked_lab_router() -> (
                     readiness_deadline_seconds: 300,
                     ttl_seconds: 3_600,
                     cleanup: CleanupStrategy::Destroy,
+                    audio: None,
                 },
             },
             1,

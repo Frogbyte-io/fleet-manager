@@ -106,6 +106,8 @@ async fn a_clone_config_reads_as_its_cores_memory_and_boot_disk() {
             memory_mib: 2048,
             memory_has_options: false,
             boot_disk: Some(boot_disk("scsi0", Some(20 * 1024))),
+            audio: None,
+            audio_unreadable: false,
             digest: Some("3c1f0a5d9e7b2c4a6f8e0d1c3b5a79e8f6d4c2b0".to_owned()),
         }
     );
@@ -270,11 +272,19 @@ async fn setting_hardware_is_a_conditional_put_of_only_the_given_values() {
     let transport = Transport::new(200, json!({"data": null}));
     let client = ProxmoxClient::new(transport.clone());
     client
-        .qemu_set_hardware(request(), "pve9-n1", 9000, Some(4), Some(8192), "3c1f0a5d")
+        .qemu_set_hardware(
+            request(),
+            "pve9-n1",
+            9000,
+            Some(4),
+            Some(8192),
+            None,
+            "3c1f0a5d",
+        )
         .await
         .unwrap();
     client
-        .qemu_set_hardware(request(), "pve9-n1", 9000, Some(4), None, "3c1f0a5d")
+        .qemu_set_hardware(request(), "pve9-n1", 9000, Some(4), None, None, "3c1f0a5d")
         .await
         .unwrap();
     {
@@ -293,7 +303,7 @@ async fn setting_hardware_is_a_conditional_put_of_only_the_given_values() {
     }
     // Nothing to set is refused before any request.
     let error = client
-        .qemu_set_hardware(request(), "pve9-n1", 9000, None, None, "3c1f0a5d")
+        .qemu_set_hardware(request(), "pve9-n1", 9000, None, None, None, "3c1f0a5d")
         .await
         .unwrap_err();
     assert!(matches!(error, PveApiError::InvalidPayload { .. }));
@@ -378,11 +388,11 @@ async fn pve_refusals_of_the_hardware_writes_surface_as_errors() {
         let client = ProxmoxClient::new(forbidden);
         let error = match call {
             "cores" => client
-                .qemu_set_hardware(request(), "pve9-n1", 9000, Some(2), None, "d")
+                .qemu_set_hardware(request(), "pve9-n1", 9000, Some(2), None, None, "d")
                 .await
                 .unwrap_err(),
             "memory" => client
-                .qemu_set_hardware(request(), "pve9-n1", 9000, None, Some(2048), "d")
+                .qemu_set_hardware(request(), "pve9-n1", 9000, None, Some(2048), None, "d")
                 .await
                 .unwrap_err(),
             _ => client
@@ -403,7 +413,7 @@ async fn pve_refusals_of_the_hardware_writes_surface_as_errors() {
         json!({"data": null, "message": "checksum mismatch (file change by other user?)\n"}),
     );
     let error = ProxmoxClient::new(refused)
-        .qemu_set_hardware(request(), "pve9-n1", 9000, Some(2), None, "stale")
+        .qemu_set_hardware(request(), "pve9-n1", 9000, Some(2), None, None, "stale")
         .await
         .unwrap_err();
     assert!(
@@ -416,11 +426,69 @@ async fn pve_refusals_of_the_hardware_writes_surface_as_errors() {
         json!({"data": null, "errors": {"memory": "value must have a minimum value of 16"}}),
     );
     let error = ProxmoxClient::new(rejected)
-        .qemu_set_hardware(request(), "pve9-n1", 9000, None, Some(8), "d")
+        .qemu_set_hardware(request(), "pve9-n1", 9000, None, Some(8), None, "d")
         .await
         .unwrap_err();
     assert!(
         matches!(error, PveApiError::Http { status: 400, .. }),
         "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn audio0_is_read_as_a_model_and_a_driver_and_written_as_a_property_string() {
+    use fleet_provider_proxmox::PveAudio;
+    let audio = |value: &str| PveAudio {
+        device: value.split(',').next().unwrap().to_owned(),
+        driver: value.split(',').nth(1).unwrap_or("spice").to_owned(),
+    };
+    for (raw, expected) in [
+        (
+            "device=ich9-intel-hda,driver=none",
+            Some(("ich9-intel-hda", "none")),
+        ),
+        ("driver=none,device=AC97", Some(("AC97", "none"))),
+        // PVE's default driver is spice.
+        ("device=intel-hda", Some(("intel-hda", "spice"))),
+        ("ich9-intel-hda", Some(("ich9-intel-hda", "spice"))),
+    ] {
+        let (read, _) = hardware(json!({"data": {"audio0": raw}})).await;
+        let expected = expected.map(|(device, driver)| PveAudio {
+            device: device.to_owned(),
+            driver: driver.to_owned(),
+        });
+        assert_eq!(read.unwrap().audio, expected, "{raw}");
+    }
+    let (read, _) = hardware(json!({"data": {"cores": 2}})).await;
+    assert_eq!(read.unwrap().audio, None);
+    // An odd audio0 never breaks the read: it is flagged, so only a caller
+    // that needs audio cares.
+    for body in [
+        json!({"data": {"audio0": ""}}),
+        json!({"data": {"audio0": "driver=none"}}),
+        json!({"data": {"audio0": 1}}),
+    ] {
+        let (read, _) = hardware(body.clone()).await;
+        let read = read.unwrap_or_else(|error| panic!("{body}: {error:?}"));
+        assert_eq!((read.audio, read.audio_unreadable), (None, true), "{body}");
+    }
+    let transport = Transport::new(200, json!({"data": null}));
+    let client = ProxmoxClient::new(transport.clone());
+    client
+        .qemu_set_hardware(
+            request(),
+            "pve9-n1",
+            9000,
+            None,
+            None,
+            Some(&audio("ich9-intel-hda,none")),
+            "d1",
+        )
+        .await
+        .unwrap();
+    let seen = transport.seen.lock().unwrap();
+    assert_eq!(
+        seen[0].1,
+        Some(json!({"audio0": "device=ich9-intel-hda,driver=none", "digest": "d1"}))
     );
 }

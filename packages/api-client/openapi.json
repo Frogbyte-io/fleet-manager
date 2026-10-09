@@ -10349,6 +10349,24 @@
           }
         }
       },
+      "LabAudioDto": {
+        "type": "object",
+        "description": "A virtual audio device (Proxmox `audio0`).",
+        "required": [
+          "device",
+          "driver"
+        ],
+        "properties": {
+          "device": {
+            "type": "string",
+            "description": "The device model: `ich9-intel-hda`, `intel-hda`, or `AC97`."
+          },
+          "driver": {
+            "type": "string",
+            "description": "The host backend: `none` (no host audio)."
+          }
+        }
+      },
       "LabPoolDrainDto": {
         "type": "object",
         "description": "What a drain did.",
@@ -10514,6 +10532,17 @@
           "cleanup"
         ],
         "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LabAudioDto",
+                "description": "The virtual audio device every guest gets, when declared."
+              }
+            ]
+          },
           "bootstrapProjectId": {
             "type": [
               "string",
@@ -10623,6 +10652,17 @@
           "updatedAt"
         ],
         "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LabAudioDto",
+                "description": "The virtual audio device every guest gets, when declared."
+              }
+            ]
+          },
           "bootstrapProjectId": {
             "type": [
               "string",
@@ -12860,6 +12900,17 @@
                 "updatedAt"
               ],
               "properties": {
+                "audio": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LabAudioDto",
+                      "description": "The virtual audio device every guest gets, when declared."
+                    }
+                  ]
+                },
                 "bootstrapProjectId": {
                   "type": [
                     "string",
@@ -16071,6 +16122,17 @@
               "updatedAt"
             ],
             "properties": {
+              "audio": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/LabAudioDto",
+                    "description": "The virtual audio device every guest gets, when declared."
+                  }
+                ]
+              },
               "bootstrapProjectId": {
                 "type": [
                   "string",
@@ -17943,6 +18005,17 @@
           "cleanup"
         ],
         "properties": {
+          "audio": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LabAudioDto",
+                "description": "The virtual audio device every guest gets. Absent leaves the clone\nas the image has it."
+              }
+            ]
+          },
           "bootstrapProjectId": {
             "type": [
               "string",

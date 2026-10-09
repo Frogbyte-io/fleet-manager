@@ -45,8 +45,8 @@ pub use image::{
     recipe_refusal_message, requests_insecure_tls,
 };
 pub use lab::{
-    CleanupStrategy, GuestState, LabTemplateContent, Lease, LeaseState,
-    MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe,
+    CleanupStrategy, GuestState, LAB_AUDIO_DEVICES, LAB_AUDIO_DRIVERS, LabAudio,
+    LabTemplateContent, Lease, LeaseState, MAX_LAB_LEASE_LIFETIME_MILLIS, ReadinessProbe,
 };
 pub use machine::{CapabilityFact, CapabilityStatus, EndpointKind, MAX_CAPABILITY_FACTS};
 pub use operation::{

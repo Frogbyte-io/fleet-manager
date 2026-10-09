@@ -161,6 +161,48 @@ fn default_ssh_trust_mode() -> String {
     "tofu".to_owned()
 }
 
+/// The audio devices a Lab template may declare: the models of Proxmox's
+/// `audio0` (qemu-server's `audio0` property, `device` enum).
+pub const LAB_AUDIO_DEVICES: [&str; 3] = ["ich9-intel-hda", "intel-hda", "AC97"];
+/// The audio drivers a Lab template may declare. PVE also knows `spice`,
+/// which needs a SPICE display a headless Lab guest does not have; only
+/// `none` (a guest-visible device with no host audio backend) is allowed.
+pub const LAB_AUDIO_DRIVERS: [&str; 1] = ["none"];
+
+/// A virtual audio device a Lab template declares for every guest it
+/// provides (Proxmox `audio0`, e.g. `device=ich9-intel-hda,driver=none`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabAudio {
+    /// The device model, one of [`LAB_AUDIO_DEVICES`].
+    pub device: String,
+    /// The host backend, one of [`LAB_AUDIO_DRIVERS`].
+    pub driver: String,
+}
+
+impl LabAudio {
+    /// Validates the declaration against the allow-lists.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a device or driver outside the allow-lists.
+    pub fn validate(&self) -> Result<(), String> {
+        if !LAB_AUDIO_DEVICES.contains(&self.device.as_str()) {
+            return Err(format!(
+                "the audio device must be one of {}",
+                LAB_AUDIO_DEVICES.join(", ")
+            ));
+        }
+        if !LAB_AUDIO_DRIVERS.contains(&self.driver.as_str()) {
+            return Err(format!(
+                "the audio driver must be one of {}",
+                LAB_AUDIO_DRIVERS.join(", ")
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A Lab template's content: the pinned image version, runtime
 /// constraints, the bootstrap profile, and the policies.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -203,6 +245,11 @@ pub struct LabTemplateContent {
     pub ttl_seconds: u32,
     /// The cleanup strategy.
     pub cleanup: CleanupStrategy,
+    /// The virtual audio device every guest gets. `None` leaves the clone
+    /// as the image has it: a template without audio never strips a device
+    /// the image already carries.
+    #[serde(default)]
+    pub audio: Option<LabAudio>,
 }
 
 impl Default for LabTemplateContent {
@@ -224,6 +271,7 @@ impl Default for LabTemplateContent {
             readiness_deadline_seconds: 0,
             ttl_seconds: 0,
             cleanup: CleanupStrategy::default(),
+            audio: None,
         }
     }
 }
@@ -268,6 +316,9 @@ impl LabTemplateContent {
             return Err("the ssh_exec probe requires a readiness command".to_owned());
         }
         self.validate_ssh()?;
+        if let Some(audio) = &self.audio {
+            audio.validate()?;
+        }
         if self.readiness_probe == ReadinessProbe::ProjectReady
             && self
                 .bootstrap_project_id
@@ -343,6 +394,7 @@ mod tests {
             readiness_deadline_seconds: 300,
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
+            audio: None,
         }
     }
 
@@ -358,6 +410,38 @@ mod tests {
         bad.readiness_deadline_seconds = 300;
         bad.ttl_seconds = 0;
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn audio_is_optional_and_limited_to_the_allow_list() {
+        let mut with = content();
+        assert!(with.audio.is_none());
+        for device in LAB_AUDIO_DEVICES {
+            with.audio = Some(LabAudio {
+                device: device.to_owned(),
+                driver: "none".to_owned(),
+            });
+            assert!(with.validate().is_ok(), "{device}");
+        }
+        for (device, driver) in [
+            ("sb16", "none"),
+            ("", "none"),
+            ("ich9-intel-hda", "spice"),
+            ("ich9-intel-hda", ""),
+            ("ich9-intel-hda,driver=spice", "none"),
+            ("ich9-intel-hda", "none,x=1"),
+        ] {
+            with.audio = Some(LabAudio {
+                device: device.to_owned(),
+                driver: driver.to_owned(),
+            });
+            assert!(with.validate().is_err(), "{device}/{driver}");
+        }
+        // A published version stored before the field existed has none.
+        let mut stored = serde_json::to_value(content()).unwrap();
+        stored.as_object_mut().unwrap().remove("audio");
+        let back: LabTemplateContent = serde_json::from_value(stored).unwrap();
+        assert!(back.audio.is_none());
     }
 
     #[test]

@@ -174,6 +174,7 @@ async fn the_provision_executor_links_its_clone_and_start_tasks_to_the_operation
         readiness_deadline_seconds: 0,
         ttl_seconds: 3_600,
         cleanup: CleanupStrategy::Destroy,
+        audio: None,
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs.as_ref(),
