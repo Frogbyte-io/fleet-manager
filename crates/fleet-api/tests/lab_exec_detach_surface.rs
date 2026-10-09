@@ -345,18 +345,47 @@ async fn status_reports_each_state_and_a_released_lease_is_a_terminal_answer() {
     assert_eq!(body["data"]["exitCode"], 3);
     assert!(!body.to_string().contains("hunter2"), "{body}");
 
+    // The terminal answer is kept: the guest is not asked again.
+    *world.guest.answer.lock().unwrap() = Err("must not be read".to_owned());
+    let (_, kept) = call(&state, "GET", &path, None, None).await;
+    assert_eq!(kept["data"]["state"], "exited");
+    assert_eq!(kept["data"]["exitCode"], 3);
+
+    // A second command is lost.
+    let (_, second) = call(
+        &state,
+        "POST",
+        &format!("/lab/leases/{}/exec-detached", world.lease_id),
+        None,
+        Some(serde_json::json!({"script": "true"})),
+    )
+    .await;
+    let second = second["data"]["handle"].as_str().unwrap().to_owned();
+    let lost_path = format!("/lab/detached-execs/{second}");
     *world.guest.answer.lock().unwrap() = Ok(GuestProcess {
         reason: Some("process_gone".to_owned()),
         ..process(GuestProcessState::Lost)
     });
-    let (_, body) = call(&state, "GET", &path, None, None).await;
+    let (_, body) = call(&state, "GET", &lost_path, None, None).await;
     assert_eq!(body["data"]["state"], "lost");
     assert_eq!(body["data"]["reason"], "process_gone");
     assert_eq!(body["data"]["terminal"], true);
 
+    let (_, third) = call(
+        &state,
+        "POST",
+        &format!("/lab/leases/{}/exec-detached", world.lease_id),
+        None,
+        Some(serde_json::json!({"script": "true"})),
+    )
+    .await;
+    let unreach_path = format!(
+        "/lab/detached-execs/{}",
+        third["data"]["handle"].as_str().unwrap()
+    );
     // An unreadable guest is an answer to poll again, not an error.
     *world.guest.answer.lock().unwrap() = Err("ssh: connection refused".to_owned());
-    let (status, body) = call(&state, "GET", &path, None, None).await;
+    let (status, body) = call(&state, "GET", &unreach_path, None, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["state"], "unreachable");
     assert_eq!(body["data"]["terminal"], false);

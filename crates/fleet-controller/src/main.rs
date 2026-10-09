@@ -244,7 +244,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     store.pool().clone(),
                 )),
                 config.data_dir.join("ssh"),
-                exec_limiter.clone(),
+                // Status polls get their own small pool, so polling can never
+                // starve exec, collect, or put of session slots.
+                fleet_provider_ssh::ExecutionLimiter::new(2),
             ) {
                 Ok(guest) => std::sync::Arc::new(guest),
                 Err(error) => {

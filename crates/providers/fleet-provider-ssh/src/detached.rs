@@ -34,7 +34,9 @@
 //! recorded start time and the same boot id), `exited` (`exit` exists), or
 //! `lost` with a reason: `guest_rebooted` (boot id differs), `process_gone`
 //! (the wrapper died without writing `exit`, for example it was killed),
-//! `never_started` (the directory never got a `pid`).
+//! `never_started` (the directory never got a `pid`, or the start gave up
+//! and wrote `abandoned`, which makes a late wrapper exit without running).
+//! Status reads only regular files, never symlinks, and bounds each read.
 
 use std::time::Duration;
 
@@ -48,8 +50,13 @@ use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 /// keeps so that a credential straddling the cut is scrubbed whole.
 pub const TAIL_WINDOW_BYTES: usize = 16 * 1024;
 
-/// How long the start or status session may take.
+/// How long the start session may take.
 pub const SESSION_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long a status read may take. The guest script bounds each file read
+/// with `timeout 5`, so a command that swaps its output for a FIFO cannot
+/// hold the session.
+pub const STATUS_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The longest handle the guest accepts.
 pub const MAX_HANDLE_LEN: usize = 64;
@@ -69,6 +76,7 @@ pub fn is_valid_handle(handle: &str) -> bool {
 /// `$1` the handle directory, `$2` the timeout in seconds.
 const WRAPPER: &str = r#"umask 077
 fleet_dir=$1; fleet_secs=$2
+[ ! -e "$fleet_dir/abandoned" ] || exit 0
 fleet_stat=$(cat /proc/$$/stat) || exit 1
 fleet_rest=${fleet_stat##*) }
 set -- $fleet_rest
@@ -118,7 +126,7 @@ while [ ! -f "$fleet_dir/pid" ] && [ "$fleet_n" -lt 100 ]; do
   sleep 0.1
   fleet_n=$((fleet_n + 1))
 done
-[ -f "$fleet_dir/pid" ] || exit 75
+[ -f "$fleet_dir/pid" ] || { : > "$fleet_dir/abandoned"; exit 75; }
 echo started
 exit 0
 "#;
@@ -150,30 +158,34 @@ pub fn start_metadata(handle: &str, timeout_seconds: u64) -> ScriptMetadata {
 }
 
 const STATUS_BODY: &str = r#"[ -d "$fleet_dir" ] && [ ! -L "$fleet_dir" ] || { echo state=absent; exit 0; }
+fleet_reg() { [ -f "$1" ] && [ ! -L "$1" ]; }
 fleet_alive() {
   local pid start stat rest
+  fleet_reg "$fleet_dir/pid" || return 1
   read -r pid start < "$fleet_dir/pid" 2>/dev/null || return 1
   case $pid in ''|*[!0-9]*) return 1;; esac
-  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  stat=$(timeout 5 cat "/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
   set -- $rest
   [ "$1" != Z ] && [ "${20}" = "$start" ]
 }
 fleet_state=; fleet_reason=
-if [ -f "$fleet_dir/exit" ]; then
+if fleet_reg "$fleet_dir/exit"; then
   fleet_state=exited
-elif [ -f "$fleet_dir/pid" ]; then
-  fleet_boot=$(cat "$fleet_dir/boot_id" 2>/dev/null)
-  fleet_now=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+elif fleet_reg "$fleet_dir/pid"; then
+  fleet_boot=$(fleet_reg "$fleet_dir/boot_id" && timeout 5 cat "$fleet_dir/boot_id" 2>/dev/null)
+  fleet_now=$(timeout 5 cat /proc/sys/kernel/random/boot_id 2>/dev/null)
   if [ "$fleet_boot" != "$fleet_now" ]; then
     fleet_state=lost; fleet_reason=guest_rebooted
   elif fleet_alive; then
     fleet_state=running
-  elif [ -f "$fleet_dir/exit" ]; then
+  elif fleet_reg "$fleet_dir/exit"; then
     fleet_state=exited
   else
     fleet_state=lost; fleet_reason=process_gone
   fi
+elif [ -e "$fleet_dir/abandoned" ]; then
+  fleet_state=lost; fleet_reason=never_started
 elif [ -n "$(find "$fleet_dir" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
   fleet_state=starting
 else
@@ -181,7 +193,8 @@ else
 fi
 fleet_num_of() {
   local value
-  value=$(cat "$1" 2>/dev/null | head -c 20)
+  fleet_reg "$1" || return 0
+  value=$(timeout 5 head -c 20 "$1" 2>/dev/null)
   case $value in ''|*[!0-9]*) ;; *) printf '%s' "$value";; esac
 }
 echo "state=$fleet_state"
@@ -190,8 +203,13 @@ echo "state=$fleet_state"
 echo "started=$(fleet_num_of "$fleet_dir/started")"
 [ "$fleet_state" != exited ] || echo "finished=$(fleet_num_of "$fleet_dir/finished")"
 for fleet_stream in stdout stderr; do
-  echo "${fleet_stream}_bytes=$(stat -c %s -- "$fleet_dir/$fleet_stream" 2>/dev/null || echo 0)"
-  echo "${fleet_stream}_b64=$(tail -c "$fleet_num" -- "$fleet_dir/$fleet_stream" 2>/dev/null | base64 -w0)"
+  if fleet_reg "$fleet_dir/$fleet_stream"; then
+    echo "${fleet_stream}_bytes=$(timeout 5 stat -c %s -- "$fleet_dir/$fleet_stream" 2>/dev/null || echo 0)"
+    echo "${fleet_stream}_b64=$(timeout 5 tail -c "$fleet_num" -- "$fleet_dir/$fleet_stream" 2>/dev/null | base64 -w0)"
+  else
+    echo "${fleet_stream}_bytes=0"
+    echo "${fleet_stream}_b64="
+  fi
 done
 exit 0
 "#;
@@ -344,7 +362,7 @@ pub fn probe_detached(
         endpoint,
         &status_script(),
         &status_metadata(handle, TAIL_WINDOW_BYTES),
-        SESSION_DEADLINE,
+        STATUS_DEADLINE,
     )?;
     if result.killed_by_deadline {
         return Err(SshProviderError::Tool {
@@ -590,6 +608,55 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(20));
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn a_command_cannot_hang_status_by_swapping_its_files_for_a_fifo() {
+        let base = tempfile::tempdir().unwrap();
+        start(base.path(), "f1", 60, "sleep 29.61");
+        let dir = base.path().join("f1");
+        std::fs::remove_file(dir.join("stdout")).unwrap();
+        Command::new("mkfifo")
+            .arg(dir.join("stdout"))
+            .status()
+            .unwrap();
+        std::fs::remove_file(dir.join("stderr")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.join("stderr")).unwrap();
+        let begun = Instant::now();
+        let report = status(base.path(), "f1");
+        assert!(
+            begun.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            begun.elapsed()
+        );
+        assert_eq!(report.state, GuestState::Running);
+        assert!(report.stdout_tail.is_empty() && report.stderr_tail.is_empty());
+        let pid_text = std::fs::read_to_string(dir.join("pid")).unwrap();
+        let pid = pid_text.split_whitespace().next().unwrap();
+        Command::new("pkill").args(["-P", pid]).status().unwrap();
+    }
+
+    #[test]
+    fn an_abandoned_start_never_runs_late() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("ab");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("abandoned"), "").unwrap();
+        std::fs::write(dir.join("cmd.sh"), "touch ran\n").unwrap();
+        let wrapper = dir.join("run.sh");
+        std::fs::write(&wrapper, WRAPPER).unwrap();
+        let out = Command::new("bash")
+            .arg(&wrapper)
+            .arg(&dir)
+            .arg("60")
+            .current_dir(base.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert!(!dir.join("ran").exists() && !dir.join("pid").exists());
+        let lost = status(base.path(), "ab");
+        assert_eq!(lost.state, GuestState::Lost);
+        assert_eq!(lost.reason.as_deref(), Some("never_started"));
     }
 
     #[test]

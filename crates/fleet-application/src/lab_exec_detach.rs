@@ -111,6 +111,9 @@ pub struct DetachedExec {
     pub created_at: i64,
     /// When the start succeeded (epoch milliseconds).
     pub started_at: Option<i64>,
+    /// The scrubbed, bounded terminal answer (exited or lost), kept so
+    /// later polls do not dial the guest.
+    pub final_json: Option<String>,
 }
 
 /// Storage for detached-command records.
@@ -130,6 +133,13 @@ pub trait DetachedExecPort: fmt::Debug + Send + Sync {
     ///
     /// Fails when the backend errors.
     async fn get(&self, handle: &str) -> Result<Option<DetachedExec>, String>;
+
+    /// Keeps the terminal answer of a handle.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the backend errors.
+    async fn set_final(&self, handle: &str, final_json: &str) -> Result<(), String>;
 
     /// Records how the start ended.
     ///
@@ -307,7 +317,13 @@ pub struct LabExecDetach {
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
     audit: Arc<dyn AuditPort>,
+    /// When each handle's status read was last audited.
+    status_audited: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
+
+/// How often one handle's status reads are audited: polling with `--wait`
+/// would otherwise write a row every few seconds.
+const STATUS_AUDIT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl LabExecDetach {
     /// Composes the use cases.
@@ -325,6 +341,7 @@ impl LabExecDetach {
             leases,
             provisions,
             audit,
+            status_audited: std::sync::Mutex::default(),
         }
     }
 
@@ -436,10 +453,22 @@ impl LabExecDetach {
     /// Fails when the record cannot be stored.
     pub async fn register(
         &self,
+        principal: &ActingPrincipal,
         prepared: &PreparedStart,
         handle: &str,
         now: i64,
     ) -> Result<(), LabUseCaseError> {
+        self.audit(
+            principal,
+            Permission::LabExec,
+            &prepared.lease_id,
+            &[
+                ("event", "lab_exec_detach_registered"),
+                ("handle", handle),
+                ("commandSha256", &prepared.command_sha256),
+            ],
+        )
+        .await?;
         self.records
             .insert_if_absent(&DetachedExec {
                 handle: handle.to_owned(),
@@ -451,6 +480,7 @@ impl LabExecDetach {
                 start_state: StartState::Starting,
                 created_at: now,
                 started_at: None,
+                final_json: None,
             })
             .await
             .map(|_| ())
@@ -464,6 +494,7 @@ impl LabExecDetach {
     /// Fails on denial, an unknown handle or one of another owner (not
     /// found), or a store failure. A guest that cannot be read is an
     /// answer ([`DetachedState::Unreachable`]), not an error.
+    #[allow(clippy::too_many_lines)]
     pub async fn status(
         &self,
         authorizer: &dyn Authorizer,
@@ -487,13 +518,24 @@ impl LabExecDetach {
         scope(principal, &record.owner, || {
             format!("detached exec {handle}")
         })?;
-        self.audit(
-            principal,
-            Permission::LabExecRead,
-            handle,
-            &[("event", "lab_exec_status_read")],
-        )
-        .await?;
+        let due = {
+            let mut seen = self
+                .status_audited
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            seen.retain(|_, at| now.duration_since(*at) < STATUS_AUDIT_EVERY);
+            seen.insert(handle.to_owned(), now).is_none()
+        };
+        if due {
+            self.audit(
+                principal,
+                Permission::LabExecRead,
+                handle,
+                &[("event", "lab_exec_status_read")],
+            )
+            .await?;
+        }
         let mut status = DetachedStatus {
             handle: record.handle.clone(),
             lease_id: record.lease_id.clone(),
@@ -527,12 +569,20 @@ impl LabExecDetach {
             status.reason = Some("lease_ended".to_owned());
             return Ok(status);
         }
-        if record.start_state == StartState::Failed {
-            status.state = DetachedState::FailedToStart;
-            status.reason = Some("start_failed".to_owned());
-            return Ok(status);
+        if let Some(kept) = record
+            .final_json
+            .as_deref()
+            .and_then(|raw| restore(&status, raw))
+        {
+            return Ok(kept);
         }
+        let failed = record.start_state == StartState::Failed;
         let Some((machine_id, endpoint_id)) = self.machine_of(&lease).await? else {
+            if failed {
+                status.state = DetachedState::FailedToStart;
+                status.reason = Some("start_failed".to_owned());
+                return Ok(status);
+            }
             status.state = DetachedState::Unreachable;
             status.reason = Some("no_lab_machine".to_owned());
             return Ok(status);
@@ -552,6 +602,24 @@ impl LabExecDetach {
             }
         };
         apply_process(&mut status, process, &record, now);
+        // A start that reported failure may still have started the command
+        // (a dropped session, a slow wrapper): the guest decides. Only a
+        // guest with no trace of it is `failed_to_start`.
+        let no_trace = matches!(status.state, DetachedState::Starting)
+            || matches!(
+                status.reason.as_deref(),
+                Some("guest_has_no_record" | "never_started")
+            );
+        if failed && no_trace {
+            status.state = DetachedState::FailedToStart;
+            status.reason = Some("start_failed".to_owned());
+            return Ok(status);
+        }
+        if matches!(status.state, DetachedState::Exited | DetachedState::Lost)
+            && let Err(error) = self.records.set_final(handle, &freeze(&status)).await
+        {
+            eprintln!("detached exec {handle}: terminal answer not kept: {error}");
+        }
         Ok(status)
     }
 
@@ -610,6 +678,48 @@ impl LabExecDetach {
     }
 }
 
+/// The terminal answer as stored.
+fn freeze(status: &DetachedStatus) -> String {
+    serde_json::json!({
+        "state": status.state.id(),
+        "exitCode": status.exit_code,
+        "reason": status.reason,
+        "startedAt": status.started_at,
+        "finishedAt": status.finished_at,
+        "stdout": status.stdout,
+        "stderr": status.stderr,
+        "truncatedStdout": status.truncated_stdout,
+        "truncatedStderr": status.truncated_stderr,
+        "stdoutBytes": status.stdout_bytes,
+        "stderrBytes": status.stderr_bytes,
+    })
+    .to_string()
+}
+
+/// A stored terminal answer laid over `base`; `None` when it does not read.
+fn restore(base: &DetachedStatus, raw: &str) -> Option<DetachedStatus> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut status = base.clone();
+    status.state = match value["state"].as_str()? {
+        "exited" => DetachedState::Exited,
+        "lost" => DetachedState::Lost,
+        _ => return None,
+    };
+    status.exit_code = value["exitCode"]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok());
+    status.reason = value["reason"].as_str().map(str::to_owned);
+    status.started_at = value["startedAt"].as_i64();
+    status.finished_at = value["finishedAt"].as_i64();
+    value["stdout"].as_str()?.clone_into(&mut status.stdout);
+    value["stderr"].as_str()?.clone_into(&mut status.stderr);
+    status.truncated_stdout = value["truncatedStdout"].as_bool()?;
+    status.truncated_stderr = value["truncatedStderr"].as_bool()?;
+    status.stdout_bytes = value["stdoutBytes"].as_u64()?;
+    status.stderr_bytes = value["stderrBytes"].as_u64()?;
+    Some(status)
+}
+
 /// Folds the guest's answer into the status.
 fn apply_process(
     status: &mut DetachedStatus,
@@ -665,6 +775,7 @@ pub fn record_from_payload(handle: &str, payload: &str, now: i64) -> Option<Deta
         start_state: StartState::Starting,
         created_at: now,
         started_at: None,
+        final_json: None,
     })
 }
 

@@ -121,7 +121,7 @@ fleetctl --output json lab destroy <lease-id> --wait
    (poll again), `unreachable` (the guest could not be read: poll again),
    and the terminal `exited` (read `exitCode`; 124 means the time bound ended
    it), `lost` (the guest rebooted or the wrapper died without an exit
-   code), `failed_to_start` (the start operation failed; `lab exec` again),
+   code), `failed_to_start` (the start operation failed and the guest has no trace of it; check status once more, then start again),
    and `lease_ended` (the lease was released or expired and took the
    command with it). A detached command never outlives its lease or
    extends it: its time bound is capped at the lease's remaining TTL, so
@@ -129,7 +129,7 @@ fleetctl --output json lab destroy <lease-id> --wait
    lease is too short. Reuse the same `--idempotency-key` when retrying a
    start so the command is not run twice. The full output stays in the guest
    under `/var/lib/fleet-lab/exec/<handle>/` (`$HOME/.local/state/fleet-lab/exec/<handle>/`
-   for a non-root SSH user): `lab collect` it before the lease ends.
+   for a non-root SSH user): `lab collect <lease-id> <dir>/stdout <dir>/stderr` before the lease ends.
 4. Optionally `lab put <lease-id> <local-path> <guest-path> [--overwrite] --wait`
    copies one local file into the guest (its directory must exist; the
    guest checks the SHA-256 before the file appears, and an existing file is

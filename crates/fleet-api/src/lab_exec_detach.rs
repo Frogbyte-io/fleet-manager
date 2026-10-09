@@ -29,7 +29,9 @@ use crate::lab::{lab_or_error, map_lab_error};
 #[serde(rename_all = "camelCase")]
 pub struct ExecDetachedRequest {
     /// The shell script to run (at most 64 KiB). It is never audited and
-    /// never stored; only its SHA-256 and size are recorded.
+    /// the detached-exec record keeps only its SHA-256 and size. Like `lab
+    /// exec`, the queued operation's payload holds it, and the guest keeps it
+    /// in `cmd.sh`.
     pub script: String,
     /// The bound in seconds, enforced in the guest. It defaults to, and can
     /// never exceed, what is left of the lease's TTL: a detached command
@@ -208,7 +210,7 @@ pub async fn exec_detached_lab_lease(
         .await
         .map_err(|error| crate::operations::map_use_case_error(&error, correlation_id))?;
     detached
-        .register(&prepared, &operation.id, now)
+        .register(&principal, &prepared, &operation.id, now)
         .await
         .map_err(|error| map_lab_error(&error, correlation_id))?;
     Ok((

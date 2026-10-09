@@ -10115,7 +10115,7 @@
         "properties": {
           "script": {
             "type": "string",
-            "description": "The shell script to run (at most 64 KiB). It is never audited and\nnever stored; only its SHA-256 and size are recorded."
+            "description": "The shell script to run (at most 64 KiB). It is never audited and\nthe detached-exec record keeps only its SHA-256 and size. Like `lab\nexec`, the queued operation's payload holds it, and the guest keeps it\nin `cmd.sh`."
           },
           "timeoutSeconds": {
             "type": [

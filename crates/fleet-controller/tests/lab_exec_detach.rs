@@ -411,6 +411,7 @@ impl Fixture {
             .unwrap();
         self.detach
             .register(
+                &lan(),
                 prepared,
                 &created.id,
                 fleet_core::SystemClock::now_unix_millis(),
@@ -1078,4 +1079,57 @@ async fn authorization_and_owner_scope_apply_to_start_and_status() {
         )
         .await;
     assert!(generic.is_err());
+}
+
+#[tokio::test]
+async fn a_start_reported_failed_that_did_start_is_reported_by_the_guest() {
+    let fixture = Fixture::new("tester").await;
+    let handle = fixture.start("sleep 1; echo ran-anyway").await;
+    // The record says failed (a dropped session, a deadline kill), yet the
+    // guest ran the command: status follows the guest, not the record.
+    DetachedExecRepository::new(fixture.pool.clone())
+        .set_start_state(&handle, StartState::Failed, None)
+        .await
+        .unwrap();
+    let running = fixture.status(&handle).await;
+    assert_eq!(running.state, DetachedState::Running, "{running:?}");
+    let exited = fixture.wait_for(&handle, DetachedState::Exited).await;
+    assert_eq!(exited.stdout, "ran-anyway\n");
+}
+
+#[tokio::test]
+async fn a_terminal_answer_is_kept_and_later_polls_do_not_dial_the_guest() {
+    let fixture = Fixture::new("tester").await;
+    let handle = fixture.start("echo kept; exit 4").await;
+    let first = fixture.wait_for(&handle, DetachedState::Exited).await;
+    let reads = fixture.guest.reads.load(Ordering::SeqCst);
+    // A restarted controller, too, answers from the record.
+    let restarted = fixture.restart().await;
+    let again = restarted.status(&handle).await;
+    assert_eq!(again, first);
+    assert_eq!(restarted.guest.reads.load(Ordering::SeqCst), 0);
+    assert!(reads > 0);
+}
+
+#[tokio::test]
+async fn status_reads_are_audited_once_a_minute_per_handle() {
+    let fixture = Fixture::new("tester").await;
+    let handle = fixture.start("sleep 29.71").await;
+    for _ in 0..5 {
+        fixture.status(&handle).await;
+    }
+    let audit = fixture.audit_events().await;
+    let reads = audit
+        .iter()
+        .filter(|event| event.contains("lab_exec_status_read"))
+        .count();
+    assert_eq!(reads, 1, "{audit:?}");
+    assert!(
+        audit
+            .iter()
+            .any(|event| event.contains("lab_exec_detach_registered") && event.contains(&handle))
+    );
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "sleep 29.71"])
+        .status();
 }

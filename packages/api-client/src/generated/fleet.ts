@@ -1370,7 +1370,9 @@ export interface EnrollmentTokenListDto {
 export interface ExecDetachedRequest {
   /**
      * The shell script to run (at most 64 KiB). It is never audited and
-     * never stored; only its SHA-256 and size are recorded.
+     * the detached-exec record keeps only its SHA-256 and size. Like `lab
+     * exec`, the queued operation's payload holds it, and the guest keeps it
+     * in `cmd.sh`.
      */
   script: string;
   /**

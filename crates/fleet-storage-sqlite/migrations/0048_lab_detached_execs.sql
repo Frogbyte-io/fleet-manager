@@ -14,6 +14,9 @@ CREATE TABLE lab_detached_execs (
     timeout_seconds INTEGER NOT NULL,
     start_state TEXT NOT NULL CHECK (start_state IN ('starting', 'started', 'failed')),
     created_at INTEGER NOT NULL,
-    started_at INTEGER
+    started_at INTEGER,
+    -- The scrubbed, bounded terminal answer (exited or lost), so later polls
+    -- do not dial the guest.
+    final_json TEXT
 );
 CREATE INDEX lab_detached_execs_lease ON lab_detached_execs (lease_id);

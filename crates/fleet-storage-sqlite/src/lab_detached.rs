@@ -38,6 +38,7 @@ fn row_to_record(row: &sqlx::sqlite::SqliteRow) -> Result<DetachedExec, String> 
         start_state: StartState::from_id(&start_state)?,
         created_at: row.get("created_at"),
         started_at: row.get("started_at"),
+        final_json: row.get("final_json"),
     })
 }
 
@@ -50,8 +51,8 @@ impl DetachedExecPort for DetachedExecRepository {
             .map_err(|_| "the timeout does not fit the store".to_owned())?;
         let result = sqlx::query(
             "INSERT OR IGNORE INTO lab_detached_execs \
-             (handle, lease_id, owner, command_sha256, command_bytes, timeout_seconds, start_state, created_at, started_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (handle, lease_id, owner, command_sha256, command_bytes, timeout_seconds, start_state, created_at, started_at, final_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&record.handle)
         .bind(&record.lease_id)
@@ -62,6 +63,7 @@ impl DetachedExecPort for DetachedExecRepository {
         .bind(record.start_state.id())
         .bind(record.created_at)
         .bind(record.started_at)
+        .bind(&record.final_json)
         .execute(&self.pool)
         .await
         .map_err(|error| format!("detached exec insert failed: {error}"))?;
@@ -76,6 +78,16 @@ impl DetachedExecPort for DetachedExecRepository {
             .map_err(|error| format!("detached exec read failed: {error}"))?
             .map(|row| row_to_record(&row))
             .transpose()
+    }
+
+    async fn set_final(&self, handle: &str, final_json: &str) -> Result<(), String> {
+        sqlx::query("UPDATE lab_detached_execs SET final_json = ?2 WHERE handle = ?1 AND final_json IS NULL")
+            .bind(handle)
+            .bind(final_json)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("detached exec update failed: {error}"))
     }
 
     async fn set_start_state(

@@ -2082,6 +2082,16 @@ fn parse_lab_exec_status(rest: &[&str]) -> Result<Command, CliError> {
             other => return Err(unknown_lab_flag(other)),
         }
     }
+    if handle.is_empty()
+        || handle.len() > 64
+        || !handle
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(CliError {
+            message: "a detached-exec handle is 1 to 64 letters, digits, `-` or `_`".to_owned(),
+        });
+    }
     Ok(Command::LabExecStatus {
         handle: (*handle).to_owned(),
         wait,
