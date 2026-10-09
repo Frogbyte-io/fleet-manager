@@ -1090,7 +1090,7 @@ impl NodeCommandExecutor {
 /// (after redaction), and in facts. Matches the use case's snapshot bound.
 const MAX_REPORT_BYTES: usize = 256 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
-const MAX_REPORT_FACTS: usize = 256;
+const MAX_REPORT_FACTS: usize = fleet_core::MAX_CAPABILITY_FACTS;
 /// How many of a report's probe errors the operation result echoes.
 const MAX_ECHOED_PROBE_ERRORS: usize = 8;
 /// How much of each echoed probe error string is kept.
@@ -1129,14 +1129,30 @@ pub(crate) async fn ingest_inventory_report(
     // Node text is untrusted data: scrub before anything is parsed out of
     // it or stored, so a credential-shaped fact value never reaches storage.
     fleet_core::redact_json_strings(&mut report);
-    let facts: Vec<fleet_core::CapabilityFact> = serde_json::from_value(report["facts"].clone())
-        .map_err(|_| "the inventory report's facts are malformed".to_owned())?;
+    let mut facts: Vec<fleet_core::CapabilityFact> =
+        serde_json::from_value(report["facts"].clone())
+            .map_err(|_| "the inventory report's facts are malformed".to_owned())?;
     if facts.len() > MAX_REPORT_FACTS {
         return Err("the inventory report carries too many facts".to_owned());
     }
     for fact in &facts {
         fact.validate()
             .map_err(|detail| format!("the inventory report has a malformed fact: {detail}"))?;
+    }
+    // A node-supplied observation time is a claim, not a fact: one in the
+    // future would never age to stale, so it is clamped to the controller's
+    // clock, in both the recorded facts and the stored snapshot.
+    let now = fleet_core::SystemClock::now_unix_millis();
+    let mut clamped = false;
+    for fact in &mut facts {
+        if fact.observed_at.unix_millis() > now {
+            fact.observed_at = fleet_core::Timestamp::from_unix_millis(now);
+            clamped = true;
+        }
+    }
+    if clamped {
+        report["facts"] = serde_json::to_value(&facts)
+            .map_err(|error| format!("the report does not serialize: {error}"))?;
     }
     let snapshot = serde_json::to_string(&report)
         .map_err(|error| format!("the report does not serialize: {error}"))?;
@@ -1148,7 +1164,7 @@ pub(crate) async fn ingest_inventory_report(
     }
 
     // Provenance: what observed it, when, at which schema version.
-    let observed_at = fleet_core::SystemClock::now_unix_millis();
+    let observed_at = now;
     machines
         .record_capabilities(machine_id, &facts)
         .await
@@ -1397,5 +1413,47 @@ mod ingest_tests {
             .await
             .unwrap();
         assert_eq!(rows, 0, "nothing is stored for a rejected report");
+    }
+
+    #[tokio::test]
+    async fn a_future_observation_time_is_clamped_to_the_controllers_clock() {
+        let (_dir, pool, repository, id) = machine().await;
+        let now = fleet_core::SystemClock::now_unix_millis();
+        let mut future = fact("future", "v");
+        future["observedAt"] = serde_json::json!(now + 365 * 24 * 3_600_000);
+        let mut past = fact("past", "v");
+        past["observedAt"] = serde_json::json!(1_000_i64);
+        ingest_inventory_report(
+            &repository,
+            &id,
+            &report(&[future, past], serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT name, observed_at FROM machine_capabilities WHERE machine_id = ?1 ORDER BY name",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows[0].1 <= fleet_core::SystemClock::now_unix_millis(),
+            "{rows:?}"
+        );
+        assert!(rows[0].1 >= now, "{rows:?}");
+        assert_eq!(rows[1].1, 1_000, "a past time is left alone");
+        let snapshot: String = sqlx::query_scalar(
+            "SELECT payload_json FROM inventory_snapshots WHERE machine_id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !snapshot.contains(&(now + 365 * 24 * 3_600_000).to_string()),
+            "{snapshot}"
+        );
     }
 }

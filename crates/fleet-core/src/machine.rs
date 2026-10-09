@@ -57,6 +57,10 @@ impl CapabilityStatus {
     }
 }
 
+/// The most capability facts one record or report may carry. The controller
+/// refuses more, and fleetd stops collecting at the same number.
+pub const MAX_CAPABILITY_FACTS: usize = 256;
+
 /// One namespaced capability fact about a machine.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

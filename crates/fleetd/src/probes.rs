@@ -22,6 +22,19 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_FACT_VALUE_BYTES: usize = 4 * 1024;
 /// The bound for the fact set one probe may return.
 pub const MAX_FACTS_PER_PROBE: usize = 64;
+/// The bound for one whole collection: the controller refuses a report with
+/// more facts, so fleetd never sends more.
+pub const MAX_FACTS_PER_REPORT: usize = fleet_core::MAX_CAPABILITY_FACTS;
+
+/// The longest prefix of `text` within `bound` bytes that ends on a character
+/// boundary: a multibyte tool output cannot be cut mid-character.
+fn truncate_at_char_boundary(text: &str, bound: usize) -> String {
+    let mut end = bound.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
 
 /// One local probe. Probes are shared across the runner's isolation
 /// threads, so implementations must be `Send + Sync`.
@@ -92,12 +105,12 @@ impl ProbeRunner {
                         {
                             let value = fact.value.take().unwrap_or_default();
                             fact.value =
-                                Some(value[..MAX_FACT_VALUE_BYTES.min(value.len())].to_owned());
+                                Some(truncate_at_char_boundary(&value, MAX_FACT_VALUE_BYTES));
                         }
                         fact.source = format!("fleetd/{name}/{schema_version}");
                         fact.observed_at = fleet_core::Timestamp::from_unix_millis(now_millis);
                         facts.push(fact);
-                        if facts.len() >= MAX_FACTS_PER_PROBE * 8 {
+                        if facts.len() >= MAX_FACTS_PER_REPORT {
                             probe_errors.push(ProbeError {
                                 probe: name.to_owned(),
                                 detail: "the fact bound was reached; later probes are skipped"
@@ -736,5 +749,64 @@ mod tests {
             collected.facts[0].value.as_ref().map(String::len),
             Some(MAX_FACT_VALUE_BYTES)
         );
+    }
+
+    #[test]
+    fn a_multibyte_oversized_value_is_cut_on_a_character_boundary() {
+        #[derive(Debug)]
+        struct MultibyteProbe;
+
+        impl Probe for MultibyteProbe {
+            fn name(&self) -> &'static str {
+                "multibyte"
+            }
+
+            fn collect(&self) -> Result<Vec<CapabilityFact>, String> {
+                // 3-byte characters: 4096 is not a multiple of 3, so a byte
+                // cut at the bound lands inside a character.
+                Ok(vec![fact(
+                    "big",
+                    "value",
+                    Some("\u{20ac}".repeat(MAX_FACT_VALUE_BYTES)),
+                )])
+            }
+        }
+        let collected = ProbeRunner::new(vec![Arc::new(MultibyteProbe)]).collect(0);
+        assert!(
+            collected.probe_errors.is_empty(),
+            "{:?}",
+            collected.probe_errors
+        );
+        let value = collected.facts[0].value.as_deref().unwrap();
+        assert!(value.len() <= MAX_FACT_VALUE_BYTES);
+        assert!(value.chars().all(|c| c == '\u{20ac}'));
+    }
+
+    #[test]
+    fn the_collection_stops_at_the_controllers_fact_cap() {
+        #[derive(Debug)]
+        struct ManyProbe(&'static str);
+
+        impl Probe for ManyProbe {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+
+            fn collect(&self) -> Result<Vec<CapabilityFact>, String> {
+                Ok((0..MAX_FACTS_PER_PROBE)
+                    .map(|n| fact("many", &format!("f{n}"), None))
+                    .collect())
+            }
+        }
+        let names = ["a", "b", "c", "d", "e"];
+        let runner = ProbeRunner::new(
+            names
+                .iter()
+                .map(|name| Arc::new(ManyProbe(name)) as Arc<dyn Probe>)
+                .collect(),
+        );
+        let collected = runner.collect(0);
+        assert_eq!(collected.facts.len(), fleet_core::MAX_CAPABILITY_FACTS);
+        assert!(!collected.probe_errors.is_empty());
     }
 }
