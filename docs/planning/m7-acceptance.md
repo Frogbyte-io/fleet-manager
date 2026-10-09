@@ -2,7 +2,7 @@
 
 Status: complete (2026-10-09)
 
-M7's image pipeline (FM-700/701) and Lab core (FM-710/711), plus the M9 Lab and Images pages (FM-930/931/932), have merged. The milestone is still open because a code survey on 2026-10-05 found that the **exit gate** cannot pass yet:
+M7's image pipeline (FM-700/701) and Lab core (FM-710/711), plus the M9 Lab and Images pages (FM-930/931/932), have merged. This plan was written after a code survey on 2026-10-05 found that the **exit gate** could not pass yet. The list below is that survey, kept as history; every item is resolved, and the passing gate is recorded under [Evidence](#evidence):
 
 - **Released leases leak their VM.** `release_lease` moves a lease to `releasing` and stops. No cleanup executor exists, and the Proxmox provider has no guest-destroy primitive.
 - **The sweeper never runs on its own.** `sweep_expired` is reachable only through `POST /lab/leases/sweep` and `fleetctl lab sweep`, so expiry after a controller restart is not automatic.

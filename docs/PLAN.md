@@ -310,6 +310,8 @@ Exit gate: a human or agent can request a disposable Linux environment from a ma
 
 ### M8 — Authentication and agent/CI hardening
 
+Status: in progress (2026-10-09). The Release QA Linux slice below has landed on `dev`: scoped delegated Lab credentials ([ADR 0011](adr/0011-delegated-lab-credentials.md), #392/#435), retry-safe lease creation and lease lookup (#395/#432), `lab put` (#393/#434), and detached long-running exec (#394/#438). The rest of M8 (first-run bootstrap, web sessions, refusing anonymous LAN administration) has not started, so the exit gate is not met.
+
 Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymous administration can be replaced by authenticated, least-privileged human, agent, and CI identities without changing application use cases.
 
 - First-run controller bootstrap, web session and CLI credential flows, plus delegated short-lived agent/CI credentials scoped by project, node/tag, action, resource limits, TTL, and owner.
@@ -321,7 +323,7 @@ Outcome: when Fleet must operate outside the initial fully trusted LAN, anonymou
   - a lease purpose that carries the Release QA candidate and run IDs (a convention within the existing free-text purpose);
   - a way to run suites longer than the 900-second exec bound;
   - download of collected Lab artifacts by that scoped CI identity, so evidence reaches the CI runner;
-  - a way to deliver GitHub upload credentials that never passes them through job payloads, logs, or audit metadata.
+  - a way to get the release candidate into the guest without a GitHub credential reaching it: the CI runner downloads and verifies the candidate, `fleetctl lab put` copies it into the lease, and the runner (which already holds the GitHub token) uploads the collected evidence. This replaces the earlier plan to deliver GitHub upload credentials to the guest.
 
   Fleet adds no Release QA-specific code. This slice covers Linux guests only. Windows guests and exclusive USB hardware stay out of it until the Lab sub-epics for them land.
 - Richer audit query/export and policy simulation.
