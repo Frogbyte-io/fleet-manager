@@ -770,7 +770,7 @@ async fn complete_blocked(
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
         "reason": "blocked_manual_approval",
-        "detail": reason,
+        "detail": fleet_core::scrub_failure_detail(reason),
         "blockedAt": step.name(),
         "completed": completed,
         "remaining": remaining.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -801,7 +801,7 @@ async fn complete_failed(
 ) -> Result<(), String> {
     let error_json = serde_json::json!({
         "reason": reason,
-        "detail": detail,
+        "detail": fleet_core::scrub_failure_detail(detail),
         "failedAt": step.name(),
         "completed": completed,
         "remaining": remaining.iter().map(ToString::to_string).collect::<Vec<_>>(),
