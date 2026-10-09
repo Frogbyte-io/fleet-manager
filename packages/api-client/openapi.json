@@ -1951,7 +1951,7 @@
           {
             "name": "state",
             "in": "query",
-            "description": "Only leases in these states, comma-separated (for example `ready,provisioning`); an unknown state is a 400.",
+            "description": "Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2021,7 +2021,7 @@
           {
             "name": "Idempotency-Key",
             "in": "header",
-            "description": "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200; the same key with a different request is a 409.",
+            "description": "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200, in whatever state it has since reached (a failed or released lease is returned as it is: use a new key for a new attempt); the same key with a different request is a 409.",
             "required": false,
             "schema": {
               "type": [

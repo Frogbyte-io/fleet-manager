@@ -167,7 +167,7 @@ fleetctl --output json lab release <lease-id>
 - Make creation safe to retry: add `--idempotency-key <key>` to `lab lease` or
   `lab create`. A retry with the same key and the same template version, purpose
   and project returns the lease already created (no second lease, no second pool
-  member); the same key with different values is refused (`conflict`). Put the run
+  member); the same key with different values is refused (`conflict`). A replay returns the lease in whatever state it has reached, even `failed` or `released`, so use a new key for each new attempt. Put the run
   identity in `--purpose` and find an unrecorded lease again with
   `lab leases --purpose <text>` or `--purpose-prefix <text>`, optionally with
   `--state` (repeatable or comma-separated) and `--owner`.

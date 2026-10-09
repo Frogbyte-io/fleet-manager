@@ -6239,7 +6239,7 @@ purpose?: string;
  */
 purposePrefix?: string;
 /**
- * Only leases in these states, comma-separated (for example `ready,provisioning`); an unknown state is a 400.
+ * Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400.
  */
 state?: string;
 /**

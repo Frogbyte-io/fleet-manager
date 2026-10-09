@@ -880,7 +880,7 @@ pub struct CreateLeaseRequest {
     tag = "lab",
     operation_id = "createLabLease",
     request_body = CreateLeaseRequest,
-    params(("Idempotency-Key" = Option<String>, Header, description = "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200; the same key with a different request is a 409.")),
+    params(("Idempotency-Key" = Option<String>, Header, description = "A caller-chosen key (1 to 128 printable ASCII characters), scoped to the caller. A retry with the same key and the same request (template version, purpose, project) returns the lease already created, with 200, in whatever state it has since reached (a failed or released lease is returned as it is: use a new key for a new attempt); the same key with a different request is a 409.")),
     responses(
         (status = 201, description = "The lease was created.", body = Resource<LeaseDto>),
         (status = 200, description = "A replay: the lease this Idempotency-Key created earlier.", body = Resource<LeaseDto>),
@@ -986,7 +986,7 @@ fn lease_filter(
         ("projectId" = Option<String>, Query, description = "Only leases serving this project."),
         ("purpose" = Option<String>, Query, description = "Only leases whose purpose is exactly this."),
         ("purposePrefix" = Option<String>, Query, description = "Only leases whose purpose starts with this (case-sensitive)."),
-        ("state" = Option<String>, Query, description = "Only leases in these states, comma-separated (for example `ready,provisioning`); an unknown state is a 400."),
+        ("state" = Option<String>, Query, description = "Only leases in these states: comma-separated (`state=ready,provisioning`) or repeated (`state=ready&state=provisioning`); an unknown state is a 400."),
         ("owner" = Option<String>, Query, description = "Only leases owned by this principal."),
     ),
     responses(

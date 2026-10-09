@@ -3516,13 +3516,13 @@ pub fn run_with_exit(invocation: &Invocation) -> Result<(String, u8), CliError> 
         correlation_id,
         lease_idempotency_key(&invocation.command),
     )?;
-    let replayed = lease_idempotency_key(&invocation.command).is_some();
+    let keyed = lease_idempotency_key(&invocation.command).is_some();
     let body = follow_skills_matrix_pages(&client, invocation, body)?;
     let body = follow_wait_stage(&client, invocation, body)?;
     let body = follow_review(&client, invocation, body)?;
     let body = follow_install_wait(&client, invocation, body)?;
     let body = follow_checkout_wait(&client, invocation, body)?;
-    let body = follow_lab(&client, invocation, body, lab_account.as_deref(), replayed)?;
+    let body = follow_lab(&client, invocation, body, lab_account.as_deref(), keyed)?;
     let payload = if body.get("items").is_some() {
         body
     } else {

@@ -45,7 +45,36 @@ impl ImagePinValidator for NoPins {
     }
 }
 
+/// Records the `event` metadata of each audit intent, then delegates.
+#[derive(Debug)]
+struct Recording {
+    inner: Arc<dyn AuditPort>,
+    events: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AuditPort for Recording {
+    async fn record_intent(
+        &self,
+        intent: &fleet_application::audit::AuditIntent,
+    ) -> Result<(), String> {
+        if let Some((_, event)) = intent.metadata.entries().find(|(key, _)| *key == "event") {
+            self.events.lock().unwrap().push(event.to_owned());
+        }
+        self.inner.record_intent(intent).await
+    }
+
+    async fn record_outcome(
+        &self,
+        operation_id: &str,
+        outcome: fleet_application::audit::AuditOutcome,
+    ) -> Result<(), String> {
+        self.inner.record_outcome(operation_id, outcome).await
+    }
+}
+
 struct World {
+    audit: Arc<Recording>,
     _dir: tempfile::TempDir,
     state: Arc<ApiState>,
     lab: Arc<Lab>,
@@ -113,7 +142,11 @@ impl World {
             })
             .await
             .unwrap();
-        let audit: Arc<dyn AuditPort> = Arc::new(AuditSink::new(pool.clone()));
+        let recording = Arc::new(Recording {
+            inner: Arc::new(AuditSink::new(pool.clone())),
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let audit: Arc<dyn AuditPort> = recording.clone();
         let leases = Arc::new(LeaseRepository::new(pool.clone()));
         let pools = Arc::new(LabPoolRepository::new(pool.clone()));
         let lab = Arc::new(
@@ -172,6 +205,7 @@ impl World {
             ..ApiState::for_document()
         });
         Self {
+            audit: recording,
             _dir: dir,
             state,
             lab,
@@ -267,6 +301,15 @@ async fn concurrent_replays_create_one_lease_and_claim_no_pool_member() {
     assert_eq!(created, 1, "exactly one request created it");
     let all = world.leases.list(None).await.unwrap();
     assert_eq!(all.len(), 1);
+    // The trail is truthful: every request wrote its intent, and each one
+    // that lost the race says so (one lease, so one creation and 11 replays).
+    let events = world.audit.events.lock().unwrap().clone();
+    let count = |name: &str| events.iter().filter(|event| *event == name).count();
+    assert_eq!(
+        count("lab_lease_creating") - count("lab_lease_create_replayed"),
+        1
+    );
+    assert!(count("lab_lease_creating") <= 12);
     // Creation claims nothing: no member is bound and no provision exists.
     assert!(
         world
@@ -328,6 +371,28 @@ async fn a_replay_returns_the_same_lease_and_a_different_body_is_refused() {
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{error}");
     }
+
+    // A replay returns the lease whatever state it reached: a failed lease
+    // is not replaced, so a new attempt needs a new key.
+    let mut lease = world
+        .leases
+        .get(first["data"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    lease.state = LeaseState::Failed;
+    world.leases.update(&lease).await.unwrap();
+    let (status, replay) = world
+        .call(
+            "ci",
+            "POST",
+            "/lab/leases",
+            Some("k1"),
+            Some(create_body("a")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["data"]["id"], first["data"]["id"]);
+    assert_eq!(replay["data"]["state"], "failed");
 
     // The key is scoped to the caller: another principal's "k1" is its own.
     let (status, other) = world

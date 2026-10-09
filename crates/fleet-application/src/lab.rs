@@ -720,8 +720,14 @@ fn lease_idempotency_scope(
         "projectId": new.project_id,
     })
     .to_string();
+    // The principal id is length-prefixed, so no (principal, key) pair can
+    // spell another's scope, whatever characters either contains.
     Ok((
-        format!("{}:lab-lease-create:{key}", principal.id),
+        format!(
+            "lab-lease-create:{}:{}:{key}",
+            principal.id.len(),
+            principal.id
+        ),
         fingerprint,
     ))
 }
@@ -1235,7 +1241,19 @@ impl Lab {
             KeyedLeaseCreate::Replay {
                 lease,
                 fingerprint: stored,
-            } => replayed_lease(lease, &stored, &fingerprint),
+            } => {
+                // The intent event above was written before this call knew
+                // the insert would lose: mark it so the trail is truthful.
+                self.audit_event(
+                    principal,
+                    Permission::LabLease,
+                    Some(&version.id),
+                    "lab_lease_create_replayed",
+                    Some(("leaseId", lease.id.as_str())),
+                )
+                .await?;
+                replayed_lease(lease, &stored, &fingerprint)
+            }
         }
     }
 
