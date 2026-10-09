@@ -3638,6 +3638,7 @@ fn lab_cleanup_retry_wait_follows_the_attempt_and_reports_the_lease() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn the_lab_artifact_commands_parse() {
     assert_eq!(
         lab_parse(&["lab", "artifacts"]).unwrap(),
@@ -3689,6 +3690,39 @@ fn the_lab_artifact_commands_parse() {
         }
     );
     assert_eq!(
+        lab_parse(&[
+            "lab",
+            "put",
+            "lease-1",
+            "./app.deb",
+            "/opt/qa/app.deb",
+            "--overwrite",
+            "--wait",
+            "--timeout",
+            "900",
+        ])
+        .unwrap(),
+        fleetctl::Command::LabPut {
+            lease_id: "lease-1".to_owned(),
+            local_path: "./app.deb".to_owned(),
+            guest_path: "/opt/qa/app.deb".to_owned(),
+            overwrite: true,
+            wait: true,
+            timeout: Some(900),
+        }
+    );
+    assert_eq!(
+        lab_parse(&["lab", "put", "lease-1", "a", "/b"]).unwrap(),
+        fleetctl::Command::LabPut {
+            lease_id: "lease-1".to_owned(),
+            local_path: "a".to_owned(),
+            guest_path: "/b".to_owned(),
+            overwrite: false,
+            wait: false,
+            timeout: None,
+        }
+    );
+    assert_eq!(
         lab_parse(&["lab", "artifact-get", "a1", "--out", "out.log"]).unwrap(),
         fleetctl::Command::LabArtifactGet {
             artifact_id: "a1".to_owned(),
@@ -3698,6 +3732,10 @@ fn the_lab_artifact_commands_parse() {
     for refused in [
         &["lab", "collect", "lease-1"][..],
         &["lab", "collect", "lease-1", "/x", "--force"],
+        &["lab", "put", "lease-1", "only-local"],
+        &["lab", "put", "lease-1", "a", "/b", "extra"],
+        &["lab", "put", "lease-1", "a", "/b", "--force"],
+        &["lab", "put", "--overwrite", "a", "/b"],
         &["lab", "artifacts", "--lease"],
         &["lab", "artifacts", "--machine", "m1"],
         &["lab", "artifacts", "--lease", "--project", "p1"],
@@ -3972,5 +4010,162 @@ fn text_output_renders_lab_artifacts() {
     assert!(
         fleetctl::render_lab_artifacts(&json!({ "items": [], "page": {} }))
             .contains("(no Lab artifacts)")
+    );
+}
+
+/// #393: `lab put` streams the file with its digest and size, sends the
+/// guest path and overwrite flag as query parameters, and surfaces the
+/// controller's refusals. A tiny recording server stands in for the
+/// controller.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fleetctl_lab_put_streams_the_file_with_its_digest() {
+    use std::io::{Read as _, Write as _};
+
+    // One request per connection: read the head, then the body by its
+    // Content-Length, answer, and report both to the test.
+    fn serve_once(
+        status_line: &'static str,
+        answer: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<(String, Vec<u8>)>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            let head_end = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                raw.extend_from_slice(&chunk[..read]);
+                if let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+            let length: usize = head
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse().unwrap())
+                })
+                .unwrap_or(0);
+            while raw.len() < head_end + length {
+                let read = stream.read(&mut chunk).unwrap();
+                raw.extend_from_slice(&chunk[..read]);
+            }
+            let body = raw[head_end..head_end + length].to_vec();
+            write!(
+                stream,
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                answer.len()
+            )
+            .unwrap();
+            sender.send((head, body)).unwrap();
+        });
+        (url, receiver)
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("installer.bin");
+    let content = vec![0xAB_u8; 300_000];
+    std::fs::write(&file, &content).unwrap();
+    let expected = {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(&content)
+            .iter()
+            .fold(String::new(), |mut text, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(text, "{byte:02x}");
+                text
+            })
+    };
+    let run = |url: &str, words: &[&str]| {
+        let mut args = vec![
+            "--url".to_owned(),
+            url.to_owned(),
+            "--output".to_owned(),
+            "json".to_owned(),
+        ];
+        args.extend(words.iter().map(ToString::to_string));
+        fleetctl::run(&fleetctl::parse(&args).unwrap()).map_err(|error| error.to_string())
+    };
+
+    let (url, received) = serve_once(
+        "202 Accepted",
+        r#"{"data":{"id":"op-1","kind":"lab.put","state":"queued"}}"#,
+    );
+    let out = run(
+        &url,
+        &[
+            "lab",
+            "put",
+            "lease-1",
+            file.to_str().unwrap(),
+            "/opt/qa/installer.bin",
+            "--overwrite",
+        ],
+    )
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(payload["id"], "op-1");
+    let (head, body) = received.recv().unwrap();
+    assert!(
+        head.starts_with(
+            "POST /api/v1/lab/leases/lease-1/files?path=%2Fopt%2Fqa%2Finstaller.bin&overwrite=true "
+        ),
+        "{head}"
+    );
+    let lower = head.to_ascii_lowercase();
+    assert!(
+        lower.contains(&format!("x-content-sha256: {expected}")),
+        "{head}"
+    );
+    assert!(
+        lower.contains("content-type: application/octet-stream"),
+        "{head}"
+    );
+    assert!(lower.contains("content-length: 300000"), "{head}");
+    assert_eq!(body, content);
+
+    // The controller's refusal is reported with its status and code.
+    let (url, _received) = serve_once(
+        "413 Payload Too Large",
+        r#"{"code":"payload_too_large","message":"the file exceeds the 10-byte upload cap"}"#,
+    );
+    let refused = run(
+        &url,
+        &["lab", "put", "lease-1", file.to_str().unwrap(), "/opt/a"],
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("413") && refused.contains("payload_too_large"),
+        "{refused}"
+    );
+
+    // Local problems never reach the network.
+    let unreachable = "http://127.0.0.1:9";
+    assert!(
+        run(
+            unreachable,
+            &[
+                "lab",
+                "put",
+                "lease-1",
+                dir.path().to_str().unwrap(),
+                "/opt/a"
+            ],
+        )
+        .unwrap_err()
+        .contains("not a regular file")
+    );
+    assert!(
+        run(
+            unreachable,
+            &["lab", "put", "lease-1", "/no/such/file", "/opt/a"],
+        )
+        .unwrap_err()
+        .contains("cannot read")
     );
 }

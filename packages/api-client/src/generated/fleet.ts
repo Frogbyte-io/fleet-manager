@@ -6413,6 +6413,17 @@ state?: string;
 owner?: string;
 };
 
+export type PutLabFileParams = {
+/**
+ * The absolute guest path of the file to create.
+ */
+path: string;
+/**
+ * Replace an existing regular file at the path (default false).
+ */
+overwrite?: boolean;
+};
+
 export type ListMachinesParams = {
 /**
  * Only machines carrying this tag.
@@ -9206,6 +9217,110 @@ const res = await fetch(getExtendLabLeaseUrl(leaseId),
 
   const data: extendLabLeaseResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as extendLabLeaseResponse
+}
+
+
+
+export type putLabFileResponse202 = {
+  data: ResourceOperationDto
+  status: 202
+}
+
+export type putLabFileResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type putLabFileResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type putLabFileResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type putLabFileResponse408 = {
+  data: ApiError
+  status: 408
+}
+
+export type putLabFileResponse413 = {
+  data: ApiError
+  status: 413
+}
+
+export type putLabFileResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type putLabFileResponse503 = {
+  data: ApiError
+  status: 503
+}
+
+export type putLabFileResponseSuccess = (putLabFileResponse202) & {
+  headers: Headers;
+};
+export type putLabFileResponseError = (putLabFileResponse400 | putLabFileResponse403 | putLabFileResponse404 | putLabFileResponse408 | putLabFileResponse413 | putLabFileResponse500 | putLabFileResponse503) & {
+  headers: Headers;
+};
+
+export type putLabFileResponse = (putLabFileResponseSuccess | putLabFileResponseError)
+
+export const getPutLabFileUrl = (leaseId: string,
+    params: PutLabFileParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/v1/lab/leases/${leaseId}/files?${stringifiedParams}` : `/api/v1/lab/leases/${leaseId}/files`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal, an unknown lease, a lease
+ * that is not ready, an invalid path, or an upload over the cap.
+ * @summary Copies one file into a ready lease as a `lab.put` operation. The body is
+the file's bytes (`application/octet-stream`). The operation's result
+records the guest path, size, and SHA-256; the controller verifies the
+SHA-256 inside the guest and moves the file into place only after it
+matches, so a failed put leaves nothing at the path.
+ */
+export const putLabFile = async (leaseId: string,
+    putLabFileBody: Blob,
+    params: PutLabFileParams, options?: RequestInit): Promise<putLabFileResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getPutLabFileUrl(leaseId,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...getHeaders(options?.headers) },
+    body: putLabFileBody
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: putLabFileResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as putLabFileResponse
 }
 
 

@@ -2749,6 +2749,167 @@
         }
       }
     },
+    "/api/v1/lab/leases/{leaseId}/files": {
+      "post": {
+        "tags": [
+          "lab"
+        ],
+        "summary": "Copies one file into a ready lease as a `lab.put` operation. The body is\nthe file's bytes (`application/octet-stream`). The operation's result\nrecords the guest path, size, and SHA-256; the controller verifies the\nSHA-256 inside the guest and moves the file into place only after it\nmatches, so a failed put leaves nothing at the path.",
+        "description": "# Errors\n\nReturns the public error envelope on refusal, an unknown lease, a lease\nthat is not ready, an invalid path, or an upload over the cap.",
+        "operationId": "putLabFile",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "description": "The lease's identity.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The absolute guest path of the file to create.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "overwrite",
+            "in": "query",
+            "description": "Replace an existing regular file at the path (default false).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "X-Content-SHA256",
+            "in": "header",
+            "description": "The file's lowercase hex SHA-256; the upload is refused when what arrives hashes differently.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "A caller-chosen key: a retry with the same key, while the lease can still take the file, returns the operation already queued.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The file's raw bytes.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The copy is queued as a `lab.put` operation; its result records the guest path, size, and SHA-256.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource_OperationDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The lease is not ready or has expired, its guest has no Lab machine, the path is invalid, or the declared SHA-256 does not match the body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not put files into this lease.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The lease does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The upload body stalled for a minute.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The file exceeds the controller's upload cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A backend port failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The controller has no upload staging area, or too many uploads are in flight (code `busy`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/lab/leases/{leaseId}/provision": {
       "post": {
         "tags": [

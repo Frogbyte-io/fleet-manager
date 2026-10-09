@@ -37,6 +37,7 @@ pub mod discovery;
 pub mod exec;
 pub mod fetch;
 pub mod inventory;
+pub mod put;
 
 pub use discovery::{
     DISCOVERY_DEADLINE, DISCOVERY_SOURCE, DiscoveredCheckout, MAX_CHECKOUTS, discover,
@@ -48,6 +49,7 @@ pub use exec::{
 };
 pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
+pub use put::{PutOutcome, PutRequest, put_file};
 
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]

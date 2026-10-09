@@ -55,7 +55,7 @@ enum CreateRoute {
 /// machine-scoped shape plus the plan and its approval identities
 /// (FM-402); the source kinds carry the remote/commit payloads and are
 /// catalog-level (FM-403).
-pub const CREATABLE_KINDS: [&str; 63] = [
+pub const CREATABLE_KINDS: [&str; 64] = [
     "noop",
     "ssh.exec",
     "agentless.inventory",
@@ -118,6 +118,7 @@ pub const CREATABLE_KINDS: [&str; 63] = [
     "lab.cleanup",
     "lab.exec",
     "lab.collect",
+    "lab.put",
     "lab.pool.fill",
 ];
 
@@ -1005,6 +1006,30 @@ impl Operations {
         .await
     }
 
+    /// Queues a `lab.put` that `LabPuts::request_put` validated (#393), by
+    /// a caller allowed to put files into that lease.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a mismatched payload, denial, or a backend failure.
+    pub async fn create_lab_put(
+        &self,
+        authorizer: &dyn Authorizer,
+        principal_id: &str,
+        lease_id: &str,
+        new: &NewOperation,
+    ) -> Result<Operation, OperationUseCaseError> {
+        self.create_for_lease(
+            authorizer,
+            principal_id,
+            lease_id,
+            new,
+            "lab.put",
+            Permission::LabPut,
+        )
+        .await
+    }
+
     /// Queues the `lab.cleanup` operation for one releasing lease (the
     /// release and sweep routes), by a caller allowed to lease Lab guests.
     ///
@@ -1342,6 +1367,13 @@ impl Operations {
             if route == CreateRoute::Generic {
                 return Err(OperationUseCaseError::Invalid {
                     detail: "lab.collect runs through the lease artifacts route".to_owned(),
+                });
+            }
+        } else if new.kind == "lab.put" {
+            // Authorized by `create_lab_put` against its lease.
+            if route == CreateRoute::Generic {
+                return Err(OperationUseCaseError::Invalid {
+                    detail: "lab.put runs through the lease files route".to_owned(),
                 });
             }
         } else if new.kind == crate::lab_pool::FILL_KIND {

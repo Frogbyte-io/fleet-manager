@@ -201,6 +201,10 @@ pub enum Permission {
     /// [`Permission::LabProvision`], which provisions a guest without a
     /// lease and so leaves a VM no lease owns.
     LabLeaseProvision,
+    /// Copy one file into a ready Lab lease's guest (#393). A privileged
+    /// mutation: it writes to a machine over SSH. Scoped CI identities that
+    /// run Release QA need it beside `lab.exec` and `lab.artifacts`.
+    LabPut,
 }
 
 impl Permission {
@@ -268,6 +272,7 @@ impl Permission {
         Permission::LabLeaseRead,
         Permission::LabArtifactRead,
         Permission::LabLeaseProvision,
+        Permission::LabPut,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -334,6 +339,7 @@ impl Permission {
             Permission::LabLeaseRead => "lab.lease.read",
             Permission::LabArtifactRead => "lab.artifacts.read",
             Permission::LabLeaseProvision => "lab.lease.provision",
+            Permission::LabPut => "lab.put",
         }
     }
 
@@ -402,7 +408,8 @@ impl Permission {
             | Permission::CredentialIssue
             | Permission::CredentialRevoke
             | Permission::LabTemplateUse
-            | Permission::LabLeaseProvision => true,
+            | Permission::LabLeaseProvision
+            | Permission::LabPut => true,
         }
     }
 
@@ -471,7 +478,8 @@ impl Permission {
             | Permission::LabArtifacts
             | Permission::CredentialRevoke
             | Permission::LabTemplateUse
-            | Permission::LabLeaseProvision => true,
+            | Permission::LabLeaseProvision
+            | Permission::LabPut => true,
         }
     }
 }

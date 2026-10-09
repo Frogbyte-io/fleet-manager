@@ -108,7 +108,10 @@ fleetctl --output json lab destroy <lease-id> --wait
    `/tmp/fleet-projects/<project-id>`:
    run `lab exec <lease-id> --wait -- sh -c 'cd /tmp/fleet-projects/<project-id> && cargo test'`
    rather than searching the filesystem.
-4. Optionally `lab collect` copies absolute guest paths into artifacts, which
+4. Optionally `lab put <lease-id> <local-path> <guest-path> [--overwrite] --wait`
+   copies one local file into the guest (its directory must exist; the
+   guest checks the SHA-256 before the file appears, and an existing file is
+   refused unless `--overwrite`). `lab collect` copies absolute guest paths into artifacts, which
    outlive the lease (with `--wait` it exits non-zero unless it succeeded), and
    `lab artifacts` lists them (filter with `--lease` or `--project`).
 5. `lab extend` adds time up to the lease's maximum lifetime; the controller

@@ -20,12 +20,14 @@ use fleet_application::lab::{
     NewLabTemplate, NewLease, NewProvision, ProvisionPort, RecipeVersion,
 };
 use fleet_application::lab_artifacts::{ArtifactPolicy, LabArtifacts};
+use fleet_application::lab_put::LabPuts;
 use fleet_application::machine::{MachinePort as _, NewEndpoint, RegisterMachine};
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
 use fleet_controller::lab_artifacts_store::{
     FsArtifactStore, GuestFiles, LabArtifactDispatch, StagingFile,
 };
+use fleet_controller::lab_put_store::{FsUploadStore, LabPutDispatch};
 use fleet_core::{CleanupStrategy, LabTemplateContent, LeaseState, ReadinessProbe};
 use fleet_provider_ssh::FetchOutcome;
 use fleet_storage_sqlite::{
@@ -90,6 +92,22 @@ impl GuestFiles for Guest {
                 .map_err(|error| error.to_string()),
         };
         (outcome, sink)
+    }
+
+    async fn put(
+        &self,
+        _machine_id: &str,
+        _endpoint_id: &str,
+        request: fleet_controller::lab_artifacts_store::GuestPut,
+        _deadline: Duration,
+        mut source: std::fs::File,
+    ) -> Result<fleet_provider_ssh::PutOutcome, String> {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        source.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        let size = bytes.len() as u64;
+        self.files.lock().unwrap().insert(request.path, bytes);
+        Ok(fleet_provider_ssh::PutOutcome::Put { bytes: size })
     }
 }
 
@@ -249,6 +267,14 @@ impl World {
                 max_bytes: 4096,
             },
         ));
+        let upload_store =
+            Arc::new(FsUploadStore::open(&dir.path().join("lab-artifacts"), 1 << 20).unwrap());
+        let puts = Arc::new(LabPuts::new(
+            upload_store.clone(),
+            leases.clone(),
+            labs.clone(),
+            Arc::new(AuditSink::new(pool.clone())),
+        ));
         let lab = Arc::new(
             Lab::new(
                 labs.clone(),
@@ -258,7 +284,8 @@ impl World {
                 Arc::new(ProjectRepository::new(pool.clone())),
                 Arc::new(AuditSink::new(pool.clone())),
             )
-            .with_artifacts(artifacts.clone()),
+            .with_artifacts(artifacts.clone())
+            .with_puts(puts),
         );
         let settings = fleet_controller::Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -308,6 +335,13 @@ impl World {
             }),
             artifacts,
             artifact_store,
+            leases.clone(),
+            labs.clone(),
+            guest.clone(),
+        );
+        let dispatch = LabPutDispatch::new(
+            Arc::new(dispatch),
+            upload_store,
             leases.clone(),
             labs.clone(),
             guest,
@@ -625,6 +659,25 @@ async fn a_scoped_credential_runs_the_whole_lab_loop_through_fleetctl_and_nothin
     let collected = collect.json();
     assert_eq!(collected["state"], "succeeded");
 
+    // put: a local file goes into the lease with the bearer token
+    let local = work_dir_file(b"candidate bytes\n");
+    let put = world
+        .cli(
+            Some(&token),
+            &[
+                "lab",
+                "put",
+                &lease_id,
+                local.path().to_str().unwrap(),
+                "/home/ci/candidate.bin",
+                "--wait",
+            ],
+        )
+        .await;
+    assert_eq!(put.code, 0, "{} {}", put.stdout, put.stderr);
+    assert_eq!(put.json()["state"], "succeeded");
+    assert_eq!(put.json()["guestPath"], "/home/ci/candidate.bin");
+
     // artifacts, artifact-get
     let artifacts = world
         .cli(Some(&token), &["lab", "artifacts", "--lease", &lease_id])
@@ -758,7 +811,7 @@ async fn a_scoped_credential_runs_the_whole_lab_loop_through_fleetctl_and_nothin
     // The token is shown once and never again: not in any output, not in
     // the audit ledger, not in the database (only its hash is).
     let everything = [
-        &created, &status, &exec, &collect, &got, &extended, &destroyed,
+        &created, &status, &exec, &collect, &put, &got, &extended, &destroyed,
     ]
     .iter()
     .fold(String::new(), |mut all, cli| {
@@ -771,6 +824,13 @@ async fn a_scoped_credential_runs_the_whole_lab_loop_through_fleetctl_and_nothin
         .admin(reqwest::Method::GET, "/api/v1/audit?limit=200", None)
         .await;
     assert!(!audit.to_string().contains(&token));
+    // The put went out under the credential, not as the anonymous admin.
+    assert!(
+        audit["items"].as_array().unwrap().iter().any(|item| {
+            item["action"] == "lab.put" && item["actor"].to_string().contains("release-qa")
+        }),
+        "{audit}"
+    );
     let rows = world.stored_text().await;
     assert!(!rows.contains(&token), "the token must not be stored");
     assert!(
@@ -1106,6 +1166,27 @@ async fn leases_artifacts_and_operations_are_scoped_to_their_owner() {
         .await;
     assert_eq!(status, 200);
 
+    // Another owner cannot put a file into the lease: it reads as not found,
+    // and nothing is staged.
+    let refused = world
+        .http
+        .post(world.url(&format!("/api/v1/lab/leases/{lease}/files?path=/tmp/x")))
+        .bearer_auth(&theirs)
+        .body("bytes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 404);
+    let owner_put = world
+        .http
+        .post(world.url(&format!("/api/v1/lab/leases/{lease}/files?path=/tmp/x")))
+        .bearer_auth(&mine)
+        .body("bytes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_put.status().as_u16(), 202);
+
     // Another owner sees none of it.
     let lease_path = format!("/api/v1/lab/leases/{lease}");
     for (method, path, body) in [
@@ -1224,6 +1305,7 @@ async fn every_route_is_allowed_refused_or_unreachable_for_the_credential() {
         ("POST", "/api/v1/lab/leases/{leaseId}/extend"),
         ("POST", "/api/v1/lab/leases/{leaseId}/exec"),
         ("POST", "/api/v1/lab/leases/{leaseId}/artifacts/collect"),
+        ("POST", "/api/v1/lab/leases/{leaseId}/files"),
         ("GET", "/api/v1/lab/artifacts"),
         ("GET", "/api/v1/lab/artifacts/{artifactId}"),
         ("GET", "/api/v1/lab/artifacts/{artifactId}/content"),
@@ -1426,4 +1508,12 @@ async fn an_account_is_not_the_credentials_to_choose_and_odd_headers_are_refused
         let status = request.send().await.unwrap().status().as_u16();
         assert_eq!(status, 401, "{headers:?}");
     }
+}
+
+/// A local file with these bytes, for `lab put`.
+fn work_dir_file(bytes: &[u8]) -> tempfile::NamedTempFile {
+    use std::io::Write as _;
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(bytes).unwrap();
+    file
 }

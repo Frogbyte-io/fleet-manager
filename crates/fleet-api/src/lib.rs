@@ -24,6 +24,7 @@ pub mod images;
 pub mod lab;
 pub mod lab_artifacts;
 pub mod lab_pools;
+pub mod lab_put;
 pub mod machines;
 mod meta;
 pub mod mise;
@@ -406,6 +407,7 @@ pub fn api(state: Arc<operations::ApiState>) -> (Router, utoipa::openapi::OpenAp
                 .routes(routes!(lab::exec_lab_lease))
                 .routes(routes!(lab::sweep_lab_leases))
                 .routes(routes!(lab_artifacts::collect_lab_artifacts))
+                .routes(routes!(lab_put::put_lab_file))
                 .routes(routes!(lab_artifacts::list_lab_artifacts))
                 .routes(routes!(lab_artifacts::get_lab_artifact))
                 .routes(routes!(lab_artifacts::download_lab_artifact))
