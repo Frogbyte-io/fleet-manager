@@ -679,10 +679,6 @@ enum Enrollment {
     Upgrade,
 }
 
-/// The install script. The enrollment token, when there is one, is
-/// interpolated into the script text — stdin-delivered, never argv — and
-/// piped straight into `fleetd enroll --token-stdin` by install.sh. The
-/// download and its digest are verified before anything executes.
 /// A node-reported fact echoed into an error: node text is untrusted, so it
 /// is scrubbed, flattened and cut to a short prefix.
 fn echo_fact(value: &str) -> String {
@@ -691,6 +687,10 @@ fn echo_fact(value: &str) -> String {
     scrubbed.chars().take(ECHO_LIMIT).collect()
 }
 
+/// The install script. The enrollment token, when there is one, is
+/// interpolated into the script text — stdin-delivered, never argv — and
+/// piped straight into `fleetd enroll --token-stdin` by install.sh. The
+/// download and its digest are verified before anything executes.
 fn install_script(token: Option<&str>, force_enroll: bool) -> String {
     let token_line = token
         .map(|token| format!("export FLEET_ENROLL_TOKEN={token}\n"))

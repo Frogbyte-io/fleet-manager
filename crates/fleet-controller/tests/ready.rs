@@ -76,6 +76,22 @@ impl fleet_application::worker::OperationExecutor for StubInner {
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             }
+            Some("leaky_failed") => {
+                // An inner executor that stores its detail as given.
+                let error_json = serde_json::json!({
+                    "reason": "step_failed",
+                    "detail": format!(
+                        "clone of https://user:hunter2pw@host.invalid/r failed token=fake-token-value {}",
+                        "x".repeat(10_000)
+                    ),
+                })
+                .to_string();
+                operations
+                    .complete(&operation.id, "failed", None, Some(&error_json))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
             Some("failed") => {
                 let error_json = serde_json::json!({
                     "reason": "step_failed",
@@ -261,6 +277,18 @@ async fn a_failing_step_stops_with_the_story() {
         !error["remaining"].as_array().unwrap().is_empty(),
         "the remaining steps are named"
     );
+}
+
+#[tokio::test]
+async fn an_inner_failure_detail_is_scrubbed_and_bounded_in_the_workflow_error() {
+    let fixture = compose(vec![("mise.install".to_owned(), "leaky_failed".to_owned())]).await;
+    let (state, _result, error) = fixture.run_ready(payload()).await;
+    assert_eq!(state, "failed");
+    let stored = error.unwrap();
+    assert!(!stored.contains("hunter2"), "{stored}");
+    assert!(!stored.contains("fake-token"), "{stored}");
+    let error: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert!(error["detail"].as_str().unwrap().len() <= 3_010);
 }
 
 impl Fixture {

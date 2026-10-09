@@ -102,7 +102,7 @@ pub fn redact_schemeless_credentials(text: &str) -> String {
 
 /// Names whose `name=value` value is a secret. A word matches when it ENDS
 /// with one (so `GITHUB_TOKEN=` and `access_token=` match).
-const SECRET_KEYS: [&str; 9] = [
+const SECRET_KEYS: [&str; 14] = [
     "token",
     "password",
     "passwd",
@@ -112,6 +112,11 @@ const SECRET_KEYS: [&str; 9] = [
     "api-key",
     "passphrase",
     "credential",
+    "credentials",
+    "secret_key",
+    "access_key",
+    "private_key",
+    "signature",
 ];
 
 const MASK: &str = "***";
@@ -130,25 +135,27 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')
 }
 
-/// `Authorization: value` or `Authorization=value`: the value runs to the end
-/// of the line or the closing quote.
+/// `Authorization: value`, `Authorization=value` or the JSON form
+/// `"Authorization": "value"`: an unquoted value runs to the end of the line
+/// or a closing quote, a quoted one to its matching quote.
 fn mask_authorization(text: &str) -> String {
     const NAME: &str = "authorization";
     let lower = text.to_ascii_lowercase();
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
     while let Some(offset) = lower[cursor..].find(NAME) {
-        let name_end = cursor + offset + NAME.len();
-        let after = &text[name_end..];
-        let trimmed = after.trim_start_matches([' ', '\t', '"', '\'']);
-        let separator = after.len() - trimmed.len();
-        if let Some(value) = trimmed.strip_prefix([':', '=']) {
-            let value_start = name_end + separator + 1;
-            let value_end = value
-                .find(['\n', '"', '\''])
-                .map_or(text.len(), |end| value_start + end);
-            result.push_str(&text[cursor..value_start]);
-            result.push(' ');
+        let start = cursor + offset;
+        let name_end = start + NAME.len();
+        let boundary = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let after = text[name_end..].trim_start_matches([' ', '\t', '"', '\'']);
+        let separator = name_end + (text.len() - name_end - after.len());
+        if boundary && after.starts_with([':', '=']) {
+            let value_start = separator + 1;
+            let (masked_start, value_end) = value_extent(text, value_start, true);
+            result.push_str(&text[cursor..masked_start]);
             result.push_str(MASK);
             cursor = value_end;
         } else {
@@ -158,6 +165,28 @@ fn mask_authorization(text: &str) -> String {
     }
     result.push_str(&text[cursor..]);
     result
+}
+
+/// The extent of a value starting at `start` (after optional spaces): a
+/// quoted value runs to its matching quote or the line end; an unquoted one
+/// to whitespace, a quote, `&`, `;` or `,`, or (for a header, `to_line_end`)
+/// to the line end or a quote.
+fn value_extent(text: &str, start: usize, to_line_end: bool) -> (usize, usize) {
+    let start = start + (text.len() - start - text[start..].trim_start_matches([' ', '\t']).len());
+    let rest = &text[start..];
+    if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        let inner = start + 1;
+        let end = text[inner..]
+            .find([quote, '\n'])
+            .map_or(text.len(), |end| inner + end);
+        return (inner, end);
+    }
+    let end = if to_line_end {
+        rest.find(['\n', '"', '\''])
+    } else {
+        rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '&' | ';' | ','))
+    };
+    (start, end.map_or(text.len(), |end| start + end))
 }
 
 /// A shorter word after "bearer" is prose ("the bearer of news"), not a token.
@@ -177,7 +206,7 @@ fn mask_bearer(text: &str) -> String {
             .next_back()
             .is_none_or(|c| !is_word_char(c));
         let value_end = text[value_start..]
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ','))
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ')' | '}' | ';'))
             .map_or(text.len(), |end| value_start + end);
         result.push_str(&text[cursor..value_start]);
         if boundary
@@ -194,40 +223,41 @@ fn mask_bearer(text: &str) -> String {
     result
 }
 
-/// `name=value` where the word before `=` ends with a secret name.
+/// `name=value`, and the JSON form `"name": "value"`, where the word before
+/// the separator ends with a secret name.
 fn mask_key_values(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
     let mut search = 0;
-    while let Some(offset) = text[search..].find('=') {
-        let equals = search + offset;
-        let key_start = text[..equals]
+    while let Some(offset) = text[search..].find(['=', ':']) {
+        let separator = search + offset;
+        search = separator + 1;
+        let mut key_end = separator;
+        if text.as_bytes()[separator] == b':' {
+            // Only the quoted-key JSON form: a bare `name: value` is prose.
+            match text[..separator].chars().next_back() {
+                Some(quote @ ('"' | '\'')) => key_end -= quote.len_utf8(),
+                _ => continue,
+            }
+        }
+        let key_start = text[..key_end]
             .char_indices()
             .rev()
             .take_while(|(_, c)| is_word_char(*c))
             .last()
-            .map_or(equals, |(index, _)| index);
-        let key = text[key_start..equals].to_ascii_lowercase();
+            .map_or(key_end, |(index, _)| index);
+        let key = text[key_start..key_end].to_ascii_lowercase();
         // The value is only scanned once the key names a secret, so a long
         // run of '=' with no secret name stays linear.
         if !SECRET_KEYS.iter().any(|name| key.ends_with(name)) {
-            search = equals + 1;
             continue;
         }
-        let mut value_start = equals + 1;
-        if text[value_start..].starts_with(['"', '\'']) {
-            value_start += 1;
-        }
-        let value_end = text[value_start..]
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '&' | ';' | ','))
-            .map_or(text.len(), |end| value_start + end);
+        let (value_start, value_end) = value_extent(text, separator + 1, false);
         if value_end > value_start && &text[value_start..value_end] != MASK {
             result.push_str(&text[cursor..value_start]);
             result.push_str(MASK);
             cursor = value_end;
             search = value_end;
-        } else {
-            search = equals + 1;
         }
     }
     result.push_str(&text[cursor..]);
@@ -478,7 +508,7 @@ mod tests {
                 "Authorization: Basic ZmFrZTpmYWtl\nnext",
                 "Authorization: ***\nnext",
             ),
-            ("authorization=Token fakevalue", "authorization= ***"),
+            ("authorization=Token fakevalue", "authorization=***"),
             (
                 "curl -H 'Authorization: Bearer fake-abc' x",
                 "curl -H 'Authorization: ***' x",
@@ -487,7 +517,17 @@ mod tests {
             ("token=fake123 other=1", "token=*** other=1"),
             ("GITHUB_TOKEN=fakegh&x=1", "GITHUB_TOKEN=***&x=1"),
             ("url ?access_token=fake9&a=b", "url ?access_token=***&a=b"),
-            ("PASSWORD=\"fake pw\"", "PASSWORD=\"***pw\""),
+            ("PASSWORD=\"fake pw tail\" x", "PASSWORD=\"***\" x"),
+            (
+                "{\"Authorization\": \"Basic fakebasic\"} x",
+                "{\"Authorization\": \"***\"} x",
+            ),
+            (
+                "{\"token\":\"fake-json\",\"a\":1}",
+                "{\"token\":\"***\",\"a\":1}",
+            ),
+            ("AWS_SECRET_KEY=fakeaws ok", "AWS_SECRET_KEY=*** ok"),
+            ("(Bearer fakebearer9)", "(Bearer ***)"),
             ("db api-key=fakekey;", "db api-key=***;"),
         ];
         for (input, expected) in cases {
@@ -498,9 +538,16 @@ mod tests {
             );
             assert!(!out.contains("fakekey") && !out.contains("fakegh"), "{out}");
             assert!(!out.contains("fake9") && !out.contains("ZmFrZ"), "{out}");
-            if !input.contains("fake pw") {
-                assert_eq!(out, expected);
+            for leaked in [
+                "fake pw",
+                "fakebasic",
+                "fake-json",
+                "fakeaws",
+                "fakebearer9",
+            ] {
+                assert!(!out.contains(leaked), "{out}");
             }
+            assert_eq!(out, expected);
         }
     }
 
