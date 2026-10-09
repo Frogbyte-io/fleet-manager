@@ -179,6 +179,28 @@ pub enum Permission {
     /// artifacts, and record or expire them (FM-721). A privileged action:
     /// it copies data off a machine and serves it.
     LabArtifacts,
+    /// List the delegated credentials' metadata (never token values). A
+    /// read of who may act on Fleet's behalf.
+    CredentialRead,
+    /// Issue a delegated credential: a scoped, short-lived bearer token.
+    /// A mutation: it hands the holder access.
+    CredentialIssue,
+    /// Revoke a delegated credential. A mutation.
+    CredentialRevoke,
+    /// Use a published Lab template version, named `<templateId>/<versionId>`,
+    /// to create a lease. The catalog entry a delegated credential's
+    /// template allow-list is decided on.
+    LabTemplateUse,
+    /// List and read Lab leases, their guest details, and reservations. A
+    /// delegated credential reads its own leases only.
+    LabLeaseRead,
+    /// List and read Lab artifact metadata. A delegated credential reads its
+    /// own artifacts only.
+    LabArtifactRead,
+    /// Provision the guest of an already requested Lab lease. Distinct from
+    /// [`Permission::LabProvision`], which provisions a guest without a
+    /// lease and so leaves a VM no lease owns.
+    LabLeaseProvision,
 }
 
 impl Permission {
@@ -239,6 +261,13 @@ impl Permission {
         Permission::LabKeep,
         Permission::LabExec,
         Permission::LabArtifacts,
+        Permission::CredentialRead,
+        Permission::CredentialIssue,
+        Permission::CredentialRevoke,
+        Permission::LabTemplateUse,
+        Permission::LabLeaseRead,
+        Permission::LabArtifactRead,
+        Permission::LabLeaseProvision,
     ];
 
     /// The stable action id, as recorded in decisions and audit events.
@@ -298,6 +327,13 @@ impl Permission {
             Permission::LabKeep => "lab.keep",
             Permission::LabExec => "lab.exec",
             Permission::LabArtifacts => "lab.artifacts",
+            Permission::CredentialRead => "credential.read",
+            Permission::CredentialIssue => "credential.issue",
+            Permission::CredentialRevoke => "credential.revoke",
+            Permission::LabTemplateUse => "lab.template.use",
+            Permission::LabLeaseRead => "lab.lease.read",
+            Permission::LabArtifactRead => "lab.artifacts.read",
+            Permission::LabLeaseProvision => "lab.lease.provision",
         }
     }
 
@@ -316,7 +352,9 @@ impl Permission {
             | Permission::NodeRead
             | Permission::ProjectsRead
             | Permission::ImagesRead
-            | Permission::LabRead => false,
+            | Permission::LabRead
+            | Permission::LabLeaseRead
+            | Permission::LabArtifactRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCreate
             | Permission::OperationCancel
@@ -359,7 +397,12 @@ impl Permission {
             | Permission::LabExtend
             | Permission::LabKeep
             | Permission::LabExec
-            | Permission::LabArtifacts => true,
+            | Permission::LabArtifacts
+            | Permission::CredentialRead
+            | Permission::CredentialIssue
+            | Permission::CredentialRevoke
+            | Permission::LabTemplateUse
+            | Permission::LabLeaseProvision => true,
         }
     }
 
@@ -392,7 +435,11 @@ impl Permission {
             | Permission::ImagesConfig
             | Permission::LabRead
             | Permission::LabConfig
-            | Permission::LabLease => false,
+            | Permission::LabLease
+            | Permission::CredentialRead
+            | Permission::CredentialIssue
+            | Permission::LabLeaseRead
+            | Permission::LabArtifactRead => false,
             Permission::MachineReadSensitive
             | Permission::OperationCancel
             | Permission::SecretRead
@@ -421,7 +468,10 @@ impl Permission {
             | Permission::LabExtend
             | Permission::LabKeep
             | Permission::LabExec
-            | Permission::LabArtifacts => true,
+            | Permission::LabArtifacts
+            | Permission::CredentialRevoke
+            | Permission::LabTemplateUse
+            | Permission::LabLeaseProvision => true,
         }
     }
 }
@@ -447,6 +497,13 @@ pub enum ReasonId {
     MissingResource,
     /// The request is malformed: it names an action outside the catalog.
     UnknownAction,
+    /// A delegated credential's policy does not include the action.
+    ActionNotDelegated,
+    /// A delegated credential's policy includes the action, but not on this
+    /// resource (for example a template outside its allow-list).
+    OutOfScope,
+    /// The presented delegated credential is expired or revoked.
+    CredentialInactive,
 }
 
 impl ReasonId {
@@ -458,6 +515,9 @@ impl ReasonId {
             ReasonId::UnknownPrincipal => "policy.unknown_principal",
             ReasonId::MissingResource => "policy.missing_resource",
             ReasonId::UnknownAction => "policy.unknown_action",
+            ReasonId::ActionNotDelegated => "policy.action_not_delegated",
+            ReasonId::OutOfScope => "policy.out_of_scope",
+            ReasonId::CredentialInactive => "policy.credential_inactive",
         }
     }
 }
@@ -528,6 +588,50 @@ impl fmt::Display for Decision {
 pub struct ActingPrincipal {
     /// The stable principal id.
     pub id: String,
+}
+
+/// The prefix of a delegated credential's principal id:
+/// `credential:<owner>:<credentialId>` (ADR 0011).
+pub const DELEGATED_PRINCIPAL_PREFIX: &str = "credential:";
+
+/// The principal id of a delegated credential.
+#[must_use]
+pub fn delegated_principal_id(owner: &str, credential_id: &str) -> String {
+    format!("{DELEGATED_PRINCIPAL_PREFIX}{owner}:{credential_id}")
+}
+
+/// Whether the principal id names a delegated credential.
+#[must_use]
+pub fn is_delegated_principal(principal_id: &str) -> bool {
+    delegated_owner_identity(principal_id).is_some()
+}
+
+/// The ownership identity of a delegated principal, `credential:<owner>`,
+/// shared by every credential of one owner so token rotation keeps the
+/// owner's leases. `None` for any other principal.
+#[must_use]
+pub fn delegated_owner_identity(principal_id: &str) -> Option<&str> {
+    let rest = principal_id.strip_prefix(DELEGATED_PRINCIPAL_PREFIX)?;
+    let (owner, credential_id) = rest.split_once(':')?;
+    if owner.is_empty() || credential_id.is_empty() {
+        return None;
+    }
+    Some(&principal_id[..DELEGATED_PRINCIPAL_PREFIX.len() + owner.len()])
+}
+
+/// The owner a resource created by this principal records: the shared owner
+/// identity for a delegated credential, the principal id for any other.
+#[must_use]
+pub fn resource_owner(principal_id: &str) -> &str {
+    delegated_owner_identity(principal_id).unwrap_or(principal_id)
+}
+
+/// Whether the principal may see a resource recorded under `owner`. A
+/// delegated credential sees only its own owner's resources; other
+/// principals are decided by the catalog alone.
+#[must_use]
+pub fn owner_scope_permits(principal_id: &str, owner: &str) -> bool {
+    delegated_owner_identity(principal_id).is_none_or(|identity| identity == owner)
 }
 
 /// The authorization port. Exactly one implementation is active in a

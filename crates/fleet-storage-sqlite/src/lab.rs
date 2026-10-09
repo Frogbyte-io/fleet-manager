@@ -1016,3 +1016,14 @@ where
         Err(error) => Err(format!("the {column} column is unreadable: {error}")),
     }
 }
+
+#[async_trait]
+impl fleet_application::operation::LeaseOwnerLookup for LeaseRepository {
+    async fn owner_of(&self, lease_id: &str) -> Result<Option<String>, String> {
+        sqlx::query_scalar::<_, String>("SELECT owner FROM lab_leases WHERE id = ?1")
+            .bind(lease_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("lease owner lookup failed: {error}"))
+    }
+}

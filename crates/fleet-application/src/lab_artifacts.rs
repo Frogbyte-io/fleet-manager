@@ -219,6 +219,21 @@ pub trait LabArtifactPort: fmt::Debug + Send + Sync {
         limit: u32,
     ) -> Result<Vec<LabArtifact>, String>;
 
+    /// As [`LabArtifactPort::list`], narrowed to the artifacts recorded
+    /// under `owner`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a backend failure.
+    async fn list_for_owner(
+        &self,
+        owner: &str,
+        lease_id: Option<&str>,
+        project_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<LabArtifact>, String>;
+
     /// Up to `limit` artifacts whose retention deadline is at or before
     /// `now`, oldest deadline first.
     ///
@@ -515,7 +530,21 @@ impl LabArtifacts {
         filter: ArtifactFilter<'_>,
         limit: u32,
     ) -> Result<Vec<LabArtifact>, LabUseCaseError> {
-        allow(authorizer, principal, Permission::LabRead, None)?;
+        allow(authorizer, principal, Permission::LabArtifactRead, None)?;
+        // A delegated credential lists its own owner's artifacts only.
+        if let Some(owner) = crate::authz::delegated_owner_identity(&principal.id) {
+            return self
+                .artifacts
+                .list_for_owner(
+                    owner,
+                    filter.lease_id,
+                    filter.project_id,
+                    filter.cursor,
+                    limit,
+                )
+                .await
+                .map_err(backend);
+        }
         self.artifacts
             .list(filter.lease_id, filter.project_id, filter.cursor, limit)
             .await
@@ -533,8 +562,10 @@ impl LabArtifacts {
         principal: &ActingPrincipal,
         id: &str,
     ) -> Result<LabArtifact, LabUseCaseError> {
-        allow(authorizer, principal, Permission::LabRead, None)?;
-        self.require(id).await
+        allow(authorizer, principal, Permission::LabArtifactRead, None)?;
+        let artifact = self.require(id).await?;
+        scope_artifact(principal, &artifact)?;
+        Ok(artifact)
     }
 
     /// Opens an artifact's bytes for download, after the store verified
@@ -560,6 +591,7 @@ impl LabArtifacts {
             Permission::LabArtifacts,
             Some(&artifact.lease_id),
         )?;
+        scope_artifact(principal, &artifact)?;
         let reader = self
             .blobs
             .open(&artifact.location, &artifact.sha256, artifact.size_bytes)
@@ -586,7 +618,16 @@ impl LabArtifacts {
         principal: &ActingPrincipal,
         lease_id: &str,
     ) -> Result<Option<CollectionFailure>, LabUseCaseError> {
-        allow(authorizer, principal, Permission::LabRead, Some(lease_id))?;
+        allow(
+            authorizer,
+            principal,
+            Permission::LabLeaseRead,
+            Some(lease_id),
+        )?;
+        if crate::authz::is_delegated_principal(&principal.id) {
+            let lease = self.lease(lease_id).await?;
+            scope_lease(principal, &lease)?;
+        }
         self.artifacts
             .collection_failure(lease_id)
             .await
@@ -618,6 +659,7 @@ impl LabArtifacts {
         )?;
         validate_collect_paths(paths).map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let lease = self.lease(lease_id).await?;
+        scope_lease(principal, &lease)?;
         lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
         let record = match &lease.provision_id {
             Some(id) => Some(self.provisions.get(id).await.map_err(backend)?),
@@ -1020,6 +1062,34 @@ impl LabArtifacts {
                 context: "audit",
                 detail,
             })
+    }
+}
+
+/// An artifact the principal may not see is reported as not found.
+fn scope_artifact(
+    principal: &ActingPrincipal,
+    artifact: &LabArtifact,
+) -> Result<(), LabUseCaseError> {
+    if crate::authz::owner_scope_permits(&principal.id, &artifact.owner) {
+        Ok(())
+    } else {
+        Err(LabUseCaseError::NotFound {
+            what: format!("artifact {}", artifact.id),
+        })
+    }
+}
+
+/// A lease the principal may not see is reported as not found.
+fn scope_lease(
+    principal: &ActingPrincipal,
+    lease: &fleet_core::Lease,
+) -> Result<(), LabUseCaseError> {
+    if crate::authz::owner_scope_permits(&principal.id, &lease.owner) {
+        Ok(())
+    } else {
+        Err(LabUseCaseError::NotFound {
+            what: format!("lease {}", lease.id),
+        })
     }
 }
 

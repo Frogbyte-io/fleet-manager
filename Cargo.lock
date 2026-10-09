@@ -916,6 +916,7 @@ dependencies = [
 name = "fleetctl"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "fleet-api",
  "fleet-application",
@@ -923,12 +924,14 @@ dependencies = [
  "fleet-config",
  "fleet-controller",
  "fleet-core",
+ "fleet-provider-ssh",
  "fleet-storage-sqlite",
  "fleetd",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "tempfile",
  "tokio",
  "uuid",

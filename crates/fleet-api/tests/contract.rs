@@ -58,6 +58,7 @@ fn test_state() -> (Arc<ApiState>, Arc<FakePort>, Arc<RecordingAuditQuery>) {
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
     });
     (state, port, audit)
 }
@@ -533,6 +534,7 @@ fn operation_state_with_hub(
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
     })
 }
 
@@ -1785,6 +1787,7 @@ fn machine_state(
         lab: None,
         desired: None,
         planning: None,
+        credentials: None,
     })
 }
 

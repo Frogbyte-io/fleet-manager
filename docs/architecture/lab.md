@@ -272,6 +272,8 @@ Lab artifacts (FM-721) are exec logs and explicitly collected guest files that o
 - Collection never changes the lease. A path that cannot be copied fails the operation (`collection_partial` or `collection_failed`, with a per-path reason), keeps whatever was copied, and records the failure beside the lease (`lab_artifact_collection_failures`, shown as `collectionFailure` in the lease detail). A collection that runs after the lease left `ready` fails the same way. Release and cleanup never wait for collection, so a failed collection cannot block or skip cleanup.
 - The Lab sweeper deletes artifacts past their retention deadline (`lab_artifact_retention_seconds`, default 7 days), audited as `lab_artifact_expired`; it removes the bytes only when no other artifact still references them.
 
+A CI job or agent can run this whole loop (create, status, exec, collect, artifacts, artifact-get, extend, destroy) with a delegated credential instead of the trusted-LAN identity: the credential allows only its allow-listed templates and its own owner's leases and artifacts ([ADR 0011](../adr/0011-delegated-lab-credentials.md), [security.md](security.md#delegated-lab-credentials-proposed-adr-0011)). Without `--account`, `fleetctl lab create` lets placement pick the Proxmox account when `FLEET_TOKEN` is set, because the credential cannot list accounts.
+
 Object storage, test-report parsing, screenshots, and result bundles remain follow-ons.
 
 ## Later USB and physical resources

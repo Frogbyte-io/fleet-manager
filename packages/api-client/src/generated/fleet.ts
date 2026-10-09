@@ -961,6 +961,35 @@ export interface CreateProxmoxAccountRequest {
 }
 
 /**
+ * A credential's metadata. The token and its hash are never part of it.
+ */
+export interface CredentialDto {
+  /** When it expires (epoch millis). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** When it was issued (epoch millis). */
+  issuedAt: number;
+  /** The administrator that issued it. */
+  issuedBy: string;
+  /** An operator's free-text label. */
+  label: string;
+  /** The owner label: the ownership identity of the leases it creates. */
+  owner: string;
+  /**
+     * When it was revoked (epoch millis), when it was.
+     * @nullable
+     */
+  revokedAt?: number | null;
+  /** `active`, `expired`, or `revoked`. */
+  status: string;
+  /** Allowed Lab template ids. */
+  templates: string[];
+  /** Allowed Lab template version ids. */
+  versions: string[];
+}
+
+/**
  * One recorded desired revision.
  */
 export interface DesiredHistoryEntryDto {
@@ -1327,6 +1356,37 @@ export interface ImportTailnetDeviceRequest {
   /** The SSH login user on the target machine. */
   user: string;
 }
+
+/**
+ * What to issue.
+ */
+export interface IssueCredentialRequest {
+  /** A free-text label. */
+  label?: string;
+  /** The owner label (`a-z`, `0-9`, `.`, `_`, `-`; at most 63). */
+  owner: string;
+  /** Allowed Lab template ids. */
+  templates?: string[];
+  /**
+     * The lifetime in seconds (60 to 86400).
+     * @minimum 0
+     */
+  ttlSeconds: number;
+  /** Allowed Lab template version ids. */
+  versions?: string[];
+}
+
+/**
+ * A freshly issued credential: its metadata and the token, shown once.
+ */
+export type IssuedCredentialDto = CredentialDto & {
+  /**
+     * The bearer token. It is returned only by this response and cannot be
+     * read again; present it as `Authorization: Bearer <token>` (or set
+     * `FLEET_TOKEN` for `fleetctl`).
+     */
+  token: string;
+};
 
 /**
  * One stored Lab artifact's metadata.
@@ -2418,6 +2478,48 @@ export type PageCorrelatedDeviceDtoItemsItem = {
 export interface PageCorrelatedDeviceDto {
   /** The items on this page, in the endpoint's documented order. */
   items: PageCorrelatedDeviceDtoItemsItem[];
+  /** Where this page sits in the result set. */
+  page: PageInfo;
+}
+
+/**
+ * A credential's metadata. The token and its hash are never part of it.
+ */
+export type PageCredentialDtoItemsItem = {
+  /** When it expires (epoch millis). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** When it was issued (epoch millis). */
+  issuedAt: number;
+  /** The administrator that issued it. */
+  issuedBy: string;
+  /** An operator's free-text label. */
+  label: string;
+  /** The owner label: the ownership identity of the leases it creates. */
+  owner: string;
+  /**
+     * When it was revoked (epoch millis), when it was.
+     * @nullable
+     */
+  revokedAt?: number | null;
+  /** `active`, `expired`, or `revoked`. */
+  status: string;
+  /** Allowed Lab template ids. */
+  templates: string[];
+  /** Allowed Lab template version ids. */
+  versions: string[];
+};
+
+/**
+ * A page of resources.
+ *
+ * The concrete schema for a list endpoint appears when that endpoint does;
+ * [`PageInfo`] is the part of the shape that is fixed for every one of them.
+ */
+export interface PageCredentialDto {
+  /** The items on this page, in the endpoint's documented order. */
+  items: PageCredentialDtoItemsItem[];
   /** Where this page sits in the result set. */
   page: PageInfo;
 }
@@ -4216,6 +4318,46 @@ export interface ResourceClearedBuildAddressDto {
 }
 
 /**
+ * A credential's metadata. The token and its hash are never part of it.
+ */
+export type ResourceCredentialDtoData = {
+  /** When it expires (epoch millis). */
+  expiresAt: number;
+  /** The credential's identity. */
+  id: string;
+  /** When it was issued (epoch millis). */
+  issuedAt: number;
+  /** The administrator that issued it. */
+  issuedBy: string;
+  /** An operator's free-text label. */
+  label: string;
+  /** The owner label: the ownership identity of the leases it creates. */
+  owner: string;
+  /**
+     * When it was revoked (epoch millis), when it was.
+     * @nullable
+     */
+  revokedAt?: number | null;
+  /** `active`, `expired`, or `revoked`. */
+  status: string;
+  /** Allowed Lab template ids. */
+  templates: string[];
+  /** Allowed Lab template version ids. */
+  versions: string[];
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceCredentialDto {
+  /** A credential's metadata. The token and its hash are never part of it. */
+  data: ResourceCredentialDtoData;
+}
+
+/**
  * The configured desired-source remote.
  */
 export type ResourceDesiredSourceDtoData = {
@@ -4351,6 +4493,29 @@ export type ResourceImageBuildDtoData = {
 export interface ResourceImageBuildDto {
   /** Safe build provenance and outcome; credentials and work paths are excluded. */
   data: ResourceImageBuildDtoData;
+}
+
+/**
+ * A freshly issued credential: its metadata and the token, shown once.
+ */
+export type ResourceIssuedCredentialDtoData = CredentialDto & {
+  /**
+     * The bearer token. It is returned only by this response and cannot be
+     * read again; present it as `Authorization: Bearer <token>` (or set
+     * `FLEET_TOKEN` for `fleetctl`).
+     */
+  token: string;
+};
+
+/**
+ * A single resource.
+ *
+ * The payload is nested under `data` so that later top-level fields are an
+ * additive change rather than a breaking one.
+ */
+export interface ResourceIssuedCredentialDto {
+  /** A freshly issued credential: its metadata and the token, shown once. */
+  data: ResourceIssuedCredentialDtoData;
 }
 
 /**
@@ -6484,6 +6649,197 @@ export const listAuditEvents = async (params?: ListAuditEventsParams, options?: 
 
   const data: listAuditEventsResponse['data'] = body ? JSON.parse(body) : {}
   return { data, status: res.status, headers: res.headers } as listAuditEventsResponse
+}
+
+
+
+export type listCredentialsResponse200 = {
+  data: PageCredentialDto
+  status: 200
+}
+
+export type listCredentialsResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type listCredentialsResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type listCredentialsResponseSuccess = (listCredentialsResponse200) & {
+  headers: Headers;
+};
+export type listCredentialsResponseError = (listCredentialsResponse403 | listCredentialsResponse500) & {
+  headers: Headers;
+};
+
+export type listCredentialsResponse = (listCredentialsResponseSuccess | listCredentialsResponseError)
+
+export const getListCredentialsUrl = () => {
+
+
+
+
+  return `/api/v1/credentials`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or backend failure.
+ * @summary Lists the delegated credentials' metadata, newest first.
+ */
+export const listCredentials = async ( options?: RequestInit): Promise<listCredentialsResponse> => {
+
+  const res = await fetch(getListCredentialsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: listCredentialsResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as listCredentialsResponse
+}
+
+
+
+export type issueCredentialResponse201 = {
+  data: ResourceIssuedCredentialDto
+  status: 201
+}
+
+export type issueCredentialResponse400 = {
+  data: ApiError
+  status: 400
+}
+
+export type issueCredentialResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type issueCredentialResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type issueCredentialResponseSuccess = (issueCredentialResponse201) & {
+  headers: Headers;
+};
+export type issueCredentialResponseError = (issueCredentialResponse400 | issueCredentialResponse403 | issueCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type issueCredentialResponse = (issueCredentialResponseSuccess | issueCredentialResponseError)
+
+export const getIssueCredentialUrl = () => {
+
+
+
+
+  return `/api/v1/credentials`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or a malformed request.
+ * @summary Issues a delegated credential. The response carries the token exactly
+once.
+ */
+export const issueCredential = async (issueCredentialRequest: IssueCredentialRequest, options?: RequestInit): Promise<issueCredentialResponse> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    return h;
+  };
+const res = await fetch(getIssueCredentialUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(issueCredentialRequest)
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: issueCredentialResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as issueCredentialResponse
+}
+
+
+
+export type revokeCredentialResponse200 = {
+  data: ResourceCredentialDto
+  status: 200
+}
+
+export type revokeCredentialResponse403 = {
+  data: ApiError
+  status: 403
+}
+
+export type revokeCredentialResponse404 = {
+  data: ApiError
+  status: 404
+}
+
+export type revokeCredentialResponse500 = {
+  data: ApiError
+  status: 500
+}
+
+export type revokeCredentialResponseSuccess = (revokeCredentialResponse200) & {
+  headers: Headers;
+};
+export type revokeCredentialResponseError = (revokeCredentialResponse403 | revokeCredentialResponse404 | revokeCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type revokeCredentialResponse = (revokeCredentialResponseSuccess | revokeCredentialResponseError)
+
+export const getRevokeCredentialUrl = (credentialId: string,) => {
+
+
+
+
+  return `/api/v1/credentials/${credentialId}/revoke`
+}
+
+/**
+ * # Errors
+ *
+ * Returns the public error envelope on refusal or an unknown credential.
+ * @summary Revokes a credential. Its next request is refused.
+ */
+export const revokeCredential = async (credentialId: string, options?: RequestInit): Promise<revokeCredentialResponse> => {
+
+  const res = await fetch(getRevokeCredentialUrl(credentialId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+)
+
+
+  const body = [204, 205, 304].includes(res.status) ? null : await res.text();
+
+  const data: revokeCredentialResponse['data'] = body ? JSON.parse(body) : {}
+  return { data, status: res.status, headers: res.headers } as revokeCredentialResponse
 }
 
 
@@ -13749,6 +14105,11 @@ export type getSystemInfoResponse200 = {
   status: 200
 }
 
+export type getSystemInfoResponse403 = {
+  data: ApiError
+  status: 403
+}
+
 export type getSystemInfoResponse500 = {
   data: ApiError
   status: 500
@@ -13757,7 +14118,7 @@ export type getSystemInfoResponse500 = {
 export type getSystemInfoResponseSuccess = (getSystemInfoResponse200) & {
   headers: Headers;
 };
-export type getSystemInfoResponseError = (getSystemInfoResponse500) & {
+export type getSystemInfoResponseError = (getSystemInfoResponse403 | getSystemInfoResponse500) & {
   headers: Headers;
 };
 

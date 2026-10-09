@@ -74,6 +74,9 @@ pub struct ApiState {
     pub desired: Option<Arc<fleet_application::source::DesiredSource>>,
     /// The server-side planning use cases, when the controller has a store.
     pub planning: Option<Arc<fleet_application::planning::Planning>>,
+    /// The delegated credential use cases, when the controller was composed
+    /// with a database; `None` only in document/test states.
+    pub credentials: Option<Arc<fleet_application::credentials::Credentials>>,
 }
 
 impl std::fmt::Debug for ApiState {
@@ -96,6 +99,7 @@ impl std::fmt::Debug for ApiState {
             .field("lab", &self.lab)
             .field("desired", &self.desired)
             .field("planning", &self.planning)
+            .field("credentials", &self.credentials)
             .finish()
     }
 }
@@ -280,6 +284,7 @@ impl ApiState {
             lab: None,
             desired: None,
             planning: None,
+            credentials: None,
         }
     }
 }
