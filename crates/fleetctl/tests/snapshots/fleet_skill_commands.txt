@@ -20,6 +20,8 @@ fleetctl --output json projects ready <project-id> <machine-id> --root <path> --
   -> POST /api/v1/projects/project-id-example/ready body {"auth":{"type":"agent"},"dryRun":false,"endpointId":"endpoint-id-example","machineId":"machine-id-example","root":"/home/dev/src","timeoutSeconds":1800}
 fleetctl --output json lab templates
   -> GET /api/v1/lab/templates
+fleetctl --output json proxmox accounts
+  -> GET /api/v1/proxmox/accounts
 fleetctl --output json lab create <template-version-id> --project <project-id> --purpose "reproduce flaky test" --wait
   -> POST /api/v1/lab/leases body {"projectId":"project-id-example","purpose":"reproduce flaky test","templateVersionId":"template-version-id-example"}
 fleetctl --output json lab exec <lease-id> --wait -- cargo test

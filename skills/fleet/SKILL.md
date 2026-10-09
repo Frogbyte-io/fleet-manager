@@ -72,6 +72,7 @@ tell the user instead of retrying.
 
 ```bash
 fleetctl --output json lab templates
+fleetctl --output json proxmox accounts
 fleetctl --output json lab create <template-version-id> --project <project-id> --purpose "reproduce flaky test" --wait
 fleetctl --output json lab exec <lease-id> --wait -- cargo test
 fleetctl --output json lab status <lease-id>
@@ -85,6 +86,10 @@ fleetctl --output json lab destroy <lease-id> --wait
 2. `lab create` leases and provisions the environment (`--wait` waits for it). `--project`
    attaches the lease to a project. Without `--account` it uses the only
    trusted Proxmox account; with none or several, pass `--account <account-id>`.
+   `proxmox accounts` lists the accounts (`id`, `name`, `host`,
+   `fingerprintState`); use the `id` of a trusted one. Nothing maps a
+   template to its account: a wrong pick fails with `template_missing`, so ask
+   the user or try the next account with a new `lab create`.
    Without `--wait` it returns the lease as it is right after provisioning was
    queued, and you follow it with `lab status` until its `state` is `ready`. With
    `--wait` the exit code is non-zero unless the lease is `ready`. Keep the
@@ -94,6 +99,11 @@ fleetctl --output json lab destroy <lease-id> --wait
    code is the guest command's (1 if it did not run, or if the wait timed out
    before the operation finished: the error names the operation). The default
    `--timeout` is 60 seconds. Its output is stored as an exec-log artifact.
+   The guest command starts in `/root`. When the lease was created with
+   `--project` from a template that bootstraps a project (readiness probe
+   `project_ready`), the checkout is at `/tmp/fleet-projects/<project-id>`:
+   run `lab exec <lease-id> --wait -- sh -c 'cd /tmp/fleet-projects/<project-id> && cargo test'`
+   rather than searching the filesystem.
 4. Optionally `lab collect` copies absolute guest paths into artifacts, which
    outlive the lease (with `--wait` it exits non-zero unless it succeeded), and
    `lab artifacts` lists them (filter with `--lease` or `--project`).
@@ -101,12 +111,24 @@ fleetctl --output json lab destroy <lease-id> --wait
    refuses more.
 6. `lab destroy` removes the environment.
 
+Polling `lab status` (or `lab leases`) stops at a terminal `state`: `ready`
+means go on; `failed`, `released`, and `cleanup_failed` never change again, so
+stop polling and act on them. `requested`, `queued`, `reserving`,
+`provisioning`, `booting`, `bootstrapping`, and `releasing` are worth waiting
+for.
+
 Rules:
 
 - Always run `lab destroy` as the last step, even when the task failed or you
   are giving up (a finally-style step). Never leave a lease behind.
 - Never use `--keep`: it hands the guest out of Lab ownership, and nothing will
   clean it up.
+- The exception is a terminal lease: `lab destroy` on `failed`, `released`, or
+  `cleanup_failed` returns 400 (`the lease <id> is already <state>`, exit 1).
+  `failed` means provisioning failed before the guest was ready; it needs no
+  destroy and cannot be re-provisioned (`lab provision-lease` returns 409).
+  Read the explanation, fix the cause (for `placement_ambiguous`, pass
+  `--account`), and start over with a new `lab create`.
 - A lease in `cleanup_failed` still owns resources. Report it to the user; do
   not retry `lab destroy` in a loop. `lab cleanup-retry` is for an operator
   after the cause is fixed.
@@ -114,7 +136,8 @@ Rules:
 
 If `lab create` fails, the operation carries an explanation (for example
 `template_missing`, no capacity on the node, or `pool_exhausted`). Report it to
-the user, then `lab destroy` any lease it left. With no trusted account, or
+the user. `lab destroy` a lease it left `ready` or in progress; a `failed` one
+needs nothing. With no trusted account, or
 several and no `--account`, `lab create` stops before it creates a lease.
 
 Lab pools (`lab pool ...`) are set up by an operator. A template version with a
