@@ -1009,23 +1009,33 @@ impl NodeCommandExecutor {
         {
             let error_json = serde_json::json!({
                 "reason": "inventory_refused",
-                "detail": String::from_utf8_lossy(&result.payload),
+                "detail": fleet_core::scrub_failure_detail(&String::from_utf8_lossy(&result.payload)),
             })
             .to_string();
             return complete(operations, &operation.id, "failed", None, Some(&error_json)).await;
         }
-        let facts =
+        let ingested =
             ingest_inventory_report(self.machines.as_ref(), &payload.machine_id, &result.payload)
                 .await?;
-        let report: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&result.payload))
-                .map_err(|error| format!("the inventory report is not JSON: {error}"))?;
+        let report = &ingested.report;
+        let facts = ingested.facts;
 
+        let scalar = |key: &str| match &report[key] {
+            value @ (serde_json::Value::String(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Bool(_)) => value.clone(),
+            _ => serde_json::Value::Null,
+        };
+        // The echoed probe errors are the redacted ones, and at most a few.
+        let probe_errors: Vec<&serde_json::Value> = report["probeErrors"]
+            .as_array()
+            .map(|errors| errors.iter().take(MAX_ECHOED_PROBE_ERRORS).collect())
+            .unwrap_or_default();
         let result_json = serde_json::json!({
-            "mode": report["mode"],
-            "revision": report["revision"],
+            "mode": scalar("mode"),
+            "revision": scalar("revision"),
             "facts": facts,
-            "probeErrors": report["probeErrors"],
+            "probeErrors": probe_errors,
         })
         .to_string();
         complete(
@@ -1039,31 +1049,63 @@ impl NodeCommandExecutor {
     }
 }
 
-/// Ingests one node inventory report: validates the envelope, records the
-/// capability facts and the snapshot with fleetd provenance. Shared by the
-/// `node.inventory` operation executor and the install workflow's
-/// verification, so both ingest identically.
+/// The most a node's inventory report may weigh as received, as stored
+/// (after redaction), and in facts. Matches the use case's snapshot bound.
+const MAX_REPORT_BYTES: usize = 256 * 1024;
+const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
+const MAX_REPORT_FACTS: usize = 256;
+/// How many of a report's probe errors the operation result echoes.
+const MAX_ECHOED_PROBE_ERRORS: usize = 16;
+
+/// What one ingested report stores and may echo: its redacted form.
+pub(crate) struct IngestedReport {
+    /// How many facts were recorded.
+    pub(crate) facts: usize,
+    /// The report with every string scrubbed and bounded.
+    pub(crate) report: serde_json::Value,
+}
+
+/// Ingests one node inventory report: bounds its size, validates the
+/// envelope, scrubs and bounds every node-supplied string (facts, source,
+/// probe errors), then records the capability facts and the snapshot with
+/// fleetd provenance. Shared by the `node.inventory` operation executor and
+/// the install workflow's verification, so both ingest identically.
 pub(crate) async fn ingest_inventory_report(
     machines: &dyn fleet_application::machine::MachinePort,
     machine_id: &str,
     report_payload: &[u8],
-) -> Result<usize, String> {
-    let report: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(report_payload))
-        .map_err(|error| format!("the inventory report is not JSON: {error}"))?;
-    if report["schemaVersion"].as_u64() != Some(1) {
+) -> Result<IngestedReport, String> {
+    if report_payload.len() > MAX_REPORT_BYTES {
         return Err(format!(
-            "the inventory report carries schema version {:?}, not 1",
-            report["schemaVersion"]
+            "the inventory report exceeds {} KiB",
+            MAX_REPORT_BYTES / 1024
         ));
     }
+    let mut report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(report_payload))
+            .map_err(|error| format!("the inventory report is not JSON: {error}"))?;
+    if report["schemaVersion"].as_u64() != Some(1) {
+        return Err("the inventory report does not carry schema version 1".to_owned());
+    }
+    // Node text is untrusted data: scrub before anything is parsed out of
+    // it or stored, so a credential-shaped fact value never reaches storage.
+    fleet_core::redact_json_strings(&mut report);
     let facts: Vec<fleet_core::CapabilityFact> = serde_json::from_value(report["facts"].clone())
-        .map_err(|error| format!("the inventory report's facts are malformed: {error}"))?;
-    if facts.len() > 256 {
+        .map_err(|_| "the inventory report's facts are malformed".to_owned())?;
+    if facts.len() > MAX_REPORT_FACTS {
         return Err("the inventory report carries too many facts".to_owned());
     }
     for fact in &facts {
         fact.validate()
             .map_err(|detail| format!("the inventory report has a malformed fact: {detail}"))?;
+    }
+    let snapshot = serde_json::to_string(&report)
+        .map_err(|error| format!("the report does not serialize: {error}"))?;
+    if snapshot.len() > MAX_SNAPSHOT_BYTES {
+        return Err(format!(
+            "the inventory report exceeds {} KiB once redacted",
+            MAX_SNAPSHOT_BYTES / 1024
+        ));
     }
 
     // Provenance: what observed it, when, at which schema version.
@@ -1072,8 +1114,6 @@ pub(crate) async fn ingest_inventory_report(
         .record_capabilities(machine_id, &facts)
         .await
         .map_err(|failure| format!("the facts could not be recorded: {failure}"))?;
-    let snapshot = serde_json::to_string(&report)
-        .map_err(|error| format!("the report does not serialize: {error}"))?;
     machines
         .record_snapshot(
             machine_id,
@@ -1083,7 +1123,10 @@ pub(crate) async fn ingest_inventory_report(
         )
         .await
         .map_err(|failure| format!("the snapshot could not be recorded: {failure}"))?;
-    Ok(facts.len())
+    Ok(IngestedReport {
+        facts: facts.len(),
+        report,
+    })
 }
 
 fn fleet_result_status_name(status: wire::ResultStatus) -> String {
@@ -1173,4 +1216,147 @@ async fn send_fault(sender: &mut SplitSink<WebSocket, WsMessage>, fault: Protoco
     };
     let _ = send_frame(sender, frame).await;
     let _ = sender.close().await;
+}
+
+#[cfg(test)]
+mod ingest_tests {
+    use super::{MAX_REPORT_BYTES, ingest_inventory_report};
+    use fleet_application::machine::{MachinePort, NewEndpoint, RegisterMachine};
+    use fleet_core::EndpointKind;
+    use fleet_storage_sqlite::{MachineRepository, Store};
+
+    async fn machine() -> (
+        tempfile::TempDir,
+        sqlx::SqlitePool,
+        MachineRepository,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
+        let pool = store.pool().clone();
+        std::mem::forget(store);
+        let repository = MachineRepository::new(pool.clone());
+        let machine = repository
+            .register(&RegisterMachine {
+                name: "ingest-target".to_owned(),
+                description: String::new(),
+                endpoints: vec![NewEndpoint {
+                    kind: EndpointKind::Fleetd,
+                    reference: "node-ingest".to_owned(),
+                }],
+                tags: vec![],
+                groups: vec![],
+            })
+            .await
+            .unwrap();
+        (dir, pool, repository, machine.id)
+    }
+
+    fn report(facts: &[serde_json::Value], extra: serde_json::Value) -> Vec<u8> {
+        let mut report = serde_json::json!({
+            "schemaVersion": 1,
+            "mode": "full",
+            "revision": 1,
+            "facts": facts,
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            report[key] = value.clone();
+        }
+        report.to_string().into_bytes()
+    }
+
+    fn fact(name: &str, value: &str) -> serde_json::Value {
+        serde_json::json!({
+            "namespace": "git",
+            "name": name,
+            "value": value,
+            "status": "known",
+            "observedAt": 1_800_000_000_000_i64,
+            "source": "fleetd/1",
+        })
+    }
+
+    #[tokio::test]
+    async fn credential_shaped_fact_values_and_probe_errors_are_never_stored() {
+        let (_dir, pool, repository, id) = machine().await;
+        let payload = report(
+            &[
+                fact("remote", "https://user:hunter2pw@host.invalid/repo.git"),
+                fact(
+                    "proxy",
+                    "http_proxy=http://user:hunter2pw@proxy.invalid:3128 token=fake-token-value",
+                ),
+                fact("huge", &"x".repeat(10_000)),
+            ],
+            serde_json::json!({
+                "probeErrors": [{ "probe": "git", "detail": "Authorization: Bearer fake-bearer-value" }],
+            }),
+        );
+        let ingested = ingest_inventory_report(&repository, &id, &payload)
+            .await
+            .unwrap();
+        assert_eq!(ingested.facts, 3);
+        assert!(!ingested.report.to_string().contains("fake-bearer"));
+        let stored: Vec<(String,)> = sqlx::query_as(
+            "SELECT value FROM machine_capabilities WHERE machine_id = ?1 AND value IS NOT NULL",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let snapshot: String = sqlx::query_scalar(
+            "SELECT payload_json FROM inventory_snapshots WHERE machine_id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let everything = format!("{stored:?} {snapshot}");
+        for leaked in ["hunter2", "fake-token", "fake-bearer"] {
+            assert!(
+                !everything.contains(leaked),
+                "{leaked} stored: {everything}"
+            );
+        }
+        assert!(stored.iter().all(|(value,)| value.len() <= 3_010));
+        assert!(snapshot.len() <= 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_report_or_too_many_facts_is_rejected_before_storing() {
+        let (_dir, pool, repository, id) = machine().await;
+        let huge = report(
+            &[],
+            serde_json::json!({ "pad": "y ".repeat(MAX_REPORT_BYTES) }),
+        );
+        let error = ingest_inventory_report(&repository, &id, &huge)
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.contains("exceeds"), "{error}");
+
+        let many: Vec<_> = (0..300).map(|n| fact(&format!("f{n}"), "v")).collect();
+        let error =
+            ingest_inventory_report(&repository, &id, &report(&many, serde_json::json!({})))
+                .await
+                .map(|_| ())
+                .unwrap_err();
+        assert!(error.contains("too many"), "{error}");
+
+        // Redacted size still over the snapshot bound: many 3000-byte values.
+        let bulky: Vec<_> = (0..40)
+            .map(|n| fact(&format!("b{n}"), &"z".repeat(3_000)))
+            .collect();
+        let error =
+            ingest_inventory_report(&repository, &id, &report(&bulky, serde_json::json!({})))
+                .await
+                .map(|_| ())
+                .unwrap_err();
+        assert!(error.contains("once redacted"), "{error}");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inventory_snapshots")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "nothing is stored for a rejected report");
+    }
 }

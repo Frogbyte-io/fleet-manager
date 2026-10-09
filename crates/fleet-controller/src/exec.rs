@@ -68,6 +68,11 @@ enum SshExecAuth {
 /// operations, which survive controller restarts.
 pub const MAX_SCRIPT_TIMEOUT: u64 = 900;
 
+/// The most facts, and the most snapshot bytes, one agentless collection may
+/// store (the same limits as a node inventory report).
+const MAX_COLLECTED_FACTS: usize = 256;
+const MAX_COLLECTED_SNAPSHOT_BYTES: usize = 64 * 1024;
+
 /// The kind-dispatching executor.
 #[derive(Debug)]
 pub struct ScriptExecutor {
@@ -208,6 +213,15 @@ impl ScriptExecutor {
 
         match (collected, detail) {
             (Some(facts), _) => {
+                // The probe output is node text: cap the count and store
+                // the redacted facts and snapshot.
+                if facts.len() > MAX_COLLECTED_FACTS {
+                    return Err("the collection carries too many facts".to_owned());
+                }
+                let facts: Vec<fleet_core::CapabilityFact> = facts
+                    .iter()
+                    .map(fleet_core::CapabilityFact::redacted)
+                    .collect();
                 let count = facts.len();
                 self.machines
                     .record_capabilities(&payload.machine_id, &facts)
@@ -215,6 +229,9 @@ impl ScriptExecutor {
                     .map_err(|failure| failure.to_string())?;
                 let snapshot = serde_json::to_string(&facts)
                     .map_err(|error| format!("the fact set does not serialize: {error}"))?;
+                if snapshot.len() > MAX_COLLECTED_SNAPSHOT_BYTES {
+                    return Err("the collected fact set is too large to store".to_owned());
+                }
                 self.machines
                     .record_snapshot(
                         &payload.machine_id,

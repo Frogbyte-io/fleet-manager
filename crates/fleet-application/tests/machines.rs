@@ -108,6 +108,9 @@ fn machine_record(id: &str, endpoints: Vec<NewEndpoint>) -> Machine {
 struct FakePort {
     machines: Mutex<Vec<Machine>>,
     last_filter: Mutex<Option<MachineFilter>>,
+    /// What `record_snapshot` and `record_capabilities` were asked to store.
+    stored_snapshots: Mutex<Vec<String>>,
+    stored_facts: Mutex<Vec<CapabilityFact>>,
 }
 
 impl FakePort {
@@ -202,18 +205,23 @@ impl MachinePort for FakePort {
         &self,
         _id: &str,
         _source: &str,
-        _payload_json: &str,
+        payload_json: &str,
         _collected_at: i64,
     ) -> Result<(), PortFailure> {
-        unimplemented!("not exercised by these tests")
+        self.stored_snapshots
+            .lock()
+            .unwrap()
+            .push(payload_json.to_owned());
+        Ok(())
     }
 
     async fn record_capabilities(
         &self,
         _id: &str,
-        _facts: &[CapabilityFact],
+        facts: &[CapabilityFact],
     ) -> Result<(), PortFailure> {
-        unimplemented!("not exercised by these tests")
+        self.stored_facts.lock().unwrap().extend_from_slice(facts);
+        Ok(())
     }
 
     async fn delete(&self, _id: &str) -> Result<(), PortFailure> {
@@ -463,4 +471,53 @@ async fn the_use_case_sends_the_filter_to_the_port() {
         .await
         .expect("the list must read");
     assert_eq!(port.last_filter.lock().unwrap().as_ref(), Some(&filter));
+}
+
+#[tokio::test]
+async fn recorded_facts_and_snapshots_are_scrubbed_and_bounded_before_the_port() {
+    let (port, service) = machines(FakePort::default());
+    let mut leaky = fact("git", "remote", CapabilityStatus::Known, NOW);
+    leaky.value = Some(format!(
+        "https://user:hunter2pw@host.invalid/r token=fake-token-value {}",
+        "x".repeat(10_000)
+    ));
+    service
+        .record_capabilities(&PermitAll, &principal(), "m-1", &[leaky])
+        .await
+        .unwrap();
+    let snapshot = serde_json::json!({ "remote": "https://user:hunter2pw@host.invalid/r" });
+    service
+        .record_snapshot(
+            &PermitAll,
+            &principal(),
+            "m-1",
+            "agentless/1",
+            &snapshot.to_string(),
+            NOW,
+        )
+        .await
+        .unwrap();
+    let stored = format!(
+        "{:?} {:?}",
+        port.stored_facts.lock().unwrap(),
+        port.stored_snapshots.lock().unwrap()
+    );
+    assert!(
+        !stored.contains("hunter2") && !stored.contains("fake-token"),
+        "{stored}"
+    );
+    assert!(
+        port.stored_facts.lock().unwrap()[0]
+            .value
+            .as_ref()
+            .unwrap()
+            .len()
+            <= 3_010,
+        "the value is bounded"
+    );
+    let error = service
+        .record_snapshot(&PermitAll, &principal(), "m-1", "s", "not json", NOW)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, MachineUseCaseError::Invalid { .. }));
 }

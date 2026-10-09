@@ -54,7 +54,7 @@ pub use operation::{
 };
 pub use project::{CheckoutFact, FetchScheme, NormalizedRemote, Project, ProjectView, RemoteFetch};
 pub use redact::{
-    RESULT_STRING_BOUND, flatten_control_characters, redact_credentials,
+    RESULT_STRING_BOUND, flatten_control_characters, redact_credentials, redact_json_strings,
     redact_schemeless_credentials, redact_secret_pairs, redact_url_credentials,
     scrub_and_bound_with, scrub_failure_detail, scrub_window, trim_to_bound,
 };
