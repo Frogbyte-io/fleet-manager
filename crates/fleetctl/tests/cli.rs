@@ -4169,6 +4169,7 @@ fn fleetctl_lab_put_streams_the_file_with_its_digest() {
         .unwrap_err()
         .contains("cannot read")
     );
+}
 
 #[test]
 fn lab_template_create_takes_an_optional_audio_device() {
