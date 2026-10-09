@@ -379,6 +379,12 @@ mod tests {
         bad.cores = 2;
         bad.memory_mib = 262_145;
         assert!(bad.validate().is_err());
+        // PVE's minimum is 16 MiB.
+        bad.memory_mib = 15;
+        assert!(bad.validate().is_err());
+        let mut edge = content();
+        edge.memory_mib = 16;
+        assert!(edge.validate().is_ok());
         bad.memory_mib = 2048;
         bad.disk_gib = 4097;
         assert!(bad.validate().is_err());

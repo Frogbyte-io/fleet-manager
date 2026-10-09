@@ -2066,6 +2066,8 @@ pub struct ProvisionExecutor {
     /// Pooled template versions take a pool member instead of a clone
     /// (FM-717).
     pools: Option<Arc<dyn fleet_application::lab_pool::LabPoolPort>>,
+    /// The bound on one disk resize task (#372).
+    hardware_task_timeout: Duration,
 }
 
 /// The placement and capacity reservation parts (FM-715).
@@ -2149,7 +2151,17 @@ impl ProvisionExecutor {
             audit: None,
             placement: None,
             pools: None,
+            hardware_task_timeout: HARDWARE_TASK_TIMEOUT,
         }
+    }
+
+    /// Bounds one disk resize task (#372) by `timeout` instead of the
+    /// default ten minutes. For tests, which cannot wait that long.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_hardware_task_timeout(mut self, timeout: Duration) -> Self {
+        self.hardware_task_timeout = timeout;
+        self
     }
 
     /// Enables pooled leases (FM-717): a lease whose template version has a
@@ -2798,10 +2810,14 @@ impl ProvisionExecutor {
     }
 
     /// Waits for a disk resize task to end, bounded, honoring cancellation.
-    /// PVE checks permissions before it starts the task, but the digest, the
-    /// config lock, a shrink, and a missing disk are all the task's exit
-    /// status. A stale digest is answered `Ok(false)` (read and try again);
-    /// any other failed task is the refusal's cause.
+    /// PVE checks `VM.Config.Disk` before it starts the task, but the
+    /// `Datastore.AllocateSpace` check runs inside the forked worker, and
+    /// the digest, the config lock, a shrink, and a missing disk are all the
+    /// task's exit status. A stale digest is answered `Ok(false)` (read and
+    /// try again); any other failed task is the refusal's cause. A transport
+    /// or server error reading the task is retried until the bound (the
+    /// resize keeps running on the node); only a refused token fails at
+    /// once.
     async fn wait_resize_task(
         &self,
         operations: &Operations,
@@ -2809,6 +2825,7 @@ impl ProvisionExecutor {
         upid: &fleet_provider_proxmox::Upid,
     ) -> Result<Result<bool, Refusal>, String> {
         let started = std::time::Instant::now();
+        let mut unreadable: Option<String>;
         loop {
             if operations
                 .cancel_requested(target.operation_id)
@@ -2838,8 +2855,11 @@ impl ProvisionExecutor {
                     )));
                 }
                 // Still running, or the node does not know it yet.
-                Ok(_) => {}
-                Err(error) => {
+                Ok(_) => unreadable = None,
+                Err(
+                    error @ (fleet_provider_proxmox::PveApiError::Auth
+                    | fleet_provider_proxmox::PveApiError::Forbidden { .. }),
+                ) => {
                     return Ok(Err(Refusal::new(
                         "hardware_failed",
                         format!(
@@ -2848,15 +2868,19 @@ impl ProvisionExecutor {
                         ),
                     )));
                 }
+                Err(error) => unreadable = Some(error.to_string()),
             }
-            if started.elapsed() >= HARDWARE_TASK_TIMEOUT {
+            if started.elapsed() >= self.hardware_task_timeout {
                 return Ok(Err(Refusal::new(
                     "hardware_failed",
                     format!(
-                        "the disk resize of {}/qemu/{} did not finish within {} seconds",
+                        "the disk resize of {}/qemu/{} did not finish within {} seconds{}; the guest is retained for cleanup",
                         target.node,
                         target.vmid,
-                        HARDWARE_TASK_TIMEOUT.as_secs()
+                        self.hardware_task_timeout.as_secs(),
+                        unreadable.map_or_else(String::new, |error| format!(
+                            " (the task could not be read: {error})"
+                        ))
                     ),
                 )));
             }
@@ -2959,7 +2983,15 @@ impl ProvisionExecutor {
                     ),
                 );
             }
-            let cores = (hardware.cores != content.cores).then_some(content.cores);
+            // The capacity reservation counts `content.cores` vCPUs, so what
+            // the guest boots with must equal it: `vcpus` when set, else
+            // `sockets * cores`. Fleet writes `cores` only on a single-socket
+            // guest without `vcpus`, where it is that count.
+            let multi = hardware.sockets > 1 || hardware.vcpus.is_some();
+            let effective = hardware
+                .vcpus
+                .unwrap_or_else(|| hardware.sockets.saturating_mul(hardware.cores));
+            let cores = (!multi && hardware.cores != content.cores).then_some(content.cores);
             let memory = (hardware.memory_mib != content.memory_mib).then_some(content.memory_mib);
             if memory.is_some() && hardware.memory_has_options {
                 return refuse(
@@ -2970,12 +3002,27 @@ impl ProvisionExecutor {
                     ),
                 );
             }
-            if cores.is_some() && (hardware.sockets > 1 || hardware.has_vcpus) {
+            if multi && effective != content.cores {
                 return refuse(
                     "hardware_unsupported",
                     format!(
-                        "the clone {where_} has {} sockets or a vcpus setting, so its cores per socket do not set its vCPU count; Fleet sets cores only on a single-socket guest",
-                        hardware.sockets
+                        "the clone {where_} boots with {effective} vCPUs ({} sockets, {} cores, vcpus {}), not the template's {}; Fleet sets cores only on a single-socket guest without a vcpus setting, so give the image a matching CPU layout",
+                        hardware.sockets,
+                        hardware.cores,
+                        hardware
+                            .vcpus
+                            .map_or_else(|| "unset".to_owned(), |vcpus| vcpus.to_string()),
+                        content.cores
+                    ),
+                );
+            }
+            if memory.is_some_and(|memory| hardware.balloon_mib.is_some_and(|b| b > memory)) {
+                return refuse(
+                    "hardware_unsupported",
+                    format!(
+                        "the clone {where_} has a balloon target of {} MiB, above the template's {} MiB memory, which PVE refuses; give the image a balloon target within the template's memory",
+                        hardware.balloon_mib.unwrap_or_default(),
+                        content.memory_mib
                     ),
                 );
             }
@@ -3940,7 +3987,8 @@ impl ProvisionExecutor {
                     },
                     &version.content,
                 )
-                .await?
+                .await
+                .unwrap_or_else(|detail| Err(Refusal::new("hardware_failed", detail)))
         {
             return self
                 .fail_at(operations, &operation.id, &record.id, "hardware", &refusal)

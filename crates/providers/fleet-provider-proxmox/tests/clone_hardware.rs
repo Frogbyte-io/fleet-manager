@@ -101,7 +101,8 @@ async fn a_clone_config_reads_as_its_cores_memory_and_boot_disk() {
             template: false,
             cores: 2,
             sockets: 1,
-            has_vcpus: false,
+            vcpus: None,
+            balloon_mib: None,
             memory_mib: 2048,
             memory_has_options: false,
             boot_disk: Some(boot_disk("scsi0", Some(20 * 1024))),
@@ -174,9 +175,9 @@ async fn the_boot_disk_follows_the_boot_order_then_bootdisk_then_the_only_disk()
     assert_eq!(read.unwrap().boot_disk, None);
     let (read, _) = hardware(json!({"data": {"scsi0": "local-lvm:vm-9000-disk-0"}})).await;
     assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", None)));
-    // Sizes round up to whole MiB.
+    // Sizes round down to whole MiB.
     let (read, _) = hardware(json!({"data": {"scsi0": "x:y,size=1500K"}})).await;
-    assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", Some(2))));
+    assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", Some(1))));
 }
 
 #[tokio::test]
@@ -189,15 +190,18 @@ async fn sockets_vcpus_template_and_name_are_read() {
     assert_eq!(read.name.as_deref(), Some("fm-lab-record-1"));
     assert!(read.template);
     assert_eq!((read.sockets, read.cores), (2, 2));
-    assert!(read.has_vcpus);
+    assert_eq!(read.vcpus, Some(3));
     let (plain, _) = hardware(json!({"data": {}})).await;
     let plain = plain.unwrap();
     assert_eq!(plain.sockets, 1);
-    assert!(!plain.has_vcpus && !plain.template);
+    assert_eq!((plain.vcpus, plain.balloon_mib), (None, None));
+    assert!(!plain.template);
     for body in [
         json!({"data": {"sockets": 0}}),
         json!({"data": {"sockets": "many"}}),
         json!({"data": {"template": 2}}),
+        json!({"data": {"vcpus": "x"}}),
+        json!({"data": {"balloon": "x"}}),
     ] {
         let (read, _) = hardware(body.clone()).await;
         assert!(
@@ -209,7 +213,7 @@ async fn sockets_vcpus_template_and_name_are_read() {
 
 #[tokio::test]
 async fn a_size_without_a_unit_is_bytes_and_an_empty_drive_is_exactly_none() {
-    // Bytes round up to whole MiB.
+    // Bytes round down to whole MiB: a disk a byte short never counts.
     let (read, _) =
         hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=21474836480"}})).await;
     assert_eq!(
@@ -217,7 +221,15 @@ async fn a_size_without_a_unit_is_bytes_and_an_empty_drive_is_exactly_none() {
         Some(boot_disk("scsi0", Some(20 * 1024)))
     );
     let (read, _) = hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=1"}})).await;
-    assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", Some(1))));
+    assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", Some(0))));
+    let (read, _) =
+        hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=21474836479"}})).await;
+    assert_eq!(
+        read.unwrap().boot_disk,
+        Some(boot_disk("scsi0", Some(20 * 1024 - 1)))
+    );
+    let (read, _) = hardware(json!({"data": {"balloon": "1024"}})).await;
+    assert_eq!(read.unwrap().balloon_mib, Some(1024));
     // An unknown unit is no size, never a guess.
     let (read, _) = hardware(json!({"data": {"scsi0": "local:vm-9000-disk-0,size=5X"}})).await;
     assert_eq!(read.unwrap().boot_disk, Some(boot_disk("scsi0", None)));

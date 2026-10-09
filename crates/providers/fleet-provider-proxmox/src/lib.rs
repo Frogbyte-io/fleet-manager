@@ -1249,8 +1249,12 @@ pub struct PveQemuHardware {
     /// The CPU sockets. PVE's default of 1 when the config has no `sockets`
     /// key. The guest's vCPU count is `sockets * cores`.
     pub sockets: u32,
-    /// Whether the config sets `vcpus` (hotplugged vCPUs below the maximum).
-    pub has_vcpus: bool,
+    /// The config's `vcpus` (the vCPUs the guest starts with, below the
+    /// maximum of `sockets * cores`), when it sets one.
+    pub vcpus: Option<u32>,
+    /// The `balloon` target in MiB, when the config sets one (`0` disables
+    /// ballooning). PVE refuses a memory size below it.
+    pub balloon_mib: Option<u32>,
     /// The memory in MiB. PVE's default of 512 when the config has no
     /// `memory` key.
     pub memory_mib: u32,
@@ -1269,7 +1273,8 @@ pub struct PveBootDisk {
     /// The config key (`scsi0`, `virtio0`, …).
     pub key: String,
     /// The disk's size in MiB, when the config states one. A size in bytes
-    /// or KiB is rounded up to a whole MiB; larger units are exact.
+    /// or KiB is rounded down to a whole MiB, so a disk a byte short of a
+    /// size never counts as that size; larger units are exact.
     pub size_mib: Option<u64>,
 }
 
@@ -2502,10 +2507,12 @@ impl ProxmoxClient {
     /// (`PUT /nodes/{node}/qemu/{vmid}/resize`; needs `VM.Config.Disk` on
     /// `/vms/{vmid}` and `Datastore.AllocateSpace` on the disk's storage).
     /// Conditional on `digest`. PVE runs the resize as a background task
-    /// and answers its UPID: the permission check happens before the task
-    /// starts, but the digest check, the config lock, the shrink refusal and
-    /// a missing disk are the task's exit status, so the caller polls the
-    /// task and then reads the config again. `None` when PVE answers no task.
+    /// and answers its UPID. Only the `VM.Config.Disk` check happens before
+    /// the task starts (an HTTP 403); the `Datastore.AllocateSpace` check
+    /// runs inside the forked worker, so a missing storage privilege is the
+    /// task's exit status, like the digest check, the config lock, the
+    /// shrink refusal and a missing disk. The caller polls the task and then
+    /// reads the config again. `None` when PVE answers no task.
     ///
     /// # Errors
     ///
@@ -2746,7 +2753,7 @@ fn is_disk_key(key: &str) -> bool {
     })
 }
 
-/// The size a disk entry states (`…,size=20G`), in MiB rounded up.
+/// The size a disk entry states (`…,size=20G`), in MiB rounded down.
 fn disk_size_mib(entry: &str) -> Option<u64> {
     let size = entry
         .split(',')
@@ -2758,8 +2765,8 @@ fn disk_size_mib(entry: &str) -> Option<u64> {
     let (digits, unit) = size.split_at(split);
     let value: u64 = digits.parse().ok()?;
     match unit {
-        "" => Some(value.div_ceil(1024 * 1024)),
-        "K" => Some(value.div_ceil(1024)),
+        "" => Some(value / (1024 * 1024)),
+        "K" => Some(value / 1024),
         "M" => Some(value),
         "G" => value.checked_mul(1024),
         "T" => value.checked_mul(1024 * 1024),
@@ -2768,6 +2775,7 @@ fn disk_size_mib(entry: &str) -> Option<u64> {
 }
 
 /// Reads the hardware facts out of one guest config.
+#[allow(clippy::too_many_lines)]
 fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String> {
     let object = config.as_object().ok_or_else(|| {
         format!(
@@ -2789,6 +2797,15 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
             .filter(|sockets| *sockets >= 1)
             .ok_or("the guest config's sockets value is unreadable")?,
     };
+    let optional_mib = |key: &str| match config.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(_) => loose_number(config, key)
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("the guest config's {key} value is unreadable")),
+    };
+    let vcpus = optional_mib("vcpus")?;
+    let balloon_mib = optional_mib("balloon")?;
     let flag = |key: &str| match config.get(key) {
         None | Some(serde_json::Value::Null) => Ok(false),
         Some(_) => match loose_number(config, key) {
@@ -2858,7 +2875,8 @@ fn parse_hardware(config: &serde_json::Value) -> Result<PveQemuHardware, String>
         template: flag("template")?,
         cores,
         sockets,
-        has_vcpus: config.get("vcpus").is_some_and(|vcpus| !vcpus.is_null()),
+        vcpus,
+        balloon_mib,
         memory_mib,
         memory_has_options,
         boot_disk,

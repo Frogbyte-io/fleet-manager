@@ -717,7 +717,7 @@ pub const PROXMOX_PRIVILEGE_TABLE: &[PrivilegeRequirement] = &[
         privileges: &["Datastore.AllocateSpace"],
         matching: PrivilegeMatch::All,
         required: true,
-        note: "The resize also needs space on the disk's storage, checked in the resize task's API call (issue #372). Fleet's token already holds it there for the clone.",
+        note: "The resize also needs space on the disk's storage. PVE checks it inside the forked resize worker, not before the task starts, so a missing privilege shows up as a failed task's exit status (\"Permission check failed (/storage/..., Datastore.AllocateSpace)\"), not an HTTP 403 (issue #372). Fleet's token already holds it there for the clone.",
     },
     PrivilegeRequirement {
         id: "lab.provision.start",

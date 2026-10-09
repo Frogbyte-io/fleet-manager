@@ -132,6 +132,21 @@ struct CloneConfig {
     sockets: Option<u32>,
     /// A resize is accepted but changes nothing.
     resize_ignored: bool,
+    /// PVE answers the resize with `{"data": null}` (no task) and applies it.
+    resize_no_task: bool,
+    /// Reads of the resize task that fail with a transient 503 first.
+    resize_poll_errors: usize,
+    /// The resize task never ends (`running`).
+    resize_running: bool,
+    /// The config update is refused as stale this many times (the config
+    /// moved under the step).
+    config_stale: usize,
+    /// The config's `vcpus` and `balloon`.
+    vcpus: Option<u32>,
+    balloon: Option<u32>,
+    /// A pool whose `lab.provision` operations are cancelled when the
+    /// resize task is first read.
+    cancel_on_resize_poll: Option<sqlx::SqlitePool>,
     /// The digest every write must carry; each write moves it on.
     digest_moves: u32,
     /// Writes PVE accepted: `(kind, body)`.
@@ -341,6 +356,15 @@ impl Pve {
                     .to_owned(),
             );
         }
+        if config.config_stale > 0 {
+            config.config_stale -= 1;
+            config.digest_moves += 1;
+            return (
+                500,
+                r#"{"data":null,"message":"checksum mismatch (file change by other user?)\n"}"#
+                    .to_owned(),
+            );
+        }
         if let Some(status) = config.set_status {
             let message = match status {
                 403 => format!(
@@ -408,6 +432,15 @@ impl Pve {
             config.writes.push(("resize".to_owned(), body.clone()));
             "OK".to_owned()
         };
+        if config.resize_no_task {
+            // Applied (or refused) synchronously: no task to poll.
+            return (200, r#"{"data":null}"#.to_owned());
+        }
+        let exit = if config.resize_running {
+            "running".to_owned()
+        } else {
+            exit
+        };
         let upid = format!(
             "UPID:pve-b:{:08X}:0C6DF532:6AAFE1EC:resize:{vmid}:fleet@pve!lab:",
             config.resize_tasks.len() + 1
@@ -417,17 +450,28 @@ impl Pve {
     }
 
     /// The status of a resize task, when the request names one.
-    fn resize_task_answer(&self, path: &str) -> Option<String> {
+    fn resize_task_answer(&self, path: &str) -> Option<(u16, String)> {
         let decoded = path
             .replace("%3A", ":")
             .replace("%40", "@")
             .replace("%21", "!");
-        let config = self.clone_config.lock().unwrap();
+        let mut config = self.clone_config.lock().unwrap();
         let (_, exit) = config
             .resize_tasks
             .iter()
-            .find(|(upid, _)| decoded.contains(upid.as_str()))?;
-        Some(serde_json::json!({"data": {"status": "stopped", "exitstatus": exit}}).to_string())
+            .find(|(upid, _)| decoded.contains(upid.as_str()))?
+            .clone();
+        if config.resize_poll_errors > 0 {
+            config.resize_poll_errors -= 1;
+            return Some((503, r#"{"data":null,"message":"unavailable"}"#.to_owned()));
+        }
+        if exit == "running" {
+            return Some((200, r#"{"data":{"status":"running"}}"#.to_owned()));
+        }
+        Some((
+            200,
+            serde_json::json!({"data": {"status": "stopped", "exitstatus": exit}}).to_string(),
+        ))
     }
 
     /// `GET`/`PUT …/qemu/{vmid}/config`: the scripted clone config.
@@ -546,6 +590,12 @@ impl Pve {
         });
         if let Some(sockets) = config.sockets {
             answer["sockets"] = serde_json::json!(sockets);
+        }
+        if let Some(vcpus) = config.vcpus {
+            answer["vcpus"] = serde_json::json!(vcpus);
+        }
+        if let Some(balloon) = config.balloon {
+            answer["balloon"] = serde_json::json!(balloon);
         }
         if !config.no_boot_disk {
             let size = if config.no_disk_size {
@@ -724,9 +774,31 @@ impl Transport {
             });
         }
         let task_status = path.contains("/tasks/") && path.ends_with("/status");
-        let answer = if task_status && let Some(answer) = self.0.resize_task_answer(&path) {
-            answer
-        } else if task_status && let Some(answer) = self.0.task_answer() {
+        if task_status && path.contains("%3Aresize%3A") {
+            // The operator cancels while the resize task is being read.
+            let pool = self
+                .0
+                .clone_config
+                .lock()
+                .unwrap()
+                .cancel_on_resize_poll
+                .take();
+            if let Some(pool) = pool {
+                sqlx::query(
+                    "UPDATE operations SET cancel_requested = 1 WHERE kind = 'lab.provision'",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+        if task_status && let Some((status, answer)) = self.0.resize_task_answer(&path) {
+            return Ok(PveHttpResponse {
+                status,
+                body: answer.into_bytes(),
+            });
+        }
+        let answer = if task_status && let Some(answer) = self.0.task_answer() {
             answer
         } else if path == "/api2/json/version" {
             r#"{"data":{"version":"9.0.3"}}"#.to_owned()
@@ -3376,27 +3448,58 @@ async fn an_unreadable_hardware_config_fails_at_hardware_not_as_a_generic_step()
 }
 
 #[tokio::test]
-async fn a_multi_socket_guest_is_refused_only_when_its_cores_would_change() {
+async fn a_guest_that_would_not_boot_with_the_templates_vcpus_is_refused() {
     let harness = Harness::new().await;
-    let (lease_id, record) = harness.record().await;
-    let pve = Pve::new(Vec::new())
-        .imaged(1, 2048, 20)
-        .configure(|config| config.sockets = Some(2));
-    let (state, error, stored) = harness
-        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
-        .await;
-    assert_eq!(state, "failed");
-    assert_eq!(error.unwrap().0, "hardware_unsupported");
-    assert!(pve.hardware_writes().is_empty());
-    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    // The template asks for 2 vCPUs. Each of these boots with another count
+    // (or one Fleet cannot set), whatever its cores say.
+    for (what, imaged_cores, sockets, vcpus) in [
+        ("2 sockets of 1 core, cores differ", 1, Some(2), None),
+        ("2 sockets of 2 cores, cores match", 2, Some(2), None),
+        ("vcpus above", 4, None, Some(4)),
+        ("vcpus below", 2, None, Some(1)),
+    ] {
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new())
+            .imaged(imaged_cores, 2048, 20)
+            .configure(|config| {
+                config.sockets = sockets;
+                config.vcpus = vcpus;
+            });
+        let (state, error, stored) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        // 2 sockets of 1 core is 2 vCPUs: fine, never refused.
+        let expected_ok = what.starts_with("2 sockets of 1");
+        if expected_ok {
+            assert_eq!(error.unwrap().0, "never_ready", "{what}");
+            assert!(pve.hardware_writes().is_empty(), "{what}");
+            continue;
+        }
+        assert_eq!(state, "failed", "{what}");
+        let (reason, detail) = error.unwrap();
+        assert_eq!(reason, "hardware_unsupported", "{what}");
+        assert!(detail.contains("vCPUs"), "{detail}");
+        assert!(pve.hardware_writes().is_empty(), "{what}");
+        assert!(first(&pve, "/status/start").is_none(), "{what}");
+        assert_eq!(stored.failed_step.as_deref(), Some("hardware"), "{what}");
+    }
 
-    // Matching cores need no change, whatever the sockets.
-    let (lease_id, record) = harness.record().await;
-    let pve = Pve::new(Vec::new()).configure(|config| config.sockets = Some(2));
-    let (_, error, _) = harness
-        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
-        .await;
-    assert_eq!(error.unwrap().0, "never_ready");
+    // A layout that already gives the template's count needs no write, even
+    // with other cores per socket.
+    for (sockets, vcpus, cores) in [(Some(2), None, 1), (None, Some(2), 4)] {
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new())
+            .imaged(cores, 2048, 20)
+            .configure(|config| {
+                config.sockets = sockets;
+                config.vcpus = vcpus;
+            });
+        let (_, error, _) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert!(pve.hardware_writes().is_empty(), "{:?}", pve.paths());
+    }
 }
 
 #[tokio::test]
@@ -3439,4 +3542,161 @@ async fn a_record_that_already_started_its_guest_is_not_changed_again() {
         .await;
     assert!(second.hardware_writes().is_empty(), "{:?}", second.paths());
     assert!(first(&second, "/resize").is_none());
+}
+
+#[tokio::test]
+async fn a_balloon_above_the_new_memory_is_refused_before_any_write() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 4096, 20)
+        .configure(|config| config.balloon = Some(4096));
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_unsupported");
+    assert!(detail.contains("balloon"), "{detail}");
+    assert!(pve.hardware_writes().is_empty());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+
+    // A balloon within the new memory (or off) is fine.
+    for balloon in [1024, 0] {
+        let (lease_id, record) = harness.record().await;
+        let pve = Pve::new(Vec::new())
+            .imaged(2, 4096, 20)
+            .configure(|config| config.balloon = Some(balloon));
+        let (_, error, _) = harness
+            .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+            .await;
+        assert_eq!(error.unwrap().0, "never_ready");
+        assert_eq!(pve.hardware_writes().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_resize_that_answers_no_task_is_taken_as_done() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_no_task = true);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert_eq!(pve.task_polls(), 0, "{:?}", pve.paths());
+    assert!(first(&pve, "/status/start").is_some());
+}
+
+#[tokio::test]
+async fn a_transient_error_reading_the_resize_task_is_retried() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_poll_errors = 1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    assert_eq!(pve.hardware_writes().len(), 1);
+    assert_eq!(pve.clone_config.lock().unwrap().resize_calls, 1);
+}
+
+#[tokio::test]
+async fn a_resize_task_that_never_ends_times_out_keeping_the_guest() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(2, 2048, 8)
+        .configure(|config| config.resize_running = true);
+    let executor = harness
+        .executor(&pve, Some(TEMPLATE_VMID))
+        .with_hardware_task_timeout(std::time::Duration::from_secs(1));
+    let (state, error, stored) = harness
+        .run_executor(&pve, executor, &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("did not finish"), "{detail}");
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert!(first(&pve, "/status/start").is_none());
+}
+
+#[tokio::test]
+async fn a_cancel_while_the_resize_task_runs_keeps_the_guest_for_cleanup() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pool = harness.pool.clone();
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 8).configure(|config| {
+        config.resize_running = true;
+        config.cancel_on_resize_poll = Some(pool);
+    });
+    let (_, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    let (reason, detail) = error.expect("a cancelled provision is reported");
+    assert_eq!(reason, "cancelled", "{detail}");
+    assert!(detail.contains("retained for cleanup"), "{detail}");
+    assert_eq!(stored.vmid, Some(NEXT_VMID));
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+    assert!(first(&pve, "/status/start").is_none());
+}
+
+#[tokio::test]
+async fn a_missing_storage_privilege_is_the_resize_tasks_exit_status() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(2, 2048, 8).configure(|config| {
+        config.resize_exit = Some(
+            "ERROR: Permission check failed (/storage/local-lvm, Datastore.AllocateSpace)"
+                .to_owned(),
+        );
+    });
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("Datastore.AllocateSpace"), "{detail}");
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn a_clone_config_without_a_digest_fails_at_hardware_before_any_write() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new()).imaged(1, 1024, 8).without_digest();
+    let (state, error, stored) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(state, "failed");
+    let (reason, detail) = error.unwrap();
+    assert_eq!(reason, "hardware_failed");
+    assert!(detail.contains("no digest"), "{detail}");
+    assert!(pve.config_updates().is_empty(), "{:?}", pve.paths());
+    assert_eq!(stored.failed_step.as_deref(), Some("hardware"));
+}
+
+#[tokio::test]
+async fn a_stale_digest_on_the_config_write_is_reread_and_retried() {
+    let harness = Harness::new().await;
+    let (lease_id, record) = harness.record().await;
+    let pve = Pve::new(Vec::new())
+        .imaged(1, 1024, 20)
+        .configure(|config| config.config_stale = 1);
+    let (_, error, _) = harness
+        .run(&pve, Some(TEMPLATE_VMID), &lease_id, &record.id)
+        .await;
+    assert_eq!(error.unwrap().0, "never_ready");
+    let writes = pve.hardware_writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    // The retry carries the digest of the config read again.
+    assert_eq!(writes[0].1["digest"], "0123abcd1");
 }
