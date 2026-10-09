@@ -209,8 +209,23 @@ fn bearer_token_is_secret(token: &str) -> bool {
             && token.chars().any(|c| !c.is_ascii_alphabetic()))
 }
 
+/// Where the token after `Bearer` starts: past spaces and tabs and at most
+/// one line break, so a blank line ends the header rather than being crossed.
+fn after_bearer_gap(text: &str, name_end: usize) -> usize {
+    let blanks = |from: usize| {
+        from + (text.len() - from - text[from..].trim_start_matches([' ', '\t']).len())
+    };
+    let mut at = blanks(name_end);
+    if text[at..].starts_with("\r\n") {
+        at = blanks(at + 2);
+    } else if text[at..].starts_with('\n') {
+        at = blanks(at + 1);
+    }
+    at
+}
+
 /// `Bearer <token>`: the token runs to whitespace, a quote or a comma, and
-/// may follow the word after any run of spaces, tabs or line breaks.
+/// may follow the word after spaces, tabs and one line break.
 fn mask_bearer(text: &str) -> String {
     const NAME: &str = "bearer";
     let lower = text.to_ascii_lowercase();
@@ -219,12 +234,7 @@ fn mask_bearer(text: &str) -> String {
     while let Some(offset) = lower[cursor..].find(NAME) {
         let start = cursor + offset;
         let name_end = start + NAME.len();
-        let value_start = name_end
-            + (text.len()
-                - name_end
-                - text[name_end..]
-                    .trim_start_matches(char::is_whitespace)
-                    .len());
+        let value_start = after_bearer_gap(text, name_end);
         let boundary = text[..start]
             .chars()
             .next_back()
@@ -276,6 +286,9 @@ fn mask_secret_flags(text: &str) -> String {
             .is_none_or(|c| !is_word_char(c));
         if !boundary
             || !text[name_end..].starts_with([' ', '\t'])
+            || text[name_start..name_end]
+                .to_ascii_lowercase()
+                .starts_with("no-")
             || !names_a_secret(&text[name_start..name_end])
         {
             continue;
@@ -343,6 +356,22 @@ fn mask_key_values(text: &str) -> String {
     result
 }
 
+/// Plain status words: `Password: incorrect` is a message, not a credential,
+/// even at the start of a line. (A quoted value is always masked.)
+const STATUS_WORDS: [&str; 11] = [
+    "incorrect",
+    "invalid",
+    "expired",
+    "missing",
+    "required",
+    "not",
+    "none",
+    "null",
+    "empty",
+    "denied",
+    "unknown",
+];
+
 /// Whether the value of a bare `key: value` is a secret: quoted, on a line
 /// that starts with the key (an optional list dash aside), or a word of at
 /// least [`BEARER_MIN_TOKEN`] characters with a digit or symbol in it.
@@ -356,11 +385,17 @@ fn bare_value_is_secret(
         .chars()
         .next_back()
         .is_some_and(|c| matches!(c, '"' | '\''));
-    let line_start = text[..key_start].rfind('\n').map_or(0, |index| index + 1);
-    let yaml_shape = text[line_start..key_start]
+    // Walk back over indentation and a list dash only, so a long line of
+    // keys stays linear: the walk ends at the first other character.
+    let yaml_shape = text[..key_start]
         .chars()
-        .all(|c| c.is_whitespace() || c == '-');
+        .rev()
+        .find(|c| *c != ' ' && *c != '\t' && *c != '-')
+        .is_none_or(|c| c == '\n');
     let value = &text[value_start..value_end];
+    if !quoted && yaml_shape && STATUS_WORDS.contains(&value.to_ascii_lowercase().as_str()) {
+        return false;
+    }
     quoted
         || yaml_shape
         || (value.len() >= BEARER_MIN_TOKEN && value.chars().any(|c| !c.is_ascii_alphabetic()))
@@ -751,6 +786,10 @@ mod tests {
             "run --no-password --token-file /x --password --next",
             "usage: tool --password <value>",
             "password:",
+            "Password: incorrect",
+            "token: expired\nsecret: not found",
+            "run --no-password file.txt",
+            "token bearer\n\nSomething happened",
             "Bearer\nof news",
             "no secrets here: a == b",
             "token=",
@@ -767,6 +806,15 @@ mod tests {
     fn secret_pair_scrub_is_linear_on_pathological_input() {
         let text = "=a".repeat(100_000) + &"token=".repeat(50_000);
         let _ = redact_credentials(&text);
+        // One very long line of bare keys must not be quadratic.
+        let started = std::time::Instant::now();
+        let long = "x password: ab ".repeat(70_000);
+        let _ = redact_credentials(&long);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
         for unit in [
             "--password ",
             "Bearer\n",
