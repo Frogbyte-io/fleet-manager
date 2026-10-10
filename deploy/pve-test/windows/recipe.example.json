@@ -1,0 +1,19 @@
+{
+  "builders": [{
+    "type": "proxmox-clone",
+    "proxmox_url": "https://pve.example.test:8006/api2/json",
+    "node": "pve",
+    "clone_vm_id": 7100,
+    "full_clone": true,
+    "vm_id": 7110,
+    "vm_name": "fleet-windows11-image",
+    "template_name": "fleet-windows11-image",
+    "scsi_controller": "virtio-scsi-single",
+    "cores": 4,
+    "memory": 8192,
+    "network_adapters": [{ "model": "virtio", "bridge": "vmbr0" }],
+    "qemu_agent": true,
+    "communicator": "none",
+    "task_timeout": "20m"
+  }]
+}
