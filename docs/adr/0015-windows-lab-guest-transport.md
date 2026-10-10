@@ -105,10 +105,10 @@ Each of these is verified on a real fixture before a Windows template is promota
 
 ## Evidence not yet gathered
 
-These claims rest on Microsoft's documentation and on reading the code, not on a Windows guest in the fixture lab. The recipe and readiness issues must confirm them on a real guest before this ADR moves to Accepted:
+Results from the first fixture run (2026-10-10, [Windows fixture runbook](../operations/windows-lab-fixture.md#evidence), #442) are marked below. The rest still rests on Microsoft's documentation and on reading the code. The recipe and readiness issues must confirm it on a real guest before this ADR moves to Accepted:
 
-- PowerShell 5.1 as `DefaultShell` accepts a stdin-delivered script with the fixed bootstrap, preserves the exit code, and is binary-safe for collect.
-- `sshd` regenerates host keys at first start after generalize when the key files were removed.
-- A Proxmox clone of a generalized Windows image gets a new MAC, SID and computer name.
+- PowerShell 5.1 as `DefaultShell` accepts a stdin-delivered script with the fixed bootstrap, preserves the exit code, and is binary-safe for collect. **Partly gathered:** key login lands in Windows PowerShell 5.1 and runs a command string. The stdin bootstrap, exit-code propagation and binary-safe collect are for the Windows exec work (#441).
+- `sshd` regenerates host keys at first start after generalize when the key files were removed. **Gathered:** on a throwaway template built with the committed scripts, the pre-generalize fingerprint, and the fingerprints of two clones, are three different keys. One pair of clones of the first template also differs, but its pre-generalize fingerprint was not captured.
+- A Proxmox clone of a generalized Windows image gets a new MAC, SID and computer name. **Partly gathered:** new MAC (read from the PVE config), new computer name and a new DHCP address on every clone. The SID was not compared. Clones of a *Fleet-built* image (a `proxmox-clone` build boots the generalized clone) share the computer name and host key ([#452](https://github.com/Frogbyte-io/fleet-manager/issues/452)).
 - Guest-agent exec and WinRM sessions are also non-interactive (expected, as both run under services; not sourced).
 - A command started by `sshd` reports a non-interactive session id, and the #397 mechanism reaches the interactive one.

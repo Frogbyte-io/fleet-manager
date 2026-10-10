@@ -198,7 +198,7 @@ cmd_generalize() {
   local i; for ((i = 0; i < 1200; i += 10)); do
     [ "$(vm_status "$VMID")" = stopped ] && { note "stopped"; return 0; }; sleep 10
   done
-  die "sysprep did not power the guest off: read C:\\Windows\\System32\\Sysprep\\Panther\\setupact.log on the guest"
+  die "sysprep did not power the guest off: read C:\\Windows\\Temp\\fleet\\generalize.log, then C:\\Windows\\System32\\Sysprep\\Panther\\setuperr.log on the guest"
 }
 
 cmd_template() {

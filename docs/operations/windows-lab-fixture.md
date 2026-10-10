@@ -11,8 +11,8 @@ The tooling is `deploy/pve-test/windows/windows-template`, with the answer files
 | virtio-win ISO downloaded and hashed; config ISO built | done |
 | Microsoft ISO downloaded and its SHA-256 matches Microsoft's | done, from a link the operator got through the browser |
 | Unattended install, guest agent, OpenSSH, key login, PowerShell default shell | done (2026-10-10); first try, the GVLK was accepted |
-| Sysprep, template 7100, two clones | done after one fix (BitLocker, below); clones get new names and host keys |
-| Fleet recipe, image version, build, promotion, Lab template | done; the first recipe built an image that did not boot (CPU type), the second works but is **not generalized** (below) |
+| Sysprep, template 7100, two clones | done after one manual fix (BitLocker, below); clones get new names and host keys. The committed scripts were then verified end to end on a throwaway VM, not on 7100 itself |
+| Fleet recipe, image version, build, promotion, Lab template | image built and promoted, Lab templates created; **lease not verified** (stream J, #441). The first recipe built an image that did not boot (CPU type); the second boots but is **not generalized** (below) |
 | Pool member and activation | not created: the operator does it. The point is [documented](#activating-a-pool-member-with-a-retail-key) |
 
 **Microsoft ISO.** The download page issues a time-limited link through the browser, and Microsoft's own download connector rejects scripted requests for it (`Sentinel marked this request as rejected`). This runbook does not work around that and does not use third-party mirrors. A person opens [the download page](https://www.microsoft.com/en-us/software-download/windows11), picks "Windows 11 (multi-edition ISO for x64 devices)" and the language, and copies the 64-bit download link (valid for 24 hours). Then `FLEET_WIN_ISO_URL=<link> windows-template fetch-iso` downloads it on the host. Never paste the link into Git, an issue, or a log.
@@ -90,7 +90,7 @@ Result on 2026-10-10: key login works, the session is Windows PowerShell 5.1 (`$
 **Findings from the first run.**
 
 - *Setup key.* Accepted: the retail multi-edition media took the Windows 11 Pro KMS client key as the setup key and installed Windows 11 Pro without a prompt. Had it rejected the key, the answer file would stop at the key page (`WillShowUI` is `OnError`) and the install would hang: look at the PVE console. Fallback: remove the `<ProductKey>` element from `autounattend.xml` (the `/IMAGE/NAME` metadata already selects Windows 11 Pro), rebuild the config ISO with `prepare`, and if setup still asks, choose "I don't have a product key" on the console. The VM stays unactivated either way.
-- *BitLocker (found and fixed).* With a TPM, Windows 11 turns on automatic device encryption after setup, and `sysprep /generalize` then fails with `BitLocker is on for the OS volume (0x80310039)`. `setup-guest.ps1` now sets `PreventDeviceEncryption`, and `generalize.ps1` decrypts and waits before running sysprep (the first run found this: decrypt with `manage-bde -off C:`, kill the stuck `sysprep.exe`, start the task again).
+- *BitLocker (found and fixed).* With a TPM, Windows 11 turns on automatic device encryption after setup, and `sysprep /generalize` then fails with `BitLocker is on for the OS volume (0x80310039)`. The first run hit this and was repaired by hand (`manage-bde -off C:`, kill the stuck `sysprep.exe`, start the task again), so **template 7100 was built with that manual step**. The committed fix is `PreventDeviceEncryption` in `setup-guest.ps1`, and a check in `generalize.ps1`: `Get-BitLockerVolume` `VolumeStatus` (an enum, so no locale dependence), `Disable-BitLocker` if needed, at most 8 minutes of waiting (the host waits 20), and a logged failure (`C:\Windows\Temp\fleet\generalize.log`) instead of running sysprep anyway. The committed scripts were verified end to end on a throwaway VM (7101, destroyed): install, setup, generalize and two clones with no manual step. That re-run also found and fixed a `setup-guest.ps1` bug (`New-Item -Force` on the existing BitLocker policy key aborted the script before `setup-complete`).
 - *Administrator password.* The install-time password is in the install media only and is removed from the guest (autologon values and cached answer files). The sysprep answer file sets a new random password for the administrator on each clone's specialize pass, so no clone carries the known one. Checked on a clone: `PasswordLastSet` is the clone's first boot, not the install. If the command fails a clone keeps the known password. Use SSH key login, or `qm guest passwd <vmid> fleetadmin` for console use.
 
 If the install stops, open the PVE console. Setup logs are in `C:\Windows\Panther`, the first-logon script's transcript is `C:\ProgramData\fleet\setup-guest.log`.
@@ -116,7 +116,7 @@ deploy/pve-test/windows/windows-template destroy-clone 7120
 deploy/pve-test/windows/windows-template destroy-clone 7121
 ```
 
-Each prints the computer name, the default shell and the host key fingerprint. Pass criteria, which are also the remaining [ADR 0015 evidence items](../adr/0015-windows-lab-guest-transport.md#evidence-not-yet-gathered): both clones reach sshd; both host keys differ from each other and from the pre-generalize fingerprint (`sshd` generated them on first start); both computer names differ from each other and from the base; each has a new MAC. Result for clones of 7100: both reach sshd with key login, computer names `WIN-QCAMIM1R8NL` and `WIN-988DD0GC68D`, host keys `SHA256:snHv4I...` and `SHA256:elMSdu...`, and different DHCP addresses (new MACs). The shared-key case would mean `sshd` regenerated a key before sysprep powered off.
+Each prints the computer name, the default shell and the host key fingerprint. Pass criteria, which are also the remaining [ADR 0015 evidence items](../adr/0015-windows-lab-guest-transport.md#evidence-not-yet-gathered): both clones reach sshd; both host keys differ from each other and from the pre-generalize fingerprint (`sshd` generated them on first start); both computer names differ from each other and from the base; each has a new MAC. Result for clones of 7100: both reach sshd with key login, computer names `WIN-QCAMIM1R8NL` and `WIN-988DD0GC68D`, host keys `SHA256:snHv4I...` and `SHA256:elMSdu...`, and different DHCP addresses (the MACs were not read for this pair). The pre-generalize fingerprint of 7100 was not captured (the output was lost). The re-run on 7101 with the committed scripts captured it: pre-generalize `SHA256:gzNlI0...`; two clones `SHA256:GMAJoS...` and `SHA256:96h7v3...`, computer names `WIN-O915R1GCNU0` and `WIN-OTOK01P3JF7`, MACs read from the PVE config all different from each other and from the template's, and three different DHCP addresses. Not compared: the machine SID. The shared-key case would mean `sshd` regenerated a key before sysprep powered off.
 
 ### 5. Fleet image version
 
@@ -136,7 +136,7 @@ fleetctl --output json lab template-create --name windows11 --image-version <ver
 fleetctl --output json lab publish <template-id>
 ```
 
-Edit `proxmox_url` (and `node`) in a copy of `recipe.example.json` for your host first. The recipe (`cpu_type` and `os` matter, see below) builds a full clone of 7100 (`full_clone: true`: the TPM state and the efidisk are copied) as VMID 7110 with `communicator: none`, like the plain clone-to-template recipe in the Lab runbook. The plugin and Fleet's recipe gate accept it for a Windows guest.
+Edit `proxmox_url` (and `node`) in a copy of `recipe.example.json` for your host first. **`lab template-create` has no SSH user option and defaults to `root`, which does not exist on this image, so a lease on that template cannot log in. Create the template through the API with `sshUser` set to the fixture administrator** (`POST /api/v1/lab/templates`, the same JSON the CLI sends plus `"sshUser": "fleetadmin"`, and `"guestOs": "windows"`), then `lab publish` it. The recipe (`cpu_type` and `os` matter, see below) builds a full clone of 7100 (`full_clone: true`: the TPM state and the efidisk are copied) as VMID 7110 with `communicator: none`, like the plain clone-to-template recipe in the Lab runbook. The plugin and Fleet's recipe gate accept it for a Windows guest.
 
 **Two findings from the first build.**
 
@@ -181,13 +181,14 @@ Run on 2026-10-10 against `dev` at `987c22f` (controller built from the same com
 | Install | about 20 min from `create` to `setup-complete`, no console interaction |
 | Template | VMID 7100, `template: 1`, tag `fleet-pve-test`, 64 GiB disk, `efidisk0 ... pre-enrolled-keys=1`, `tpmstate0 ... version=v2.0` |
 | Clones of 7100 | unique names, host keys and addresses (above) |
+| Clones of 7110 (Fleet image) | same computer name and same SSH host key; different DHCP addresses (above, #452) |
 | Recipe, version | `images create ... --source clone` then `publish`: the second recipe version (with `cpu_type: host`) is the working one |
 | Build | succeeded in about 150 s, artifact `pve:7110`. A full clone of a 64 GiB disk dominates |
 | Promotion | `images promote` accepted the version |
 | Lab templates | `windows11` (`--guest-os windows --cleanup revert --probe guest_agent`) and `windows11-fleetadmin`, the same plus `sshUser: fleetadmin` through `POST /api/v1/lab/templates`. The CLI has no SSH user flag and defaults to `root`, which does not exist on this image, so a lease needs the second template |
 | Ids | recorded in the PR and the issue (they belong to the temporary controller's database, so they are not repeated in Git) |
 
-Not verified: a lease on these templates (stream J, #441), TPM snapshot and rollback of a pool member, activation (the operator's), a Packer build that re-generalizes the image.
+Not verified: the machine SID of clones, a lease on these templates (stream J, #441), TPM snapshot and rollback of a pool member, activation (the operator's), a Packer build that re-generalizes the image.
 
 ## Host changes
 
