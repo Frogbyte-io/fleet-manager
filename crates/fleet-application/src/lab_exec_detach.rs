@@ -316,6 +316,7 @@ pub struct LabExecDetach {
     guest: Arc<dyn GuestExecPort>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn crate::lab::LabTemplatePort>,
     audit: Arc<dyn AuditPort>,
     /// When each handle's status read was last audited.
     status_audited: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
@@ -333,6 +334,7 @@ impl LabExecDetach {
         guest: Arc<dyn GuestExecPort>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn crate::lab::LabTemplatePort>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
@@ -340,6 +342,7 @@ impl LabExecDetach {
             guest,
             leases,
             provisions,
+            templates,
             audit,
             status_audited: std::sync::Mutex::default(),
         }
@@ -391,6 +394,19 @@ impl LabExecDetach {
         scope(principal, &lease.owner, || format!("lease {lease_id}"))?;
         lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
         self.require_machine(&lease).await?;
+        // The detached scripts are Bash. A Windows guest must not be handed
+        // them (PowerShell would pass them to whatever `bash` it finds).
+        let guest_os = self
+            .templates
+            .get_version(&lease.template_version_id)
+            .await
+            .map(|version| version.content.guest_os)
+            .map_err(|detail| backend("templates", detail))?;
+        if guest_os != fleet_core::GuestOs::Linux {
+            return Err(LabUseCaseError::Invalid {
+                detail: "detached exec is not available on Windows guests yet".to_owned(),
+            });
+        }
         let remaining = lease.expires_at.map_or(0, |expires| {
             u64::try_from((expires - now) / 1000).unwrap_or(0)
         });

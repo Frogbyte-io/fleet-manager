@@ -80,6 +80,7 @@ impl GuestFiles for Guest {
         &self,
         _machine_id: &str,
         _endpoint_id: &str,
+        _guest_os: fleet_core::GuestOs,
         path: &str,
         _max_bytes: u64,
         _deadline: Duration,
@@ -302,6 +303,7 @@ impl World {
             artifact_store.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
             ArtifactPolicy {
                 retention_seconds: 3_600,
@@ -314,6 +316,7 @@ impl World {
             upload_store.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         ));
         let detach_records = Arc::new(fleet_storage_sqlite::DetachedExecRepository::new(
@@ -323,6 +326,7 @@ impl World {
             detach_records.clone(),
             Arc::new(DetachedGuest::default()),
             leases.clone(),
+            labs.clone(),
             labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         ));
@@ -389,6 +393,7 @@ impl World {
             artifact_store,
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             guest.clone(),
         );
         let dispatch = LabPutDispatch::new(
@@ -396,12 +401,14 @@ impl World {
             upload_store,
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             guest,
         );
         let dispatch = LabDetachDispatch::new(
             Arc::new(dispatch),
             detach_records,
             leases.clone(),
+            labs.clone(),
             labs.clone(),
         );
         let worker = tokio::spawn(async move {

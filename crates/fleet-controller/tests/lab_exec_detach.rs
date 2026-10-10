@@ -180,6 +180,11 @@ impl Fixture {
     /// A ready lease owned by `owner`, whose guest is a registered Lab
     /// machine.
     async fn new(owner: &str) -> Self {
+        Self::with_os(owner, fleet_core::GuestOs::Linux).await
+    }
+
+    /// The same, for a template that declares the guest OS.
+    async fn with_os(owner: &str, guest_os: fleet_core::GuestOs) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let guest_base = dir.path().join("guest-exec");
@@ -205,7 +210,7 @@ impl Fixture {
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
             audio: None,
-            guest_os: fleet_core::GuestOs::default(),
+            guest_os,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -314,6 +319,7 @@ impl Fixture {
             guest.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         );
         let operations = Arc::new(Operations::new_with_events(
@@ -341,6 +347,7 @@ impl Fixture {
             Arc::new(lab_dispatch),
             records,
             leases.clone(),
+            labs.clone(),
             labs.clone(),
         );
         Self {
@@ -950,6 +957,25 @@ async fn the_bound_never_reaches_past_the_lease() {
     let _ = std::process::Command::new("pkill")
         .args(["-f", "sleep 29.51"])
         .status();
+}
+
+#[tokio::test]
+async fn detached_exec_is_refused_for_a_windows_lease_until_its_scripts_exist() {
+    let fixture = Fixture::with_os("tester", fleet_core::GuestOs::Windows).await;
+    let error = fixture
+        .prepare(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            "Get-Date",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, LabUseCaseError::Invalid { detail } if detail.contains("Windows")),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

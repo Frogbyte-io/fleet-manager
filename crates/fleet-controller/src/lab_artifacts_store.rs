@@ -26,10 +26,10 @@ use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 
 use fleet_application::authz::ActingPrincipal;
-use fleet_application::lab::{LeasePort, ProvisionPort, lease_exec_ready};
+use fleet_application::lab::{LabTemplatePort, LeasePort, ProvisionPort, lease_exec_ready};
 use fleet_application::lab_artifacts::{
     ArtifactBlobPort, ArtifactReader, BlobError, LabArtifacts, StagedBlob, StoredBlob,
-    exec_log_text, is_sha256_hex, validate_collect_paths,
+    exec_log_text, is_sha256_hex, validate_collect_paths_for,
 };
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
@@ -412,10 +412,12 @@ fn hex(bytes: &[u8]) -> String {
 pub trait GuestFiles: std::fmt::Debug + Send + Sync {
     /// Copies `path` from the machine's endpoint into `sink`, bounded by
     /// `max_bytes` and `deadline`, and hands the sink back.
+    #[allow(clippy::too_many_arguments)]
     async fn fetch(
         &self,
         machine_id: &str,
         endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
         path: &str,
         max_bytes: u64,
         deadline: Duration,
@@ -439,6 +441,8 @@ pub trait GuestFiles: std::fmt::Debug + Send + Sync {
 /// What to put into a guest.
 #[derive(Clone, Debug)]
 pub struct GuestPut {
+    /// The guest's OS, which selects the guest shell.
+    pub guest_os: fleet_core::GuestOs,
     /// The absolute guest path of the file to create.
     pub path: String,
     /// The exact size in bytes.
@@ -484,6 +488,7 @@ impl GuestFiles for SshGuestFiles {
         &self,
         machine_id: &str,
         endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
         path: &str,
         max_bytes: u64,
         deadline: Duration,
@@ -497,7 +502,10 @@ impl GuestFiles for SshGuestFiles {
         )
         .await
         {
-            Ok((spec, _, _)) => spec,
+            Ok((mut spec, _, _)) => {
+                spec.guest_os = guest_os;
+                spec
+            }
             Err(error) => return (Err(error), sink),
         };
         let provider = self.provider.clone();
@@ -539,13 +547,14 @@ impl GuestFiles for SshGuestFiles {
         deadline: Duration,
         mut source: std::fs::File,
     ) -> Result<fleet_provider_ssh::PutOutcome, String> {
-        let (spec, _, _) = crate::exec::resolve_ssh_endpoint(
+        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,
             fleet_provider_ssh::SshAuth::Agent,
         )
         .await?;
+        spec.guest_os = request.guest_os;
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
         tokio::task::spawn_blocking(move || {
@@ -584,6 +593,7 @@ impl GuestFiles for UnavailableGuestFiles {
         &self,
         _machine_id: &str,
         _endpoint_id: &str,
+        _guest_os: fleet_core::GuestOs,
         _path: &str,
         _max_bytes: u64,
         _deadline: Duration,
@@ -624,6 +634,7 @@ pub struct LabArtifactDispatch {
     store: Arc<FsArtifactStore>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn LabTemplatePort>,
     files: Arc<dyn GuestFiles>,
 }
 
@@ -636,6 +647,7 @@ impl LabArtifactDispatch {
         store: Arc<FsArtifactStore>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn LabTemplatePort>,
         files: Arc<dyn GuestFiles>,
     ) -> Self {
         Self {
@@ -644,6 +656,7 @@ impl LabArtifactDispatch {
             store,
             leases,
             provisions,
+            templates,
             files,
         }
     }
@@ -703,7 +716,15 @@ impl LabArtifactDispatch {
             .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
             .and_then(|payload| serde_json::from_value(payload["paths"].clone()).ok())
             .unwrap_or_default();
-        if let Err(detail) = validate_collect_paths(&paths) {
+        let guest_os = match payload_guest_os(operation) {
+            Ok(os) => os,
+            Err(detail) => {
+                return self
+                    .refuse(operations, operation, &lease_id, "invalid_payload", &detail)
+                    .await;
+            }
+        };
+        if let Err(detail) = validate_collect_paths_for(guest_os, &paths) {
             return self
                 .refuse(operations, operation, &lease_id, "invalid_paths", &detail)
                 .await;
@@ -711,6 +732,8 @@ impl LabArtifactDispatch {
         let (machine_id, endpoint_id) = match resolve_lab_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
+            self.templates.as_ref(),
+            guest_os,
             &lease_id,
             fleet_core::SystemClock::now_unix_millis(),
         )
@@ -756,6 +779,7 @@ impl LabArtifactDispatch {
                     &operation.id,
                     &machine_id,
                     &endpoint_id,
+                    guest_os,
                     path,
                     remaining,
                 )
@@ -814,12 +838,14 @@ impl LabArtifactDispatch {
     }
 
     /// Copies one path and records it; answers a stable reason on failure.
+    #[allow(clippy::too_many_arguments)]
     async fn collect_one(
         &self,
         lease_id: &str,
         operation_id: &str,
         machine_id: &str,
         endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
         path: &str,
         remaining: Duration,
     ) -> Result<fleet_application::lab_artifacts::LabArtifact, &'static str> {
@@ -832,6 +858,7 @@ impl LabArtifactDispatch {
             .fetch(
                 machine_id,
                 endpoint_id,
+                guest_os,
                 path,
                 self.store.max_bytes(),
                 remaining,
@@ -953,6 +980,8 @@ impl OperationExecutor for LabArtifactDispatch {
 pub(crate) async fn resolve_lab_machine(
     leases: &dyn LeasePort,
     provisions: &dyn ProvisionPort,
+    templates: &dyn LabTemplatePort,
+    claimed_os: fleet_core::GuestOs,
     lease_id: &str,
     now: i64,
 ) -> Result<(String, String), (&'static str, String)> {
@@ -970,13 +999,38 @@ pub(crate) async fn resolve_lab_machine(
         })?),
         None => None,
     };
-    record
+    let found = record
         .filter(|record| record.lease_id.as_deref() == Some(lease.id.as_str()))
         .and_then(|record| record.machine_id.zip(record.endpoint_id))
         .ok_or((
             "no_lab_machine",
             "the lease's guest has no registered Lab machine".to_owned(),
-        ))
+        ))?;
+    // The operation's payload is a claim; the lease's immutable template
+    // version is the truth. An operation queued before the payload named a
+    // guest OS (so claiming Linux) must never run Linux framing against a
+    // Windows guest.
+    let actual = templates
+        .get_version(&lease.template_version_id)
+        .await
+        .map(|version| version.content.guest_os)
+        .map_err(|detail| {
+            (
+                "template_unavailable",
+                logged(lease_id, "the lease's template version", &detail),
+            )
+        })?;
+    if actual != claimed_os {
+        return Err((
+            "guest_os_mismatch",
+            format!(
+                "the operation was queued for a {} guest but the lease's guest is {}; queue it again",
+                claimed_os.id(),
+                actual.id()
+            ),
+        ));
+    }
+    Ok(found)
 }
 
 /// Logs a store failure's raw detail and answers the fixed message that is
@@ -985,6 +1039,22 @@ fn logged(lease_id: &str, what: &str, detail: &str) -> String {
     let detail = fleet_core::scrub_failure_detail(detail);
     eprintln!("lab artifacts: collecting from lease {lease_id}: reading {what} failed: {detail}");
     format!("{what} could not be read; the detail is in the controller log")
+}
+
+/// The guest OS an operation payload names. Absent means Linux (an operation
+/// queued before the field existed); a value that is not a known OS is an
+/// error, never a silent Linux.
+pub(crate) fn payload_guest_os(operation: &Operation) -> Result<fleet_core::GuestOs, String> {
+    let payload = operation
+        .payload_json
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .unwrap_or_default();
+    match payload.get("guestOs") {
+        None | Some(serde_json::Value::Null) => Ok(fleet_core::GuestOs::Linux),
+        Some(serde_json::Value::String(id)) => fleet_core::GuestOs::from_id(id),
+        Some(_) => Err("the payload's guestOs is not a string".to_owned()),
+    }
 }
 
 pub(crate) fn payload_lease(operation: &Operation) -> String {

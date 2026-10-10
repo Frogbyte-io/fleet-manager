@@ -255,3 +255,111 @@ fn a_windows_probe_collects_facts_over_ssh() {
         "{facts:?}"
     );
 }
+
+fn sha(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
+#[test]
+fn put_and_collect_move_binary_files_over_ssh() {
+    let (sshd, provider, limiter) = sshd_or_skip!();
+    let spec = sshd.spec();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("sub dir").join("copy.bin");
+    std::fs::create_dir(target.parent().unwrap()).unwrap();
+    let mut payload: Vec<u8> = (0..=255_u8).cycle().take(5 * 1024 * 1024 + 3).collect();
+    payload.extend_from_slice(b"\r\n\x1a\0");
+    let target_text = target.display().to_string();
+    let request = fleet_provider_ssh::PutRequest {
+        path: &target_text,
+        size: payload.len() as u64,
+        sha256: &sha(&payload),
+        overwrite: false,
+    };
+    let outcome = fleet_provider_ssh::put_file(
+        &provider,
+        &limiter,
+        &spec,
+        &request,
+        Duration::from_secs(120),
+        &mut std::io::Cursor::new(payload.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        fleet_provider_ssh::PutOutcome::Put {
+            bytes: payload.len() as u64
+        }
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), payload);
+
+    // A second put without overwrite is refused; with a wrong hash nothing changes.
+    let again = fleet_provider_ssh::put_file(
+        &provider,
+        &limiter,
+        &spec,
+        &request,
+        Duration::from_secs(120),
+        &mut std::io::Cursor::new(payload.clone()),
+    )
+    .unwrap();
+    assert_eq!(again, fleet_provider_ssh::PutOutcome::TargetExists);
+    let wrong = fleet_provider_ssh::PutRequest {
+        sha256: &sha(b"other"),
+        overwrite: true,
+        ..request
+    };
+    let mismatch = fleet_provider_ssh::put_file(
+        &provider,
+        &limiter,
+        &spec,
+        &wrong,
+        Duration::from_secs(120),
+        &mut std::io::Cursor::new(payload.clone()),
+    )
+    .unwrap();
+    assert_eq!(mismatch, fleet_provider_ssh::PutOutcome::HashMismatch);
+    assert_eq!(std::fs::read(&target).unwrap(), payload);
+
+    // Collect brings the same bytes back, untouched.
+    let mut sink = Vec::new();
+    let fetched = fleet_provider_ssh::fetch_file(
+        &provider,
+        &limiter,
+        &spec,
+        &target_text,
+        64 * 1024 * 1024,
+        Duration::from_secs(120),
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(
+        fetched,
+        fleet_provider_ssh::FetchOutcome::Fetched {
+            bytes: payload.len() as u64
+        }
+    );
+    assert_eq!(sink, payload);
+
+    // A cap below the size is refused without bytes.
+    let mut small = Vec::new();
+    let refused = fleet_provider_ssh::fetch_file(
+        &provider,
+        &limiter,
+        &spec,
+        &target_text,
+        1024,
+        Duration::from_secs(120),
+        &mut small,
+    )
+    .unwrap();
+    assert_eq!(refused, fleet_provider_ssh::FetchOutcome::TooLarge);
+    assert!(small.is_empty());
+}

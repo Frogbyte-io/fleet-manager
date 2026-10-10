@@ -76,6 +76,7 @@ impl GuestFiles for Guest {
         &self,
         _machine_id: &str,
         _endpoint_id: &str,
+        _guest_os: fleet_core::GuestOs,
         path: &str,
         _max_bytes: u64,
         _deadline: Duration,
@@ -152,6 +153,11 @@ struct Fixture {
 impl Fixture {
     /// A ready lease whose guest is a registered Lab machine.
     async fn new() -> Self {
+        Self::with_os(fleet_core::GuestOs::Linux).await
+    }
+
+    /// The same, for a template that declares the guest OS.
+    async fn with_os(guest_os: fleet_core::GuestOs) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -176,7 +182,7 @@ impl Fixture {
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
             audio: None,
-            guest_os: fleet_core::GuestOs::default(),
+            guest_os,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -266,6 +272,7 @@ impl Fixture {
             upload_store.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         ));
         let lab_dispatch = fleet_controller::proxmox_exec::LabDispatch::new(
@@ -298,6 +305,7 @@ impl Fixture {
             Arc::new(lab_dispatch),
             upload_store.clone(),
             leases.clone(),
+            labs.clone(),
             labs.clone(),
             guest.clone(),
         );
@@ -364,6 +372,50 @@ impl Fixture {
             .await
             .unwrap();
         Ok((created, staged))
+    }
+
+    /// Queues a put whose payload is edited first, the way an operation queued
+    /// by an older controller (or a hand-built one) would look.
+    async fn put_with_payload(
+        &self,
+        guest_path: &str,
+        bytes: &[u8],
+        edit: impl Fn(&mut serde_json::Value),
+    ) -> Operation {
+        let authorizer = fleet_auth::LanAllowAllAuthorizer;
+        let target = PutTarget {
+            lease_id: &self.lease_id,
+            guest_path,
+            overwrite: false,
+        };
+        let now = fleet_core::SystemClock::now_unix_millis();
+        let mut writer = self
+            .puts
+            .begin_upload(&authorizer, &Self::principal(), &target, now)
+            .await
+            .unwrap();
+        writer.write(bytes).await.unwrap();
+        let staged = writer.finish().await.unwrap();
+        let mut new = self
+            .puts
+            .request_put(&authorizer, &Self::principal(), &target, &staged, now)
+            .await
+            .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        edit(&mut payload);
+        new.payload_json = Some(payload.to_string());
+        let created = self
+            .operations
+            .create_lab_put(
+                &authorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &self.lease_id,
+                &new,
+            )
+            .await
+            .unwrap();
+        self.run(&created).await
     }
 
     async fn run(&self, created: &Operation) -> Operation {
@@ -899,4 +951,113 @@ async fn uploads_in_flight_and_staged_bytes_are_bounded() {
     again.write(&[2_u8; 100]).await.unwrap();
     drop(again);
     assert_eq!(std::fs::read_dir(store.dir()).unwrap().count(), 3);
+}
+
+#[tokio::test]
+async fn a_windows_lease_takes_windows_paths_and_tells_the_executor_its_os() {
+    let fixture = Fixture::with_os(fleet_core::GuestOs::Windows).await;
+    let done = fixture
+        .put(r"C:\Users\qa\app.msi", false, b"installer-bytes")
+        .await;
+    assert_eq!(done.state, "succeeded", "{done:?}");
+    let payload: serde_json::Value =
+        serde_json::from_str(done.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["guestOs"], "windows");
+    let requests = fixture.guest.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].guest_os, fleet_core::GuestOs::Windows);
+    assert_eq!(requests[0].path, r"C:\Users\qa\app.msi");
+    // Forward slashes name the same place and are accepted too.
+    let slash = fixture.put("C:/Users/qa/other.msi", false, b"x").await;
+    assert_eq!(slash.state, "succeeded");
+
+    // Every refusal happens before a byte is accepted.
+    for bad in [
+        "/opt/a.bin",
+        r"C:\Users\qa\NUL",
+        r"C:\Users\qa\con.txt",
+        r"\\server\share\f",
+        r"\\?\C:\f",
+        r"C:\Users\qa\f.txt:stream",
+        r"C:\Users\..\f",
+        r"C:\Users\qa\trailing.",
+        "C:relative",
+    ] {
+        assert!(
+            fixture
+                .upload(&fleet_auth::LanAllowAllAuthorizer, bad, false, b"x")
+                .await
+                .is_err(),
+            "{bad}"
+        );
+    }
+    assert_eq!(fixture.staged_files(), 0);
+}
+
+#[tokio::test]
+async fn a_linux_lease_refuses_windows_paths() {
+    let fixture = Fixture::new().await;
+    assert!(
+        fixture
+            .upload(
+                &fleet_auth::LanAllowAllAuthorizer,
+                r"C:\Users\qa\app.msi",
+                false,
+                b"x"
+            )
+            .await
+            .is_err()
+    );
+    let done = fixture.put("/opt/a.bin", false, b"x").await;
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(
+        fixture.guest.requests.lock().unwrap()[0].guest_os,
+        fleet_core::GuestOs::Linux
+    );
+}
+
+#[tokio::test]
+async fn the_executor_trusts_the_lease_not_the_payload_about_the_guest_os() {
+    // A put queued without `guestOs` (an older controller) claims Linux; on
+    // a Windows lease it is refused and the guest is never contacted.
+    let windows = Fixture::with_os(fleet_core::GuestOs::Windows).await;
+    let done = windows
+        .put_with_payload("C:\\opt\\a.bin", b"x", |payload| {
+            payload.as_object_mut().unwrap().remove("guestOs");
+        })
+        .await;
+    // Claiming Linux, the Windows path is not even a valid payload.
+    assert_eq!(done.state, "failed", "{done:?}");
+    // A Linux-valid path with no `guestOs` (claimed Linux) passes payload
+    // validation and reaches the lease OS check itself.
+    let done = windows
+        .put_with_payload("C:\\opt\\a.bin", b"x", |payload| {
+            let object = payload.as_object_mut().unwrap();
+            object.remove("guestOs");
+            object.insert("guestPath".to_owned(), "/opt/a.bin".into());
+        })
+        .await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert_eq!(error_of(&done)["reason"], "guest_os_mismatch");
+    assert!(windows.guest.requests.lock().unwrap().is_empty());
+
+    // The reverse claim is refused too.
+    let linux = Fixture::new().await;
+    let done = linux
+        .put_with_payload("/opt/a.bin", b"x", |payload| {
+            payload["guestOs"] = "windows".into();
+            payload["guestPath"] = "C:\\opt\\a.bin".into();
+        })
+        .await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert_eq!(error_of(&done)["reason"], "guest_os_mismatch");
+
+    // An unknown value is a bad payload, not a silent Linux.
+    let done = linux
+        .put_with_payload("/opt/a.bin", b"x", |payload| {
+            payload["guestOs"] = "plan9".into();
+        })
+        .await;
+    assert_eq!(done.state, "failed");
+    assert!(linux.guest.requests.lock().unwrap().is_empty());
 }
