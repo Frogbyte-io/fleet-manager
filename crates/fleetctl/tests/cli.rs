@@ -3411,6 +3411,31 @@ fn the_template_form_of_lab_create_still_parses_and_has_a_new_name() {
 }
 
 #[test]
+fn lab_exec_script_sends_the_one_word_untouched() {
+    // A PowerShell script: POSIX quoting would turn it into a string literal.
+    let script = "Write-Output \"hi $env:USERNAME\"; exit 3";
+    assert_eq!(
+        lab_parse(&["lab", "exec", "lease-1", "--script", "--wait", "--", script]).unwrap(),
+        fleetctl::Command::LabExec {
+            lease_id: "lease-1".to_owned(),
+            script: script.to_owned(),
+            timeout: None,
+            wait: true,
+        }
+    );
+    assert!(matches!(
+        lab_parse(&["lab", "exec", "lease-1", "--detach", "--script", "--", script]).unwrap(),
+        fleetctl::Command::LabExecDetach { script: sent, .. } if sent == script
+    ));
+    // Exactly one word: more would be ambiguous (joined how?).
+    assert!(
+        lab_parse(&["lab", "exec", "lease-1", "--script", "--", "a", "b"])
+            .unwrap_err()
+            .contains("exactly one word")
+    );
+}
+
+#[test]
 fn shell_join_quotes_only_what_needs_it() {
     assert_eq!(fleetctl::shell_join(&["make", "test"]), "make test");
     assert_eq!(
