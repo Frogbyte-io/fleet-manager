@@ -416,7 +416,7 @@ public static class FleetLaunch {
     # more than 30 s of its 60 s session gives up here, before launching: sshd
     # does not end the session when the client disappears, so a late launch
     # after the controller has already read `never_started` would run anyway.
-    if (([DateTime]::UtcNow - $fleetBegan).TotalSeconds -gt 30) { $fleetLaunched = $false }
+    if (([DateTime]::UtcNow - $fleetBegan).TotalSeconds -gt 15) { $fleetLaunched = $false }
     elseif ([FleetLaunch]::Start($fleetLine, $fleetCwd) -le 0) { $fleetLaunched = $false }
   } catch { $fleetLaunched = $false }
 } else {
@@ -1569,7 +1569,7 @@ mod tests {
                 "{out:?}"
             );
             // And the give-up-late guard is in front of the launch.
-            let guard = start.find("TotalSeconds -gt 30").unwrap();
+            let guard = start.find("TotalSeconds -gt 15").unwrap();
             let launch = start.find("[FleetLaunch]::Start($fleetLine").unwrap();
             assert!(guard < launch);
         }
