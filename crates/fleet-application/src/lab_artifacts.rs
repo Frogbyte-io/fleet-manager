@@ -491,7 +491,17 @@ fn is_windows_reserved_stem(stem: &str) -> bool {
         && chars.next().is_none()
 }
 
+/// The longest Windows path in characters: `MAX_PATH` is 260 including the
+/// terminating NUL, and Windows PowerShell 5.1 without long-path support
+/// fails beyond it.
+const MAX_WINDOWS_PATH_CHARS: usize = 259;
+
 fn validate_windows_path(path: &str) -> Result<(), String> {
+    if path.encode_utf16().count() > MAX_WINDOWS_PATH_CHARS {
+        return Err(format!(
+            "the path is longer than {MAX_WINDOWS_PATH_CHARS} characters"
+        ));
+    }
     if path.len() > MAX_COLLECT_PATH_BYTES {
         return Err(format!(
             "the path is longer than {MAX_COLLECT_PATH_BYTES} bytes"
@@ -1434,6 +1444,10 @@ mod tests {
         assert!(windows(&format!("C:\\{}", "a".repeat(1024))).is_err());
         assert!(windows(&format!("C:\\{}", "a".repeat(256))).is_err());
         assert!(windows(&format!("C:\\{}", "a".repeat(255))).is_ok());
+        // MAX_PATH: 259 characters pass, 260 do not.
+        let long = |n: usize| format!("C:\\{}\\{}", "a".repeat(100), "b".repeat(n - 104));
+        assert!(windows(&long(259)).is_ok());
+        assert!(windows(&long(260)).is_err());
     }
 
     #[test]

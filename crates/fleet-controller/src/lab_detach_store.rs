@@ -127,6 +127,7 @@ pub struct LabDetachDispatch {
     records: Arc<dyn DetachedExecPort>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
 }
 
 impl LabDetachDispatch {
@@ -137,12 +138,14 @@ impl LabDetachDispatch {
         records: Arc<dyn DetachedExecPort>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
     ) -> Self {
         Self {
             inner,
             records,
             leases,
             provisions,
+            templates,
         }
     }
 
@@ -225,9 +228,13 @@ impl LabDetachDispatch {
                 .await;
         };
         let lease_id = payload_lease(operation);
+        // The start script is Bash: a Windows lease is refused, whatever the
+        // payload says.
         let (machine_id, endpoint_id) = match resolve_lab_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
+            self.templates.as_ref(),
+            fleet_core::GuestOs::Linux,
             &lease_id,
             now,
         )

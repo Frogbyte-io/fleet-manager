@@ -283,6 +283,7 @@ impl Fixture {
             artifact_store.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             guest.clone(),
         );
         Self {
@@ -1066,5 +1067,17 @@ async fn a_collect_queued_with_an_unknown_guest_os_is_refused_before_any_copy() 
         .unwrap();
     let done = fixture.run(created).await;
     assert_eq!(done.state, "failed");
+    assert!(fixture.guest.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_collect_queued_without_guest_os_is_refused_on_a_windows_lease() {
+    let fixture = Fixture::with_os(fleet_core::GuestOs::Windows).await;
+    // `collect` builds the payload without `guestOs`, like an older controller.
+    let done = fixture.collect(&["/var/log/app.log"]).await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    let error: serde_json::Value =
+        serde_json::from_str(done.error_json.as_deref().unwrap()).unwrap();
+    assert_eq!(error["reason"], "guest_os_mismatch");
     assert!(fixture.guest.seen.lock().unwrap().is_empty());
 }

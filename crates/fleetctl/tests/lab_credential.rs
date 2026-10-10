@@ -393,6 +393,7 @@ impl World {
             artifact_store,
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             guest.clone(),
         );
         let dispatch = LabPutDispatch::new(
@@ -400,12 +401,14 @@ impl World {
             upload_store,
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             guest,
         );
         let dispatch = LabDetachDispatch::new(
             Arc::new(dispatch),
             detach_records,
             leases.clone(),
+            labs.clone(),
             labs.clone(),
         );
         let worker = tokio::spawn(async move {

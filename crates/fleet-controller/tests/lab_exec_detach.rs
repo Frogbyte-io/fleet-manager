@@ -348,6 +348,7 @@ impl Fixture {
             records,
             leases.clone(),
             labs.clone(),
+            labs.clone(),
         );
         Self {
             _store: store,

@@ -829,6 +829,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                                 std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                                     store.pool().clone(),
                                 )),
+                                std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                    store.pool().clone(),
+                                )),
                                 files,
                             ),
                         )
@@ -867,6 +870,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                             std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                                 store.pool().clone(),
                             )),
+                            std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
+                                store.pool().clone(),
+                            )),
                             files,
                         ))
                     }
@@ -879,6 +885,9 @@ fn run_serve(mut config: fleet_config::ControllerConfig) -> ExitCode {
                     with_lab,
                     detached_records.clone(),
                     std::sync::Arc::new(fleet_storage_sqlite::LeaseRepository::new(
+                        store.pool().clone(),
+                    )),
+                    std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(
                         store.pool().clone(),
                     )),
                     std::sync::Arc::new(fleet_storage_sqlite::LabRepository::new(

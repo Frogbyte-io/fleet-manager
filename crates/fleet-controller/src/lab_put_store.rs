@@ -377,6 +377,7 @@ pub struct LabPutDispatch {
     store: Arc<FsUploadStore>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
     files: Arc<dyn GuestFiles>,
 }
 
@@ -388,6 +389,7 @@ impl LabPutDispatch {
         store: Arc<FsUploadStore>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn fleet_application::lab::LabTemplatePort>,
         files: Arc<dyn GuestFiles>,
     ) -> Self {
         Self {
@@ -395,6 +397,7 @@ impl LabPutDispatch {
             store,
             leases,
             provisions,
+            templates,
             files,
         }
     }
@@ -441,6 +444,8 @@ impl LabPutDispatch {
         let (machine_id, endpoint_id) = match resolve_lab_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
+            self.templates.as_ref(),
+            payload.guest_os,
             &lease_id,
             fleet_core::SystemClock::now_unix_millis(),
         )
@@ -507,6 +512,14 @@ impl LabPutDispatch {
             Ok(PutOutcome::TargetNotFile) => (
                 "target_not_file",
                 "the guest path exists and is not a regular file; it is never replaced",
+            ),
+            Ok(PutOutcome::TargetReadOnly) => (
+                "target_read_only",
+                "the guest path is a read-only file; it is never replaced",
+            ),
+            Ok(PutOutcome::PathRejected) => (
+                "path_rejected",
+                "the guest refused the path (for example it is longer than the platform allows)",
             ),
             Ok(PutOutcome::NoDirectory) => {
                 ("no_directory", "the guest path's directory does not exist")

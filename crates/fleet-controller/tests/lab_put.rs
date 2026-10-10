@@ -306,6 +306,7 @@ impl Fixture {
             upload_store.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             guest.clone(),
         );
         Self {
@@ -371,6 +372,50 @@ impl Fixture {
             .await
             .unwrap();
         Ok((created, staged))
+    }
+
+    /// Queues a put whose payload is edited first, the way an operation queued
+    /// by an older controller (or a hand-built one) would look.
+    async fn put_with_payload(
+        &self,
+        guest_path: &str,
+        bytes: &[u8],
+        edit: impl Fn(&mut serde_json::Value),
+    ) -> Operation {
+        let authorizer = fleet_auth::LanAllowAllAuthorizer;
+        let target = PutTarget {
+            lease_id: &self.lease_id,
+            guest_path,
+            overwrite: false,
+        };
+        let now = fleet_core::SystemClock::now_unix_millis();
+        let mut writer = self
+            .puts
+            .begin_upload(&authorizer, &Self::principal(), &target, now)
+            .await
+            .unwrap();
+        writer.write(bytes).await.unwrap();
+        let staged = writer.finish().await.unwrap();
+        let mut new = self
+            .puts
+            .request_put(&authorizer, &Self::principal(), &target, &staged, now)
+            .await
+            .unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+        edit(&mut payload);
+        new.payload_json = Some(payload.to_string());
+        let created = self
+            .operations
+            .create_lab_put(
+                &authorizer,
+                fleet_auth::LAN_PRINCIPAL_ID,
+                &self.lease_id,
+                &new,
+            )
+            .await
+            .unwrap();
+        self.run(&created).await
     }
 
     async fn run(&self, created: &Operation) -> Operation {
@@ -969,4 +1014,39 @@ async fn a_linux_lease_refuses_windows_paths() {
         fixture.guest.requests.lock().unwrap()[0].guest_os,
         fleet_core::GuestOs::Linux
     );
+}
+
+#[tokio::test]
+async fn the_executor_trusts_the_lease_not_the_payload_about_the_guest_os() {
+    // A put queued without `guestOs` (an older controller) claims Linux; on
+    // a Windows lease it is refused and the guest is never contacted.
+    let windows = Fixture::with_os(fleet_core::GuestOs::Windows).await;
+    let done = windows
+        .put_with_payload("C:\\opt\\a.bin", b"x", |payload| {
+            payload.as_object_mut().unwrap().remove("guestOs");
+        })
+        .await;
+    // Claiming Linux, the Windows path is not even a valid payload.
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert!(windows.guest.requests.lock().unwrap().is_empty());
+
+    // The reverse claim is refused too.
+    let linux = Fixture::new().await;
+    let done = linux
+        .put_with_payload("/opt/a.bin", b"x", |payload| {
+            payload["guestOs"] = "windows".into();
+            payload["guestPath"] = "C:\\opt\\a.bin".into();
+        })
+        .await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert_eq!(error_of(&done)["reason"], "guest_os_mismatch");
+
+    // An unknown value is a bad payload, not a silent Linux.
+    let done = linux
+        .put_with_payload("/opt/a.bin", b"x", |payload| {
+            payload["guestOs"] = "plan9".into();
+        })
+        .await;
+    assert_eq!(done.state, "failed");
+    assert!(linux.guest.requests.lock().unwrap().is_empty());
 }

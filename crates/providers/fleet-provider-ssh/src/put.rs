@@ -46,6 +46,11 @@ pub enum PutOutcome {
     HashMismatch,
     /// The byte count that arrived differs from the declared size.
     SizeMismatch,
+    /// The target is read-only (Windows); it is not replaced.
+    TargetReadOnly,
+    /// The guest refused the path or the arguments' shape (for example a
+    /// Windows path over the platform's length limit).
+    PathRejected,
     /// The local `ssh` process was killed at the deadline.
     DeadlineKilled,
     /// The local source could not be read (shorter than declared, or an I/O
@@ -106,13 +111,20 @@ fleet_put \"$@\"; exit $?\n";
 /// can remain, never a partial target.
 const WINDOWS_PUT_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
 $fleetPath = $args[0]
-$fleetSize = [int64]$args[1]
+$fleetSizeText = $args[1]
 $fleetSha = $args[2]
 $fleetOver = $args[3]
+# The application validated all of this; it is checked again here because the
+# values are data from a caller. On Windows the path must be drive-absolute
+# (the rooted check stands in on other platforms, where the tests run).
+$fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
+if ($fleetSizeText -notmatch '^[0-9]{1,19}$' -or $fleetSha -cnotmatch '^[0-9a-f]{64}$' -or ($fleetOver -ne '0' -and $fleetOver -ne '1')) { exit 64 }
+try { $fleetSize = [int64]$fleetSizeText } catch { exit 64 }
 if ([string]::IsNullOrEmpty($fleetPath) -or $fleetPath.StartsWith('\\') -or $fleetPath.StartsWith('//') `
     -or $fleetPath.IndexOfAny([char[]]'<>"|?*') -ge 0 -or ($fleetPath.Length -gt 2 -and $fleetPath.IndexOf(':', 2) -ge 0) `
-    -or -not [IO.Path]::IsPathRooted($fleetPath)) { exit 64 }
+    -or -not [IO.Path]::IsPathRooted($fleetPath) -or ($fleetWindows -and $fleetPath -notmatch '^[A-Za-z]:[\\/]')) { exit 64 }
 try { $fleetFull = [IO.Path]::GetFullPath($fleetPath) } catch { exit 64 }
+if ($fleetFull.StartsWith('\\')) { exit 64 }
 $fleetDir = [IO.Path]::GetDirectoryName($fleetFull)
 if ([string]::IsNullOrEmpty($fleetDir) -or -not [IO.Directory]::Exists($fleetDir)) { exit 69 }
 $fleetCode = 70
@@ -120,41 +132,64 @@ $fleetTmp = $null
 $fleetFs = $null
 try {
   do {
+    # Partial files a killed copy left behind: older than an hour, ours by name.
+    try {
+      foreach ($fleetOld in [IO.Directory]::GetFiles($fleetDir, '.fleet-put.*')) {
+        if (([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($fleetOld)).TotalHours -gt 1) { try { [IO.File]::Delete($fleetOld) } catch { } }
+      }
+    } catch { }
     if ([IO.File]::Exists($fleetFull) -or [IO.Directory]::Exists($fleetFull)) {
       if ($fleetOver -ne '1') { $fleetCode = 73; break }
       $fleetItem = Get-Item -LiteralPath $fleetFull -Force
       if ($fleetItem.PSIsContainer -or ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $fleetCode = 65; break }
+      if ($fleetItem.Attributes -band [IO.FileAttributes]::ReadOnly) { $fleetCode = 74; break }
     }
-    $fleetTmp = Join-Path $fleetDir ('.fleet-put.' + [Guid]::NewGuid().ToString('N'))
+    $fleetTmp = [IO.Path]::Combine($fleetDir, '.fleet-put.' + [Guid]::NewGuid().ToString('N'))
     try {
-      $fleetFs = New-Object IO.FileStream($fleetTmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536)
+      # Delete sharing only: nothing else can read or write the temporary file
+      # while it is written, hashed and renamed (the handle stays open across
+      # the rename, so the bytes that were hashed are the bytes published).
+      $fleetFs = New-Object IO.FileStream($fleetTmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Delete, 65536)
     } catch [UnauthorizedAccessException] { $fleetTmp = $null; $fleetCode = 71; break
     } catch { $fleetTmp = $null; $fleetCode = 79; break }
+    try { [IO.File]::SetAttributes($fleetTmp, [IO.FileAttributes]'Hidden,Temporary') } catch { }
+    $fleetHasher = [Security.Cryptography.SHA256]::Create()
     $fleetIn = [Console]::OpenStandardInput()
     $fleetBuf = New-Object byte[] 65536
     $fleetLeft = $fleetSize
+    $fleetGot = [int64]0
     while ($fleetLeft -gt 0) {
       $fleetN = $fleetIn.Read($fleetBuf, 0, [int][Math]::Min([int64]$fleetBuf.Length, $fleetLeft))
       if ($fleetN -le 0) { break }
       $fleetFs.Write($fleetBuf, 0, $fleetN)
+      [void]$fleetHasher.TransformBlock($fleetBuf, 0, $fleetN, $null, 0)
       $fleetLeft -= $fleetN
+      $fleetGot += $fleetN
     }
-    $fleetFs.Flush()
-    $fleetFs.Dispose()
-    $fleetFs = $null
-    if ((New-Object IO.FileInfo $fleetTmp).Length -ne $fleetSize) { $fleetCode = 76; break }
-    $fleetHave = (Get-FileHash -LiteralPath $fleetTmp -Algorithm SHA256).Hash.ToLowerInvariant()
+    [void]$fleetHasher.TransformFinalBlock([byte[]]@(), 0, 0)
+    $fleetFs.Flush($true)
+    if ($fleetGot -ne $fleetSize) { $fleetCode = 76; break }
+    $fleetHave = ([BitConverter]::ToString($fleetHasher.Hash)).Replace('-', '').ToLowerInvariant()
     if ($fleetHave -ne $fleetSha) { $fleetCode = 75; break }
+    $fleetReplaced = $false
     if ($fleetOver -eq '1' -and [IO.File]::Exists($fleetFull)) {
       $fleetItem = Get-Item -LiteralPath $fleetFull -Force
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { $fleetCode = 65; break }
+      if ($fleetItem.Attributes -band [IO.FileAttributes]::ReadOnly) { $fleetCode = 74; break }
       try { [IO.File]::Replace($fleetTmp, $fleetFull, [NullString]::Value) } catch { $fleetCode = 77; break }
+      $fleetReplaced = $true
     } else {
       try { [IO.File]::Move($fleetTmp, $fleetFull) } catch {
         if ([IO.File]::Exists($fleetFull) -or [IO.Directory]::Exists($fleetFull)) { $fleetCode = 73 } else { $fleetCode = 77 }
         break
       }
     }
+    $fleetFs.Dispose()
+    $fleetFs = $null
+    # The published file is an ordinary file: not hidden or temporary, and a
+    # replaced file does not keep the old file's Zone.Identifier stream.
+    try { [IO.File]::SetAttributes($fleetFull, [IO.FileAttributes]::Normal) } catch { }
+    if ($fleetReplaced -and $fleetWindows) { try { Remove-Item -LiteralPath $fleetFull -Stream Zone.Identifier -ErrorAction Stop } catch { } }
     $fleetCode = 0
   } while ($false)
 } catch { $fleetCode = 70 } finally {
@@ -307,11 +342,13 @@ fn put_inner(
     let bytes = sent.unwrap_or(0);
     Ok(match status.and_then(|status| status.code()) {
         Some(0) => PutOutcome::Put { bytes },
+        Some(64) => PutOutcome::PathRejected,
         Some(65) => PutOutcome::TargetNotFile,
         Some(69) => PutOutcome::NoDirectory,
         Some(71) => PutOutcome::DirectoryNotWritable,
         Some(73) => PutOutcome::TargetExists,
         Some(75) => PutOutcome::HashMismatch,
+        Some(74) => PutOutcome::TargetReadOnly,
         Some(76) => PutOutcome::SizeMismatch,
         Some(255) => {
             return Err(SshProviderError::Connect {
@@ -616,6 +653,77 @@ mod tests {
             assert_eq!(code(&link_name, b"x", "0"), Some(73));
             assert_eq!(std::fs::read(&path).unwrap(), b"new");
             assert_eq!(entries(dir.path()), 3);
+        }
+
+        #[test]
+        fn a_read_only_target_is_refused_and_stale_temp_files_are_swept() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("out.bin");
+            std::fs::write(&path, b"old").unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&path, perms).unwrap();
+            let name = path.display().to_string();
+            let out = put(&pwsh, dir.path(), &name, b"new", 3, &sha(b"new"), "1");
+            // Unix has no ReadOnly attribute for a root-writable file, so the
+            // guard is only observable where the platform reports one.
+            if out.status.code() == Some(74) {
+                assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            }
+            // An old `.fleet-put.*` file is removed; a fresh one is left.
+            let stale = dir.path().join(".fleet-put.stale");
+            let fresh = dir.path().join(".fleet-put.fresh");
+            std::fs::write(&stale, b"x").unwrap();
+            std::fs::write(&fresh, b"x").unwrap();
+            let old = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+            std::fs::File::options()
+                .write(true)
+                .open(&stale)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            let other = dir.path().join("other.bin").display().to_string();
+            let out = put(&pwsh, dir.path(), &other, b"z", 1, &sha(b"z"), "0");
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(!stale.exists() && fresh.exists());
+        }
+
+        #[test]
+        fn hostile_size_and_hash_arguments_are_refused_before_anything_is_written() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("f").display().to_string();
+            let run = |size: &str, sha_text: &str, over: &str| {
+                let metadata = ScriptMetadata {
+                    arguments: vec![
+                        path.clone(),
+                        size.to_owned(),
+                        sha_text.to_owned(),
+                        over.to_owned(),
+                    ],
+                    ..ScriptMetadata::default()
+                };
+                run_ps(&pwsh, WINDOWS_PUT_SCRIPT, &metadata, b"x", Some(dir.path()))
+                    .status
+                    .code()
+            };
+            let good = sha(b"x");
+            assert_eq!(run("1", &good, "0"), Some(0));
+            std::fs::remove_file(&path).unwrap();
+            for (size, hash, over) in [
+                ("-1", good.as_str(), "0"),
+                ("1e3", &good, "0"),
+                ("9999999999999999999", &good, "0"),
+                ("12345678901234567890", &good, "0"),
+                ("0x10", &good, "0"),
+                ("1", "ABC", "0"),
+                ("1", &good.to_uppercase(), "0"),
+                ("1", &good, "yes"),
+            ] {
+                assert_eq!(run(size, hash, over), Some(64), "{size} {hash} {over}");
+            }
+            assert_eq!(entries(dir.path()), 0);
         }
 
         #[test]

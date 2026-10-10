@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 
 use fleet_application::authz::ActingPrincipal;
-use fleet_application::lab::{LeasePort, ProvisionPort, lease_exec_ready};
+use fleet_application::lab::{LabTemplatePort, LeasePort, ProvisionPort, lease_exec_ready};
 use fleet_application::lab_artifacts::{
     ArtifactBlobPort, ArtifactReader, BlobError, LabArtifacts, StagedBlob, StoredBlob,
     exec_log_text, is_sha256_hex, validate_collect_paths_for,
@@ -634,6 +634,7 @@ pub struct LabArtifactDispatch {
     store: Arc<FsArtifactStore>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn LabTemplatePort>,
     files: Arc<dyn GuestFiles>,
 }
 
@@ -646,6 +647,7 @@ impl LabArtifactDispatch {
         store: Arc<FsArtifactStore>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn LabTemplatePort>,
         files: Arc<dyn GuestFiles>,
     ) -> Self {
         Self {
@@ -654,6 +656,7 @@ impl LabArtifactDispatch {
             store,
             leases,
             provisions,
+            templates,
             files,
         }
     }
@@ -717,7 +720,7 @@ impl LabArtifactDispatch {
             Ok(os) => os,
             Err(detail) => {
                 return self
-                    .refuse(operations, operation, &lease_id, "invalid_paths", &detail)
+                    .refuse(operations, operation, &lease_id, "invalid_payload", &detail)
                     .await;
             }
         };
@@ -729,6 +732,8 @@ impl LabArtifactDispatch {
         let (machine_id, endpoint_id) = match resolve_lab_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
+            self.templates.as_ref(),
+            guest_os,
             &lease_id,
             fleet_core::SystemClock::now_unix_millis(),
         )
@@ -975,6 +980,8 @@ impl OperationExecutor for LabArtifactDispatch {
 pub(crate) async fn resolve_lab_machine(
     leases: &dyn LeasePort,
     provisions: &dyn ProvisionPort,
+    templates: &dyn LabTemplatePort,
+    claimed_os: fleet_core::GuestOs,
     lease_id: &str,
     now: i64,
 ) -> Result<(String, String), (&'static str, String)> {
@@ -992,13 +999,38 @@ pub(crate) async fn resolve_lab_machine(
         })?),
         None => None,
     };
-    record
+    let found = record
         .filter(|record| record.lease_id.as_deref() == Some(lease.id.as_str()))
         .and_then(|record| record.machine_id.zip(record.endpoint_id))
         .ok_or((
             "no_lab_machine",
             "the lease's guest has no registered Lab machine".to_owned(),
-        ))
+        ))?;
+    // The operation's payload is a claim; the lease's immutable template
+    // version is the truth. An operation queued before the payload named a
+    // guest OS (so claiming Linux) must never run Linux framing against a
+    // Windows guest.
+    let actual = templates
+        .get_version(&lease.template_version_id)
+        .await
+        .map(|version| version.content.guest_os)
+        .map_err(|detail| {
+            (
+                "template_unavailable",
+                logged(lease_id, "the lease's template version", &detail),
+            )
+        })?;
+    if actual != claimed_os {
+        return Err((
+            "guest_os_mismatch",
+            format!(
+                "the operation was queued for a {} guest but the lease's guest is {}; queue it again",
+                claimed_os.id(),
+                actual.id()
+            ),
+        ));
+    }
+    Ok(found)
 }
 
 /// Logs a store failure's raw detail and answers the fixed message that is

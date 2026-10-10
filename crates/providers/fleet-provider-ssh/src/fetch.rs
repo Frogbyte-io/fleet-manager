@@ -69,11 +69,15 @@ exec head -c \"$((fleet_max + 1))\" -- \"$fleet_path\"\n";
 /// alternate data stream, and the path must be rooted.
 const WINDOWS_FETCH_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
 $fleetPath = $args[0]
-$fleetMax = [int64]$args[1]
+$fleetMaxText = $args[1]
+$fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
+if ($fleetMaxText -notmatch '^[0-9]{1,19}$') { exit 64 }
+try { $fleetMax = [int64]$fleetMaxText } catch { exit 64 }
 if ([string]::IsNullOrEmpty($fleetPath) -or $fleetPath.StartsWith('\\') -or $fleetPath.StartsWith('//') `
     -or $fleetPath.IndexOfAny([char[]]'<>"|?*') -ge 0 -or ($fleetPath.Length -gt 2 -and $fleetPath.IndexOf(':', 2) -ge 0) `
-    -or -not [IO.Path]::IsPathRooted($fleetPath)) { exit 64 }
+    -or -not [IO.Path]::IsPathRooted($fleetPath) -or ($fleetWindows -and $fleetPath -notmatch '^[A-Za-z]:[\\/]')) { exit 64 }
 try { $fleetFull = [IO.Path]::GetFullPath($fleetPath) } catch { exit 64 }
+if ($fleetFull.StartsWith('\\')) { exit 64 }
 if ([IO.Directory]::Exists($fleetFull)) { exit 65 }
 if (-not [IO.File]::Exists($fleetFull)) { exit 66 }
 try { $fleetLen = (New-Object IO.FileInfo $fleetFull).Length } catch { exit 70 }
