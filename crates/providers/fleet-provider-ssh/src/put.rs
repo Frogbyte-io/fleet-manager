@@ -153,10 +153,9 @@ try {
     $fleetTmp = [IO.Path]::Combine($fleetDir, '.fleet-put.' + [Guid]::NewGuid().ToString('N'))
     try {
       # Read and Delete sharing, no writer: nobody can change the bytes while
-      # they are written, hashed and renamed (the handle stays open across the
-      # rename, so the bytes that were hashed are the bytes published). File.Replace
-      # opens the replacement for read and delete, so it needs both. A
-      # same-privilege process could still swap the file through Delete
+      # they are written and hashed, and (for a new file) renamed with the
+      # handle still open. An overwrite closes this handle first (see below).
+      # A same-privilege process could still swap the file through Delete
       # sharing; the directory's ACL is the boundary.
       $fleetFs = New-Object IO.FileStream($fleetTmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]'Read,Delete', 65536)
     } catch [UnauthorizedAccessException] { $fleetTmp = $null; $fleetCode = 71; break
@@ -181,7 +180,7 @@ try {
       # Windows OpenSSH (in-box 9.5) stalls its stdin pipe for a reader that
       # drains it with no pause between reads (a transfer of a few hundred KB
       # never finishes). One millisecond between reads avoids it and still
-      # moves tens of MB per second.
+      # moves a few MB per second (a Windows timer tick is about 15 ms).
       [Threading.Thread]::Sleep(1)
       [void]$fleetHasher.TransformBlock($fleetBuf, 0, $fleetN, $null, 0)
       $fleetLeft -= $fleetN
@@ -199,9 +198,13 @@ try {
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { $fleetCode = 65; break }
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReadOnly) { $fleetCode = 74; break }
       $fleetOldAttr = $fleetItem.Attributes
-      # File.Replace opens the replacement itself, so it fails (77) while this
-      # handle is open, even with read and delete sharing (seen on the live
-      # Windows run). Close it, re-verify what is on disk, then replace.
+      # File.Replace opens the replacement itself, so it fails (77) while the
+      # write handle is open, even with read and delete sharing, and also while
+      # a read handle is held (both seen on the live Windows run). So close the
+      # writer and re-hash what is on disk just before the replace. A
+      # same-privilege process that can write this directory could still swap
+      # the temporary file in that short window; the directory's ACL is the
+      # boundary, as for every file it can write.
       $fleetFs.Dispose()
       $fleetFs = $null
       $fleetAgain = (Get-FileHash -LiteralPath $fleetTmp -Algorithm SHA256).Hash.ToLowerInvariant()

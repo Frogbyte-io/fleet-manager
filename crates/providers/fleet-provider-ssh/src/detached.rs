@@ -349,7 +349,8 @@ if ($fleetChild.WaitForExit($fleetMs)) {
 
 /// The Windows start body: `$fleetCmd64` (the command as base64 UTF-8) and
 /// `$fleetWrapper` are set by the caller's prefix.
-const WINDOWS_START_BODY: &str = r#"if ($fleetWindows -and -not $fleetOverride) {
+const WINDOWS_START_BODY: &str = r#"$fleetBegan = [DateTime]::UtcNow
+if ($fleetWindows -and -not $fleetOverride) {
   if (-not (fleetMakeDir $fleetParent)) { exit 71 }
   if (-not (fleetMakeDir $fleetBase)) { exit 71 }
 } else {
@@ -390,7 +391,7 @@ if ($fleetWindows) {
     # allows breakaway from it. Unlike WMI process creation this works
     # for a standard (non-administrator) account, and the child keeps the
     # session's user, token and environment.
-    Add-Type -TypeDefinition @"
+    Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class FleetLaunch {
@@ -410,8 +411,13 @@ public static class FleetLaunch {
     return pi.dwProcessId;
   }
 }
-"@
-    if ([FleetLaunch]::Start($fleetLine, $fleetCwd) -le 0) { $fleetLaunched = $false }
+'@
+    # Compiling the helper can be slow on a cold guest. A start that has used
+    # more than 30 s of its 60 s session gives up here, before launching: sshd
+    # does not end the session when the client disappears, so a late launch
+    # after the controller has already read `never_started` would run anyway.
+    if (([DateTime]::UtcNow - $fleetBegan).TotalSeconds -gt 30) { $fleetLaunched = $false }
+    elseif ([FleetLaunch]::Start($fleetLine, $fleetCwd) -le 0) { $fleetLaunched = $false }
   } catch { $fleetLaunched = $false }
 } else {
   $fleetInfo = New-Object Diagnostics.ProcessStartInfo
@@ -425,7 +431,7 @@ public static class FleetLaunch {
   $fleetInfo.WorkingDirectory = $fleetCwd
   [void][Diagnostics.Process]::Start($fleetInfo)
 }
-# A launch that failed (WMI error) never started a wrapper unless one slipped
+# A launch that failed (a launch error) never started a wrapper unless one slipped
 # in: take the gate to say so, and if the gate is already taken, wait for the
 # wrapper like any other start.
 if (-not $fleetLaunched -and (fleetGiveUp)) { exit 75 }
@@ -1541,6 +1547,31 @@ mod tests {
             let report = status(&pwsh, base.path(), "g4");
             assert_eq!(report.state, GuestState::Starting, "{report:?}");
             assert_eq!(report.reason.as_deref(), Some("start_unconfirmed"));
+        }
+
+        #[test]
+        fn the_windows_launch_helper_compiles_and_runs_before_it_is_launched() {
+            let Some(pwsh) = require_pwsh() else { return };
+            // The C# helper is the one piece of the start script no Linux
+            // test executes (it calls kernel32). It must at least compile, so
+            // a typo does not wait for a Windows guest to be found.
+            let start = start_script_for(GuestShell::PowerShell, "exit 0");
+            let from = start.find("Add-Type -TypeDefinition @'\n").unwrap();
+            let end = from + start[from..].find("\n'@\n").unwrap() + 4;
+            let snippet = format!(
+                "{}\n[Console]::Out.Write([FleetLaunch]::Start.GetType().Name + ' ' + [FleetLaunch].FullName)\n",
+                &start[from..end]
+            );
+            let out = run_ps(&pwsh, &snippet, &ScriptMetadata::default(), b"", None);
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("FleetLaunch"),
+                "{out:?}"
+            );
+            // And the give-up-late guard is in front of the launch.
+            let guard = start.find("TotalSeconds -gt 30").unwrap();
+            let launch = start.find("[FleetLaunch]::Start($fleetLine").unwrap();
+            assert!(guard < launch);
         }
     }
 }
