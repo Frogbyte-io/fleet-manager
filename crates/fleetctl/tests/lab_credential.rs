@@ -80,6 +80,7 @@ impl GuestFiles for Guest {
         &self,
         _machine_id: &str,
         _endpoint_id: &str,
+        _guest_os: fleet_core::GuestOs,
         path: &str,
         _max_bytes: u64,
         _deadline: Duration,
@@ -302,6 +303,7 @@ impl World {
             artifact_store.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
             ArtifactPolicy {
                 retention_seconds: 3_600,
@@ -313,6 +315,7 @@ impl World {
         let puts = Arc::new(LabPuts::new(
             upload_store.clone(),
             leases.clone(),
+            labs.clone(),
             labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         ));

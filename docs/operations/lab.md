@@ -209,7 +209,13 @@ What the controller sends, so you can reason about it:
 - The inventory probe uses CIM and .NET instead of `uname` and `/proc`; its tool set is reported `unknown` (not probed on Windows). Checkout discovery is not supported on Windows guests.
 - Readiness commands (`ssh_exec`) are PowerShell.
 
-Guest paths for `lab collect` and `lab put` follow the Windows rules (drive-absolute only; see the path rules in the ADR); `lab put`, `lab collect` and detached exec on Windows guests are documented as they land.
+**`lab put` and `lab collect`** on a Windows guest follow the same flow, bounds, authorization and audit as on Linux, with these differences:
+
+- Guest paths are drive-absolute (`C:\dir\file` or `C:/dir/file`); the API refuses UNC and device prefixes (`\\server`, `\\?\`, `\\.\`), `.`/`..`/empty components, control characters, any of `<>:"|?*` (so no alternate data streams), a trailing dot or space in a component, reserved device names with or without an extension (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM0-9`, `LPT0-9`), and components over 255 characters. Two paths that differ only in case or separator count as one path named twice. A Linux path is refused on a Windows lease and the reverse. The guest script checks the path's shape again before it opens anything.
+- `put` streams the bytes on stdin after the script and writes them to `.fleet-put.<random>` in the target's directory, checks the size and `Get-FileHash` (SHA-256) there, and only then moves the file into place (`File.Move`, which never replaces; `File.Replace` for `--overwrite`). The temporary file is deleted on every path that runs the script's `finally`. If the guest kills the process outright (a deadline kill closes sshd's job object), a `.fleet-put.*` file can remain; the target is never partial. The new file inherits the directory's ACL (Linux uses mode 0600); a directory or reparse point (symlink, junction) at the target is `target_not_file`.
+- `collect` reads a regular file with read/write/delete sharing (so a log another process holds open can be copied), refuses a directory (`not_a_file`) and a file over the cap (`too_large`) before sending any byte, follows a symlink the way Linux `stat -L` does, and writes the bytes to the raw standard-output stream, never through PowerShell's pipeline, which would re-encode them.
+
+Detached exec on Windows guests is documented when it lands.
 
 ## First run
 

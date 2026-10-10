@@ -19,8 +19,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
-use crate::lab::{LabUseCaseError, LeasePort, ProvisionPort};
-use crate::lab_artifacts::{BlobError, is_sha256_hex, require_guest_machine, validate_guest_path};
+use crate::lab::{LabTemplatePort, LabUseCaseError, LeasePort, ProvisionPort};
+use crate::lab_artifacts::{
+    BlobError, is_sha256_hex, require_guest_machine, validate_guest_path_for,
+};
 use crate::operation::{AuditPort, NewOperation};
 
 /// The default cap on one uploaded file: 2 GiB, enough for packaged desktop
@@ -93,6 +95,7 @@ pub struct LabPuts {
     stage: Arc<dyn UploadStagePort>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn LabTemplatePort>,
     audit: Arc<dyn AuditPort>,
 }
 
@@ -103,12 +106,14 @@ impl LabPuts {
         stage: Arc<dyn UploadStagePort>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn LabTemplatePort>,
         audit: Arc<dyn AuditPort>,
     ) -> Self {
         Self {
             stage,
             leases,
             provisions,
+            templates,
             audit,
         }
     }
@@ -182,7 +187,7 @@ impl LabPuts {
         staged: &StagedUpload,
         now: i64,
     ) -> Result<NewOperation, LabUseCaseError> {
-        self.check(authorizer, principal, target, now).await?;
+        let guest_os = self.check(authorizer, principal, target, now).await?;
         if !is_sha256_hex(&staged.sha256) {
             return Err(LabUseCaseError::Invalid {
                 detail: "the upload's SHA-256 is not a lowercase hex digest".to_owned(),
@@ -240,6 +245,7 @@ impl LabPuts {
                     "sizeBytes": staged.size_bytes,
                     "sha256": staged.sha256,
                     "overwrite": target.overwrite,
+                    "guestOs": guest_os.id(),
                 })
                 .to_string(),
             ),
@@ -253,7 +259,7 @@ impl LabPuts {
         principal: &ActingPrincipal,
         target: &PutTarget<'_>,
         now: i64,
-    ) -> Result<(), LabUseCaseError> {
+    ) -> Result<fleet_core::GuestOs, LabUseCaseError> {
         authorize(
             authorizer,
             AccessRequest {
@@ -263,19 +269,24 @@ impl LabPuts {
             },
         )
         .map_err(LabUseCaseError::Denied)?;
-        validate_guest_path(target.guest_path).map_err(|detail| LabUseCaseError::Invalid {
-            detail: format!("guest path: {detail}"),
-        })?;
-        require_guest_machine(
+        // The lease comes first: the guest's OS decides which path rules
+        // apply.
+        let (_, guest_os) = require_guest_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
+            self.templates.as_ref(),
             principal,
             target.lease_id,
             now,
             "put into",
         )
-        .await
-        .map(|_| ())
+        .await?;
+        validate_guest_path_for(guest_os, target.guest_path).map_err(|detail| {
+            LabUseCaseError::Invalid {
+                detail: format!("guest path: {detail}"),
+            }
+        })?;
+        Ok(guest_os)
     }
 }
 

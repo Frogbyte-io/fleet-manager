@@ -3843,6 +3843,7 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
             blobs.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             std::sync::Arc::new(fleet_storage_sqlite::AuditSink::new(pool.clone())),
             fleet_application::lab_artifacts::ArtifactPolicy::default(),
         ));

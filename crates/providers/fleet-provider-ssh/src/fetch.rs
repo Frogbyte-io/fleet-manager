@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::exec::ExecutionLimiter;
-use crate::shell::{arguments_only, spawn_script_session};
+use crate::shell::{GuestShell, arguments_only, spawn_script_session};
 use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 
 /// Why the guest refused a file, or how a copy ended without one.
@@ -60,6 +60,50 @@ fleet_max=$2\n\
 fleet_size=$(stat -L -c %s -- \"$fleet_path\") || exit 70\n\
 [ \"$fleet_size\" -le \"$fleet_max\" ] || exit 68\n\
 exec head -c \"$((fleet_max + 1))\" -- \"$fleet_path\"\n";
+
+/// The Windows PowerShell twin of [`FETCH_SCRIPT`]; `$args[0]` is the path,
+/// `$args[1]` the cap, and the exit codes are the same. The bytes go to the
+/// raw standard-output stream, never through the PowerShell pipeline, which
+/// would re-encode them. Path shape is checked here too (defence in depth;
+/// the application validates first): no UNC/device prefix, wildcard or
+/// alternate data stream, and the path must be rooted.
+const WINDOWS_FETCH_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
+$fleetPath = $args[0]
+$fleetMax = [int64]$args[1]
+if ([string]::IsNullOrEmpty($fleetPath) -or $fleetPath.StartsWith('\\') -or $fleetPath.StartsWith('//') `
+    -or $fleetPath.IndexOfAny([char[]]'<>"|?*') -ge 0 -or ($fleetPath.Length -gt 2 -and $fleetPath.IndexOf(':', 2) -ge 0) `
+    -or -not [IO.Path]::IsPathRooted($fleetPath)) { exit 64 }
+try { $fleetFull = [IO.Path]::GetFullPath($fleetPath) } catch { exit 64 }
+if ([IO.Directory]::Exists($fleetFull)) { exit 65 }
+if (-not [IO.File]::Exists($fleetFull)) { exit 66 }
+try { $fleetLen = (New-Object IO.FileInfo $fleetFull).Length } catch { exit 70 }
+if ($fleetLen -gt $fleetMax) { exit 68 }
+try {
+  $fleetFs = [IO.File]::Open($fleetFull, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+} catch [UnauthorizedAccessException] { exit 67 } catch [IO.IOException] { exit 67 } catch { exit 70 }
+try {
+  $fleetOut = [Console]::OpenStandardOutput()
+  $fleetBuf = New-Object byte[] 65536
+  $fleetTotal = [int64]0
+  while ($fleetTotal -le $fleetMax) {
+    $fleetWant = [int][Math]::Min([int64]$fleetBuf.Length, $fleetMax + 1 - $fleetTotal)
+    $fleetN = $fleetFs.Read($fleetBuf, 0, $fleetWant)
+    if ($fleetN -le 0) { break }
+    $fleetOut.Write($fleetBuf, 0, $fleetN)
+    $fleetTotal += $fleetN
+  }
+  $fleetOut.Flush()
+} catch { exit 70 } finally { $fleetFs.Dispose() }
+exit 0
+"#;
+
+/// The fetch script for a guest shell.
+fn fetch_script_for(shell: GuestShell) -> &'static str {
+    match shell {
+        GuestShell::Posix => FETCH_SCRIPT,
+        GuestShell::PowerShell => WINDOWS_FETCH_SCRIPT,
+    }
+}
 
 /// How much of a stream to read at once.
 const READ_CHUNK: usize = 64 * 1024;
@@ -201,7 +245,7 @@ fn spawn_copy(
         provider,
         endpoint,
         &arguments_only(vec![path.to_owned(), max_bytes.to_string()]),
-        FETCH_SCRIPT,
+        fetch_script_for(GuestShell::for_os(endpoint.guest_os)?),
         deadline,
     )?;
     // The script is all this session reads: close stdin.
@@ -279,4 +323,82 @@ pub(crate) fn drain_stderr<R: Read>(pipe: Option<R>) -> Vec<u8> {
         }
     }
     kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WINDOWS_FETCH_SCRIPT;
+    use crate::exec::ScriptMetadata;
+    use crate::pwsh_support::{require_pwsh, run_ps};
+
+    fn fetch(pwsh: &str, path: &str, max: u64) -> std::process::Output {
+        let metadata = ScriptMetadata {
+            arguments: vec![path.to_owned(), max.to_string()],
+            ..ScriptMetadata::default()
+        };
+        run_ps(pwsh, WINDOWS_FETCH_SCRIPT, &metadata, b"", None)
+    }
+
+    #[test]
+    fn windows_fetch_streams_binary_bytes_untouched() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dir with $x & 'q'/f.bin");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Every byte value several times over, CRLF, ^Z, NUL, a UTF-8 BOM, and
+        // invalid UTF-8: anything a text pipeline would mangle.
+        let mut payload: Vec<u8> = (0..=255_u8).cycle().take(300_000).collect();
+        payload.extend_from_slice(b"\r\n\x1a\0\xef\xbb\xbf\xff\xfe\r\n");
+        std::fs::write(&path, &payload).unwrap();
+        let out = fetch(&pwsh, &path.display().to_string(), 10_000_000);
+        assert_eq!(out.status.code(), Some(0), "{:?}", out.stderr);
+        assert_eq!(out.stdout, payload);
+        // An empty file is a successful, empty copy.
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, b"").unwrap();
+        let out = fetch(&pwsh, &empty.display().to_string(), 10);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn windows_fetch_refuses_missing_directories_and_oversize_files_with_the_linux_codes() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let code = |path: &str, max: u64| fetch(&pwsh, path, max).status.code();
+        assert_eq!(
+            code(&dir.path().join("nope").display().to_string(), 10),
+            Some(66)
+        );
+        assert_eq!(code(&dir.path().display().to_string(), 10), Some(65));
+        let big = dir.path().join("big");
+        std::fs::write(&big, vec![0_u8; 100]).unwrap();
+        let out = fetch(&pwsh, &big.display().to_string(), 99);
+        assert_eq!(out.status.code(), Some(68));
+        assert!(out.stdout.is_empty(), "a refused copy writes no bytes");
+        assert_eq!(code(&big.display().to_string(), 100), Some(0));
+        // A symlink to a regular file is followed, as `stat -L` does.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&big, &link).unwrap();
+        assert_eq!(code(&link.display().to_string(), 100), Some(0));
+        // Unsafe or relative paths are refused before anything is opened.
+        let ads = format!("{}:stream", big.display());
+        for bad in [ads.as_str(), "//server/share/f", "relative", "/tmp/a*b"] {
+            assert_eq!(code(bad, 100), Some(64), "{bad}");
+        }
+    }
+
+    #[test]
+    fn windows_fetch_of_a_file_exactly_at_the_cap_returns_all_of_it() {
+        let Some(pwsh) = require_pwsh() else { return };
+        // A file that grew after the size check is cut at cap + 1 so the
+        // controller can tell it overflowed; here the size check would refuse
+        // it, so the bound is exercised through a cap equal to the size.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, vec![1_u8; 70_000]).unwrap();
+        let out = fetch(&pwsh, &file.display().to_string(), 70_000);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.stdout.len(), 70_000);
+    }
 }

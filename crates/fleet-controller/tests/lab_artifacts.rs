@@ -59,6 +59,8 @@ impl OperationExecutor for Ssh {
 #[derive(Debug, Default)]
 struct Guest {
     files: Mutex<HashMap<String, Result<Vec<u8>, FetchOutcome>>>,
+    /// The guest OS each fetch was told about.
+    seen: Mutex<Vec<fleet_core::GuestOs>>,
 }
 
 #[async_trait]
@@ -67,11 +69,13 @@ impl GuestFiles for Guest {
         &self,
         _machine_id: &str,
         _endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
         path: &str,
         max_bytes: u64,
         _deadline: Duration,
         mut sink: StagingFile,
     ) -> (Result<FetchOutcome, String>, StagingFile) {
+        self.seen.lock().unwrap().push(guest_os);
         let entry = self.files.lock().unwrap().get(path).cloned();
         let outcome = match entry {
             None => Ok(FetchOutcome::Missing),
@@ -120,6 +124,11 @@ struct Fixture {
 impl Fixture {
     /// A ready lease whose guest is a registered Lab machine.
     async fn new() -> Self {
+        Self::with_os(fleet_core::GuestOs::Linux).await
+    }
+
+    /// The same, for a template that declares the guest OS.
+    async fn with_os(guest_os: fleet_core::GuestOs) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("fleet.db")).await.unwrap();
         let pool = store.pool().clone();
@@ -144,7 +153,7 @@ impl Fixture {
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
             audio: None,
-            guest_os: fleet_core::GuestOs::default(),
+            guest_os,
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),
@@ -234,6 +243,7 @@ impl Fixture {
             Arc::new(LabArtifactRepository::new(pool.clone())),
             artifact_store.clone(),
             leases.clone(),
+            labs.clone(),
             labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
             ArtifactPolicy {
@@ -777,6 +787,7 @@ async fn collection_requests_are_validated_authorized_and_audited() {
     let payload: serde_json::Value =
         serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
     assert_eq!(payload["paths"][0], "/var/log/syslog");
+    assert_eq!(payload["guestOs"], "linux");
     assert!(
         fixture
             .audit_events()
@@ -968,4 +979,92 @@ async fn a_download_is_authorized_on_the_artifacts_lease() {
             Some(fleet_application::lab::LabUseCaseError::Denied(_))
         ));
     }
+}
+
+#[tokio::test]
+async fn a_windows_lease_collects_windows_paths_and_tells_the_executor_its_os() {
+    let fixture = Fixture::with_os(fleet_core::GuestOs::Windows).await;
+    let principal = Fixture::principal();
+    let request = |paths: &[&str]| {
+        let paths: Vec<String> = paths.iter().map(|path| (*path).to_owned()).collect();
+        let artifacts = fixture.artifacts.clone();
+        let lease = fixture.lease_id.clone();
+        let principal = principal.clone();
+        async move {
+            artifacts
+                .request_collect(
+                    &fleet_auth::LanAllowAllAuthorizer,
+                    &principal,
+                    &lease,
+                    &paths,
+                    fleet_core::SystemClock::now_unix_millis(),
+                )
+                .await
+        }
+    };
+    for bad in [
+        &["/var/log/syslog"][..],
+        &[r"C:\logs\NUL"],
+        &[r"C:\logs\a.txt:stream"],
+        &[r"\\?\C:\logs\a.txt"],
+        &[r"C:\logs\a.txt", "c:/LOGS/A.TXT"],
+    ] {
+        assert!(request(bad).await.is_err(), "{bad:?}");
+    }
+    let new = request(&[r"C:\logs\app.log"]).await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(new.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["guestOs"], "windows");
+
+    fixture.guest.files.lock().unwrap().insert(
+        r"C:\logs\app.log".to_owned(),
+        Ok(b"windows log\r\n".to_vec()),
+    );
+    let created = fixture
+        .operations
+        .create_lab_collect(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &fixture.lease_id,
+            &new,
+        )
+        .await
+        .unwrap();
+    let done = fixture.run(created).await;
+    assert_eq!(done.state, "succeeded", "{:?}", done.error_json);
+    assert_eq!(
+        fixture.guest.seen.lock().unwrap().clone(),
+        vec![fleet_core::GuestOs::Windows]
+    );
+}
+
+#[tokio::test]
+async fn a_collect_queued_with_an_unknown_guest_os_is_refused_before_any_copy() {
+    let fixture = Fixture::new().await;
+    let new = NewOperation {
+        kind: "lab.collect".to_owned(),
+        idempotency_key: None,
+        deadline_at: None,
+        correlation_id: None,
+        payload_json: Some(
+            serde_json::json!({
+                "leaseId": fixture.lease_id, "paths": ["/var/log/x"], "guestOs": "plan9"
+            })
+            .to_string(),
+        ),
+        review_token: None,
+    };
+    let created = fixture
+        .operations
+        .create_lab_collect(
+            &fleet_auth::LanAllowAllAuthorizer,
+            fleet_auth::LAN_PRINCIPAL_ID,
+            &fixture.lease_id,
+            &new,
+        )
+        .await
+        .unwrap();
+    let done = fixture.run(created).await;
+    assert_eq!(done.state, "failed");
+    assert!(fixture.guest.seen.lock().unwrap().is_empty());
 }

@@ -25,7 +25,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
 use fleet_application::lab::{LeasePort, ProvisionPort};
-use fleet_application::lab_artifacts::{BlobError, is_sha256_hex, validate_guest_path};
+use fleet_application::lab_artifacts::{BlobError, is_sha256_hex, validate_guest_path_for};
 use fleet_application::lab_put::{StagedUpload, UploadStagePort, UploadWriter};
 use fleet_application::operation::{Operation, Operations};
 use fleet_application::worker::OperationExecutor;
@@ -332,6 +332,7 @@ impl Drop for StagedGuard<'_> {
 
 /// What a `lab.put` operation's payload carries.
 struct PutPayload {
+    guest_os: fleet_core::GuestOs,
     guest_path: String,
     upload_id: String,
     size: u64,
@@ -349,12 +350,18 @@ fn parse_payload(operation: &Operation) -> Result<PutPayload, String> {
         .as_str()
         .ok_or("no guest path")?
         .to_owned();
-    validate_guest_path(&guest_path)?;
+    let guest_os = match value.get("guestOs") {
+        None | Some(serde_json::Value::Null) => fleet_core::GuestOs::Linux,
+        Some(serde_json::Value::String(id)) => fleet_core::GuestOs::from_id(id)?,
+        Some(_) => return Err("the payload's guestOs is not a string".to_owned()),
+    };
+    validate_guest_path_for(guest_os, &guest_path)?;
     let sha256 = value["sha256"].as_str().ok_or("no sha256")?.to_owned();
     if !is_sha256_hex(&sha256) {
         return Err("the sha256 is not a lowercase hex digest".to_owned());
     }
     Ok(PutPayload {
+        guest_os,
         guest_path,
         upload_id: value["uploadId"].as_str().ok_or("no upload id")?.to_owned(),
         size: value["sizeBytes"].as_u64().ok_or("no size")?,
@@ -468,6 +475,7 @@ impl LabPutDispatch {
                 &machine_id,
                 &endpoint_id,
                 GuestPut {
+                    guest_os: payload.guest_os,
                     path: payload.guest_path.clone(),
                     size: payload.size,
                     sha256: payload.sha256.clone(),

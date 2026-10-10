@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use fleet_core::GuestOs;
 
 use crate::authz::{AccessRequest, ActingPrincipal, Authorizer, Decision, Permission, authorize};
-use crate::lab::{LabUseCaseError, LeasePort, ProvisionPort, lease_exec_ready};
+use crate::lab::{LabTemplatePort, LabUseCaseError, LeasePort, ProvisionPort, lease_exec_ready};
 use crate::operation::{AuditPort, NewOperation};
 
 /// What an artifact holds.
@@ -620,6 +620,7 @@ pub struct LabArtifacts {
     blobs: Arc<dyn ArtifactBlobPort>,
     leases: Arc<dyn LeasePort>,
     provisions: Arc<dyn ProvisionPort>,
+    templates: Arc<dyn LabTemplatePort>,
     audit: Arc<dyn AuditPort>,
     policy: ArtifactPolicy,
     /// Serializes blob commits with blob removals: content addressing lets
@@ -636,6 +637,7 @@ impl LabArtifacts {
         blobs: Arc<dyn ArtifactBlobPort>,
         leases: Arc<dyn LeasePort>,
         provisions: Arc<dyn ProvisionPort>,
+        templates: Arc<dyn LabTemplatePort>,
         audit: Arc<dyn AuditPort>,
         policy: ArtifactPolicy,
     ) -> Self {
@@ -644,6 +646,7 @@ impl LabArtifacts {
             blobs,
             leases,
             provisions,
+            templates,
             audit,
             policy,
             blob_lock: tokio::sync::Mutex::new(()),
@@ -773,7 +776,8 @@ impl LabArtifacts {
             .map_err(backend)
     }
 
-    /// Validates a collection of guest paths from a ready lease and answers
+    /// Validates a collection of guest paths (under the rules of the lease's
+    /// guest OS) from a ready lease and answers
     /// the `lab.collect` operation to queue. The lease must be ready and
     /// unexpired with a registered Lab machine; the executor re-checks
     /// that when it runs.
@@ -796,16 +800,18 @@ impl LabArtifacts {
             Permission::LabArtifacts,
             Some(lease_id),
         )?;
-        validate_collect_paths(paths).map_err(|detail| LabUseCaseError::Invalid { detail })?;
-        require_guest_machine(
+        let (_, guest_os) = require_guest_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
+            self.templates.as_ref(),
             principal,
             lease_id,
             now,
             "collect from",
         )
         .await?;
+        validate_collect_paths_for(guest_os, paths)
+            .map_err(|detail| LabUseCaseError::Invalid { detail })?;
         self.audit_event(
             principal,
             lease_id,
@@ -819,7 +825,12 @@ impl LabArtifacts {
             deadline_at: None,
             correlation_id: None,
             payload_json: Some(
-                serde_json::json!({ "leaseId": lease_id, "paths": paths }).to_string(),
+                serde_json::json!({
+                    "leaseId": lease_id,
+                    "paths": paths,
+                    "guestOs": guest_os.id(),
+                })
+                .to_string(),
             ),
             review_token: None,
         })
@@ -1235,11 +1246,12 @@ pub(crate) fn scope_lease(
 pub(crate) async fn require_guest_machine(
     leases: &dyn LeasePort,
     provisions: &dyn ProvisionPort,
+    templates: &dyn LabTemplatePort,
     principal: &ActingPrincipal,
     lease_id: &str,
     now: i64,
     verb: &str,
-) -> Result<fleet_core::Lease, LabUseCaseError> {
+) -> Result<(fleet_core::Lease, GuestOs), LabUseCaseError> {
     let lease = leases.get(lease_id).await.map_err(|detail| {
         if detail.contains("not found") {
             LabUseCaseError::NotFound {
@@ -1264,7 +1276,14 @@ pub(crate) async fn require_guest_machine(
             detail: format!("the lease's guest has no registered Lab machine to {verb}"),
         });
     }
-    Ok(lease)
+    // The guest OS selects the shell and the path rules; the version it
+    // comes from is immutable.
+    let guest_os = templates
+        .get_version(&lease.template_version_id)
+        .await
+        .map(|version| version.content.guest_os)
+        .map_err(backend)?;
+    Ok((lease, guest_os))
 }
 
 fn allow(

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::exec::ExecutionLimiter;
 use crate::fetch::{POLL, drain_stderr};
-use crate::shell::{arguments_only, spawn_script_session};
+use crate::shell::{GuestShell, arguments_only, spawn_script_session};
 use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 
 /// How a copy into the guest ended.
@@ -95,6 +95,83 @@ exit 0\n\
 }\n\
 fleet_put \"$@\"; exit $?\n";
 
+/// The Windows PowerShell twin of [`PUT_SCRIPT`]; `$args` are the path, the
+/// size, the SHA-256, and `1` to overwrite, with the same exit codes. The
+/// payload is read from the raw standard-input stream (right after the two
+/// header lines the bootstrap consumed), written to a temporary file in the
+/// target's own directory, checked for size and `Get-FileHash`, and only then
+/// moved into place: `File.Move` refuses to clobber, and an overwrite uses
+/// `File.Replace`. The temporary file is deleted on every path that runs
+/// `finally`; if the guest kills the process outright a `.fleet-put.*` file
+/// can remain, never a partial target.
+const WINDOWS_PUT_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
+$fleetPath = $args[0]
+$fleetSize = [int64]$args[1]
+$fleetSha = $args[2]
+$fleetOver = $args[3]
+if ([string]::IsNullOrEmpty($fleetPath) -or $fleetPath.StartsWith('\\') -or $fleetPath.StartsWith('//') `
+    -or $fleetPath.IndexOfAny([char[]]'<>"|?*') -ge 0 -or ($fleetPath.Length -gt 2 -and $fleetPath.IndexOf(':', 2) -ge 0) `
+    -or -not [IO.Path]::IsPathRooted($fleetPath)) { exit 64 }
+try { $fleetFull = [IO.Path]::GetFullPath($fleetPath) } catch { exit 64 }
+$fleetDir = [IO.Path]::GetDirectoryName($fleetFull)
+if ([string]::IsNullOrEmpty($fleetDir) -or -not [IO.Directory]::Exists($fleetDir)) { exit 69 }
+$fleetCode = 70
+$fleetTmp = $null
+$fleetFs = $null
+try {
+  do {
+    if ([IO.File]::Exists($fleetFull) -or [IO.Directory]::Exists($fleetFull)) {
+      if ($fleetOver -ne '1') { $fleetCode = 73; break }
+      $fleetItem = Get-Item -LiteralPath $fleetFull -Force
+      if ($fleetItem.PSIsContainer -or ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $fleetCode = 65; break }
+    }
+    $fleetTmp = Join-Path $fleetDir ('.fleet-put.' + [Guid]::NewGuid().ToString('N'))
+    try {
+      $fleetFs = New-Object IO.FileStream($fleetTmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536)
+    } catch [UnauthorizedAccessException] { $fleetTmp = $null; $fleetCode = 71; break
+    } catch { $fleetTmp = $null; $fleetCode = 79; break }
+    $fleetIn = [Console]::OpenStandardInput()
+    $fleetBuf = New-Object byte[] 65536
+    $fleetLeft = $fleetSize
+    while ($fleetLeft -gt 0) {
+      $fleetN = $fleetIn.Read($fleetBuf, 0, [int][Math]::Min([int64]$fleetBuf.Length, $fleetLeft))
+      if ($fleetN -le 0) { break }
+      $fleetFs.Write($fleetBuf, 0, $fleetN)
+      $fleetLeft -= $fleetN
+    }
+    $fleetFs.Flush()
+    $fleetFs.Dispose()
+    $fleetFs = $null
+    if ((New-Object IO.FileInfo $fleetTmp).Length -ne $fleetSize) { $fleetCode = 76; break }
+    $fleetHave = (Get-FileHash -LiteralPath $fleetTmp -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($fleetHave -ne $fleetSha) { $fleetCode = 75; break }
+    if ($fleetOver -eq '1' -and [IO.File]::Exists($fleetFull)) {
+      $fleetItem = Get-Item -LiteralPath $fleetFull -Force
+      if ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { $fleetCode = 65; break }
+      try { [IO.File]::Replace($fleetTmp, $fleetFull, [NullString]::Value) } catch { $fleetCode = 77; break }
+    } else {
+      try { [IO.File]::Move($fleetTmp, $fleetFull) } catch {
+        if ([IO.File]::Exists($fleetFull) -or [IO.Directory]::Exists($fleetFull)) { $fleetCode = 73 } else { $fleetCode = 77 }
+        break
+      }
+    }
+    $fleetCode = 0
+  } while ($false)
+} catch { $fleetCode = 70 } finally {
+  if ($null -ne $fleetFs) { try { $fleetFs.Dispose() } catch { } }
+  if ($null -ne $fleetTmp -and [IO.File]::Exists($fleetTmp)) { try { [IO.File]::Delete($fleetTmp) } catch { } }
+}
+exit $fleetCode
+"#;
+
+/// The put script for a guest shell.
+fn put_script_for(shell: GuestShell) -> &'static str {
+    match shell {
+        GuestShell::Posix => PUT_SCRIPT,
+        GuestShell::PowerShell => WINDOWS_PUT_SCRIPT,
+    }
+}
+
 /// How much of the source to read at once.
 const WRITE_CHUNK: usize = 64 * 1024;
 
@@ -165,7 +242,7 @@ fn put_inner(
             request.sha256.to_owned(),
             if request.overwrite { "1" } else { "0" }.to_owned(),
         ]),
-        PUT_SCRIPT,
+        put_script_for(GuestShell::for_os(endpoint.guest_os)?),
         deadline,
     )?;
     let stdin = child.stdin.take();
@@ -425,5 +502,189 @@ mod tests {
         };
         assert_eq!(out.status.code(), Some(76));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    mod windows {
+        use super::super::WINDOWS_PUT_SCRIPT;
+        use super::sha;
+        use crate::exec::ScriptMetadata;
+        use crate::pwsh_support::{require_pwsh, run_ps};
+
+        fn put(
+            pwsh: &str,
+            dir: &std::path::Path,
+            target: &str,
+            payload: &[u8],
+            declared: usize,
+            sha: &str,
+            over: &str,
+        ) -> std::process::Output {
+            let metadata = ScriptMetadata {
+                arguments: vec![
+                    target.to_owned(),
+                    declared.to_string(),
+                    sha.to_owned(),
+                    over.to_owned(),
+                ],
+                ..ScriptMetadata::default()
+            };
+            run_ps(pwsh, WINDOWS_PUT_SCRIPT, &metadata, payload, Some(dir))
+        }
+
+        fn entries(dir: &std::path::Path) -> usize {
+            std::fs::read_dir(dir).unwrap().count()
+        }
+
+        #[test]
+        fn puts_binary_bytes_verifies_and_leaves_no_temp_file() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("dir with 'quotes' $x & (y)");
+            std::fs::create_dir(&target).unwrap();
+            let path = target.join("file;name `x`.bin").display().to_string();
+            // Every byte value, CRLF, ^Z, NUL, and a PowerShell-looking tail,
+            // large enough to cross several read chunks.
+            let mut payload: Vec<u8> = (0..=255_u8).cycle().take(3 * 1024 * 1024 + 17).collect();
+            payload.extend_from_slice(b"\r\n\x1a\0Write-Output pwned\r\nexit 3\r\n");
+            let out = put(
+                &pwsh,
+                dir.path(),
+                &path,
+                &payload,
+                payload.len(),
+                &sha(&payload),
+                "0",
+            );
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), payload);
+            assert_eq!(entries(&target), 1);
+        }
+
+        #[test]
+        fn refuses_a_wrong_hash_or_short_payload_without_touching_the_target() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("out.bin").display().to_string();
+            let out = put(&pwsh, dir.path(), &path, b"abc", 3, &sha(b"other"), "0");
+            assert_eq!(out.status.code(), Some(75), "{out:?}");
+            assert_eq!(entries(dir.path()), 0);
+            // Declared 4 bytes, sent 2.
+            let out = put(&pwsh, dir.path(), &path, b"ab", 4, &sha(b"abcd"), "0");
+            assert_eq!(out.status.code(), Some(76), "{out:?}");
+            assert_eq!(entries(dir.path()), 0);
+            // Existing content is not harmed by a refused overwrite.
+            std::fs::write(&path, b"old").unwrap();
+            let out = put(&pwsh, dir.path(), &path, b"new", 3, &sha(b"zzz"), "1");
+            assert_eq!(out.status.code(), Some(75));
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            assert_eq!(entries(dir.path()), 1);
+        }
+
+        #[test]
+        fn overwrite_policy_matches_linux() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("out.bin");
+            std::fs::write(&path, b"old").unwrap();
+            let name = path.display().to_string();
+            let code = |target: &str, payload: &[u8], over: &str| {
+                put(
+                    &pwsh,
+                    dir.path(),
+                    target,
+                    payload,
+                    payload.len(),
+                    &sha(payload),
+                    over,
+                )
+                .status
+                .code()
+            };
+            assert_eq!(code(&name, b"new", "0"), Some(73));
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            assert_eq!(code(&name, b"new", "1"), Some(0));
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            // A directory or symlink is never replaced.
+            let sub = dir.path().join("sub");
+            std::fs::create_dir(&sub).unwrap();
+            assert_eq!(code(&sub.display().to_string(), b"x", "1"), Some(65));
+            assert_eq!(code(&sub.display().to_string(), b"x", "0"), Some(73));
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            let link_name = link.display().to_string();
+            assert_eq!(code(&link_name, b"x", "1"), Some(65));
+            assert_eq!(code(&link_name, b"x", "0"), Some(73));
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            assert_eq!(entries(dir.path()), 3);
+        }
+
+        #[test]
+        fn refuses_a_missing_directory_and_unsafe_paths() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("nope/out.bin").display().to_string();
+            let code = |target: &str| {
+                put(&pwsh, dir.path(), target, b"x", 1, &sha(b"x"), "0")
+                    .status
+                    .code()
+            };
+            assert_eq!(code(&missing), Some(69));
+            // Alternate data streams, wildcards, UNC and relative paths are
+            // refused in the guest too, before anything is written.
+            let ads = format!("{}:stream", dir.path().join("f").display());
+            for bad in [
+                ads.as_str(),
+                "//server/share/f",
+                "relative/path",
+                "/tmp/a*b",
+                "/tmp/a?b",
+            ] {
+                assert_eq!(code(bad), Some(64), "{bad}");
+            }
+            assert_eq!(entries(dir.path()), 0);
+        }
+
+        #[test]
+        fn a_killed_copy_never_leaves_a_partial_target() {
+            use std::io::Write as _;
+            let Some(pwsh) = require_pwsh() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("out.bin");
+            let payload = vec![7_u8; 1024 * 1024];
+            let shell = crate::shell::GuestShell::PowerShell;
+            let metadata = ScriptMetadata {
+                arguments: vec![
+                    path.display().to_string(),
+                    payload.len().to_string(),
+                    sha(&payload),
+                    "0".to_owned(),
+                ],
+                ..ScriptMetadata::default()
+            };
+            let mut child = std::process::Command::new(&pwsh)
+                .args(["-NoProfile", "-NonInteractive", "-Command"])
+                .arg(shell.command_line(&metadata))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin
+                .write_all(&shell.session_input(WINDOWS_PUT_SCRIPT, &metadata))
+                .unwrap();
+            // Half the payload, then the process is killed outright.
+            stdin.write_all(&payload[..payload.len() / 2]).unwrap();
+            stdin.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            child.kill().unwrap();
+            let _ = child.wait();
+            assert!(!path.exists());
+            // Only the documented temporary name can be left behind.
+            for entry in std::fs::read_dir(dir.path()).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(name.starts_with(".fleet-put."), "{name}");
+            }
+        }
     }
 }
