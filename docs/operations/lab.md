@@ -219,7 +219,16 @@ The executors take the guest OS from the lease's template version, not the paylo
 
 On the live Windows run, still to be confirmed: that `finally` runs when sshd closes the session, that Defender or an indexer does not cause sharing violations on the temporary file, that `catch [Type]` filters and `break` inside `try`/`catch` inside `do/while` behave on 5.1 as under PowerShell 7, that `File.Replace` works with the source handle still open, and that the data is durable (it is flushed before the rename, but the rename itself is not synced).
 
-Detached exec on a Windows lease is refused (`invalid`) until its Windows scripts land.
+**Detached exec** (`lab exec --detach`, `lab exec-status`) works on Windows guests with the same states (`starting`, `running`, `exited`, `lost` with `guest_rebooted`, `process_gone` or `never_started`), bounds, scrubbing and `abandoned` semantics as Linux. Differences:
+
+- The handle directory is `%ProgramData%\fleet-lab\exec\<handle>` when the SSH user is an administrator (its ACL is protected: SYSTEM, Administrators and that user only) and `%LOCALAPPDATA%\fleet-lab\exec\<handle>` otherwise. Files: `body.ps1` (your command, verbatim UTF-8, run as PowerShell), `run.ps1` (the fixed wrapper), `pid` (`<pid> <start ticks>`), `boot_id` (the OS last-boot time), `started`, `stdout`, `stderr`, `exit`, `finished` (written last, temporary file then rename), `abandoned`.
+- The command is data: it reaches the guest as a base64 literal inside the start script (alphabet that cannot leave a single-quoted string) and is written to `body.ps1` by .NET; nothing is interpolated.
+- The wrapper is started through WMI (`Win32_Process.Create`) so it is outside the SSH session's job object (Windows OpenSSH kills a session's process tree when it ends); it runs the command as a child under the timeout with stdout, stderr and an empty stdin redirected to files; `exit 124` means the bound ended it (the process tree is killed with `taskkill /T`). The command starts in the handle directory, not the SSH user's profile directory, with the environment WMI gives a new process rather than the SSH session's.
+- Status reads only regular files that are not reparse points, each bounded (the last 16 KiB of each stream), with sharing that tolerates a running writer; liveness is the pid plus a start time within a second and an unchanged last-boot time.
+- Output encoding is whatever the command writes; the child sets UTF-8 for PowerShell output.
+- A command can tamper with its own directory, children it starts can outlive the kill (job objects are not used for them), and `--keep` semantics are the same as on Linux.
+
+To confirm on the live Windows run: that WMI-created processes escape the OpenSSH job object and survive the session, that `Start-Process -Redirect*` files can be read while the child writes, the ACL call, and the `Win32_Process.Create` identity and environment.
 
 ## First run
 

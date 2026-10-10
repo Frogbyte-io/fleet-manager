@@ -107,7 +107,13 @@ struct LocalGuest {
 
 #[async_trait]
 impl GuestExecPort for LocalGuest {
-    async fn probe(&self, _: &str, _: &str, handle: &str) -> Result<GuestProcess, String> {
+    async fn probe(
+        &self,
+        _: &str,
+        _: &str,
+        _: fleet_core::GuestOs,
+        handle: &str,
+    ) -> Result<GuestProcess, String> {
         use std::io::Write as _;
         self.reads.fetch_add(1, Ordering::SeqCst);
         let mut args = status_metadata(handle, TAIL_WINDOW_BYTES).arguments;
@@ -960,9 +966,9 @@ async fn the_bound_never_reaches_past_the_lease() {
 }
 
 #[tokio::test]
-async fn detached_exec_is_refused_for_a_windows_lease_until_its_scripts_exist() {
+async fn a_windows_lease_prepares_a_windows_start_and_the_executor_checks_the_lease() {
     let fixture = Fixture::with_os("tester", fleet_core::GuestOs::Windows).await;
-    let error = fixture
+    let prepared = fixture
         .prepare(
             &fleet_auth::LanAllowAllAuthorizer,
             &lan(),
@@ -971,10 +977,26 @@ async fn detached_exec_is_refused_for_a_windows_lease_until_its_scripts_exist() 
             None,
         )
         .await
-        .unwrap_err();
+        .unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(prepared.operation.payload_json.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["guestOs"], "windows");
+
+    // A start queued without `guestOs` (an older controller) claims Linux
+    // and is refused on a Windows lease before any session starts.
+    let mut stale = prepared;
+    let mut edited = payload;
+    edited.as_object_mut().unwrap().remove("guestOs");
+    stale.operation.payload_json = Some(edited.to_string());
+    let handle = fixture.queue(&stale).await;
+    let done = fixture.run(&handle).await;
+    assert_eq!(done.state, "failed", "{done:?}");
     assert!(
-        matches!(&error, LabUseCaseError::Invalid { detail } if detail.contains("Windows")),
-        "{error:?}"
+        done.error_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("guest_os_mismatch"),
+        "{done:?}"
     );
 }
 

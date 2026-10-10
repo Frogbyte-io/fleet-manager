@@ -66,7 +66,13 @@ struct Guest {
 
 #[async_trait]
 impl GuestExecPort for Guest {
-    async fn probe(&self, _: &str, _: &str, _: &str) -> Result<GuestProcess, String> {
+    async fn probe(
+        &self,
+        _: &str,
+        _: &str,
+        _: fleet_core::GuestOs,
+        _: &str,
+    ) -> Result<GuestProcess, String> {
         self.answer.lock().unwrap().clone()
     }
 }

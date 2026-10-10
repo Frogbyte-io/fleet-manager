@@ -125,7 +125,13 @@ struct DetachedGuest {
 
 #[async_trait]
 impl GuestExecPort for DetachedGuest {
-    async fn probe(&self, _: &str, _: &str, _: &str) -> Result<GuestProcess, String> {
+    async fn probe(
+        &self,
+        _: &str,
+        _: &str,
+        _: fleet_core::GuestOs,
+        _: &str,
+    ) -> Result<GuestProcess, String> {
         let first = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
         Ok(GuestProcess {
             state: if first {

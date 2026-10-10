@@ -66,7 +66,13 @@ pub struct UnavailableGuestExec {
 
 #[async_trait]
 impl GuestExecPort for UnavailableGuestExec {
-    async fn probe(&self, _: &str, _: &str, _: &str) -> Result<GuestProcess, String> {
+    async fn probe(
+        &self,
+        _: &str,
+        _: &str,
+        _: fleet_core::GuestOs,
+        _: &str,
+    ) -> Result<GuestProcess, String> {
         Err(self.reason.clone())
     }
 }
@@ -77,15 +83,17 @@ impl GuestExecPort for SshGuestExec {
         &self,
         machine_id: &str,
         endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
         handle: &str,
     ) -> Result<GuestProcess, String> {
-        let (spec, _, _) = crate::exec::resolve_ssh_endpoint(
+        let (mut spec, _, _) = crate::exec::resolve_ssh_endpoint(
             self.machines.as_ref(),
             machine_id,
             endpoint_id,
             fleet_provider_ssh::SshAuth::Agent,
         )
         .await?;
+        spec.guest_os = guest_os;
         let provider = self.provider.clone();
         let limiter = self.limiter.clone();
         let handle = handle.to_owned();
@@ -228,13 +236,19 @@ impl LabDetachDispatch {
                 .await;
         };
         let lease_id = payload_lease(operation);
-        // The start script is Bash: a Windows lease is refused, whatever the
-        // payload says.
+        let guest_os = match crate::lab_artifacts_store::payload_guest_os(operation) {
+            Ok(os) => os,
+            Err(detail) => {
+                return self
+                    .fail(operations, operation, "invalid_payload", &detail)
+                    .await;
+            }
+        };
         let (machine_id, endpoint_id) = match resolve_lab_machine(
             self.leases.as_ref(),
             self.provisions.as_ref(),
             self.templates.as_ref(),
-            fleet_core::GuestOs::Linux,
+            guest_os,
             &lease_id,
             now,
         )
@@ -264,7 +278,11 @@ impl LabDetachDispatch {
                 "machineId": machine_id,
                 "endpointId": endpoint_id,
                 "auth": {"type": "agent"},
-                "script": fleet_provider_ssh::detached::start_script(script),
+                "guestOs": guest_os.id(),
+                "script": fleet_provider_ssh::detached::start_script_for(
+                    fleet_provider_ssh::GuestShell::for_os(guest_os).map_err(|error| error.to_string())?,
+                    script,
+                ),
                 "arguments": [operation.id, timeout.to_string()],
                 "timeoutSeconds": fleet_provider_ssh::detached::SESSION_DEADLINE.as_secs(),
             })
