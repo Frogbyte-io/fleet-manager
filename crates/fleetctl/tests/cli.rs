@@ -4288,4 +4288,15 @@ fn lab_template_create_takes_an_optional_guest_os() {
     };
     assert_eq!(guest_os.as_deref(), Some("windows"));
     assert!(parse(&["--guest-os"]).is_err());
+    let fleetctl::Command::LabCreate { ssh_user, .. } = parse(&[]).unwrap().command else {
+        panic!("a template create");
+    };
+    assert_eq!(ssh_user, None);
+    let fleetctl::Command::LabCreate { ssh_user, .. } =
+        parse(&["--ssh-user", "fleetadmin"]).unwrap().command
+    else {
+        panic!("a template create");
+    };
+    assert_eq!(ssh_user.as_deref(), Some("fleetadmin"));
+    assert!(parse(&["--ssh-user"]).is_err());
 }
