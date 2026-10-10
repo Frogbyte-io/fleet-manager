@@ -174,14 +174,15 @@ pub fn start_script(command: &str) -> String {
 /// `$args`: handle, number, optional base directory override (tests only;
 /// Fleet never sets it).
 ///
-/// Trust: `C:\ProgramData` lets any local user create folders, so the base
-/// directories and the handle directory are only used when each is a real
-/// directory (not a reparse point), owned by SYSTEM, Administrators or the
-/// SSH user, and grants write-class access to nobody else. Otherwise a local
-/// user could pre-create `fleet-lab` (or a junction), rename the handle
-/// directory away, and plant the `run.ps1` the supervisor executes. They are
-/// created with a protected ACL in the same call, then checked again (a
-/// directory someone else created first fails the check).
+/// Directories: always under the SSH user's `%LOCALAPPDATA%\fleet-lab\exec`
+/// (never `C:\ProgramData`, where any local user can create folders and could
+/// pre-create `fleet-lab` or a junction to plant the `run.ps1` the supervisor
+/// runs). Even there, the base directories and the handle directory are only
+/// used when each is a real directory (not a reparse point), owned by SYSTEM,
+/// the SSH user or (for an administrator) Administrators, and grants
+/// write-class access to nobody else. They are created with a protected ACL in
+/// the same call (the creator is the owner; nothing sets it), then checked
+/// again: a directory someone else created first fails the check.
 const WINDOWS_RESOLVE: &str = r"$ErrorActionPreference = 'Stop'
 $fleetHandle = $args[0]
 $fleetNum = $args[1]
@@ -201,8 +202,8 @@ if ($fleetWindows) {
 }
 if (-not $fleetBase) {
   if ($fleetWindows) {
-    if ($fleetAdminUser) { $fleetBase = [IO.Path]::Combine($env:ProgramData, 'fleet-lab', 'exec') }
-    else { if (-not $env:LOCALAPPDATA) { exit 71 }; $fleetBase = [IO.Path]::Combine($env:LOCALAPPDATA, 'fleet-lab', 'exec') }
+    if (-not $env:LOCALAPPDATA) { exit 71 }
+    $fleetBase = [IO.Path]::Combine($env:LOCALAPPDATA, 'fleet-lab', 'exec')
   } else {
     if (-not $env:HOME) { exit 71 }
     $fleetBase = [IO.Path]::Combine($env:HOME, '.local', 'state', 'fleet-lab', 'exec')
@@ -210,10 +211,13 @@ if (-not $fleetBase) {
 }
 $fleetParent = [IO.Path]::GetDirectoryName($fleetBase)
 $fleetDir = [IO.Path]::Combine($fleetBase, $fleetHandle)
-# Who may own or write: SYSTEM and Administrators always, and the SSH user
-# when it is not an administrator (its own %LOCALAPPDATA%).
-$fleetTrusted = @($fleetSystem, $fleetAdmins)
-if ($fleetWindows -and -not $fleetAdminUser) { $fleetTrusted += $fleetMe }
+# Who may own or write: SYSTEM and the SSH user, and Administrators when the
+# SSH user is one (its objects are then owned by that group).
+$fleetTrusted = @()
+if ($fleetWindows) {
+  $fleetTrusted = @($fleetSystem, $fleetMe)
+  if ($fleetAdminUser) { $fleetTrusted += $fleetAdmins }
+}
 function fleetIn($sid) { foreach ($t in $fleetTrusted) { if ($t.Equals($sid)) { return $true } }; return $false }
 function fleetSecure($path) {
   if (-not $fleetWindows) { return $true }
@@ -222,9 +226,11 @@ function fleetSecure($path) {
     if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
     $acl = $info.GetAccessControl()
     if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])))) { return $false }
-    $writes = [Security.AccessControl.FileSystemRights]'WriteData,AppendData,WriteExtendedAttributes,WriteAttributes,Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+    # Write-class bits, including the raw generic rights an ACE can carry
+    # (GENERIC_ALL 0x10000000, GENERIC_WRITE 0x40000000) that the enum names miss.
+    $writes = [int64]0x500D0156
     foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-      if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $writes) -and -not (fleetIn $rule.IdentityReference)) { return $false }
+      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference)) { return $false }
     }
     return $true
   } catch { return $false }
@@ -235,7 +241,6 @@ function fleetMakeDir($path) {
       if ($fleetWindows) {
         $sec = New-Object Security.AccessControl.DirectorySecurity
         $sec.SetAccessRuleProtection($true, $false)
-        $sec.SetOwner($fleetAdmins)
         foreach ($sid in $fleetTrusted) {
           $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
         }
@@ -243,7 +248,7 @@ function fleetMakeDir($path) {
       } else {
         [void][IO.Directory]::CreateDirectory($path)
       }
-    } catch { }
+    } catch { [Console]::Error.WriteLine('fleet: cannot create a guest directory (' + $_.Exception.GetType().Name + ')') }
   }
   return (fleetSecure $path)
 }
@@ -282,8 +287,9 @@ if ($Mode -eq 'body') {
   $global:LASTEXITCODE = $null
   Invoke-Command -ScriptBlock $fleetBlock
   if ($global:fleetOk -eq $false) {
+    # The code goes to a file, not through ssh: keep any nonzero code as it is.
     $fleetC = 1
-    if ($global:LASTEXITCODE) { $fleetC = [int]$global:LASTEXITCODE; if (($fleetC -band 255) -eq 0) { $fleetC = 1 } }
+    if ($global:LASTEXITCODE) { $fleetC = [int]$global:LASTEXITCODE }
     exit $fleetC
   }
   exit 0
@@ -324,8 +330,8 @@ if ($fleetChild.WaitForExit($fleetMs)) {
   $fleetKilled = $false
   if ($fleetWindows) {
     try {
-      $fleetKill = Start-Process -FilePath ([IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')) -ArgumentList @('/T', '/F', '/PID', [string]$fleetChild.Id) -NoNewWindow -PassThru -Wait
-      $fleetKilled = $true
+      $fleetKill = Start-Process -FilePath ([IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')) -ArgumentList @('/T', '/F', '/PID', [string]$fleetChild.Id) -NoNewWindow -PassThru
+      if ($fleetKill.WaitForExit(10000) -and $fleetKill.ExitCode -eq 0) { $fleetKilled = $true }
     } catch { }
   }
   if (-not $fleetKilled) { try { if ($fleetWindows) { $fleetChild.Kill() } else { $fleetChild.Kill($true) } } catch { } }
@@ -370,13 +376,14 @@ function fleetGiveUp {
 }
 $fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
 $fleetCwd = (Get-Location).ProviderPath
+$fleetLaunched = $true
 if ($fleetWindows) {
   $fleetPs = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   $fleetLine = '"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -Dir "{2}" -Secs {3}' -f $fleetPs, $fleetRun, $fleetDir, $fleetNum
   try {
-    $fleetMade = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $fleetLine; CurrentDirectory = $fleetCwd }
-    if ($fleetMade.ReturnValue -ne 0) { [void](fleetGiveUp); exit 75 }
-  } catch { [void](fleetGiveUp); exit 75 }
+    $fleetMade = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -OperationTimeoutSec 10 -Arguments @{ CommandLine = $fleetLine; CurrentDirectory = $fleetCwd }
+    if ($fleetMade.ReturnValue -ne 0) { $fleetLaunched = $false }
+  } catch { $fleetLaunched = $false }
 } else {
   $fleetInfo = New-Object Diagnostics.ProcessStartInfo
   $fleetInfo.FileName = [IO.Path]::Combine($PSHOME, 'pwsh')
@@ -389,15 +396,24 @@ if ($fleetWindows) {
   $fleetInfo.WorkingDirectory = $fleetCwd
   [void][Diagnostics.Process]::Start($fleetInfo)
 }
+# A launch that failed (WMI error) never started a wrapper unless one slipped
+# in: take the gate to say so, and if the gate is already taken, wait for the
+# wrapper like any other start.
+if (-not $fleetLaunched -and (fleetGiveUp)) { exit 75 }
+# Worst case in this session: 10 s for the launch call, 25 s here, 5 s below,
+# inside the 60 s session deadline together with ssh setup and PowerShell's
+# own cold start.
 $fleetPidFile = [IO.Path]::Combine($fleetDir, 'pid')
 $fleetWaited = 0
-while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 300) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
+while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 250) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
 if (-not [IO.File]::Exists($fleetPidFile)) {
   if (fleetGiveUp) { exit 75 }
-  # The wrapper holds the gate: it is running. Give it a little longer.
+  # The wrapper holds the gate, so it is running (or about to). Give it a
+  # little longer; if its pid is still not there the outcome is unknown, which
+  # is not the same as failed: status decides.
   $fleetWaited = 0
-  while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 100) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
-  if (-not [IO.File]::Exists($fleetPidFile)) { exit 75 }
+  while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 50) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
+  if (-not [IO.File]::Exists($fleetPidFile)) { exit 76 }
 }
 [Console]::Out.Write("started`n")
 exit 0
@@ -461,6 +477,10 @@ if (fleetReg $fleetExit) {
   else { $fleetState = 'lost'; $fleetReason = 'process_gone' }
 } elseif ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'abandoned'))) {
   $fleetState = 'lost'; $fleetReason = 'never_started'
+} elseif ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'gate')) -and (([DateTime]::UtcNow - (New-Object IO.DirectoryInfo $fleetDir).CreationTimeUtc).TotalSeconds -lt 180)) {
+  # A wrapper holds the gate but has not recorded its pid yet: the start is
+  # unconfirmed, not failed.
+  $fleetState = 'starting'; $fleetReason = 'start_unconfirmed'
 } elseif (([DateTime]::UtcNow - (New-Object IO.DirectoryInfo $fleetDir).CreationTimeUtc).TotalSeconds -lt 60) {
   $fleetState = 'starting'
 } else {
@@ -693,7 +713,8 @@ pub fn parse_status(output: &str) -> Result<GuestReport, String> {
             "reason" => {
                 report.reason = Some(
                     match value.trim() {
-                        reason @ ("guest_rebooted" | "process_gone" | "never_started") => reason,
+                        reason @ ("guest_rebooted" | "process_gone" | "never_started"
+                        | "start_unconfirmed") => reason,
                         _ => "unknown",
                     }
                     .to_owned(),
@@ -1451,9 +1472,13 @@ mod tests {
                 assert!(text.contains("function fleetSecure"));
                 assert!(text.contains("ReparsePoint"));
                 assert!(text.contains("GetOwner("));
-                assert!(text.contains("ChangePermissions"));
+                assert!(text.contains("0x500D0156"));
             }
             assert!(start.contains("CreateDirectory($path, $sec)"));
+            // The creator is the owner: setting Administrators fails for a
+            // non-admin token. And only the user's own profile is used.
+            assert!(!start.contains("SetOwner") && !start.contains("ProgramData"));
+            assert!(start.contains("LOCALAPPDATA") && start.contains("0x500D0156"));
             assert!(start.contains("SetAccessRuleProtection($true, $false)"));
             assert!(
                 start.contains("fleetMakeDir $fleetParent")
@@ -1462,6 +1487,28 @@ mod tests {
             assert!(status.contains("fleetChainSecure") && status.contains("exit 71"));
             // Anchors that a trailing newline cannot slip past.
             assert!(!start.contains("}$'") && start.contains("\\z"));
+        }
+
+        #[test]
+        fn the_start_session_fits_its_deadline_and_a_held_gate_is_unconfirmed_not_failed() {
+            let start = start_script_for(GuestShell::PowerShell, "exit 0");
+            // 10 s launch call + 25 s + 5 s of waiting, plus ssh setup and a
+            // cold PowerShell, inside SESSION_DEADLINE (60 s).
+            assert!(start.contains("-OperationTimeoutSec 10"));
+            assert!(
+                start.contains("$fleetWaited -lt 250") && start.contains("$fleetWaited -lt 50")
+            );
+            assert!(10 + 25 + 5 < SESSION_DEADLINE.as_secs());
+            assert!(start.contains("exit 76"));
+
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("g4");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("gate"), "").unwrap();
+            let report = status(&pwsh, base.path(), "g4");
+            assert_eq!(report.state, GuestState::Starting, "{report:?}");
+            assert_eq!(report.reason.as_deref(), Some("start_unconfirmed"));
         }
     }
 }

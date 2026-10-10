@@ -616,7 +616,8 @@ impl LabExecDetach {
         // A start that reported failure may still have started the command
         // (a dropped session, a slow wrapper): the guest decides. Only a
         // guest with no trace of it is `failed_to_start`.
-        let no_trace = matches!(status.state, DetachedState::Starting)
+        let unconfirmed = status.reason.as_deref() == Some("start_unconfirmed");
+        let no_trace = (matches!(status.state, DetachedState::Starting) && !unconfirmed)
             || matches!(
                 status.reason.as_deref(),
                 Some("guest_has_no_record" | "never_started")
@@ -766,7 +767,12 @@ fn apply_process(
             status.state = DetachedState::Lost;
             status.reason = Some(process.reason.unwrap_or_else(|| "unknown".to_owned()));
         }
-        GuestProcessState::Starting => status.state = DetachedState::Starting,
+        GuestProcessState::Starting => {
+            status.state = DetachedState::Starting;
+            // `start_unconfirmed`: a wrapper holds the gate but has not
+            // recorded its pid yet.
+            status.reason = process.reason;
+        }
         GuestProcessState::Absent => {
             if record.start_state == StartState::Starting
                 && now - record.created_at < START_GRACE_MS
