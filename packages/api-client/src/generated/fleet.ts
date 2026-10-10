@@ -1171,8 +1171,9 @@ export interface DetachedExecStatusDto {
      */
   leaseState?: string | null;
   /**
-     * A stable reason for `lost` (`guest_rebooted`, `process_gone`,
-     * `never_started`, `guest_has_no_record`), `failed_to_start`
+     * A stable reason for `starting` (`start_unconfirmed`: a start whose
+     * outcome is unknown, check status again), `lost` (`guest_rebooted`,
+     * `process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`
      * (`start_failed`; see the operation), `lease_ended`, and
      * `unreachable` (`guest_unreachable`, `no_lab_machine`).
      * @nullable
@@ -4595,8 +4596,9 @@ export type ResourceDetachedExecStatusDtoData = {
      */
   leaseState?: string | null;
   /**
-     * A stable reason for `lost` (`guest_rebooted`, `process_gone`,
-     * `never_started`, `guest_has_no_record`), `failed_to_start`
+     * A stable reason for `starting` (`start_unconfirmed`: a start whose
+     * outcome is unknown, check status again), `lost` (`guest_rebooted`,
+     * `process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`
      * (`start_failed`; see the operation), `lease_ended`, and
      * `unreachable` (`guest_unreachable`, `no_lab_machine`).
      * @nullable

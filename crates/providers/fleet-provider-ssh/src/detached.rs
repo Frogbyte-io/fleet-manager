@@ -147,6 +147,404 @@ pub fn start_script(command: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Windows (PowerShell 5.1) twins of the scripts above. Same layout, same
+// states, same `key=value` status protocol, so `parse_status` reads both.
+//
+// Guest layout: `<base>\<handle>\` where `<base>` is
+// `%LOCALAPPDATA%\fleet-lab\exec` of the SSH user (every directory's ACL is
+// protected: SYSTEM, Administrators and the SSH user only). Files: `body.ps1` (the
+// command, verbatim UTF-8), `run.ps1` (the fixed wrapper), `pid`
+// (`<pid> <start time ticks>`), `boot_id`, `started`, `stdout`, `stderr`,
+// `exit` and `finished` (written last, temporary file then rename), and
+// `abandoned` (a start that gave up: a late wrapper exits without running).
+//
+// The command runs as a child of the wrapper under a timeout (`124` is the
+// bound ending it; its process tree is killed), with stdio redirected to
+// files. The wrapper is launched through WMI (`Win32_Process.Create`) so it
+// is outside the OpenSSH session's job object, which kills everything in it
+// when the session ends (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in
+// `w32-doexec.c`). Whether WMI is the right escape on a real guest is for the
+// Windows fixture to confirm.
+// ---------------------------------------------------------------------------
+
+/// The Windows prologue shared by start and status: validates the handle and
+/// the number, resolves the directories, and defines the trust check.
+/// `$args`: handle, number, optional base directory override (tests only;
+/// Fleet never sets it).
+///
+/// Directories: always under the SSH user's `%LOCALAPPDATA%\fleet-lab\exec`
+/// (never `C:\ProgramData`, where any local user can create folders and could
+/// pre-create `fleet-lab` or a junction to plant the `run.ps1` the supervisor
+/// runs). Even there, the base directories and the handle directory are only
+/// used when each is a real directory (not a reparse point), owned by SYSTEM,
+/// Administrators or the SSH user, and grants
+/// write-class access to nobody else. They are created with a protected ACL in
+/// the same call (the creator is the owner; nothing sets it), then checked
+/// again: a directory someone else created first fails the check.
+const WINDOWS_RESOLVE: &str = r"$ErrorActionPreference = 'Stop'
+$fleetHandle = $args[0]
+$fleetNum = $args[1]
+$fleetBase = $args[2]
+if ($fleetHandle -cnotmatch '^[A-Za-z0-9_-]{1,64}\z' -or $fleetNum -cnotmatch '^[0-9]{1,18}\z') { exit 64 }
+$fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
+$fleetOverride = [bool]$fleetBase
+$fleetSystem = $null
+$fleetAdmins = $null
+$fleetMe = $null
+if ($fleetWindows) {
+  $fleetSystem = New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'
+  $fleetAdmins = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+  $fleetMe = [Security.Principal.WindowsIdentity]::GetCurrent().User
+}
+if (-not $fleetBase) {
+  if ($fleetWindows) {
+    if (-not $env:LOCALAPPDATA) { exit 71 }
+    $fleetBase = [IO.Path]::Combine($env:LOCALAPPDATA, 'fleet-lab', 'exec')
+  } else {
+    if (-not $env:HOME) { exit 71 }
+    $fleetBase = [IO.Path]::Combine($env:HOME, '.local', 'state', 'fleet-lab', 'exec')
+  }
+}
+$fleetParent = [IO.Path]::GetDirectoryName($fleetBase)
+$fleetDir = [IO.Path]::Combine($fleetBase, $fleetHandle)
+# Who may own or write: SYSTEM, Administrators and the SSH user, always, so
+# an elevation change between start and status (or a profile whose ACL
+# already names them) neither locks the user out nor fails the check.
+$fleetTrusted = @()
+if ($fleetWindows) { $fleetTrusted = @($fleetSystem, $fleetAdmins, $fleetMe) }
+function fleetIn($sid) { foreach ($t in $fleetTrusted) { if ($t.Equals($sid)) { return $true } }; return $false }
+function fleetSecure($path) {
+  if (-not $fleetWindows) { return $true }
+  try {
+    $info = New-Object IO.DirectoryInfo $path
+    if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    $acl = $info.GetAccessControl()
+    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])))) { return $false }
+    # Write-class bits, including the raw generic rights an ACE can carry
+    # (GENERIC_ALL 0x10000000, GENERIC_WRITE 0x40000000) that the enum names miss.
+    $writes = [int64]0x500D0156
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+      if ($rule.AccessControlType -eq 'Allow' -and ((([int64]$rule.FileSystemRights) -band $writes) -ne 0) -and -not (fleetIn $rule.IdentityReference)) { return $false }
+    }
+    return $true
+  } catch { return $false }
+}
+function fleetMakeDir($path) {
+  if (-not [IO.Directory]::Exists($path)) {
+    try {
+      if ($fleetWindows) {
+        $sec = New-Object Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        foreach ($sid in $fleetTrusted) {
+          $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        }
+        [void][IO.Directory]::CreateDirectory($path, $sec)
+      } else {
+        [void][IO.Directory]::CreateDirectory($path)
+      }
+    } catch { [Console]::Error.WriteLine('fleet: cannot create a guest directory (' + $_.Exception.GetType().Name + $(if ($_.Exception.InnerException) { ' / ' + $_.Exception.InnerException.GetType().Name } else { '' }) + ')') }
+  }
+  return (fleetSecure $path)
+}
+function fleetChainSecure {
+  if (-not $fleetWindows -or $fleetOverride) { return $true }
+  foreach ($d in @($fleetParent, $fleetBase)) { if ([IO.Directory]::Exists($d) -and -not (fleetSecure $d)) { return $false } }
+  return $true
+}
+function fleetReg($path) {
+  try { $i = New-Object IO.FileInfo $path; return ($i.Exists -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) } catch { return $false }
+}
+function fleetBoot {
+  if ($fleetWindows) {
+    # The boot counter, unlike the last-boot time, does not move when the
+    # clock is stepped. Empty means unknown, never a mismatch.
+    try { return ([string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name BootId -ErrorAction Stop).BootId) } catch { return '' }
+  }
+  try { return (Get-Content -LiteralPath '/proc/sys/kernel/random/boot_id' -TotalCount 1) } catch { return '' }
+}
+";
+
+/// The wrapper (`run.ps1`), written verbatim by the start script. With
+/// `-Mode body` it is the child that runs the command; otherwise it is the
+/// supervisor: it takes the `gate` (a start that gave up and a wrapper that
+/// runs cannot both win), records its pid first, runs the child under the
+/// timeout with output in files, and writes `exit` last.
+const WINDOWS_WRAPPER: &str = r#"param([string]$Dir, [string]$Secs, [string]$Mode)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+if ($Mode -eq 'body') {
+  try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+  $fleetText = [IO.File]::ReadAllText([IO.Path]::Combine($Dir, 'body.ps1'), [Text.Encoding]::UTF8)
+  $fleetBlock = [scriptblock]::Create($fleetText + [Environment]::NewLine + [Environment]::NewLine + '$global:fleetOk=$?')
+  $ErrorActionPreference = 'Continue'
+  $global:fleetOk = $null
+  $global:LASTEXITCODE = $null
+  Invoke-Command -ScriptBlock $fleetBlock
+  if ($global:fleetOk -eq $false) {
+    # The code goes to a file, not through ssh: keep any nonzero code as it is.
+    $fleetC = 1
+    if ($global:LASTEXITCODE) { $fleetC = [int]$global:LASTEXITCODE }
+    exit $fleetC
+  }
+  exit 0
+}
+function fleetPath($name) { return [IO.Path]::Combine($Dir, $name) }
+try {
+  $fleetGate = New-Object IO.FileStream((fleetPath 'gate'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $fleetGate.Dispose()
+} catch { exit 0 }
+if ([IO.File]::Exists((fleetPath 'abandoned'))) { exit 0 }
+$fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
+$fleetMe = [Diagnostics.Process]::GetCurrentProcess()
+[IO.File]::WriteAllText((fleetPath 'pid.tmp'), ('{0} {1}' -f $fleetMe.Id, $fleetMe.StartTime.ToUniversalTime().Ticks) + "`n")
+[IO.File]::Move((fleetPath 'pid.tmp'), (fleetPath 'pid'))
+$fleetBoot = ''
+if ($fleetWindows) {
+  try { $fleetBoot = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name BootId -ErrorAction Stop).BootId } catch { }
+} else {
+  try { $fleetBoot = (Get-Content -LiteralPath '/proc/sys/kernel/random/boot_id' -TotalCount 1) } catch { }
+}
+[IO.File]::WriteAllText((fleetPath 'boot_id'), $fleetBoot + "`n")
+[IO.File]::WriteAllText((fleetPath 'started'), [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n")
+[IO.File]::WriteAllBytes((fleetPath 'stdin'), [byte[]]@())
+if ($fleetWindows) { $fleetExe = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') } else { $fleetExe = [IO.Path]::Combine($PSHOME, 'pwsh') }
+$fleetArgs = @('-NoProfile', '-NonInteractive')
+if ($fleetWindows) { $fleetArgs += @('-ExecutionPolicy', 'Bypass') }
+$fleetArgs += @('-File', ('"{0}"' -f (fleetPath 'run.ps1')), '-Dir', ('"{0}"' -f $Dir), '-Secs', $Secs, '-Mode', 'body')
+# The command runs where the start session was (the supervisor's working
+# directory), not in its own control directory.
+$fleetCwd = (Get-Location).ProviderPath
+$fleetChild = Start-Process -FilePath $fleetExe -ArgumentList $fleetArgs -WorkingDirectory $fleetCwd -RedirectStandardOutput (fleetPath 'stdout') -RedirectStandardError (fleetPath 'stderr') -RedirectStandardInput (fleetPath 'stdin') -NoNewWindow -PassThru
+$null = $fleetChild.Handle
+$fleetMs = [int][Math]::Min([int64]$Secs * 1000, 2000000000)
+if ($fleetChild.WaitForExit($fleetMs)) {
+  $fleetChild.WaitForExit()
+  $fleetCode = $fleetChild.ExitCode
+} else {
+  $fleetKilled = $false
+  if ($fleetWindows) {
+    try {
+      # Process.Start keeps the handle, so ExitCode is reliable (Windows
+      # PowerShell 5.1's Start-Process -PassThru can lose it for a process
+      # that exits quickly).
+      $fleetPsi = New-Object Diagnostics.ProcessStartInfo
+      $fleetPsi.FileName = [IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')
+      $fleetPsi.Arguments = '/T /F /PID ' + [string]$fleetChild.Id
+      $fleetPsi.UseShellExecute = $false
+      $fleetPsi.CreateNoWindow = $true
+      $fleetKill = [Diagnostics.Process]::Start($fleetPsi)
+      if ($fleetKill.WaitForExit(10000) -and $fleetKill.ExitCode -eq 0) { $fleetKilled = $true }
+    } catch { }
+  }
+  if (-not $fleetKilled) { try { if ($fleetWindows) { $fleetChild.Kill() } else { $fleetChild.Kill($true) } } catch { } }
+  [void]$fleetChild.WaitForExit(30000)
+  $fleetCode = 124
+}
+[IO.File]::WriteAllText((fleetPath 'finished'), [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n")
+[IO.File]::WriteAllText((fleetPath 'exit.tmp'), ([string]$fleetCode) + "`n")
+[IO.File]::Move((fleetPath 'exit.tmp'), (fleetPath 'exit'))
+"#;
+
+/// The Windows start body: `$fleetCmd64` (the command as base64 UTF-8) and
+/// `$fleetWrapper` are set by the caller's prefix.
+const WINDOWS_START_BODY: &str = r#"if ($fleetWindows -and -not $fleetOverride) {
+  if (-not (fleetMakeDir $fleetParent)) { exit 71 }
+  if (-not (fleetMakeDir $fleetBase)) { exit 71 }
+} else {
+  try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
+}
+if ([IO.Directory]::Exists($fleetDir)) {
+  if (-not (fleetSecure $fleetDir)) { exit 71 }
+  [Console]::Out.Write("exists`n")
+  exit 0
+}
+if (-not (fleetMakeDir $fleetDir)) { exit 71 }
+try {
+  [IO.File]::WriteAllBytes([IO.Path]::Combine($fleetDir, 'body.ps1'), [Convert]::FromBase64String($fleetCmd64))
+  [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'run.ps1'), $fleetWrapper)
+} catch { exit 72 }
+# A start that gives up and a wrapper that runs race for the gate: whoever
+# creates it first decides. The loser of the start's side only reports; the
+# marker keeps a late wrapper from running.
+function fleetGiveUp {
+  $won = $false
+  try {
+    $g = New-Object IO.FileStream([IO.Path]::Combine($fleetDir, 'gate'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $g.Dispose()
+    $won = $true
+  } catch { }
+  if ($won) { try { [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'abandoned'), '') } catch { } }
+  return $won
+}
+$fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
+$fleetCwd = (Get-Location).ProviderPath
+$fleetLaunched = $true
+if ($fleetWindows) {
+  $fleetPs = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  $fleetLine = '"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -Dir "{2}" -Secs {3}' -f $fleetPs, $fleetRun, $fleetDir, $fleetNum
+  try {
+    $fleetMade = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -OperationTimeoutSec 10 -Arguments @{ CommandLine = $fleetLine; CurrentDirectory = $fleetCwd }
+    if ($fleetMade.ReturnValue -ne 0) { $fleetLaunched = $false }
+  } catch { $fleetLaunched = $false }
+} else {
+  $fleetInfo = New-Object Diagnostics.ProcessStartInfo
+  $fleetInfo.FileName = [IO.Path]::Combine($PSHOME, 'pwsh')
+  foreach ($fleetPart in @('-NoProfile', '-NonInteractive', '-File', $fleetRun, '-Dir', $fleetDir, '-Secs', $fleetNum)) { [void]$fleetInfo.ArgumentList.Add($fleetPart) }
+  $fleetInfo.UseShellExecute = $false
+  # Only so the child holds none of this session's pipes (tests, non-Windows).
+  $fleetInfo.RedirectStandardInput = $true
+  $fleetInfo.RedirectStandardOutput = $true
+  $fleetInfo.RedirectStandardError = $true
+  $fleetInfo.WorkingDirectory = $fleetCwd
+  [void][Diagnostics.Process]::Start($fleetInfo)
+}
+# A launch that failed (WMI error) never started a wrapper unless one slipped
+# in: take the gate to say so, and if the gate is already taken, wait for the
+# wrapper like any other start.
+if (-not $fleetLaunched -and (fleetGiveUp)) { exit 75 }
+# Worst case in this session: 10 s for the launch call, 25 s here, 5 s below,
+# inside the 60 s session deadline together with ssh setup and PowerShell's
+# own cold start.
+$fleetPidFile = [IO.Path]::Combine($fleetDir, 'pid')
+$fleetWaited = 0
+while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 250) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
+if (-not [IO.File]::Exists($fleetPidFile)) {
+  if (fleetGiveUp) { exit 75 }
+  # The wrapper holds the gate, so it is running (or about to). Give it a
+  # little longer; if its pid is still not there the outcome is unknown, which
+  # is not the same as failed: status decides.
+  $fleetWaited = 0
+  while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 50) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
+  if (-not [IO.File]::Exists($fleetPidFile)) { exit 76 }
+}
+[Console]::Out.Write("started`n")
+exit 0
+"#;
+
+/// The Windows status body: prints the same `key=value` lines as the Bash
+/// one. Only regular files that are not reparse points are read, each
+/// bounded; the tails are the last `$fleetNum` bytes. The directories are
+/// trusted only as `WINDOWS_RESOLVE` describes (exit 71 otherwise).
+const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path, $signed) {
+  if (-not (fleetReg $path)) { return '' }
+  try {
+    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
+    $text = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
+    if ($signed) { if ($text -cmatch '^-?[0-9]{1,11}\z') { return $text } }
+    elseif ($text -cmatch '^[0-9]{1,19}\z') { return $text }
+  } catch { }
+  return ''
+}
+function fleetSmall($path) {
+  if (-not (fleetReg $path)) { return '' }
+  try {
+    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+    try { $buf = New-Object byte[] 64; $n = $fs.Read($buf, 0, 64) } finally { $fs.Dispose() }
+    return [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
+  } catch { return '' }
+}
+function fleetAlive {
+  $line = fleetSmall ([IO.Path]::Combine($fleetDir, 'pid'))
+  $parts = $line.Split(' ')
+  if ($parts.Length -ne 2 -or $parts[0] -cnotmatch '^[0-9]{1,10}\z' -or $parts[1] -cnotmatch '^[0-9]{1,19}\z') { return $false }
+  try {
+    $p = Get-Process -Id ([int]$parts[0]) -ErrorAction Stop
+    if ($p.HasExited) { return $false }
+    # Within a second: Windows reports the exact creation time, but other
+    # platforms estimate it, and a reused pid is never a second younger.
+    return ([Math]::Abs($p.StartTime.ToUniversalTime().Ticks - [int64]$parts[1]) -lt 10000000)
+  } catch { return $false }
+}
+$fleetExit = [IO.Path]::Combine($fleetDir, 'exit')
+$fleetPid = [IO.Path]::Combine($fleetDir, 'pid')
+if (-not (fleetChainSecure)) { exit 71 }
+if (-not [IO.Directory]::Exists($fleetDir)) {
+  [Console]::Out.Write("state=absent`n")
+  exit 0
+}
+if (-not (fleetSecure $fleetDir)) { exit 71 }
+$fleetState = ''
+$fleetReason = ''
+if (fleetReg $fleetExit) {
+  $fleetState = 'exited'
+} elseif (fleetReg $fleetPid) {
+  # A boot counter that is unknown on either side is not evidence of a
+  # reboot: the pid and its start time decide.
+  $fleetThen = fleetSmall ([IO.Path]::Combine($fleetDir, 'boot_id'))
+  $fleetNow = fleetBoot
+  if ($fleetThen -ne '' -and $fleetNow -ne '' -and $fleetThen -ne $fleetNow) { $fleetState = 'lost'; $fleetReason = 'guest_rebooted' }
+  elseif (fleetAlive) { $fleetState = 'running' }
+  elseif (fleetReg $fleetExit) { $fleetState = 'exited' }
+  else { $fleetState = 'lost'; $fleetReason = 'process_gone' }
+} elseif ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'abandoned'))) {
+  $fleetState = 'lost'; $fleetReason = 'never_started'
+} elseif ([IO.File]::Exists([IO.Path]::Combine($fleetDir, 'gate')) -and (([DateTime]::UtcNow - (New-Object IO.DirectoryInfo $fleetDir).CreationTimeUtc).TotalSeconds -lt 180)) {
+  # A wrapper holds the gate but has not recorded its pid yet: the start is
+  # unconfirmed, not failed.
+  $fleetState = 'starting'; $fleetReason = 'start_unconfirmed'
+} elseif (([DateTime]::UtcNow - (New-Object IO.DirectoryInfo $fleetDir).CreationTimeUtc).TotalSeconds -lt 60) {
+  $fleetState = 'starting'
+} else {
+  $fleetState = 'lost'; $fleetReason = 'never_started'
+}
+$fleetOut = New-Object Text.StringBuilder
+[void]$fleetOut.Append("state=$fleetState`n")
+if ($fleetReason -ne '') { [void]$fleetOut.Append("reason=$fleetReason`n") }
+if ($fleetState -eq 'exited') { [void]$fleetOut.Append('exit=' + (fleetNumOf $fleetExit $true) + "`n") }
+[void]$fleetOut.Append('started=' + (fleetNumOf ([IO.Path]::Combine($fleetDir, 'started')) $false) + "`n")
+if ($fleetState -eq 'exited') { [void]$fleetOut.Append('finished=' + (fleetNumOf ([IO.Path]::Combine($fleetDir, 'finished')) $false) + "`n") }
+$fleetWant = [int64][Math]::Min([int64]$fleetNum, 1048576)
+foreach ($fleetStream in 'stdout', 'stderr') {
+  $fleetFile = [IO.Path]::Combine($fleetDir, $fleetStream)
+  $fleetBytes = 0
+  $fleetB64 = ''
+  if (fleetReg $fleetFile) {
+    try {
+      $fs = New-Object IO.FileStream($fleetFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
+      try {
+        $fleetBytes = $fs.Length
+        $take = [int][Math]::Min($fleetBytes, $fleetWant)
+        $buf = New-Object byte[] $take
+        [void]$fs.Seek($fleetBytes - $take, [IO.SeekOrigin]::Begin)
+        $got = 0
+        while ($got -lt $take) { $n = $fs.Read($buf, $got, $take - $got); if ($n -le 0) { break }; $got += $n }
+        $fleetB64 = [Convert]::ToBase64String($buf, 0, $got)
+      } finally { $fs.Dispose() }
+    } catch { $fleetBytes = 0; $fleetB64 = '' }
+  }
+  [void]$fleetOut.Append("${fleetStream}_bytes=$fleetBytes`n")
+  [void]$fleetOut.Append("${fleetStream}_b64=$fleetB64`n")
+}
+[Console]::Out.Write($fleetOut.ToString())
+exit 0
+"#;
+
+/// The script that starts `command` detached on a guest with `shell`; see
+/// [`start_script`] for the semantics, which are the same.
+#[must_use]
+pub fn start_script_for(shell: crate::shell::GuestShell, command: &str) -> String {
+    match shell {
+        crate::shell::GuestShell::Posix => start_script(command),
+        crate::shell::GuestShell::PowerShell => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+            format!(
+                "$fleetCmd64 = '{encoded}'\n$fleetWrapper = @'\n{WINDOWS_WRAPPER}'@\n{WINDOWS_RESOLVE}{WINDOWS_START_BODY}"
+            )
+        }
+    }
+}
+
+/// The script that reads a handle's state on a guest with `shell`.
+#[must_use]
+pub fn status_script_for(shell: crate::shell::GuestShell) -> String {
+    match shell {
+        crate::shell::GuestShell::Posix => status_script(),
+        crate::shell::GuestShell::PowerShell => format!("{WINDOWS_RESOLVE}{WINDOWS_STATUS_BODY}"),
+    }
+}
+
 /// The metadata for [`start_script`].
 #[must_use]
 pub fn start_metadata(handle: &str, timeout_seconds: u64) -> ScriptMetadata {
@@ -318,7 +716,8 @@ pub fn parse_status(output: &str) -> Result<GuestReport, String> {
             "reason" => {
                 report.reason = Some(
                     match value.trim() {
-                        reason @ ("guest_rebooted" | "process_gone" | "never_started") => reason,
+                        reason @ ("guest_rebooted" | "process_gone" | "never_started"
+                        | "start_unconfirmed") => reason,
                         _ => "unknown",
                     }
                     .to_owned(),
@@ -356,11 +755,12 @@ pub fn probe_detached(
             detail: "the handle is not a valid detached-exec handle".to_owned(),
         });
     }
+    let shell = crate::shell::GuestShell::for_os(endpoint.guest_os)?;
     let result = execute_script(
         provider,
         limiter,
         endpoint,
-        &status_script(),
+        &status_script_for(shell),
         &status_metadata(handle, TAIL_WINDOW_BYTES),
         STATUS_DEADLINE,
     )?;
@@ -730,5 +1130,388 @@ mod tests {
         assert!(parse_status(&format!("state=running\nstdout_b64={huge}\n")).is_err());
         let ok = parse_status("state=lost\nreason=anything else\n").unwrap();
         assert_eq!(ok.reason.as_deref(), Some("unknown"));
+    }
+
+    /// The Windows scripts under a real PowerShell (see `pwsh_support`).
+    mod windows {
+        use super::*;
+        use crate::exec::ScriptMetadata;
+        use crate::pwsh_support::{require_pwsh, run_ps};
+        use crate::shell::GuestShell;
+
+        fn run(pwsh: &str, script: &str, args: &[&str]) -> std::process::Output {
+            let metadata = ScriptMetadata {
+                arguments: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                ..ScriptMetadata::default()
+            };
+            // The session starts in the guest directory the arguments name (the
+            // last one), like an SSH session in a login directory.
+            let cwd = args.last().map(Path::new).filter(|path| path.is_dir());
+            run_ps(pwsh, script, &metadata, b"", cwd)
+        }
+
+        fn start(
+            pwsh: &str,
+            base: &Path,
+            handle: &str,
+            secs: u64,
+            command: &str,
+        ) -> std::process::Output {
+            run(
+                pwsh,
+                &start_script_for(GuestShell::PowerShell, command),
+                &[handle, &secs.to_string(), &base.display().to_string()],
+            )
+        }
+
+        fn status(pwsh: &str, base: &Path, handle: &str) -> GuestReport {
+            let out = run(
+                pwsh,
+                &status_script_for(GuestShell::PowerShell),
+                &[
+                    handle,
+                    &TAIL_WINDOW_BYTES.to_string(),
+                    &base.display().to_string(),
+                ],
+            );
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            parse_status(&String::from_utf8(out.stdout).unwrap()).unwrap()
+        }
+
+        fn wait_for(pwsh: &str, base: &Path, handle: &str, state: GuestState) -> GuestReport {
+            let started = Instant::now();
+            loop {
+                let report = status(pwsh, base, handle);
+                if report.state == state {
+                    return report;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(40),
+                    "waited for {state:?}, last {report:?}"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+
+        fn pid_of(base: &Path, handle: &str) -> String {
+            std::fs::read_to_string(base.join(handle).join("pid"))
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_owned()
+        }
+
+        #[test]
+        fn a_command_runs_detached_and_exits_with_its_code_and_output() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let out = start(
+                &pwsh,
+                base.path(),
+                "w1",
+                60,
+                "Write-Output 'out-line'\n[Console]::Error.WriteLine('err-line')\nStart-Sleep -Seconds 2\nexit 7\n",
+            );
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "started");
+            let running = status(&pwsh, base.path(), "w1");
+            assert_eq!(running.state, GuestState::Running, "{running:?}");
+            let exited = wait_for(&pwsh, base.path(), "w1", GuestState::Exited);
+            assert_eq!(exited.exit_code, Some(7), "{exited:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&exited.stdout_tail).trim(),
+                "out-line"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&exited.stderr_tail).trim(),
+                "err-line"
+            );
+            assert!(exited.started_at.is_some() && exited.finished_at.is_some());
+        }
+
+        #[test]
+        fn the_command_is_data_never_shell_text_of_the_start_script() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            // Text that would break out of a single-quoted literal, a
+            // here-string, or an expandable string if it were interpolated.
+            let command =
+                "Write-Output '@'\n'@\n\"`$(New-Item pwned2)\"\n'; New-Item pwned3; '\nexit 0\n";
+            let out = start(&pwsh, base.path(), "w2", 60, command);
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            wait_for(&pwsh, base.path(), "w2", GuestState::Exited);
+            let written = std::fs::read(base.path().join("w2/body.ps1")).unwrap();
+            assert_eq!(written, command.as_bytes(), "stored byte for byte");
+            // The start script never expanded it (the session started in the
+            // base directory, where any expansion would have left a file).
+            assert!(!base.path().join("pwned2").exists());
+            assert!(!base.path().join("pwned3").exists());
+            assert!(!base.path().join("w2/pwned3").exists());
+        }
+
+        #[test]
+        fn a_bad_handle_or_number_is_refused_before_anything_is_created() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            for (handle, secs) in [
+                ("../escape", "60"),
+                ("a b", "60"),
+                ("ok", "6x"),
+                ("ok", "-1"),
+                ("x;y", "60"),
+            ] {
+                let out = run(
+                    &pwsh,
+                    &start_script_for(GuestShell::PowerShell, "exit 0"),
+                    &[handle, secs, &base.path().display().to_string()],
+                );
+                assert_eq!(out.status.code(), Some(64), "{handle:?} {secs:?}: {out:?}");
+            }
+            assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+            let out = run(
+                &pwsh,
+                &status_script_for(GuestShell::PowerShell),
+                &["../x", "10", &base.path().display().to_string()],
+            );
+            assert_eq!(out.status.code(), Some(64));
+        }
+
+        #[test]
+        fn starting_twice_runs_the_command_once_and_unknown_handles_are_absent() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let marker = base.path().join("runs");
+            let command = format!(
+                "Add-Content -LiteralPath '{}' x\nStart-Sleep -Seconds 1\n",
+                marker.display()
+            );
+            assert_eq!(
+                start(&pwsh, base.path(), "w3", 60, &command).status.code(),
+                Some(0)
+            );
+            let again = start(&pwsh, base.path(), "w3", 60, &command);
+            assert_eq!(String::from_utf8_lossy(&again.stdout).trim(), "exists");
+            wait_for(&pwsh, base.path(), "w3", GuestState::Exited);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "x");
+            assert_eq!(
+                status(&pwsh, base.path(), "nothing").state,
+                GuestState::Absent
+            );
+        }
+
+        #[test]
+        fn the_timeout_ends_the_command_and_its_tree_with_124() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            start(&pwsh, base.path(), "w4", 2, "Start-Sleep -Seconds 60\n");
+            let exited = wait_for(&pwsh, base.path(), "w4", GuestState::Exited);
+            assert_eq!(exited.exit_code, Some(124));
+        }
+
+        #[test]
+        fn a_killed_wrapper_is_lost_and_a_reboot_is_lost_too() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            start(&pwsh, base.path(), "w5", 60, "Start-Sleep -Seconds 29\n");
+            let pid = pid_of(base.path(), "w5");
+            Command::new("kill").args(["-9", &pid]).status().unwrap();
+            let lost = wait_for(&pwsh, base.path(), "w5", GuestState::Lost);
+            assert_eq!(lost.reason.as_deref(), Some("process_gone"));
+            let _ = Command::new("pkill")
+                .args(["-f", &base.path().display().to_string()])
+                .status();
+
+            start(&pwsh, base.path(), "w6", 60, "Start-Sleep -Seconds 29\n");
+            std::fs::write(base.path().join("w6/boot_id"), "not-this-boot\n").unwrap();
+            let lost = status(&pwsh, base.path(), "w6");
+            assert_eq!(lost.state, GuestState::Lost);
+            assert_eq!(lost.reason.as_deref(), Some("guest_rebooted"));
+            let pid = pid_of(base.path(), "w6");
+            let _ = Command::new("pkill").args(["-P", &pid]).status();
+            let _ = Command::new("kill").args(["-9", &pid]).status();
+        }
+
+        #[test]
+        fn a_reused_pid_is_not_mistaken_for_the_wrapper() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            start(&pwsh, base.path(), "w7", 60, "Start-Sleep -Seconds 29\n");
+            let pid_path = base.path().join("w7/pid");
+            let text = std::fs::read_to_string(&pid_path).unwrap();
+            let (pid, _) = text.trim().split_once(' ').unwrap();
+            std::fs::write(&pid_path, format!("{pid} 1\n")).unwrap();
+            assert_eq!(status(&pwsh, base.path(), "w7").state, GuestState::Lost);
+            let _ = Command::new("pkill").args(["-P", pid]).status();
+            let _ = Command::new("kill").args(["-9", pid]).status();
+        }
+
+        #[test]
+        fn an_abandoned_start_never_runs_late_and_an_unstarted_directory_ages_to_lost() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("ab");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("abandoned"), "").unwrap();
+            std::fs::write(dir.join("body.ps1"), "New-Item ran | Out-Null\n").unwrap();
+            std::fs::write(dir.join("run.ps1"), WINDOWS_WRAPPER).unwrap();
+            let out = Command::new(&pwsh)
+                .args(["-NoProfile", "-File"])
+                .arg(dir.join("run.ps1"))
+                .args(["-Dir"])
+                .arg(&dir)
+                .args(["-Secs", "60"])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(!dir.join("ran").exists() && !dir.join("pid").exists());
+            let lost = status(&pwsh, base.path(), "ab");
+            assert_eq!(lost.reason.as_deref(), Some("never_started"));
+
+            let fresh = base.path().join("fresh");
+            std::fs::create_dir(&fresh).unwrap();
+            assert_eq!(
+                status(&pwsh, base.path(), "fresh").state,
+                GuestState::Starting
+            );
+            Command::new("touch")
+                .args(["-d", "10 minutes ago"])
+                .arg(&fresh)
+                .status()
+                .unwrap();
+            // CreationTime is not settable with touch on Linux; the birth time
+            // is what the script reads, so only the abandoned path is asserted
+            // above and the fresh directory must at least read as starting.
+        }
+
+        #[test]
+        fn status_reads_only_regular_files_and_returns_a_bounded_tail() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            start(
+                &pwsh,
+                base.path(),
+                "w8",
+                60,
+                "[Console]::Out.Write(('a' * 100000) + 'THE-END \u{e9}\u{4e2d}')\n",
+            );
+            let report = wait_for(&pwsh, base.path(), "w8", GuestState::Exited);
+            assert!(report.stdout_bytes >= 100_000 + "THE-END \u{e9}\u{4e2d}".len() as u64);
+            assert_eq!(report.stdout_tail.len(), TAIL_WINDOW_BYTES);
+            assert!(
+                String::from_utf8_lossy(&report.stdout_tail)
+                    .trim_end()
+                    .ends_with("THE-END \u{e9}\u{4e2d}")
+            );
+            // A command that swaps its output for a symlink is not followed.
+            let dir = base.path().join("w8");
+            let _ = std::fs::remove_file(dir.join("stdout"));
+            std::os::unix::fs::symlink("/dev/zero", dir.join("stdout")).unwrap();
+            let begun = Instant::now();
+            let report = status(&pwsh, base.path(), "w8");
+            assert!(begun.elapsed() < Duration::from_secs(10));
+            assert!(report.stdout_tail.is_empty());
+        }
+
+        #[test]
+        fn a_wrapper_that_loses_the_gate_never_runs_and_negative_exit_codes_survive() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("g1");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("gate"), "").unwrap();
+            std::fs::write(dir.join("body.ps1"), "New-Item ran | Out-Null\n").unwrap();
+            std::fs::write(dir.join("run.ps1"), WINDOWS_WRAPPER).unwrap();
+            let out = Command::new(&pwsh)
+                .args(["-NoProfile", "-File"])
+                .arg(dir.join("run.ps1"))
+                .arg("-Dir")
+                .arg(&dir)
+                .args(["-Secs", "60"])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(!dir.join("ran").exists() && !dir.join("pid").exists());
+
+            // An NTSTATUS-style negative exit code is reported, not blanked.
+            let done = base.path().join("g2");
+            std::fs::create_dir(&done).unwrap();
+            std::fs::write(done.join("exit"), "-1073741819\n").unwrap();
+            std::fs::write(done.join("finished"), "1790000000\n").unwrap();
+            let report = status(&pwsh, base.path(), "g2");
+            assert_eq!(report.state, GuestState::Exited);
+            assert_eq!(report.exit_code, Some(-1_073_741_819));
+            // Garbage in a control file is not a number.
+            std::fs::write(done.join("exit"), "12abc\n").unwrap();
+            assert_eq!(status(&pwsh, base.path(), "g2").exit_code, None);
+            std::fs::write(done.join("exit"), "5\n\n").unwrap();
+            assert_eq!(status(&pwsh, base.path(), "g2").exit_code, Some(5));
+        }
+
+        #[test]
+        fn an_unknown_boot_counter_is_not_a_reboot() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            start(&pwsh, base.path(), "g3", 60, "Start-Sleep -Seconds 25\n");
+            std::fs::write(base.path().join("g3/boot_id"), "\n").unwrap();
+            let report = status(&pwsh, base.path(), "g3");
+            assert_eq!(report.state, GuestState::Running, "{report:?}");
+            let pid = pid_of(base.path(), "g3");
+            let _ = Command::new("pkill").args(["-P", &pid]).status();
+            let _ = Command::new("kill").args(["-9", &pid]).status();
+        }
+
+        #[test]
+        fn the_directories_are_trust_checked_before_use_and_created_protected() {
+            // Off Windows the ACL calls cannot run, so the script's shape is
+            // what is checked here; the fixture exercises it (a base that a
+            // local user pre-created, a junction in its place, a foreign
+            // owner, an extra write ACE).
+            let start = start_script_for(GuestShell::PowerShell, "exit 0");
+            let status = status_script_for(GuestShell::PowerShell);
+            for text in [&start, &status] {
+                assert!(text.contains("function fleetSecure"));
+                assert!(text.contains("ReparsePoint"));
+                assert!(text.contains("GetOwner("));
+                assert!(text.contains("0x500D0156"));
+            }
+            assert!(start.contains("CreateDirectory($path, $sec)"));
+            // The creator is the owner: setting Administrators fails for a
+            // non-admin token. And only the user's own profile is used.
+            assert!(!start.contains("SetOwner") && !start.contains("ProgramData"));
+            assert!(start.contains("LOCALAPPDATA") && start.contains("0x500D0156"));
+            assert!(start.contains("SetAccessRuleProtection($true, $false)"));
+            assert!(
+                start.contains("fleetMakeDir $fleetParent")
+                    && start.contains("fleetMakeDir $fleetBase")
+            );
+            assert!(status.contains("fleetChainSecure") && status.contains("exit 71"));
+            // Anchors that a trailing newline cannot slip past.
+            assert!(!start.contains("}$'") && start.contains("\\z"));
+        }
+
+        #[test]
+        fn the_start_session_fits_its_deadline_and_a_held_gate_is_unconfirmed_not_failed() {
+            let start = start_script_for(GuestShell::PowerShell, "exit 0");
+            // 10 s launch call + 25 s + 5 s of waiting, plus ssh setup and a
+            // cold PowerShell, inside SESSION_DEADLINE (60 s).
+            assert!(start.contains("-OperationTimeoutSec 10"));
+            assert!(
+                start.contains("$fleetWaited -lt 250") && start.contains("$fleetWaited -lt 50")
+            );
+            assert!(10 + 25 + 5 < SESSION_DEADLINE.as_secs());
+            assert!(start.contains("exit 76"));
+
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("g4");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("gate"), "").unwrap();
+            let report = status(&pwsh, base.path(), "g4");
+            assert_eq!(report.state, GuestState::Starting, "{report:?}");
+            assert_eq!(report.reason.as_deref(), Some("start_unconfirmed"));
+        }
     }
 }

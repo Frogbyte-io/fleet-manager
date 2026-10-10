@@ -9776,7 +9776,7 @@
               "string",
               "null"
             ],
-            "description": "A stable reason for `lost` (`guest_rebooted`, `process_gone`,\n`never_started`, `guest_has_no_record`), `failed_to_start`\n(`start_failed`; see the operation), `lease_ended`, and\n`unreachable` (`guest_unreachable`, `no_lab_machine`)."
+            "description": "A stable reason for `starting` (`start_unconfirmed`: a start whose\noutcome is unknown, check status again), `lost` (`guest_rebooted`,\n`process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`\n(`start_failed`; see the operation), `lease_ended`, and\n`unreachable` (`guest_unreachable`, `no_lab_machine`)."
           },
           "startedAt": {
             "type": [
@@ -16141,7 +16141,7 @@
                   "string",
                   "null"
                 ],
-                "description": "A stable reason for `lost` (`guest_rebooted`, `process_gone`,\n`never_started`, `guest_has_no_record`), `failed_to_start`\n(`start_failed`; see the operation), `lease_ended`, and\n`unreachable` (`guest_unreachable`, `no_lab_machine`)."
+                "description": "A stable reason for `starting` (`start_unconfirmed`: a start whose\noutcome is unknown, check status again), `lost` (`guest_rebooted`,\n`process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`\n(`start_failed`; see the operation), `lease_ended`, and\n`unreachable` (`guest_unreachable`, `no_lab_machine`)."
               },
               "startedAt": {
                 "type": [

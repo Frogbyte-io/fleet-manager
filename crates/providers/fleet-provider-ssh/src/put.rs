@@ -118,7 +118,7 @@ $fleetOver = $args[3]
 # values are data from a caller. On Windows the path must be drive-absolute
 # (the rooted check stands in on other platforms, where the tests run).
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
-if ($fleetSizeText -notmatch '^[0-9]{1,19}$' -or $fleetSha -cnotmatch '^[0-9a-f]{64}$' -or ($fleetOver -ne '0' -and $fleetOver -ne '1')) { exit 64 }
+if ($fleetSizeText -cnotmatch '^[0-9]{1,19}\z' -or $fleetSha -cnotmatch '^[0-9a-f]{64}\z' -or ($fleetOver -ne '0' -and $fleetOver -ne '1')) { exit 64 }
 try { $fleetSize = [int64]$fleetSizeText } catch { exit 64 }
 if ([string]::IsNullOrEmpty($fleetPath) -or $fleetPath.StartsWith('\\') -or $fleetPath.StartsWith('//') `
     -or $fleetPath.IndexOfAny([char[]]'<>"|?*') -ge 0 -or ($fleetPath.Length -gt 2 -and $fleetPath.IndexOf(':', 2) -ge 0) `

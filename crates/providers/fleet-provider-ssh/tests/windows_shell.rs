@@ -363,3 +363,50 @@ fn put_and_collect_move_binary_files_over_ssh() {
     assert_eq!(refused, fleet_provider_ssh::FetchOutcome::TooLarge);
     assert!(small.is_empty());
 }
+
+#[test]
+fn a_detached_command_outlives_its_ssh_session_and_status_reads_it_back() {
+    use fleet_provider_ssh::detached::{GuestState, probe_detached, start_script_for};
+    let (sshd, provider, limiter) = sshd_or_skip!();
+    let spec = sshd.spec();
+    let handle = format!("e2e-{}", std::process::id());
+    let metadata = ScriptMetadata {
+        arguments: vec![handle.clone(), "60".to_owned()],
+        ..ScriptMetadata::default()
+    };
+    let started = execute_script(
+        &provider,
+        &limiter,
+        &spec,
+        &start_script_for(
+            fleet_provider_ssh::GuestShell::PowerShell,
+            "Write-Output 'detached-out'\nStart-Sleep -Seconds 3\nexit 5\n",
+        ),
+        &metadata,
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert_eq!(started.exit_code, Some(0), "{started:?}");
+    assert_eq!(started.stdout.trim(), "started");
+    // The start session has ended; the command keeps running.
+    let running = probe_detached(&provider, &limiter, &spec, &handle).unwrap();
+    assert_eq!(running.state, GuestState::Running, "{running:?}");
+    let begun = std::time::Instant::now();
+    let report = loop {
+        let report = probe_detached(&provider, &limiter, &spec, &handle).unwrap();
+        if report.state == GuestState::Exited {
+            break report;
+        }
+        assert!(begun.elapsed() < Duration::from_secs(60), "{report:?}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(report.exit_code, Some(5));
+    assert_eq!(
+        String::from_utf8_lossy(&report.stdout_tail).trim(),
+        "detached-out"
+    );
+    // Clean up the guest directory (the test's own home).
+    if let Ok(home) = std::env::var("HOME") {
+        let _ = std::fs::remove_dir_all(format!("{home}/.local/state/fleet-lab/exec/{handle}"));
+    }
+}

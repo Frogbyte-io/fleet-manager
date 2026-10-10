@@ -205,6 +205,7 @@ pub trait GuestExecPort: fmt::Debug + Send + Sync {
         &self,
         machine_id: &str,
         endpoint_id: &str,
+        guest_os: fleet_core::GuestOs,
         handle: &str,
     ) -> Result<GuestProcess, String>;
 }
@@ -394,19 +395,7 @@ impl LabExecDetach {
         scope(principal, &lease.owner, || format!("lease {lease_id}"))?;
         lease_exec_ready(&lease, now).map_err(|detail| LabUseCaseError::Invalid { detail })?;
         self.require_machine(&lease).await?;
-        // The detached scripts are Bash. A Windows guest must not be handed
-        // them (PowerShell would pass them to whatever `bash` it finds).
-        let guest_os = self
-            .templates
-            .get_version(&lease.template_version_id)
-            .await
-            .map(|version| version.content.guest_os)
-            .map_err(|detail| backend("templates", detail))?;
-        if guest_os != fleet_core::GuestOs::Linux {
-            return Err(LabUseCaseError::Invalid {
-                detail: "detached exec is not available on Windows guests yet".to_owned(),
-            });
-        }
+        let guest_os = self.guest_os_of(&lease).await?;
         let remaining = lease.expires_at.map_or(0, |expires| {
             u64::try_from((expires - now) / 1000).unwrap_or(0)
         });
@@ -448,6 +437,7 @@ impl LabExecDetach {
                         "owner": lease.owner,
                         "commandSha256": command_sha256,
                         "commandBytes": command_bytes,
+                        "guestOs": guest_os.id(),
                     })
                     .to_string(),
                 ),
@@ -603,7 +593,12 @@ impl LabExecDetach {
             status.reason = Some("no_lab_machine".to_owned());
             return Ok(status);
         };
-        let process = match self.guest.probe(&machine_id, &endpoint_id, handle).await {
+        let guest_os = self.guest_os_of(&lease).await?;
+        let process = match self
+            .guest
+            .probe(&machine_id, &endpoint_id, guest_os, handle)
+            .await
+        {
             Ok(process) => process,
             Err(detail) => {
                 // The text names a tool failure, never output; it is logged
@@ -621,7 +616,8 @@ impl LabExecDetach {
         // A start that reported failure may still have started the command
         // (a dropped session, a slow wrapper): the guest decides. Only a
         // guest with no trace of it is `failed_to_start`.
-        let no_trace = matches!(status.state, DetachedState::Starting)
+        let unconfirmed = status.reason.as_deref() == Some("start_unconfirmed");
+        let no_trace = (matches!(status.state, DetachedState::Starting) && !unconfirmed)
             || matches!(
                 status.reason.as_deref(),
                 Some("guest_has_no_record" | "never_started")
@@ -637,6 +633,18 @@ impl LabExecDetach {
             eprintln!("detached exec {handle}: terminal answer not kept: {error}");
         }
         Ok(status)
+    }
+
+    /// The guest OS of the lease's immutable template version.
+    async fn guest_os_of(
+        &self,
+        lease: &fleet_core::Lease,
+    ) -> Result<fleet_core::GuestOs, LabUseCaseError> {
+        self.templates
+            .get_version(&lease.template_version_id)
+            .await
+            .map(|version| version.content.guest_os)
+            .map_err(|detail| backend("templates", detail))
     }
 
     async fn require_machine(&self, lease: &fleet_core::Lease) -> Result<(), LabUseCaseError> {
@@ -759,7 +767,12 @@ fn apply_process(
             status.state = DetachedState::Lost;
             status.reason = Some(process.reason.unwrap_or_else(|| "unknown".to_owned()));
         }
-        GuestProcessState::Starting => status.state = DetachedState::Starting,
+        GuestProcessState::Starting => {
+            status.state = DetachedState::Starting;
+            // `start_unconfirmed`: a wrapper holds the gate but has not
+            // recorded its pid yet.
+            status.reason = process.reason;
+        }
         GuestProcessState::Absent => {
             if record.start_state == StartState::Starting
                 && now - record.created_at < START_GRACE_MS
