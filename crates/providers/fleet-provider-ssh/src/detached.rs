@@ -161,11 +161,12 @@ pub fn start_script(command: &str) -> String {
 //
 // The command runs as a child of the wrapper under a timeout (`124` is the
 // bound ending it; its process tree is killed), with stdio redirected to
-// files. The wrapper is launched through WMI (`Win32_Process.Create`) so it
-// is outside the OpenSSH session's job object, which kills everything in it
-// when the session ends (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in
-// `w32-doexec.c`). Whether WMI is the right escape on a real guest is for the
-// Windows fixture to confirm.
+// files. The wrapper is launched with CreateProcess and
+// `CREATE_BREAKAWAY_FROM_JOB` so it is outside the OpenSSH session's job
+// object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in `w32-doexec.c`). WMI's
+// `Win32_Process.Create` was tried first and is refused for a standard
+// account ("Access denied"); breakaway works for both account types (live
+// Windows run).
 // ---------------------------------------------------------------------------
 
 /// The Windows prologue shared by start and status: validates the handle and
@@ -384,8 +385,33 @@ if ($fleetWindows) {
   $fleetPs = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   $fleetLine = '"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -Dir "{2}" -Secs {3}' -f $fleetPs, $fleetRun, $fleetDir, $fleetNum
   try {
-    $fleetMade = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -OperationTimeoutSec 10 -Arguments @{ CommandLine = $fleetLine; CurrentDirectory = $fleetCwd }
-    if ($fleetMade.ReturnValue -ne 0) { $fleetLaunched = $false }
+    # CreateProcess with CREATE_BREAKAWAY_FROM_JOB: Windows OpenSSH puts the
+    # session's processes in a job that is killed when the session ends, and
+    # allows breakaway from it. Unlike WMI process creation this works
+    # for a standard (non-administrator) account, and the child keeps the
+    # session's user, token and environment.
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class FleetLaunch {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct STARTUPINFO { public int cb; public string lpReserved; public string lpDesktop; public string lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool CreateProcessW(string app, string cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  public static int Start(string cmd, string cwd) {
+    STARTUPINFO si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO)); PROCESS_INFORMATION pi;
+    // CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW (a hidden console: powershell.exe does not start under DETACHED_PROCESS)
+    uint flags = 0x01000000 | 0x00000200 | 0x08000000;
+    if (!CreateProcessW(null, cmd, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, cwd, ref si, out pi)) return -Marshal.GetLastWin32Error();
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    return pi.dwProcessId;
+  }
+}
+"@
+    if ([FleetLaunch]::Start($fleetLine, $fleetCwd) -le 0) { $fleetLaunched = $false }
   } catch { $fleetLaunched = $false }
 } else {
   $fleetInfo = New-Object Diagnostics.ProcessStartInfo
@@ -403,7 +429,8 @@ if ($fleetWindows) {
 # in: take the gate to say so, and if the gate is already taken, wait for the
 # wrapper like any other start.
 if (-not $fleetLaunched -and (fleetGiveUp)) { exit 75 }
-# Worst case in this session: 10 s for the launch call, 25 s here, 5 s below,
+# Worst case in this session: a few seconds to compile the launch helper, 25 s
+# here, 5 s below,
 # inside the 60 s session deadline together with ssh setup and PowerShell's
 # own cold start.
 $fleetPidFile = [IO.Path]::Combine($fleetDir, 'pid')
@@ -1495,9 +1522,11 @@ mod tests {
         #[test]
         fn the_start_session_fits_its_deadline_and_a_held_gate_is_unconfirmed_not_failed() {
             let start = start_script_for(GuestShell::PowerShell, "exit 0");
-            // 10 s launch call + 25 s + 5 s of waiting, plus ssh setup and a
+            // helper compile + 25 s + 5 s of waiting, plus ssh setup and a
             // cold PowerShell, inside SESSION_DEADLINE (60 s).
-            assert!(start.contains("-OperationTimeoutSec 10"));
+            assert!(
+                start.contains("CREATE_BREAKAWAY_FROM_JOB") && !start.contains("Win32_Process")
+            );
             assert!(
                 start.contains("$fleetWaited -lt 250") && start.contains("$fleetWaited -lt 50")
             );

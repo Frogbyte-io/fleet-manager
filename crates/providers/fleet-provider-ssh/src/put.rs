@@ -168,14 +168,26 @@ try {
     $fleetBuf = New-Object byte[] 65536
     $fleetLeft = $fleetSize
     $fleetGot = [int64]0
+    $fleetIdle = $false
     while ($fleetLeft -gt 0) {
-      $fleetN = $fleetIn.Read($fleetBuf, 0, [int][Math]::Min([int64]$fleetBuf.Length, $fleetLeft))
+      # A client that disappeared (a deadline kill) leaves this read blocked
+      # for ever on a Windows guest: give up after two minutes without data so
+      # the temporary file is removed and the process ends.
+      $fleetTask = $fleetIn.ReadAsync($fleetBuf, 0, [int][Math]::Min([int64]$fleetBuf.Length, $fleetLeft))
+      if (-not $fleetTask.Wait(120000)) { $fleetIdle = $true; break }
+      $fleetN = $fleetTask.Result
       if ($fleetN -le 0) { break }
       $fleetFs.Write($fleetBuf, 0, $fleetN)
+      # Windows OpenSSH (in-box 9.5) stalls its stdin pipe for a reader that
+      # drains it with no pause between reads (a transfer of a few hundred KB
+      # never finishes). One millisecond between reads avoids it and still
+      # moves tens of MB per second.
+      [Threading.Thread]::Sleep(1)
       [void]$fleetHasher.TransformBlock($fleetBuf, 0, $fleetN, $null, 0)
       $fleetLeft -= $fleetN
       $fleetGot += $fleetN
     }
+    if ($fleetIdle) { $fleetCode = 70; break }
     [void]$fleetHasher.TransformFinalBlock([byte[]]@(), 0, 0)
     $fleetFs.Flush($true)
     if ($fleetGot -ne $fleetSize) { $fleetCode = 76; break }
@@ -187,6 +199,13 @@ try {
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { $fleetCode = 65; break }
       if ($fleetItem.Attributes -band [IO.FileAttributes]::ReadOnly) { $fleetCode = 74; break }
       $fleetOldAttr = $fleetItem.Attributes
+      # File.Replace opens the replacement itself, so it fails (77) while this
+      # handle is open, even with read and delete sharing (seen on the live
+      # Windows run). Close it, re-verify what is on disk, then replace.
+      $fleetFs.Dispose()
+      $fleetFs = $null
+      $fleetAgain = (Get-FileHash -LiteralPath $fleetTmp -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($fleetAgain -ne $fleetSha) { $fleetCode = 75; break }
       try { [IO.File]::Replace($fleetTmp, $fleetFull, [NullString]::Value) } catch { $fleetCode = 77; break }
       $fleetReplaced = $true
     } else {
@@ -195,8 +214,7 @@ try {
         break
       }
     }
-    $fleetFs.Dispose()
-    $fleetFs = $null
+    if ($null -ne $fleetFs) { $fleetFs.Dispose(); $fleetFs = $null }
     # The published file is not hidden or temporary, and a replaced file keeps
     # its own other attributes except Hidden (it was not read-only) but not the old file's
     # Zone.Identifier stream.
@@ -741,6 +759,26 @@ mod tests {
                 assert_eq!(run(size, hash, over), Some(64), "{size} {hash} {over}");
             }
             assert_eq!(entries(dir.path()), 0);
+        }
+
+        #[test]
+        fn the_windows_reader_paces_itself_and_gives_up_on_a_vanished_client() {
+            // Live findings: Windows OpenSSH stalls a stdin reader that has no
+            // pause between reads, and a killed client leaves the read blocked
+            // for ever. Both are properties of the script text; the live run
+            // is what proves them (see docs/operations/lab.md).
+            assert!(WINDOWS_PUT_SCRIPT.contains("[Threading.Thread]::Sleep(1)"));
+            assert!(
+                WINDOWS_PUT_SCRIPT.contains("ReadAsync")
+                    && WINDOWS_PUT_SCRIPT.contains(".Wait(120000)")
+            );
+            // File.Replace needs the temporary file closed, and re-verified.
+            let replace = WINDOWS_PUT_SCRIPT.find("[IO.File]::Replace").unwrap();
+            let close = WINDOWS_PUT_SCRIPT[..replace]
+                .rfind("$fleetFs.Dispose()")
+                .unwrap();
+            let rehash = WINDOWS_PUT_SCRIPT[..replace].rfind("Get-FileHash").unwrap();
+            assert!(close < rehash && rehash < replace);
         }
 
         #[test]
