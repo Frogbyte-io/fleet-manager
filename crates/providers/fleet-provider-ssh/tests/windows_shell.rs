@@ -29,7 +29,7 @@ fn pwsh() -> Option<String> {
             .to_string();
     }
     Command::new(&candidate)
-        .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+        .args(["-NoProfile", "-Command", "exit 0"])
         .output()
         .ok()
         .filter(|out| out.status.success())
@@ -88,9 +88,7 @@ impl PowerShellSshd {
         let wrapper = dir.path().join("windows-default-shell.sh");
         std::fs::write(
             &wrapper,
-            format!(
-                "#!/bin/sh\nexec '{pwsh}' -NoProfile -NonInteractive -Command \"$SSH_ORIGINAL_COMMAND\"\n"
-            ),
+            format!("#!/bin/sh\nexec '{pwsh}' -Command \"$SSH_ORIGINAL_COMMAND\"\n"),
         )
         .unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
@@ -166,6 +164,10 @@ impl PowerShellSshd {
 macro_rules! sshd_or_skip {
     () => {{
         let Some(pwsh) = pwsh() else {
+            assert!(
+                std::env::var_os("FLEET_REQUIRE_PWSH").is_none(),
+                "FLEET_REQUIRE_PWSH is set but no PowerShell was found"
+            );
             eprintln!("SKIPPED: no pwsh on PATH and FLEET_PWSH unset");
             return;
         };

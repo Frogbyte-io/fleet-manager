@@ -88,33 +88,84 @@ impl GuestShell {
 /// script block, and maps the outcome to an exit code the way a POSIX shell
 /// would: `exit N` in the script exits N; otherwise the exit code is 0 when
 /// the script's last statement succeeded, else the last native command's
-/// exit code, else 1. Syntax is Windows PowerShell 5.1.
+/// exit code, else 1 (a native code whose low byte is 0 also reports 1:
+/// `ssh` truncates the remote exit status to 8 bits, and a failure must not
+/// read as success). A header that is truncated or malformed, a working
+/// directory that is not an existing local directory, or an environment
+/// entry that cannot be applied exits 90 without echoing any caller text.
+/// Syntax is Windows PowerShell 5.1.
 pub const POWERSHELL_BOOTSTRAP: &str = concat!(
     "$ErrorActionPreference='Stop';",
     "$ProgressPreference='SilentlyContinue';",
-    "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);",
+    "try{[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false)}catch{};",
     "$fleetIn=[Console]::OpenStandardInput();",
     "function fleetLine{",
     "$m=New-Object System.IO.MemoryStream;",
     "while(($b=$fleetIn.ReadByte()) -ge 0 -and $b -ne 10){$m.WriteByte($b)};",
+    "if($b -lt 0){throw 'header'};",
     "[System.Text.Encoding]::ASCII.GetString($m.ToArray()).Trim()};",
+    "try{",
     "$fleetMeta=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((fleetLine))).Split([char]0);",
     "$fleetText=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((fleetLine)));",
     "$i=1;$fleetEnv=@();",
     "while($i -lt $fleetMeta.Length -and $fleetMeta[$i] -ne ''){$fleetEnv+=$fleetMeta[$i];$i++};",
     "$i++;$fleetArgs=@();",
     "while($i -lt $fleetMeta.Length){if($fleetMeta[$i] -ne ''){$fleetArgs+=$fleetMeta[$i]};$i++};",
-    "try{",
-    "if($fleetMeta[0] -ne ''){Set-Location -LiteralPath $fleetMeta[0];",
+    "$d=$fleetMeta[0];",
+    "if($d -ne ''){",
+    "if($d.Length -ge 2 -and ($d[0] -eq [char]92 -or $d[0] -eq [char]47) -and ($d[1] -eq [char]92 -or $d[1] -eq [char]47)){throw 'unc'};",
+    "if(-not [System.IO.Directory]::Exists($d)){throw 'dir'};",
+    "Set-Location -LiteralPath $d;",
     "[Environment]::CurrentDirectory=(Get-Location -PSProvider FileSystem).ProviderPath};",
     "foreach($e in $fleetEnv){$k=$e.IndexOf('=');",
     "[Environment]::SetEnvironmentVariable($e.Substring(0,$k),$e.Substring($k+1),'Process')}",
-    "}catch{[Console]::Error.WriteLine('fleet: the working directory or environment cannot be applied');exit 90};",
-    "$fleetBlock=[scriptblock]::Create($fleetText+[Environment]::NewLine+'$global:fleetOk=$?');",
+    "}catch{[Console]::Error.WriteLine('fleet: the session header, working directory or environment cannot be applied');exit 90};",
+    "$fleetBlock=[scriptblock]::Create($fleetText+[Environment]::NewLine+[Environment]::NewLine+'$global:fleetOk=$?');",
+    "Remove-Variable i,d,e,k,m,b,fleetMeta,fleetEnv,fleetText -ErrorAction SilentlyContinue;",
     "$ErrorActionPreference='Continue';$global:fleetOk=$null;$global:LASTEXITCODE=$null;",
     "Invoke-Command -ScriptBlock $fleetBlock -ArgumentList $fleetArgs;",
-    "if($global:fleetOk -eq $false){if($global:LASTEXITCODE){exit $global:LASTEXITCODE}else{exit 1}}else{exit 0}"
+    "if($global:fleetOk -eq $false){$fleetC=1;",
+    "if($global:LASTEXITCODE){$fleetC=[int]$global:LASTEXITCODE;if(($fleetC -band 255) -eq 0){$fleetC=1}};",
+    "exit $fleetC}else{exit 0}"
 );
+
+/// Refuses metadata the framing cannot carry faithfully. A NUL byte is the
+/// framing's field separator, so one inside a field would shift every field
+/// after it (nothing becomes shell text, but the script would see other
+/// data); an environment name outside `[A-Za-z_][A-Za-z0-9_]*` is not a
+/// variable either shell can set the same way.
+fn validate_metadata(metadata: &ScriptMetadata) -> Result<(), SshProviderError> {
+    let has_nul = |text: &str| text.contains('\0');
+    if has_nul(&metadata.working_directory)
+        || metadata
+            .environment
+            .iter()
+            .any(|(name, value)| has_nul(name) || has_nul(value))
+        || metadata.arguments.iter().any(|argument| has_nul(argument))
+    {
+        return Err(SshProviderError::Setup {
+            detail: "the working directory, environment and arguments cannot contain a NUL byte"
+                .to_owned(),
+        });
+    }
+    let valid_name = |name: &str| {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if let Some((name, _)) = metadata
+        .environment
+        .iter()
+        .find(|(name, _)| !valid_name(name))
+    {
+        return Err(SshProviderError::Setup {
+            detail: format!("the environment name {name:?} is not [A-Za-z_][A-Za-z0-9_]*"),
+        });
+    }
+    Ok(())
+}
 
 /// Starts an `ssh` session running `script` with `metadata` through the
 /// endpoint's guest shell. The script has been written to the session's
@@ -128,6 +179,7 @@ pub(crate) fn spawn_script_session(
     deadline: Duration,
 ) -> Result<std::process::Child, SshProviderError> {
     let shell = GuestShell::for_os(endpoint.guest_os)?;
+    validate_metadata(metadata)?;
     let config_path = provider.write_config(&endpoint.auth)?;
 
     let mut command = std::process::Command::new("ssh");
@@ -179,7 +231,7 @@ pub(crate) fn arguments_only(arguments: Vec<String>) -> ScriptMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pwsh_support::{require_pwsh, run_ps, text};
+    use crate::pwsh_support::{require_pwsh, run_ps, run_ps_raw, text};
 
     #[test]
     fn the_posix_framing_is_the_bash_framing() {
@@ -364,5 +416,131 @@ mod tests {
         );
         assert_eq!(out.status.code(), Some(0), "{out:?}");
         assert_eq!(text(&out.stdout), "caf\u{e9} \u{4e2d}\u{6587} \u{1f600}\n");
+    }
+
+    #[test]
+    fn powershell_never_reports_a_failed_native_code_as_success() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let code = |script: &str| {
+            run_ps(&pwsh, script, &ScriptMetadata::default(), b"", None)
+                .status
+                .code()
+        };
+        // ssh truncates the remote status to 8 bits, so a code that is a
+        // multiple of 256 would read as success.
+        assert_eq!(
+            code("$global:LASTEXITCODE = 512\nGet-Item /definitely/not/here\n"),
+            Some(1)
+        );
+        assert_eq!(
+            code("$global:LASTEXITCODE = 3\nGet-Item /definitely/not/here\n"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_trailing_line_continuation_cannot_swallow_the_status_probe() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let run = |script: &str| run_ps(&pwsh, script, &ScriptMetadata::default(), b"", None);
+        let failed = run("Get-Item /definitely/not/here `");
+        assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+        let printed = run("Write-Output hi `");
+        assert_eq!(printed.status.code(), Some(0));
+        assert_eq!(text(&printed.stdout), "hi\n");
+    }
+
+    #[test]
+    fn a_truncated_or_malformed_header_exits_90_and_runs_nothing() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let b64 = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+        let script = b64("Write-Output ran");
+        for input in [
+            String::new(),
+            "AAAA".to_owned(),
+            format!("{}\n", encode_metadata(&ScriptMetadata::default())),
+            "!!!\n!!!\n".to_owned(),
+            format!("{}\n{script}", encode_metadata(&ScriptMetadata::default())),
+        ] {
+            let out = run_ps_raw(&pwsh, input.as_bytes());
+            assert_eq!(out.status.code(), Some(90), "{input:?}: {out:?}");
+            assert!(!text(&out.stdout).contains("ran"));
+        }
+    }
+
+    #[test]
+    fn the_working_directory_must_be_an_existing_local_directory() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        for bad in [
+            "//server/share".to_owned(),
+            "\\\\server\\share".to_owned(),
+            file.display().to_string(),
+            "Env:".to_owned(),
+        ] {
+            let metadata = ScriptMetadata {
+                working_directory: bad.clone(),
+                ..ScriptMetadata::default()
+            };
+            let out = run_ps(&pwsh, "Write-Output ran\n", &metadata, b"", None);
+            assert_eq!(out.status.code(), Some(90), "{bad}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn the_bootstraps_own_variables_are_not_left_for_the_script() {
+        let Some(pwsh) = require_pwsh() else { return };
+        let metadata = ScriptMetadata {
+            environment: vec![("FLEET_SECRETISH".to_owned(), "value".to_owned())],
+            ..ScriptMetadata::default()
+        };
+        let out = run_ps(
+            &pwsh,
+            "[Console]::Out.Write([string]($null -eq (Get-Variable fleetMeta,fleetEnv,fleetText -ErrorAction SilentlyContinue)))\n",
+            &metadata,
+            b"",
+            None,
+        );
+        assert_eq!(text(&out.stdout), "True");
+    }
+
+    #[test]
+    fn metadata_the_framing_cannot_carry_is_refused_before_a_session_starts() {
+        for bad in [
+            ScriptMetadata {
+                working_directory: "/tmp\0X=1".to_owned(),
+                ..ScriptMetadata::default()
+            },
+            ScriptMetadata {
+                environment: vec![("A".to_owned(), "v\0\0-injected".to_owned())],
+                ..ScriptMetadata::default()
+            },
+            ScriptMetadata {
+                arguments: vec!["a\0b".to_owned()],
+                ..ScriptMetadata::default()
+            },
+            ScriptMetadata {
+                environment: vec![("1BAD".to_owned(), "v".to_owned())],
+                ..ScriptMetadata::default()
+            },
+            ScriptMetadata {
+                environment: vec![("A=B".to_owned(), "v".to_owned())],
+                ..ScriptMetadata::default()
+            },
+            ScriptMetadata {
+                environment: vec![(String::new(), "v".to_owned())],
+                ..ScriptMetadata::default()
+            },
+        ] {
+            assert!(validate_metadata(&bad).is_err(), "{bad:?}");
+        }
+        assert!(
+            validate_metadata(&ScriptMetadata {
+                environment: vec![("_OK_1".to_owned(), "a=b".to_owned())],
+                ..ScriptMetadata::default()
+            })
+            .is_ok()
+        );
     }
 }
