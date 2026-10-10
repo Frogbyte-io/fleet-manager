@@ -165,7 +165,7 @@ cmd_wait_install() {
     if [ -n "$ip" ] && G "$ip" 'if (Test-Path C:\ProgramData\fleet\setup-complete) { "ready" }' 2>/dev/null | grep -q ready; then
       note "install and guest setup finished"
       G "$ip" '$p=(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"); "{0} build {1}.{2}; shell $env:ComSpec; PS $($PSVersionTable.PSVersion)" -f $p.ProductName,$p.CurrentBuildNumber,$p.UBR; (Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL" | Where-Object Name -like "Windows*" | Select-Object -First 1).LicenseStatus'
-      echo "(LicenseStatus 0 = unlicensed, the expected state)"
+      echo "(LicenseStatus 5 = notification mode, 0 = unlicensed: both mean not activated, the expected state)"
       return 0
     fi
     sleep 20

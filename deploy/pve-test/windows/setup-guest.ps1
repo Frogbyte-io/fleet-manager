@@ -67,6 +67,11 @@ Step 'OpenSSH Server' {
 }
 
 Step 'keep generalize working' {
+  # With a TPM, Windows 11 turns on automatic device encryption, and sysprep /generalize
+  # refuses to run while BitLocker is on (0x80310039). Stop it, and decrypt if it started.
+  New-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker' -Force | Out-Null
+  Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker' -Name PreventDeviceEncryption -Type DWord -Value 1
+  manage-bde.exe -off C: | Out-Null
   # A Store app updated by a user makes sysprep /generalize fail (ADR 0015).
   New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' -Force | Out-Null
   Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' -Name AutoDownload -Type DWord -Value 2
