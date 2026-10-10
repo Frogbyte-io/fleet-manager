@@ -39,6 +39,7 @@ pub mod exec;
 pub mod fetch;
 pub mod inventory;
 pub mod put;
+pub mod shell;
 
 pub use discovery::{
     DISCOVERY_DEADLINE, DISCOVERY_SOURCE, DiscoveredCheckout, MAX_CHECKOUTS, discover,
@@ -51,6 +52,7 @@ pub use exec::{
 pub use fetch::{FetchOutcome, fetch_file};
 pub use inventory::{COLLECTION_DEADLINE, PROBE_SOURCE, collect, parse_probe_output, probe_script};
 pub use put::{PutOutcome, PutRequest, put_file};
+pub use shell::GuestShell;
 
 /// One host's key, as observed from the network.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -441,6 +443,9 @@ pub struct SshConnectionSpec {
     pub user: String,
     /// The authentication method.
     pub auth: SshAuth,
+    /// The guest's operating system, which selects the guest shell. A
+    /// machine that is not a Lab guest is Linux.
+    pub guest_os: fleet_core::GuestOs,
 }
 
 /// Extracts `(key type, fingerprint)` from an `ssh-keygen -lf` summary line:
@@ -647,6 +652,7 @@ mod tests {
     #[test]
     fn ssh_destination_is_after_the_option_terminator() {
         let endpoint = SshConnectionSpec {
+            guest_os: fleet_core::GuestOs::default(),
             host: "-Fmalicious".to_owned(),
             port: 22,
             user: "-oProxyCommand=malicious".to_owned(),

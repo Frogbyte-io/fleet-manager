@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::exec::ExecutionLimiter;
-use crate::fetch::{POLL, drain_stderr, spawn_script_session};
+use crate::fetch::{POLL, arguments_only, drain_stderr};
+use crate::shell::spawn_script_session;
 use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 
 /// How a copy into the guest ended.
@@ -158,12 +159,12 @@ fn put_inner(
     let mut child = spawn_script_session(
         provider,
         endpoint,
-        vec![
+        &arguments_only(vec![
             request.path.to_owned(),
             request.size.to_string(),
             request.sha256.to_owned(),
             if request.overwrite { "1" } else { "0" }.to_owned(),
-        ],
+        ]),
         PUT_SCRIPT,
         deadline,
     )?;

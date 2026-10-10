@@ -491,6 +491,7 @@ pub(crate) async fn resolve_ssh_endpoint(
         .map_err(|_| "the endpoint reference's port is not a number")?;
     Ok((
         SshConnectionSpec {
+            guest_os: fleet_core::GuestOs::Linux,
             host: host.to_owned(),
             port,
             user: user.to_owned(),

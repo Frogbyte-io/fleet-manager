@@ -345,6 +345,7 @@ fn connection_spec(draft: &OnboardingDraft) -> Result<SshConnectionSpec, String>
         OnboardAuth::IdentityFile { path } => SshAuth::IdentityFile { path: path.clone() },
     };
     Ok(SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::Linux,
         host: draft.endpoint.host.clone(),
         port: draft.endpoint.port,
         user: draft.endpoint.user.clone(),

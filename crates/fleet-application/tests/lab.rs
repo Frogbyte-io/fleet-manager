@@ -58,6 +58,7 @@ fn content(name: &str, image_version_id: &str) -> LabTemplateContent {
         ttl_seconds: 3_600,
         cleanup: fleet_core::CleanupStrategy::Destroy,
         audio: None,
+        guest_os: fleet_core::GuestOs::default(),
     }
 }
 

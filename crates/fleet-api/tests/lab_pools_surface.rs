@@ -120,7 +120,7 @@ impl World {
                 readiness_deadline_seconds: 300,
                 ttl_seconds: 3_600,
                 cleanup,
-                audio: None,
+                ..LabTemplateContent::default()
             };
             let template: LabTemplate = labs
                 .create(

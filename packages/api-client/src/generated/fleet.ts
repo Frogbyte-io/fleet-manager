@@ -1722,6 +1722,8 @@ export interface LabTemplateContentDto {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The pinned image version id. */
   imageVersionId: string;
   /**
@@ -1790,6 +1792,8 @@ export interface LabTemplateDto {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -2886,6 +2890,8 @@ export type PageLabTemplateDtoItemsItem = {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -4905,6 +4911,8 @@ export type ResourceLabTemplateDtoData = {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` or `windows`. */
+  guestOs: string;
   /** The draft's identity. */
   id: string;
   /** The pinned image version id. */
@@ -6055,6 +6063,8 @@ export interface SaveLabTemplateRequest {
      * @minimum 0
      */
   diskGib: number;
+  /** The guest's operating system: `linux` (the default) or `windows`. */
+  guestOs?: string;
   /** The pinned image version id. */
   imageVersionId: string;
   /**

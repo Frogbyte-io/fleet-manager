@@ -51,6 +51,7 @@ function template(overrides: Partial<LabTemplateDto> = {}): LabTemplateDto {
     readinessDeadlineSeconds: 600,
     ttlSeconds: 7200,
     cleanup: 'destroy',
+    guestOs: 'linux',
     publishedFrom: 'v1',
     createdAt: 0,
     updatedAt: 0,

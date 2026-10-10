@@ -242,6 +242,7 @@ async fn publish(labs: &LabRepository, name: &str, cleanup: CleanupStrategy) -> 
         ttl_seconds: 3_600,
         cleanup,
         audio: None,
+        guest_os: fleet_core::GuestOs::default(),
     };
     let template: LabTemplate = LabTemplatePort::create(
         labs,

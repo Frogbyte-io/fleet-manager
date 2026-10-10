@@ -168,6 +168,7 @@ fn start_sshd() -> TestSshd {
 
 fn spec(sshd: &TestSshd) -> SshConnectionSpec {
     SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         host: "127.0.0.1".to_owned(),
         port: sshd.port,
         user: whoami(),
@@ -347,6 +348,7 @@ fn the_limiter_saturates_without_starting_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let provider = SshProvider::new(dir.path().to_path_buf()).unwrap();
     let refused = SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         host: "127.0.0.1".to_owned(),
         port: 1,
         user: whoami(),
@@ -612,6 +614,7 @@ fn agent_auth_falls_back_to_the_default_identity_file() {
         .unwrap();
     provider.pin(&observation).unwrap();
     let agent_spec = SshConnectionSpec {
+        guest_os: fleet_core::GuestOs::default(),
         auth: SshAuth::Agent,
         ..spec(&sshd)
     };

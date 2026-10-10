@@ -87,7 +87,7 @@ function template(): LabTemplateDto {
   return {
     id: 't1', name: 'ubuntu-dev', description: '', imageVersionId: 'img-1', cores: 2, memoryMib: 4096, diskGib: 40,
     bootstrapProjectId: null, readinessProbe: 'guest_agent', readinessCommand: null, sshUser: 'root', sshPort: 22,
-    sshTrustMode: 'tofu', sshFingerprint: null, readinessDeadlineSeconds: 600, ttlSeconds: 7200, cleanup: 'destroy',
+    sshTrustMode: 'tofu', sshFingerprint: null, readinessDeadlineSeconds: 600, ttlSeconds: 7200, cleanup: 'destroy', guestOs: 'linux',
     publishedFrom: 'v1', createdAt: 0, updatedAt: 0,
   }
 }
