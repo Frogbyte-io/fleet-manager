@@ -976,6 +976,7 @@ impl Harness {
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
             audio,
+            guest_os: fleet_core::GuestOs::default(),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

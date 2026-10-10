@@ -53,6 +53,43 @@ impl ReadinessProbe {
     }
 }
 
+/// The operating system of a Lab guest. It selects the guest shell and the
+/// path rules; the template declares it because both must be chosen before
+/// the guest has proven anything (ADR 0015).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestOs {
+    /// A Linux guest with Bash (the default).
+    #[default]
+    Linux,
+    /// A Windows guest running OpenSSH Server and Windows PowerShell.
+    Windows,
+}
+
+impl GuestOs {
+    /// The stable string used in storage and the API.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Windows => "windows",
+        }
+    }
+
+    /// Parses the stable string.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an unrecognized guest OS id.
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "linux" => Ok(Self::Linux),
+            "windows" => Ok(Self::Windows),
+            other => Err(format!("unrecognized guest OS {other:?}")),
+        }
+    }
+}
+
 /// The cleanup strategy a template declares. `destroy` is the default;
 /// `revert` applies only to explicitly pooled guests; `keep` is gated at
 /// lease time in FM-711 and recorded here as data.
@@ -250,6 +287,10 @@ pub struct LabTemplateContent {
     /// the image already carries.
     #[serde(default)]
     pub audio: Option<LabAudio>,
+    /// The guest's operating system; `linux` unless declared. Existing
+    /// templates read as `linux`.
+    #[serde(default)]
+    pub guest_os: GuestOs,
 }
 
 impl Default for LabTemplateContent {
@@ -272,6 +313,7 @@ impl Default for LabTemplateContent {
             ttl_seconds: 0,
             cleanup: CleanupStrategy::default(),
             audio: None,
+            guest_os: GuestOs::default(),
         }
     }
 }
@@ -395,7 +437,26 @@ mod tests {
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
             audio: None,
+            guest_os: GuestOs::Linux,
         }
+    }
+
+    #[test]
+    fn guest_os_defaults_to_linux_and_round_trips() {
+        assert_eq!(GuestOs::default(), GuestOs::Linux);
+        for os in [GuestOs::Linux, GuestOs::Windows] {
+            assert_eq!(GuestOs::from_id(os.id()), Ok(os));
+        }
+        assert!(GuestOs::from_id("macos").is_err());
+        // A template stored before the field existed reads as linux.
+        let mut json = serde_json::to_value(content()).unwrap();
+        json.as_object_mut().unwrap().remove("guestOs");
+        let back: LabTemplateContent = serde_json::from_value(json).unwrap();
+        assert_eq!(back.guest_os, GuestOs::Linux);
+        let mut windows = content();
+        windows.guest_os = GuestOs::Windows;
+        let text = serde_json::to_string(&windows).unwrap();
+        assert!(text.contains("\"guestOs\":\"windows\""), "{text}");
     }
 
     #[test]

@@ -10834,7 +10834,8 @@
           "sshTrustMode",
           "readinessDeadlineSeconds",
           "ttlSeconds",
-          "cleanup"
+          "cleanup",
+          "guestOs"
         ],
         "properties": {
           "audio": {
@@ -10874,6 +10875,10 @@
             "format": "int32",
             "description": "The disk size in GiB.",
             "minimum": 0
+          },
+          "guestOs": {
+            "type": "string",
+            "description": "The guest's operating system: `linux` or `windows`."
           },
           "imageVersionId": {
             "type": "string",
@@ -10953,6 +10958,7 @@
           "readinessDeadlineSeconds",
           "ttlSeconds",
           "cleanup",
+          "guestOs",
           "createdAt",
           "updatedAt"
         ],
@@ -10999,6 +11005,10 @@
             "format": "int32",
             "description": "The disk size in GiB.",
             "minimum": 0
+          },
+          "guestOs": {
+            "type": "string",
+            "description": "The guest's operating system: `linux` or `windows`."
           },
           "id": {
             "type": "string",
@@ -13201,6 +13211,7 @@
                 "readinessDeadlineSeconds",
                 "ttlSeconds",
                 "cleanup",
+                "guestOs",
                 "createdAt",
                 "updatedAt"
               ],
@@ -13247,6 +13258,10 @@
                   "format": "int32",
                   "description": "The disk size in GiB.",
                   "minimum": 0
+                },
+                "guestOs": {
+                  "type": "string",
+                  "description": "The guest's operating system: `linux` or `windows`."
                 },
                 "id": {
                   "type": "string",
@@ -16578,6 +16593,7 @@
               "readinessDeadlineSeconds",
               "ttlSeconds",
               "cleanup",
+              "guestOs",
               "createdAt",
               "updatedAt"
             ],
@@ -16624,6 +16640,10 @@
                 "format": "int32",
                 "description": "The disk size in GiB.",
                 "minimum": 0
+              },
+              "guestOs": {
+                "type": "string",
+                "description": "The guest's operating system: `linux` or `windows`."
               },
               "id": {
                 "type": "string",
@@ -18502,6 +18522,10 @@
             "format": "int32",
             "description": "The disk size in GiB.",
             "minimum": 0
+          },
+          "guestOs": {
+            "type": "string",
+            "description": "The guest's operating system: `linux` (the default) or `windows`."
           },
           "imageVersionId": {
             "type": "string",

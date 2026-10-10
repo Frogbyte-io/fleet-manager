@@ -205,6 +205,7 @@ impl Fixture {
             ttl_seconds: 3_600,
             cleanup: CleanupStrategy::Destroy,
             audio: None,
+            guest_os: fleet_core::GuestOs::default(),
         };
         let template: LabTemplate = LabTemplatePort::create(
             labs.as_ref(),

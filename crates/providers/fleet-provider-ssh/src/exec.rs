@@ -15,8 +15,7 @@
 //! because every concurrent session costs a file descriptor and a slot on
 //! the remote host.
 
-use std::io::{Read, Write as _};
-use std::process::Child;
+use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -250,50 +249,10 @@ fn execute_script_inner(
     deadline: Duration,
 ) -> Result<ExecutionResult, SshProviderError> {
     let started = Instant::now();
-    let config_path = provider.write_config(&endpoint.auth)?;
-    let blob = encode_metadata(metadata);
-
-    let mut command = std::process::Command::new("ssh");
-    command
-        .arg("-F")
-        .arg(&config_path)
-        .arg("-o")
-        .arg(format!("ConnectTimeout={}", deadline.as_secs().max(1)))
-        .arg("-T")
-        .arg("-p")
-        .arg(endpoint.port.to_string());
-    match &endpoint.auth {
-        crate::SshAuth::Agent => {}
-        crate::SshAuth::IdentityFile { path } => {
-            command.arg("-i").arg(path);
-        }
-    }
-    crate::add_ssh_destination(&mut command, endpoint);
-    command
-        // The remote shell parses exactly this: `bash -s --` and the inert
-        // blob.
-        .arg(format!("bash -s -- {blob}"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child: Child = command.spawn().map_err(|error| SshProviderError::Tool {
-        tool: "ssh",
-        detail: format!("cannot start: {error}"),
-    })?;
-    // The script rides stdin; the prologue decodes the blob from `$1`.
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| SshProviderError::Tool {
-            tool: "ssh",
-            detail: "the ssh process has no stdin".to_owned(),
-        })?
-        .write_all(format!("{}{script}", remote_prologue()).as_bytes())
-        .map_err(|error| SshProviderError::Tool {
-            tool: "ssh",
-            detail: format!("cannot send the script: {error}"),
-        })?;
+    // The script rides stdin; nothing else is written after it.
+    let mut child =
+        crate::shell::spawn_script_session(provider, endpoint, metadata, script, deadline)?;
+    drop(child.stdin.take());
 
     // Reader threads drain the pipes so a silent remote session cannot wedge
     // the deadline poll; killing the child closes the pipes and ends them.

@@ -2709,6 +2709,7 @@ async fn project_linked_lab_router() -> (
                     ttl_seconds: 3_600,
                     cleanup: CleanupStrategy::Destroy,
                     audio: None,
+                    guest_os: fleet_core::GuestOs::default(),
                 },
             },
             1,

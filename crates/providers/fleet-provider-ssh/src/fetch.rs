@@ -15,7 +15,8 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::exec::{ExecutionLimiter, ScriptMetadata, encode_metadata, remote_prologue};
+use crate::exec::{ExecutionLimiter, ScriptMetadata};
+use crate::shell::spawn_script_session;
 use crate::{SshConnectionSpec, SshProvider, SshProviderError};
 
 /// Why the guest refused a file, or how a copy ended without one.
@@ -199,67 +200,12 @@ fn spawn_copy(
     let mut child = spawn_script_session(
         provider,
         endpoint,
-        vec![path.to_owned(), max_bytes.to_string()],
+        &arguments_only(vec![path.to_owned(), max_bytes.to_string()]),
         FETCH_SCRIPT,
         deadline,
     )?;
     // The script is all this session reads: close stdin.
     drop(child.stdin.take());
-    Ok(child)
-}
-
-/// Starts an `ssh` session running `script` under the shell-inert metadata
-/// blob (`arguments` become `$1..`). The script has been written to the
-/// session's stdin, which stays open: a caller that streams a payload after
-/// the script keeps writing to it, and everyone else drops it.
-pub(crate) fn spawn_script_session(
-    provider: &SshProvider,
-    endpoint: &SshConnectionSpec,
-    arguments: Vec<String>,
-    script: &str,
-    deadline: Duration,
-) -> Result<std::process::Child, SshProviderError> {
-    let config_path = provider.write_config(&endpoint.auth)?;
-    let blob = encode_metadata(&ScriptMetadata {
-        working_directory: String::new(),
-        environment: Vec::new(),
-        arguments,
-    });
-
-    let mut command = std::process::Command::new("ssh");
-    command
-        .arg("-F")
-        .arg(&config_path)
-        .arg("-o")
-        .arg(format!("ConnectTimeout={}", deadline.as_secs().max(1)))
-        .arg("-T")
-        .arg("-p")
-        .arg(endpoint.port.to_string());
-    if let crate::SshAuth::IdentityFile { path } = &endpoint.auth {
-        command.arg("-i").arg(path);
-    }
-    crate::add_ssh_destination(&mut command, endpoint);
-    command
-        .arg(format!("bash -s -- {blob}"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn().map_err(|error| SshProviderError::Tool {
-        tool: "ssh",
-        detail: format!("cannot start: {error}"),
-    })?;
-    let stdin = child.stdin.as_mut().ok_or_else(|| SshProviderError::Tool {
-        tool: "ssh",
-        detail: "the ssh process has no stdin".to_owned(),
-    })?;
-    if let Err(error) = stdin.write_all(format!("{}{script}", remote_prologue()).as_bytes()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(SshProviderError::Tool {
-            tool: "ssh",
-            detail: format!("cannot send the script: {error}"),
-        });
-    }
     Ok(child)
 }
 
@@ -333,4 +279,13 @@ pub(crate) fn drain_stderr<R: Read>(pipe: Option<R>) -> Vec<u8> {
         }
     }
     kept
+}
+
+/// Metadata that carries only positional arguments.
+pub(crate) fn arguments_only(arguments: Vec<String>) -> ScriptMetadata {
+    ScriptMetadata {
+        working_directory: String::new(),
+        environment: Vec::new(),
+        arguments,
+    }
 }

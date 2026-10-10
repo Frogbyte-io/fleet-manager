@@ -142,6 +142,7 @@ impl World {
             ttl_seconds: TTL_SECONDS,
             cleanup: CleanupStrategy::Destroy,
             audio: None,
+            guest_os: fleet_core::GuestOs::default(),
         };
         let template = LabTemplatePort::create(
             &labs,

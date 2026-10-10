@@ -136,6 +136,8 @@ pub struct LabTemplateDto {
     pub cleanup: String,
     /// The virtual audio device every guest gets, when declared.
     pub audio: Option<LabAudioDto>,
+    /// The guest's operating system: `linux` or `windows`.
+    pub guest_os: String,
     /// The published version this draft descends from, when any.
     pub published_from: Option<String>,
     /// When the draft was created.
@@ -165,6 +167,7 @@ impl From<LabTemplate> for LabTemplateDto {
             ttl_seconds: template.content.ttl_seconds,
             cleanup: template.content.cleanup.id().to_owned(),
             audio: template.content.audio.map(Into::into),
+            guest_os: template.content.guest_os.id().to_owned(),
             published_from: template.published_from,
             created_at: template.created_at,
             updated_at: template.updated_at,
@@ -230,6 +233,8 @@ pub struct LabTemplateContentDto {
     pub cleanup: String,
     /// The virtual audio device every guest gets, when declared.
     pub audio: Option<LabAudioDto>,
+    /// The guest's operating system: `linux` or `windows`.
+    pub guest_os: String,
 }
 
 impl From<LabTemplateVersion> for LabTemplateVersionDto {
@@ -256,6 +261,7 @@ impl From<LabTemplateVersion> for LabTemplateVersionDto {
                 ttl_seconds: version.content.ttl_seconds,
                 cleanup: version.content.cleanup.id().to_owned(),
                 audio: version.content.audio.map(Into::into),
+                guest_os: version.content.guest_os.id().to_owned(),
             },
             image_digest: version.image_digest,
             published_by: version.published_by,
@@ -366,6 +372,13 @@ pub struct SaveLabTemplateRequest {
     /// as the image has it.
     #[serde(default)]
     pub audio: Option<LabAudioDto>,
+    /// The guest's operating system: `linux` (the default) or `windows`.
+    #[serde(default = "default_lab_guest_os")]
+    pub guest_os: String,
+}
+
+fn default_lab_guest_os() -> String {
+    fleet_core::GuestOs::default().id().to_owned()
 }
 
 fn default_lab_ssh_user() -> String {
@@ -386,6 +399,8 @@ impl SaveLabTemplateRequest {
         let probe = fleet_core::ReadinessProbe::from_id(&self.readiness_probe)
             .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         let cleanup = fleet_core::CleanupStrategy::from_id(&self.cleanup)
+            .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
+        let guest_os = fleet_core::GuestOs::from_id(&self.guest_os)
             .map_err(|detail| crate::machines::invalid_request(&detail, correlation_id))?;
         Ok(fleet_core::LabTemplateContent {
             name: self.name,
@@ -408,6 +423,7 @@ impl SaveLabTemplateRequest {
                 device: audio.device,
                 driver: audio.driver,
             }),
+            guest_os,
         })
     }
 }

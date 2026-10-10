@@ -3788,6 +3788,7 @@ fn fleetctl_lists_and_downloads_lab_artifacts_with_digest_verification() {
             ttl_seconds: 3_600,
             cleanup: fleet_core::CleanupStrategy::Destroy,
             audio: None,
+            guest_os: fleet_core::GuestOs::default(),
         };
         let template = LabTemplatePort::create(
             labs.as_ref(),
@@ -4215,4 +4216,50 @@ fn lab_template_create_takes_an_optional_audio_device() {
     };
     assert_eq!(audio.as_deref(), Some("ich9-intel-hda"));
     assert!(parse(&["--audio"]).is_err());
+}
+
+#[test]
+fn lab_template_create_takes_an_optional_guest_os() {
+    let parse = |extra: &[&str]| {
+        let mut args: Vec<String> = [
+            "lab",
+            "template-create",
+            "--name",
+            "w",
+            "--description",
+            "d",
+            "--image-version",
+            "rcp-1@abc",
+            "--cores",
+            "2",
+            "--memory",
+            "2048",
+            "--disk",
+            "20",
+            "--probe",
+            "guest_agent",
+            "--readiness-deadline",
+            "300",
+            "--ttl",
+            "3600",
+            "--cleanup",
+            "destroy",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        args.extend(extra.iter().map(ToString::to_string));
+        fleetctl::parse(&args)
+    };
+    let fleetctl::Command::LabCreate { guest_os, .. } = parse(&[]).unwrap().command else {
+        panic!("a template create");
+    };
+    assert_eq!(guest_os, None);
+    let fleetctl::Command::LabCreate { guest_os, .. } =
+        parse(&["--guest-os", "windows"]).unwrap().command
+    else {
+        panic!("a template create");
+    };
+    assert_eq!(guest_os.as_deref(), Some("windows"));
+    assert!(parse(&["--guest-os"]).is_err());
 }
