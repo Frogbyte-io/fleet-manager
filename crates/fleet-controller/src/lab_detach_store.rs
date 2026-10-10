@@ -271,6 +271,14 @@ impl LabDetachDispatch {
                 u64::try_from((expires - now) / 1000).unwrap_or(0)
             });
         let timeout = timeout.min(remaining).max(1);
+        let shell = match fleet_provider_ssh::GuestShell::for_os(guest_os) {
+            Ok(shell) => shell,
+            Err(error) => {
+                return self
+                    .fail(operations, operation, "invalid_payload", &error.to_string())
+                    .await;
+            }
+        };
         let mut ssh = operation.clone();
         ssh.kind = "ssh.exec".to_owned();
         ssh.payload_json = Some(
@@ -279,10 +287,7 @@ impl LabDetachDispatch {
                 "endpointId": endpoint_id,
                 "auth": {"type": "agent"},
                 "guestOs": guest_os.id(),
-                "script": fleet_provider_ssh::detached::start_script_for(
-                    fleet_provider_ssh::GuestShell::for_os(guest_os).map_err(|error| error.to_string())?,
-                    script,
-                ),
+                "script": fleet_provider_ssh::detached::start_script_for(shell, script),
                 "arguments": [operation.id, timeout.to_string()],
                 "timeoutSeconds": fleet_provider_ssh::detached::SESSION_DEADLINE.as_secs(),
             })

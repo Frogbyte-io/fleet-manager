@@ -71,7 +71,7 @@ const WINDOWS_FETCH_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
 $fleetPath = $args[0]
 $fleetMaxText = $args[1]
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
-if ($fleetMaxText -notmatch '^[0-9]{1,19}$') { exit 64 }
+if ($fleetMaxText -cnotmatch '^[0-9]{1,19}\z') { exit 64 }
 try { $fleetMax = [int64]$fleetMaxText } catch { exit 64 }
 if ([string]::IsNullOrEmpty($fleetPath) -or $fleetPath.StartsWith('\\') -or $fleetPath.StartsWith('//') `
     -or $fleetPath.IndexOfAny([char[]]'<>"|?*') -ge 0 -or ($fleetPath.Length -gt 2 -and $fleetPath.IndexOf(':', 2) -ge 0) `

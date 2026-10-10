@@ -170,31 +170,96 @@ pub fn start_script(command: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// The Windows prologue shared by start and status: validates the handle and
-/// the number, resolves the directory. `$args`: handle, number, optional base
-/// directory override (tests only; Fleet never sets it).
+/// the number, resolves the directories, and defines the trust check.
+/// `$args`: handle, number, optional base directory override (tests only;
+/// Fleet never sets it).
+///
+/// Trust: `C:\ProgramData` lets any local user create folders, so the base
+/// directories and the handle directory are only used when each is a real
+/// directory (not a reparse point), owned by SYSTEM, Administrators or the
+/// SSH user, and grants write-class access to nobody else. Otherwise a local
+/// user could pre-create `fleet-lab` (or a junction), rename the handle
+/// directory away, and plant the `run.ps1` the supervisor executes. They are
+/// created with a protected ACL in the same call, then checked again (a
+/// directory someone else created first fails the check).
 const WINDOWS_RESOLVE: &str = r"$ErrorActionPreference = 'Stop'
 $fleetHandle = $args[0]
 $fleetNum = $args[1]
 $fleetBase = $args[2]
-if ($fleetHandle -notmatch '^[A-Za-z0-9_-]{1,64}$' -or $fleetNum -notmatch '^[0-9]{1,18}$') { exit 64 }
+if ($fleetHandle -cnotmatch '^[A-Za-z0-9_-]{1,64}\z' -or $fleetNum -cnotmatch '^[0-9]{1,18}\z') { exit 64 }
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
+$fleetOverride = [bool]$fleetBase
+$fleetSystem = $null
+$fleetAdmins = $null
+$fleetAdminUser = $false
+$fleetMe = $null
+if ($fleetWindows) {
+  $fleetSystem = New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'
+  $fleetAdmins = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+  $fleetMe = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $fleetAdminUser = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 if (-not $fleetBase) {
   if ($fleetWindows) {
-    $fleetAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if ($fleetAdmin) { $fleetBase = [IO.Path]::Combine($env:ProgramData, 'fleet-lab', 'exec') }
+    if ($fleetAdminUser) { $fleetBase = [IO.Path]::Combine($env:ProgramData, 'fleet-lab', 'exec') }
     else { if (-not $env:LOCALAPPDATA) { exit 71 }; $fleetBase = [IO.Path]::Combine($env:LOCALAPPDATA, 'fleet-lab', 'exec') }
   } else {
     if (-not $env:HOME) { exit 71 }
     $fleetBase = [IO.Path]::Combine($env:HOME, '.local', 'state', 'fleet-lab', 'exec')
   }
 }
+$fleetParent = [IO.Path]::GetDirectoryName($fleetBase)
 $fleetDir = [IO.Path]::Combine($fleetBase, $fleetHandle)
+# Who may own or write: SYSTEM and Administrators always, and the SSH user
+# when it is not an administrator (its own %LOCALAPPDATA%).
+$fleetTrusted = @($fleetSystem, $fleetAdmins)
+if ($fleetWindows -and -not $fleetAdminUser) { $fleetTrusted += $fleetMe }
+function fleetIn($sid) { foreach ($t in $fleetTrusted) { if ($t.Equals($sid)) { return $true } }; return $false }
+function fleetSecure($path) {
+  if (-not $fleetWindows) { return $true }
+  try {
+    $info = New-Object IO.DirectoryInfo $path
+    if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    $acl = $info.GetAccessControl()
+    if (-not (fleetIn ($acl.GetOwner([Security.Principal.SecurityIdentifier])))) { return $false }
+    $writes = [Security.AccessControl.FileSystemRights]'WriteData,AppendData,WriteExtendedAttributes,WriteAttributes,Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+      if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $writes) -and -not (fleetIn $rule.IdentityReference)) { return $false }
+    }
+    return $true
+  } catch { return $false }
+}
+function fleetMakeDir($path) {
+  if (-not [IO.Directory]::Exists($path)) {
+    try {
+      if ($fleetWindows) {
+        $sec = New-Object Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        $sec.SetOwner($fleetAdmins)
+        foreach ($sid in $fleetTrusted) {
+          $sec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        }
+        [void][IO.Directory]::CreateDirectory($path, $sec)
+      } else {
+        [void][IO.Directory]::CreateDirectory($path)
+      }
+    } catch { }
+  }
+  return (fleetSecure $path)
+}
+function fleetChainSecure {
+  if (-not $fleetWindows -or $fleetOverride) { return $true }
+  foreach ($d in @($fleetParent, $fleetBase)) { if ([IO.Directory]::Exists($d) -and -not (fleetSecure $d)) { return $false } }
+  return $true
+}
 function fleetReg($path) {
   try { $i = New-Object IO.FileInfo $path; return ($i.Exists -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) } catch { return $false }
 }
 function fleetBoot {
   if ($fleetWindows) {
-    try { return ((Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks).ToString() } catch { return '' }
+    # The boot counter, unlike the last-boot time, does not move when the
+    # clock is stepped. Empty means unknown, never a mismatch.
+    try { return ([string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name BootId -ErrorAction Stop).BootId) } catch { return '' }
   }
   try { return (Get-Content -LiteralPath '/proc/sys/kernel/random/boot_id' -TotalCount 1) } catch { return '' }
 }
@@ -202,10 +267,12 @@ function fleetBoot {
 
 /// The wrapper (`run.ps1`), written verbatim by the start script. With
 /// `-Mode body` it is the child that runs the command; otherwise it is the
-/// supervisor: it records what status needs, runs the child under the
+/// supervisor: it takes the `gate` (a start that gave up and a wrapper that
+/// runs cannot both win), records its pid first, runs the child under the
 /// timeout with output in files, and writes `exit` last.
 const WINDOWS_WRAPPER: &str = r#"param([string]$Dir, [string]$Secs, [string]$Mode)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 if ($Mode -eq 'body') {
   try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
   $fleetText = [IO.File]::ReadAllText([IO.Path]::Combine($Dir, 'body.ps1'), [Text.Encoding]::UTF8)
@@ -222,33 +289,47 @@ if ($Mode -eq 'body') {
   exit 0
 }
 function fleetPath($name) { return [IO.Path]::Combine($Dir, $name) }
+try {
+  $fleetGate = New-Object IO.FileStream((fleetPath 'gate'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  $fleetGate.Dispose()
+} catch { exit 0 }
 if ([IO.File]::Exists((fleetPath 'abandoned'))) { exit 0 }
 $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 $fleetMe = [Diagnostics.Process]::GetCurrentProcess()
+[IO.File]::WriteAllText((fleetPath 'pid.tmp'), ('{0} {1}' -f $fleetMe.Id, $fleetMe.StartTime.ToUniversalTime().Ticks) + "`n")
+[IO.File]::Move((fleetPath 'pid.tmp'), (fleetPath 'pid'))
 $fleetBoot = ''
 if ($fleetWindows) {
-  try { $fleetBoot = ((Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks).ToString() } catch { }
+  try { $fleetBoot = [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name BootId -ErrorAction Stop).BootId } catch { }
 } else {
   try { $fleetBoot = (Get-Content -LiteralPath '/proc/sys/kernel/random/boot_id' -TotalCount 1) } catch { }
 }
 [IO.File]::WriteAllText((fleetPath 'boot_id'), $fleetBoot + "`n")
 [IO.File]::WriteAllText((fleetPath 'started'), [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n")
-[IO.File]::WriteAllText((fleetPath 'pid.tmp'), ('{0} {1}' -f $fleetMe.Id, $fleetMe.StartTime.ToUniversalTime().Ticks) + "`n")
-[IO.File]::Move((fleetPath 'pid.tmp'), (fleetPath 'pid'))
 [IO.File]::WriteAllBytes((fleetPath 'stdin'), [byte[]]@())
-$fleetExe = [IO.Path]::Combine($PSHOME, $(if ($fleetWindows) { 'powershell.exe' } else { 'pwsh' }))
+if ($fleetWindows) { $fleetExe = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') } else { $fleetExe = [IO.Path]::Combine($PSHOME, 'pwsh') }
 $fleetArgs = @('-NoProfile', '-NonInteractive')
 if ($fleetWindows) { $fleetArgs += @('-ExecutionPolicy', 'Bypass') }
 $fleetArgs += @('-File', ('"{0}"' -f (fleetPath 'run.ps1')), '-Dir', ('"{0}"' -f $Dir), '-Secs', $Secs, '-Mode', 'body')
-$fleetChild = Start-Process -FilePath $fleetExe -ArgumentList $fleetArgs -RedirectStandardOutput (fleetPath 'stdout') -RedirectStandardError (fleetPath 'stderr') -RedirectStandardInput (fleetPath 'stdin') -NoNewWindow -PassThru
+# The command runs where the start session was (the supervisor's working
+# directory), not in its own control directory.
+$fleetCwd = (Get-Location).ProviderPath
+$fleetChild = Start-Process -FilePath $fleetExe -ArgumentList $fleetArgs -WorkingDirectory $fleetCwd -RedirectStandardOutput (fleetPath 'stdout') -RedirectStandardError (fleetPath 'stderr') -RedirectStandardInput (fleetPath 'stdin') -NoNewWindow -PassThru
 $null = $fleetChild.Handle
 $fleetMs = [int][Math]::Min([int64]$Secs * 1000, 2000000000)
 if ($fleetChild.WaitForExit($fleetMs)) {
   $fleetChild.WaitForExit()
   $fleetCode = $fleetChild.ExitCode
 } else {
-  if ($fleetWindows) { & taskkill.exe /T /F /PID $fleetChild.Id | Out-Null } else { $fleetChild.Kill($true) }
-  $fleetChild.WaitForExit()
+  $fleetKilled = $false
+  if ($fleetWindows) {
+    try {
+      $fleetKill = Start-Process -FilePath ([IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')) -ArgumentList @('/T', '/F', '/PID', [string]$fleetChild.Id) -NoNewWindow -PassThru -Wait
+      $fleetKilled = $true
+    } catch { }
+  }
+  if (-not $fleetKilled) { try { if ($fleetWindows) { $fleetChild.Kill() } else { $fleetChild.Kill($true) } } catch { } }
+  [void]$fleetChild.WaitForExit(30000)
   $fleetCode = 124
 }
 [IO.File]::WriteAllText((fleetPath 'finished'), [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString() + "`n")
@@ -256,44 +337,46 @@ if ($fleetChild.WaitForExit($fleetMs)) {
 [IO.File]::Move((fleetPath 'exit.tmp'), (fleetPath 'exit'))
 "#;
 
-/// The Windows start body: `$fleetCmd64` (the command as base64 UTF-8) is
-/// already set by the caller's prefix; `$fleetWrapper` is the wrapper.
-const WINDOWS_START_BODY: &str = r#"try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
+/// The Windows start body: `$fleetCmd64` (the command as base64 UTF-8) and
+/// `$fleetWrapper` are set by the caller's prefix.
+const WINDOWS_START_BODY: &str = r#"if ($fleetWindows -and -not $fleetOverride) {
+  if (-not (fleetMakeDir $fleetParent)) { exit 71 }
+  if (-not (fleetMakeDir $fleetBase)) { exit 71 }
+} else {
+  try { [void][IO.Directory]::CreateDirectory($fleetBase) } catch { exit 71 }
+}
 if ([IO.Directory]::Exists($fleetDir)) {
-  if ((New-Object IO.DirectoryInfo $fleetDir).Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 71 }
+  if (-not (fleetSecure $fleetDir)) { exit 71 }
   [Console]::Out.Write("exists`n")
   exit 0
 }
-try { [void](New-Item -ItemType Directory -Path $fleetDir -ErrorAction Stop) } catch {
-  if ([IO.Directory]::Exists($fleetDir)) { [Console]::Out.Write("exists`n"); exit 0 }
-  exit 71
-}
-if ($fleetWindows) {
-  try {
-    $fleetSec = New-Object Security.AccessControl.DirectorySecurity
-    $fleetSec.SetAccessRuleProtection($true, $false)
-    $fleetSids = @(
-      (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'),
-      (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'),
-      [Security.Principal.WindowsIdentity]::GetCurrent().User
-    )
-    foreach ($fleetSid in $fleetSids) {
-      $fleetSec.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($fleetSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-    }
-    [IO.Directory]::SetAccessControl($fleetDir, $fleetSec)
-  } catch { exit 71 }
-}
+if (-not (fleetMakeDir $fleetDir)) { exit 71 }
 try {
   [IO.File]::WriteAllBytes([IO.Path]::Combine($fleetDir, 'body.ps1'), [Convert]::FromBase64String($fleetCmd64))
   [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'run.ps1'), $fleetWrapper)
 } catch { exit 72 }
-$fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
-if ($fleetWindows) {
-  $fleetLine = '"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -Dir "{2}" -Secs {3}' -f [IO.Path]::Combine($PSHOME, 'powershell.exe'), $fleetRun, $fleetDir, $fleetNum
+# A start that gives up and a wrapper that runs race for the gate: whoever
+# creates it first decides. The loser of the start's side only reports; the
+# marker keeps a late wrapper from running.
+function fleetGiveUp {
+  $won = $false
   try {
-    $fleetMade = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $fleetLine; CurrentDirectory = $fleetDir }
-    if ($fleetMade.ReturnValue -ne 0) { exit 75 }
-  } catch { exit 75 }
+    $g = New-Object IO.FileStream([IO.Path]::Combine($fleetDir, 'gate'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $g.Dispose()
+    $won = $true
+  } catch { }
+  if ($won) { try { [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'abandoned'), '') } catch { } }
+  return $won
+}
+$fleetRun = [IO.Path]::Combine($fleetDir, 'run.ps1')
+$fleetCwd = (Get-Location).ProviderPath
+if ($fleetWindows) {
+  $fleetPs = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  $fleetLine = '"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -Dir "{2}" -Secs {3}' -f $fleetPs, $fleetRun, $fleetDir, $fleetNum
+  try {
+    $fleetMade = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $fleetLine; CurrentDirectory = $fleetCwd }
+    if ($fleetMade.ReturnValue -ne 0) { [void](fleetGiveUp); exit 75 }
+  } catch { [void](fleetGiveUp); exit 75 }
 } else {
   $fleetInfo = New-Object Diagnostics.ProcessStartInfo
   $fleetInfo.FileName = [IO.Path]::Combine($PSHOME, 'pwsh')
@@ -303,14 +386,18 @@ if ($fleetWindows) {
   $fleetInfo.RedirectStandardInput = $true
   $fleetInfo.RedirectStandardOutput = $true
   $fleetInfo.RedirectStandardError = $true
-  $fleetInfo.WorkingDirectory = $fleetDir
+  $fleetInfo.WorkingDirectory = $fleetCwd
   [void][Diagnostics.Process]::Start($fleetInfo)
 }
+$fleetPidFile = [IO.Path]::Combine($fleetDir, 'pid')
 $fleetWaited = 0
-while (-not [IO.File]::Exists([IO.Path]::Combine($fleetDir, 'pid')) -and $fleetWaited -lt 100) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
-if (-not [IO.File]::Exists([IO.Path]::Combine($fleetDir, 'pid'))) {
-  [IO.File]::WriteAllText([IO.Path]::Combine($fleetDir, 'abandoned'), '')
-  exit 75
+while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 300) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
+if (-not [IO.File]::Exists($fleetPidFile)) {
+  if (fleetGiveUp) { exit 75 }
+  # The wrapper holds the gate: it is running. Give it a little longer.
+  $fleetWaited = 0
+  while (-not [IO.File]::Exists($fleetPidFile) -and $fleetWaited -lt 100) { Start-Sleep -Milliseconds 100; $fleetWaited++ }
+  if (-not [IO.File]::Exists($fleetPidFile)) { exit 75 }
 }
 [Console]::Out.Write("started`n")
 exit 0
@@ -318,14 +405,16 @@ exit 0
 
 /// The Windows status body: prints the same `key=value` lines as the Bash
 /// one. Only regular files that are not reparse points are read, each
-/// bounded; the tails are the last `$fleetNum` bytes.
-const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path) {
+/// bounded; the tails are the last `$fleetNum` bytes. The directories are
+/// trusted only as `WINDOWS_RESOLVE` describes (exit 71 otherwise).
+const WINDOWS_STATUS_BODY: &str = r#"function fleetNumOf($path, $signed) {
   if (-not (fleetReg $path)) { return '' }
   try {
     $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite,Delete')
     try { $buf = New-Object byte[] 20; $n = $fs.Read($buf, 0, 20) } finally { $fs.Dispose() }
     $text = [Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
-    if ($text -match '^[0-9]+$') { return $text }
+    if ($signed) { if ($text -cmatch '^-?[0-9]{1,11}\z') { return $text } }
+    elseif ($text -cmatch '^[0-9]{1,19}\z') { return $text }
   } catch { }
   return ''
 }
@@ -340,7 +429,7 @@ function fleetSmall($path) {
 function fleetAlive {
   $line = fleetSmall ([IO.Path]::Combine($fleetDir, 'pid'))
   $parts = $line.Split(' ')
-  if ($parts.Length -ne 2 -or $parts[0] -notmatch '^[0-9]+$' -or $parts[1] -notmatch '^[0-9]{1,19}$') { return $false }
+  if ($parts.Length -ne 2 -or $parts[0] -cnotmatch '^[0-9]{1,10}\z' -or $parts[1] -cnotmatch '^[0-9]{1,19}\z') { return $false }
   try {
     $p = Get-Process -Id ([int]$parts[0]) -ErrorAction Stop
     if ($p.HasExited) { return $false }
@@ -351,17 +440,22 @@ function fleetAlive {
 }
 $fleetExit = [IO.Path]::Combine($fleetDir, 'exit')
 $fleetPid = [IO.Path]::Combine($fleetDir, 'pid')
-if (-not [IO.Directory]::Exists($fleetDir) -or ((New-Object IO.DirectoryInfo $fleetDir).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+if (-not (fleetChainSecure)) { exit 71 }
+if (-not [IO.Directory]::Exists($fleetDir)) {
   [Console]::Out.Write("state=absent`n")
   exit 0
 }
+if (-not (fleetSecure $fleetDir)) { exit 71 }
 $fleetState = ''
 $fleetReason = ''
 if (fleetReg $fleetExit) {
   $fleetState = 'exited'
 } elseif (fleetReg $fleetPid) {
+  # A boot counter that is unknown on either side is not evidence of a
+  # reboot: the pid and its start time decide.
   $fleetThen = fleetSmall ([IO.Path]::Combine($fleetDir, 'boot_id'))
-  if ($fleetThen -ne (fleetBoot)) { $fleetState = 'lost'; $fleetReason = 'guest_rebooted' }
+  $fleetNow = fleetBoot
+  if ($fleetThen -ne '' -and $fleetNow -ne '' -and $fleetThen -ne $fleetNow) { $fleetState = 'lost'; $fleetReason = 'guest_rebooted' }
   elseif (fleetAlive) { $fleetState = 'running' }
   elseif (fleetReg $fleetExit) { $fleetState = 'exited' }
   else { $fleetState = 'lost'; $fleetReason = 'process_gone' }
@@ -375,9 +469,9 @@ if (fleetReg $fleetExit) {
 $fleetOut = New-Object Text.StringBuilder
 [void]$fleetOut.Append("state=$fleetState`n")
 if ($fleetReason -ne '') { [void]$fleetOut.Append("reason=$fleetReason`n") }
-if ($fleetState -eq 'exited') { [void]$fleetOut.Append('exit=' + (fleetNumOf $fleetExit) + "`n") }
-[void]$fleetOut.Append('started=' + (fleetNumOf ([IO.Path]::Combine($fleetDir, 'started'))) + "`n")
-if ($fleetState -eq 'exited') { [void]$fleetOut.Append('finished=' + (fleetNumOf ([IO.Path]::Combine($fleetDir, 'finished'))) + "`n") }
+if ($fleetState -eq 'exited') { [void]$fleetOut.Append('exit=' + (fleetNumOf $fleetExit $true) + "`n") }
+[void]$fleetOut.Append('started=' + (fleetNumOf ([IO.Path]::Combine($fleetDir, 'started')) $false) + "`n")
+if ($fleetState -eq 'exited') { [void]$fleetOut.Append('finished=' + (fleetNumOf ([IO.Path]::Combine($fleetDir, 'finished')) $false) + "`n") }
 $fleetWant = [int64][Math]::Min([int64]$fleetNum, 1048576)
 foreach ($fleetStream in 'stdout', 'stderr') {
   $fleetFile = [IO.Path]::Combine($fleetDir, $fleetStream)
@@ -1026,7 +1120,10 @@ mod tests {
                 arguments: args.iter().map(|arg| (*arg).to_owned()).collect(),
                 ..ScriptMetadata::default()
             };
-            run_ps(pwsh, script, &metadata, b"", None)
+            // The session starts in the guest directory the arguments name (the
+            // last one), like an SSH session in a login directory.
+            let cwd = args.last().map(Path::new).filter(|path| path.is_dir());
+            run_ps(pwsh, script, &metadata, b"", cwd)
         }
 
         fn start(
@@ -1115,14 +1212,15 @@ mod tests {
             let base = tempfile::tempdir().unwrap();
             // Text that would break out of a single-quoted literal, a
             // here-string, or an expandable string if it were interpolated.
-            let command = "Write-Output '@'\n'@\n$(New-Item -ItemType File pwned1)\n\"`$(New-Item pwned2)\"\n'; New-Item pwned3; '\nexit 0\n";
+            let command =
+                "Write-Output '@'\n'@\n\"`$(New-Item pwned2)\"\n'; New-Item pwned3; '\nexit 0\n";
             let out = start(&pwsh, base.path(), "w2", 60, command);
             assert_eq!(out.status.code(), Some(0), "{out:?}");
             wait_for(&pwsh, base.path(), "w2", GuestState::Exited);
             let written = std::fs::read(base.path().join("w2/body.ps1")).unwrap();
             assert_eq!(written, command.as_bytes(), "stored byte for byte");
-            // The start script never expanded it; the command ran in the
-            // handle directory (it creates pwned1 there on purpose).
+            // The start script never expanded it (the session started in the
+            // base directory, where any expansion would have left a file).
             assert!(!base.path().join("pwned2").exists());
             assert!(!base.path().join("pwned3").exists());
             assert!(!base.path().join("w2/pwned3").exists());
@@ -1290,6 +1388,80 @@ mod tests {
             let report = status(&pwsh, base.path(), "w8");
             assert!(begun.elapsed() < Duration::from_secs(10));
             assert!(report.stdout_tail.is_empty());
+        }
+
+        #[test]
+        fn a_wrapper_that_loses_the_gate_never_runs_and_negative_exit_codes_survive() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            let dir = base.path().join("g1");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("gate"), "").unwrap();
+            std::fs::write(dir.join("body.ps1"), "New-Item ran | Out-Null\n").unwrap();
+            std::fs::write(dir.join("run.ps1"), WINDOWS_WRAPPER).unwrap();
+            let out = Command::new(&pwsh)
+                .args(["-NoProfile", "-File"])
+                .arg(dir.join("run.ps1"))
+                .arg("-Dir")
+                .arg(&dir)
+                .args(["-Secs", "60"])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{out:?}");
+            assert!(!dir.join("ran").exists() && !dir.join("pid").exists());
+
+            // An NTSTATUS-style negative exit code is reported, not blanked.
+            let done = base.path().join("g2");
+            std::fs::create_dir(&done).unwrap();
+            std::fs::write(done.join("exit"), "-1073741819\n").unwrap();
+            std::fs::write(done.join("finished"), "1790000000\n").unwrap();
+            let report = status(&pwsh, base.path(), "g2");
+            assert_eq!(report.state, GuestState::Exited);
+            assert_eq!(report.exit_code, Some(-1_073_741_819));
+            // Garbage in a control file is not a number.
+            std::fs::write(done.join("exit"), "12abc\n").unwrap();
+            assert_eq!(status(&pwsh, base.path(), "g2").exit_code, None);
+            std::fs::write(done.join("exit"), "5\n\n").unwrap();
+            assert_eq!(status(&pwsh, base.path(), "g2").exit_code, Some(5));
+        }
+
+        #[test]
+        fn an_unknown_boot_counter_is_not_a_reboot() {
+            let Some(pwsh) = require_pwsh() else { return };
+            let base = tempfile::tempdir().unwrap();
+            start(&pwsh, base.path(), "g3", 60, "Start-Sleep -Seconds 25\n");
+            std::fs::write(base.path().join("g3/boot_id"), "\n").unwrap();
+            let report = status(&pwsh, base.path(), "g3");
+            assert_eq!(report.state, GuestState::Running, "{report:?}");
+            let pid = pid_of(base.path(), "g3");
+            let _ = Command::new("pkill").args(["-P", &pid]).status();
+            let _ = Command::new("kill").args(["-9", &pid]).status();
+        }
+
+        #[test]
+        fn the_directories_are_trust_checked_before_use_and_created_protected() {
+            // Off Windows the ACL calls cannot run, so the script's shape is
+            // what is checked here; the fixture exercises it (a base that a
+            // local user pre-created, a junction in its place, a foreign
+            // owner, an extra write ACE).
+            let start = start_script_for(GuestShell::PowerShell, "exit 0");
+            let status = status_script_for(GuestShell::PowerShell);
+            for text in [&start, &status] {
+                assert!(text.contains("function fleetSecure"));
+                assert!(text.contains("ReparsePoint"));
+                assert!(text.contains("GetOwner("));
+                assert!(text.contains("ChangePermissions"));
+            }
+            assert!(start.contains("CreateDirectory($path, $sec)"));
+            assert!(start.contains("SetAccessRuleProtection($true, $false)"));
+            assert!(
+                start.contains("fleetMakeDir $fleetParent")
+                    && start.contains("fleetMakeDir $fleetBase")
+            );
+            assert!(status.contains("fleetChainSecure") && status.contains("exit 71"));
+            // Anchors that a trailing newline cannot slip past.
+            assert!(!start.contains("}$'") && start.contains("\\z"));
         }
     }
 }
