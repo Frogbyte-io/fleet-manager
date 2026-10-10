@@ -215,7 +215,7 @@ What the controller sends, so you can reason about it:
 - `put` streams the bytes on stdin after the script and writes them to `.fleet-put.<random>` in the target's directory, checks the size and `Get-FileHash` (SHA-256) there, and only then moves the file into place (`File.Move`, which never replaces; `File.Replace` for `--overwrite`). The temporary file is deleted on every path that runs the script's `finally`. If the guest kills the process outright (a deadline kill closes sshd's job object), a `.fleet-put.*` file can remain; the target is never partial. The new file inherits the directory's ACL (Linux uses mode 0600); a directory or reparse point (symlink, junction) at the target is `target_not_file`.
 - `collect` reads a regular file with read/write/delete sharing (so a log another process holds open can be copied), refuses a directory (`not_a_file`) and a file over the cap (`too_large`) before sending any byte, follows a symlink the way Linux `stat -L` does, and writes the bytes to the raw standard-output stream, never through PowerShell's pipeline, which would re-encode them.
 
-Detached exec on Windows guests is documented when it lands.
+Detached exec on a Windows lease is refused (`invalid`) until its Windows scripts land.
 
 ## First run
 

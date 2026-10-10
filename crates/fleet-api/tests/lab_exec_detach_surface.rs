@@ -210,6 +210,7 @@ impl World {
             guest.clone(),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             audit.clone(),
         ));
         let lab = Lab::new(

@@ -327,6 +327,7 @@ impl World {
             Arc::new(DetachedGuest::default()),
             leases.clone(),
             labs.clone(),
+            labs.clone(),
             Arc::new(AuditSink::new(pool.clone())),
         ));
         let lab = Arc::new(
