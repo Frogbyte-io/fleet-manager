@@ -152,9 +152,8 @@ pub fn start_script(command: &str) -> String {
 // states, same `key=value` status protocol, so `parse_status` reads both.
 //
 // Guest layout: `<base>\<handle>\` where `<base>` is
-// `%ProgramData%\fleet-lab\exec` for an administrator (the directory's ACL is
-// then protected: SYSTEM, Administrators and the SSH user only) and
-// `%LOCALAPPDATA%\fleet-lab\exec` for anyone else. Files: `body.ps1` (the
+// `%LOCALAPPDATA%\fleet-lab\exec` of the SSH user (every directory's ACL is
+// protected: SYSTEM, Administrators and the SSH user only). Files: `body.ps1` (the
 // command, verbatim UTF-8), `run.ps1` (the fixed wrapper), `pid`
 // (`<pid> <start time ticks>`), `boot_id`, `started`, `stdout`, `stderr`,
 // `exit` and `finished` (written last, temporary file then rename), and
@@ -192,13 +191,11 @@ $fleetWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 $fleetOverride = [bool]$fleetBase
 $fleetSystem = $null
 $fleetAdmins = $null
-$fleetAdminUser = $false
 $fleetMe = $null
 if ($fleetWindows) {
   $fleetSystem = New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'
   $fleetAdmins = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'
   $fleetMe = [Security.Principal.WindowsIdentity]::GetCurrent().User
-  $fleetAdminUser = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 if (-not $fleetBase) {
   if ($fleetWindows) {
@@ -211,13 +208,11 @@ if (-not $fleetBase) {
 }
 $fleetParent = [IO.Path]::GetDirectoryName($fleetBase)
 $fleetDir = [IO.Path]::Combine($fleetBase, $fleetHandle)
-# Who may own or write: SYSTEM and the SSH user, and Administrators when the
-# SSH user is one (its objects are then owned by that group).
+# Who may own or write: SYSTEM, Administrators and the SSH user, always, so
+# an elevation change between start and status (or a profile whose ACL
+# already names them) neither locks the user out nor fails the check.
 $fleetTrusted = @()
-if ($fleetWindows) {
-  $fleetTrusted = @($fleetSystem, $fleetMe)
-  if ($fleetAdminUser) { $fleetTrusted += $fleetAdmins }
-}
+if ($fleetWindows) { $fleetTrusted = @($fleetSystem, $fleetAdmins, $fleetMe) }
 function fleetIn($sid) { foreach ($t in $fleetTrusted) { if ($t.Equals($sid)) { return $true } }; return $false }
 function fleetSecure($path) {
   if (-not $fleetWindows) { return $true }
@@ -248,7 +243,7 @@ function fleetMakeDir($path) {
       } else {
         [void][IO.Directory]::CreateDirectory($path)
       }
-    } catch { [Console]::Error.WriteLine('fleet: cannot create a guest directory (' + $_.Exception.GetType().Name + ')') }
+    } catch { [Console]::Error.WriteLine('fleet: cannot create a guest directory (' + $_.Exception.GetType().Name + $(if ($_.Exception.InnerException) { ' / ' + $_.Exception.InnerException.GetType().Name } else { '' }) + ')') }
   }
   return (fleetSecure $path)
 }
@@ -330,7 +325,15 @@ if ($fleetChild.WaitForExit($fleetMs)) {
   $fleetKilled = $false
   if ($fleetWindows) {
     try {
-      $fleetKill = Start-Process -FilePath ([IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')) -ArgumentList @('/T', '/F', '/PID', [string]$fleetChild.Id) -NoNewWindow -PassThru
+      # Process.Start keeps the handle, so ExitCode is reliable (Windows
+      # PowerShell 5.1's Start-Process -PassThru can lose it for a process
+      # that exits quickly).
+      $fleetPsi = New-Object Diagnostics.ProcessStartInfo
+      $fleetPsi.FileName = [IO.Path]::Combine($env:SystemRoot, 'System32', 'taskkill.exe')
+      $fleetPsi.Arguments = '/T /F /PID ' + [string]$fleetChild.Id
+      $fleetPsi.UseShellExecute = $false
+      $fleetPsi.CreateNoWindow = $true
+      $fleetKill = [Diagnostics.Process]::Start($fleetPsi)
       if ($fleetKill.WaitForExit(10000) -and $fleetKill.ExitCode -eq 0) { $fleetKilled = $true }
     } catch { }
   }

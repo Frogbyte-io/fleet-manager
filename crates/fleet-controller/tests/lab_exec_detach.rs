@@ -1147,6 +1147,66 @@ async fn a_start_reported_failed_that_did_start_is_reported_by_the_guest() {
     assert_eq!(exited.stdout, "ran-anyway\n");
 }
 
+/// Answers every status read with a start that is not confirmed yet: a
+/// wrapper holds the gate but has not recorded its pid.
+#[derive(Debug)]
+struct UnconfirmedGuest;
+
+#[async_trait]
+impl GuestExecPort for UnconfirmedGuest {
+    async fn probe(
+        &self,
+        _: &str,
+        _: &str,
+        _: fleet_core::GuestOs,
+        _: &str,
+    ) -> Result<GuestProcess, String> {
+        Ok(GuestProcess {
+            state: fleet_application::lab_exec_detach::GuestProcessState::Starting,
+            reason: Some("start_unconfirmed".to_owned()),
+            exit_code: None,
+            started_at: None,
+            finished_at: None,
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            stdout_tail: Vec::new(),
+            stderr_tail: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_start_with_an_unconfirmed_guest_is_never_failed_to_start() {
+    let fixture = Fixture::new("tester").await;
+    let handle = fixture.start("sleep 1").await;
+    // The record says failed (the start session timed out), and the guest
+    // says a wrapper holds the gate: the command may be running, so "start
+    // again" must not be the answer.
+    DetachedExecRepository::new(fixture.pool.clone())
+        .set_start_state(&handle, StartState::Failed, None)
+        .await
+        .unwrap();
+    let detach = LabExecDetach::new(
+        Arc::new(DetachedExecRepository::new(fixture.pool.clone())),
+        Arc::new(UnconfirmedGuest),
+        Arc::new(LeaseRepository::new(fixture.pool.clone())),
+        Arc::new(LabRepository::new(fixture.pool.clone())),
+        Arc::new(LabRepository::new(fixture.pool.clone())),
+        Arc::new(AuditSink::new(fixture.pool.clone())),
+    );
+    let status = detach
+        .status(
+            &fleet_auth::LanAllowAllAuthorizer,
+            &lan(),
+            &handle,
+            fleet_core::SystemClock::now_unix_millis(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.state, DetachedState::Starting, "{status:?}");
+    assert_eq!(status.reason.as_deref(), Some("start_unconfirmed"));
+}
+
 #[tokio::test]
 async fn a_terminal_answer_is_kept_and_later_polls_do_not_dial_the_guest() {
     let fixture = Fixture::new("tester").await;

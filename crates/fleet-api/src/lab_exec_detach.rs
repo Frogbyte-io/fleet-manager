@@ -73,8 +73,9 @@ pub struct DetachedExecStatusDto {
     /// The exit code, once `exited`. `124` means the command's time bound
     /// ended it.
     pub exit_code: Option<i32>,
-    /// A stable reason for `lost` (`guest_rebooted`, `process_gone`,
-    /// `never_started`, `guest_has_no_record`), `failed_to_start`
+    /// A stable reason for `starting` (`start_unconfirmed`: a start whose
+    /// outcome is unknown, check status again), `lost` (`guest_rebooted`,
+    /// `process_gone`, `never_started`, `guest_has_no_record`), `failed_to_start`
     /// (`start_failed`; see the operation), `lease_ended`, and
     /// `unreachable` (`guest_unreachable`, `no_lab_machine`).
     pub reason: Option<String>,
